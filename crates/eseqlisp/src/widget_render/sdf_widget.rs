@@ -655,13 +655,12 @@ fn resolve_sdf_input_color(
     props: &HashMap<String, Value>,
     default: crate::backend::Color,
 ) -> crate::backend::Color {
-    let key = if super::get_bool_prop(props, "selected", false)
-        && props.contains_key("selected-color")
-    {
-        "selected-color"
-    } else {
-        "color"
-    };
+    let key =
+        if super::get_bool_prop(props, "selected", false) && props.contains_key("selected-color") {
+            "selected-color"
+        } else {
+            "color"
+        };
     super::resolve_named_color(props, key, default)
 }
 

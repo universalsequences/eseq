@@ -18,6 +18,7 @@
 (defstate samples-sidebar-visible true)
 (defstate mixer-panel-visible true)
 (defstate lower-panel-visible true)
+(defstate patch-macros-panel-visible true)
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
 (defstate param-mode 0)
@@ -72,9 +73,12 @@
 
 (load "@/ui/browser.lisp")
 (load "@/ui/mixer.lisp")
+(load "@/ui/patch-macros.lisp")
 (load "@/ui/effects.lisp")
 (load "@/ui/macros.lisp")
 (load "@/ui/piano-roll.lisp")
+;; Must precede the patcher buffers, which mount choose-model-panel.
+(load "@/ui/choose-model.lisp")
 (load "@/ui/transport.lisp")
 (load "@/ui/agent.lisp")
 
@@ -84,6 +88,12 @@
 
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-ui-selection")
+
+;; Code editor: compile + hot-swap the current dsp code buffer. The host
+;; command no-ops unless a code edit session is active.
+(def seq-eval-editor-code ()
+  (host-command "evaluate-editor-source" (dict)))
+(bind-key "C-c C-c" "seq-eval-editor-code")
 
 (defstate piano-roll-placement :bottom)
 (defstate seq-main-view :session)
@@ -529,6 +539,13 @@
     (lambda () (seq-hide-mixer-panel))
     min-width max-width min-height max-height))
 
+;; Patch-editor bottom bar variant of the mixer panel: a single compact
+;; channel strip for the current track (see patch-mixer-strip in mixer.lisp).
+(def seq-patch-mixer-panel-layout-spec (min-width max-width min-height max-height)
+  (seq-collapsible-panel-layout-spec "*patch-mixer*"
+    (lambda () (seq-hide-mixer-panel))
+    min-width max-width min-height max-height))
+
 (def seq-fx-panel-layout-spec (min-width max-width min-height max-height)
   (seq-collapsible-panel-layout-spec "*fx*"
     (lambda () (seq-hide-fx-panel))
@@ -570,48 +587,75 @@
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
         0.95 main-layout))))
 
+;; Every patcher bottom-bar panel shares the regular fx-panel height so the
+;; instrument preview isn't padded out by a taller neighbor.
+(def seq-patcher-bottom-bar-panel-height lower-fx-layout-height)
+
 (def seq-patcher-bottom-bar-layout-spec ()
-  (if (and samples-sidebar-visible mixer-panel-visible lower-panel-visible)
-    (list :cols :gap 1
-      0.333 (seq-samples-panel-layout-spec 28 28 13 13)
-      0.334 (seq-mixer-panel-layout-spec 25 30 15 15)
-      0.333 (seq-fx-panel-layout-spec nil nil 13 13))
-    (if (and samples-sidebar-visible mixer-panel-visible)
+  (let ((h seq-patcher-bottom-bar-panel-height))
+    (if (and samples-sidebar-visible mixer-panel-visible lower-panel-visible)
       (list :cols :gap 1
-        0.5 (seq-samples-panel-layout-spec 28 28 13 13)
-        0.5 (seq-mixer-panel-layout-spec 25 30 14 14))
-    (if samples-sidebar-visible
-      (if lower-panel-visible
+        0.30 (seq-samples-panel-layout-spec 28 28 h h)
+        0.15 (seq-patch-mixer-panel-layout-spec 10 10 h h)
+        0.55 (seq-fx-panel-layout-spec nil nil h h))
+      (if (and samples-sidebar-visible mixer-panel-visible)
         (list :cols :gap 1
-          0.5 (seq-samples-panel-layout-spec 28 28 13 13)
-          0.5 (seq-fx-panel-layout-spec nil nil 13 13))
-        (seq-samples-panel-layout-spec 28 28 13 13))
-      (if mixer-panel-visible
+          0.6 (seq-samples-panel-layout-spec 28 28 h h)
+          0.4 (seq-patch-mixer-panel-layout-spec 10 10 h h))
+      (if samples-sidebar-visible
         (if lower-panel-visible
           (list :cols :gap 1
-            0.5 (seq-mixer-panel-layout-spec 25 30 14 14)
-            0.5 (seq-fx-panel-layout-spec nil nil 13 13))
-          (seq-mixer-panel-layout-spec 25 30 14 14))
-        (seq-fx-panel-layout-spec nil nil 13 13))))))
+            0.5 (seq-samples-panel-layout-spec 28 28 h h)
+            0.5 (seq-fx-panel-layout-spec nil nil h h))
+          (seq-samples-panel-layout-spec 28 28 h h))
+        (if mixer-panel-visible
+          (if lower-panel-visible
+            (list :cols :gap 1
+              0.4 (seq-patch-mixer-panel-layout-spec 10 10 h h)
+              0.6 (seq-fx-panel-layout-spec nil nil h h))
+            (seq-patch-mixer-panel-layout-spec 15 15 h h))
+          (seq-fx-panel-layout-spec nil nil h h)))))))
 
 (def seq-patcher-bottom-bar-visible? ()
   (or samples-sidebar-visible mixer-panel-visible lower-panel-visible))
+
+;; Macro sidebar to the left of the patch editor: defmacros in the patch +
+;; the saved macro library (see ui/patch-macros.lisp).
+(def seq-patch-macros-panel-layout-spec ()
+  (seq-collapsible-panel-layout-spec "*patch-macros*"
+    (lambda () (seq-hide-patch-macros-panel))
+    22 26 nil nil))
+
+(def seq-patcher-canvas-layout-spec (patcher-buffer)
+  (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))
+
+(def seq-patcher-main-layout-spec (patcher-buffer)
+  (if patch-macros-panel-visible
+    (list :cols :gap 1
+      0.15 (seq-patch-macros-panel-layout-spec)
+      0.85 (seq-patcher-canvas-layout-spec patcher-buffer))
+    (seq-patcher-canvas-layout-spec patcher-buffer)))
 
 (def seq-instrument-patcher-layout-spec (patcher-buffer)
   (if (seq-patcher-bottom-bar-visible?)
     (list :rows :gap 1
       0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-      0.80 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
+      0.80 (seq-patcher-main-layout-spec patcher-buffer)
       0.15 (seq-patcher-bottom-bar-layout-spec))
     (list :rows :gap 1
       0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-      0.95 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))))
+      0.95 (seq-patcher-main-layout-spec patcher-buffer))))
 
 (def seq-instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
   (let ((main-layout
-          (list :cols :gap 1
-            0.62 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
-            0.38 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))))
+          (if patch-macros-panel-visible
+            (list :cols :gap 1
+              0.14 (seq-patch-macros-panel-layout-spec)
+              0.53 (seq-patcher-canvas-layout-spec patcher-buffer)
+              0.33 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))
+            (list :cols :gap 1
+              0.62 (seq-patcher-canvas-layout-spec patcher-buffer)
+              0.38 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)))))
     (if (seq-patcher-bottom-bar-visible?)
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
@@ -700,6 +744,23 @@
       (set! lower-panel-visible false)
       (seq-refresh-current-layout))
     nil))
+
+(def seq-hide-patch-macros-panel ()
+  (if patch-macros-panel-visible
+    (do
+      (set! patch-macros-panel-visible false)
+      (seq-refresh-current-layout))
+    nil))
+
+;; Bound to C-x m below: dragging the macro sidebar past the collapse threshold
+;; calls `seq-hide-patch-macros-panel`, so without a discoverable toggle the
+;; only way back is M-x.
+(def seq-toggle-patch-macros-panel ()
+  (do
+    (set! patch-macros-panel-visible (not patch-macros-panel-visible))
+    (seq-refresh-current-layout)))
+
+(bind-key "C-x m" "seq-toggle-patch-macros-panel")
 
 (def seq-toggle-samples-sidebar ()
   (do

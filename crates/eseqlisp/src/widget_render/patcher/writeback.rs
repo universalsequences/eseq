@@ -5,8 +5,9 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::display::{node_display_input_slots, node_display_label};
 use super::lisp::{
-    node_kind_for_op, parse_patch_source, parse_patch_source_with_library, positional_args,
-    symbol_at,
+    attribute_item_mask, attribute_span_len, is_attribute_key, node_kind_for_op,
+    normalize_editor_node_text, parse_patch_source, parse_patch_source_with_library,
+    positional_args, symbol_at,
 };
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
@@ -352,213 +353,6 @@ fn emit_patch_writeback_result_for_root_patch(
         source: document.emit(),
         generated_node_ids,
     })
-}
-
-pub(super) fn discard_stale_semantic_edits(
-    source: &str,
-    intent: PatcherIntent,
-    interaction_state: &mut PatcherInteractionState,
-) -> Result<bool, WriteBackError> {
-    let document = SourceDocument::parse(source)?;
-    let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
-    let effective_root_patch = patch_with_created_macros(root_patch, interaction_state);
-
-    let stale_node_keys = interaction_state
-        .edit_state
-        .nodes
-        .iter()
-        .filter_map(|(key, edit)| {
-            node_edit_is_stale(&document, &effective_root_patch, edit).then(|| key.clone())
-        })
-        .collect::<HashSet<_>>();
-    let stale_connection_keys = interaction_state
-        .edit_state
-        .connections
-        .iter()
-        .filter_map(|(key, edit)| {
-            connection_edit_is_stale(
-                &document,
-                &effective_root_patch,
-                interaction_state,
-                &stale_node_keys,
-                edit,
-            )
-            .then(|| key.clone())
-        })
-        .collect::<HashSet<_>>();
-    let stale_deleted_nodes = interaction_state
-        .edit_state
-        .deleted_nodes
-        .iter()
-        .filter_map(|key| {
-            let (view_key, node_id) = split_scoped_key(key);
-            patch_for_view(&effective_root_patch, &view_key)
-                .and_then(|patch| patch_node(patch, &node_id))
-                .is_none()
-                .then(|| key.clone())
-        })
-        .collect::<HashSet<_>>();
-    let stale_deleted_connections = interaction_state
-        .edit_state
-        .deleted_connections
-        .iter()
-        .filter_map(|key| {
-            let (view_key, connection_id) = split_scoped_key(key);
-            source_connection(&effective_root_patch, &view_key, &connection_id)
-                .is_none()
-                .then(|| key.clone())
-        })
-        .collect::<HashSet<_>>();
-
-    let changed = !stale_node_keys.is_empty()
-        || !stale_connection_keys.is_empty()
-        || !stale_deleted_nodes.is_empty()
-        || !stale_deleted_connections.is_empty();
-    if !changed {
-        return Ok(false);
-    }
-
-    for key in &stale_node_keys {
-        interaction_state.edit_state.nodes.remove(key);
-    }
-    for key in &stale_connection_keys {
-        interaction_state.edit_state.connections.remove(key);
-    }
-    for key in &stale_deleted_nodes {
-        interaction_state.edit_state.deleted_nodes.remove(key);
-    }
-    for key in &stale_deleted_connections {
-        interaction_state.edit_state.deleted_connections.remove(key);
-    }
-    interaction_state.selected_nodes.retain(|node_id| {
-        !stale_node_keys
-            .iter()
-            .any(|key| split_scoped_key(key).1 == *node_id)
-    });
-    if interaction_state.text_edit.as_ref().is_some_and(|edit| {
-        stale_node_keys.contains(&node_edit_key(
-            &active_patcher_view_key(interaction_state),
-            &edit.node_id,
-        ))
-    }) {
-        interaction_state.text_edit = None;
-    }
-
-    Ok(true)
-}
-
-fn node_edit_is_stale(
-    document: &SourceDocument,
-    root_patch: &Patch,
-    edit: &super::state::PatcherNodeEdit,
-) -> bool {
-    match &edit.origin {
-        PatcherNodeOrigin::Created { .. } => false,
-        PatcherNodeOrigin::Source { source_node_id } => {
-            let Some(node) = patch_for_view(root_patch, &edit.view_key)
-                .and_then(|patch| patch_node(patch, source_node_id))
-            else {
-                return true;
-            };
-            node_source_is_stale(document, node)
-        }
-    }
-}
-
-fn connection_edit_is_stale(
-    document: &SourceDocument,
-    root_patch: &Patch,
-    interaction_state: &PatcherInteractionState,
-    stale_node_keys: &HashSet<String>,
-    edit: &PatcherConnectionEdit,
-) -> bool {
-    match &edit.origin {
-        PatcherConnectionOrigin::Source {
-            source_connection_id,
-        } => {
-            source_connection(root_patch, &edit.view_key, source_connection_id).is_none()
-                || connection_endpoint_is_stale(
-                    document,
-                    root_patch,
-                    interaction_state,
-                    &edit.view_key,
-                    &edit.from.node_id,
-                    stale_node_keys,
-                )
-                || connection_endpoint_is_stale(
-                    document,
-                    root_patch,
-                    interaction_state,
-                    &edit.view_key,
-                    &edit.to.node_id,
-                    stale_node_keys,
-                )
-        }
-        PatcherConnectionOrigin::Created { .. } => {
-            connection_endpoint_is_stale(
-                document,
-                root_patch,
-                interaction_state,
-                &edit.view_key,
-                &edit.from.node_id,
-                stale_node_keys,
-            ) || connection_endpoint_is_stale(
-                document,
-                root_patch,
-                interaction_state,
-                &edit.view_key,
-                &edit.to.node_id,
-                stale_node_keys,
-            )
-        }
-    }
-}
-
-fn connection_endpoint_is_stale(
-    document: &SourceDocument,
-    root_patch: &Patch,
-    interaction_state: &PatcherInteractionState,
-    view_key: &str,
-    node_id: &str,
-    stale_node_keys: &HashSet<String>,
-) -> bool {
-    if stale_node_keys.contains(&node_edit_key(view_key, node_id)) {
-        return true;
-    }
-    if interaction_state
-        .edit_state
-        .nodes
-        .contains_key(&node_edit_key(view_key, node_id))
-    {
-        return false;
-    }
-    let Some(node) =
-        patch_for_view(root_patch, view_key).and_then(|patch| patch_node(patch, node_id))
-    else {
-        return true;
-    };
-    node_source_is_stale(document, node)
-}
-
-fn node_source_is_stale(document: &SourceDocument, node: &PatchNode) -> bool {
-    let Some(source) = node.source.as_ref() else {
-        return true;
-    };
-    source
-        .expr
-        .as_ref()
-        .is_some_and(|expr| document.expr(expr).is_none())
-        || source.call_shape.as_ref().is_some_and(|shape| {
-            document.expr(&shape.call).is_none()
-                || shape
-                    .positional_args
-                    .iter()
-                    .any(|arg| document.expr(&arg.expr).is_none())
-                || shape
-                    .attributes
-                    .iter()
-                    .any(|attr| document.expr(&attr.value).is_none())
-        })
 }
 
 fn validate_connection_edits(
@@ -2359,10 +2153,9 @@ fn collect_generated_symbol_dependencies(
             }
         }
         Expression::List(items) | Expression::QuoteList(items) => {
+            let attribute_items = attribute_item_mask(items);
             for (idx, item) in items.iter().enumerate() {
-                if matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
-                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
-                {
+                if attribute_items[idx] {
                     continue;
                 }
                 collect_generated_symbol_dependencies(item, generated_name_to_order, out);
@@ -3019,12 +2812,10 @@ fn normalize_created_node_inline_args(
     let mut attributes = Vec::new();
     let mut idx = 1usize;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            attributes.push(items[idx].clone());
-            if let Some(value) = items.get(idx + 1) {
-                attributes.push(value.clone());
-            }
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            let span = attribute_span_len(items, idx);
+            attributes.extend_from_slice(&items[idx..items.len().min(idx + span)]);
+            idx += span;
         } else {
             idx += 1;
         }
@@ -3710,17 +3501,16 @@ fn expression_source_dependency_index(
 ) -> usize {
     match expr {
         Expression::Symbol(symbol) => source_bindings.get(symbol.as_str()).copied().unwrap_or(0),
-        Expression::List(items) => items
-            .iter()
-            .enumerate()
-            .filter(|(idx, item)| {
-                *idx != 0
-                    && !matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
-                    && !matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
-            })
-            .map(|(_, item)| expression_source_dependency_index(item, source_bindings))
-            .max()
-            .unwrap_or(0),
+        Expression::List(items) => {
+            let attribute_items = attribute_item_mask(items);
+            items
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != 0 && !attribute_items[*idx])
+                .map(|(_, item)| expression_source_dependency_index(item, source_bindings))
+                .max()
+                .unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -5655,12 +5445,10 @@ fn required_input_count_for_existing_node_edit(
 fn append_original_attributes(original_items: &[Expression], merged: &mut Vec<Expression>) {
     let mut idx = 1usize;
     while idx < original_items.len() {
-        if matches!(&original_items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            merged.push(original_items[idx].clone());
-            if let Some(value) = original_items.get(idx + 1) {
-                merged.push(value.clone());
-            }
-            idx += 2;
+        if is_attribute_key(&original_items[idx]) {
+            let span = attribute_span_len(original_items, idx);
+            merged.extend_from_slice(&original_items[idx..original_items.len().min(idx + span)]);
+            idx += span;
         } else {
             idx += 1;
         }
@@ -5671,16 +5459,15 @@ fn append_missing_original_attributes(original_items: &[Expression], merged: &mu
     let existing = attribute_keys(merged);
     let mut idx = 1usize;
     while idx < original_items.len() {
-        if matches!(&original_items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+        if is_attribute_key(&original_items[idx]) {
+            let span = attribute_span_len(original_items, idx);
             if let Expression::Symbol(symbol) = &original_items[idx]
                 && !existing.contains(symbol)
             {
-                merged.push(original_items[idx].clone());
-                if let Some(value) = original_items.get(idx + 1) {
-                    merged.push(value.clone());
-                }
+                merged
+                    .extend_from_slice(&original_items[idx..original_items.len().min(idx + span)]);
             }
-            idx += 2;
+            idx += span;
         } else {
             idx += 1;
         }
@@ -5695,7 +5482,7 @@ fn attribute_keys(items: &[Expression]) -> HashSet<String> {
             && symbol.starts_with('@')
         {
             keys.insert(symbol.clone());
-            idx += 2;
+            idx += attribute_span_len(items, idx);
             continue;
         }
         idx += 1;
@@ -5800,7 +5587,7 @@ fn node_display_omits_first_input(node: &PatchNode) -> bool {
 }
 
 fn parse_single_expression(source: &str) -> Result<Expression, String> {
-    let tokens = Parser::new(source.to_string())
+    let tokens = Parser::new(normalize_editor_node_text(source))
         .parse()
         .map_err(|error| format!("failed to tokenize edited node text: {error:?}"))?;
     let exprs = ASTParser::new(tokens)
@@ -7636,8 +7423,8 @@ fn positional_item_index(items: &[Expression], semantic_index: usize) -> Option<
     let mut current = 0;
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            idx += attribute_span_len(items, idx);
             continue;
         }
         if current == semantic_index {
@@ -7700,8 +7487,8 @@ fn positional_arg_count(items: &[Expression]) -> usize {
     let mut count = 0;
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            idx += attribute_span_len(items, idx);
             continue;
         }
         count += 1;
@@ -7713,7 +7500,7 @@ fn positional_arg_count(items: &[Expression]) -> usize {
 fn positional_insert_index(items: &[Expression]) -> usize {
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+        if is_attribute_key(&items[idx]) {
             return idx;
         }
         idx += 1;
@@ -7885,10 +7672,10 @@ fn collect_scope_value_references(expr: &Expression, references: &mut HashSet<St
         }
         Expression::List(items) | Expression::QuoteList(items) => {
             let head = symbol_at(items, 0);
+            let attribute_items = attribute_item_mask(items);
             for (idx, item) in items.iter().enumerate() {
                 if idx == 0
-                    || matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
-                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+                    || attribute_items[idx]
                     || (idx == 1 && matches!(head, Some("def" | "param" | "make-history")))
                 {
                     continue;

@@ -6,9 +6,9 @@ use crate::parser::{Expression, format_expression};
 use super::display::preview;
 use super::layout;
 use super::lisp::{
-    attribute_symbol_value, attribute_value, connection_kind_for_op, default_outputs,
-    format_patch_literal, is_numeric_literal, is_unsupported_call_head, node_kind_for_op,
-    node_label, symbol_at,
+    attribute_span_len, attribute_symbol_value, attribute_value, connection_kind_for_op,
+    default_outputs, format_patch_literal, is_attribute_key, is_numeric_literal,
+    is_unsupported_call_head, node_kind_for_op, node_label, symbol_at,
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
@@ -115,7 +115,13 @@ impl Projector {
             "def" => self.project_def(items, expr, source_expr),
             "defmacro" => self.project_defmacro(items, expr, source_expr),
             "param" => self.project_param(items, expr, source_expr),
-            "use-defmacro" => {}
+            "use-defmacro" => {
+                if let Some(name) = symbol_at(items, 1)
+                    && !self.patch.imports.iter().any(|import| import == name)
+                {
+                    self.patch.imports.push(name.to_string());
+                }
+            }
             "make-history" => self.project_make_history(items, expr, source_expr),
             "write-history" => {
                 let _ = self.project_write_history(items, expr, source_expr);
@@ -209,6 +215,7 @@ impl Projector {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source: Some(NodeSource {
                 owner: SourceOwner::Compound {
@@ -239,7 +246,8 @@ impl Projector {
 
         match &items[1] {
             Expression::Symbol(name) => {
-                if self.is_hidden_host_modulator_def(name, &items[2]) {
+                if let Some(host_modulator) = self.hidden_host_modulator_def(name, &items[2]) {
+                    self.patch.host_modulators.push(host_modulator);
                     return;
                 }
                 let binding = self.binding_id(name, BindingKind::Def);
@@ -383,6 +391,7 @@ impl Projector {
                 width: None,
                 param: None,
                 inline_inputs: Vec::new(),
+                synthesized: false,
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::MacroParameter {
@@ -427,13 +436,20 @@ impl Projector {
         );
     }
 
-    fn is_hidden_host_modulator_def(&self, name: &str, expr: &Expression) -> bool {
+    fn hidden_host_modulator_def(
+        &self,
+        name: &str,
+        expr: &Expression,
+    ) -> Option<super::model::HostModulatorInput> {
         if self.scope != SourceScopeId::Root {
-            return false;
+            return None;
         }
-        expected_host_modulator_slot(name).is_some_and(|slot| {
-            host_modulator_input_signature(expr)
-                .is_some_and(|(_, input_name, modulator)| input_name == name && modulator == slot)
+        let slot = expected_host_modulator_slot(name)?;
+        let (channel, input_name, modulator) = host_modulator_input_signature(expr)?;
+        (input_name == name && modulator == slot).then(|| super::model::HostModulatorInput {
+            name: name.to_string(),
+            channel,
+            slot,
         })
     }
 
@@ -483,6 +499,7 @@ impl Projector {
                     width: None,
                     param: None,
                     inline_inputs: Vec::new(),
+                    synthesized: false,
                     diagnostic: None,
                     source: Some(NodeSource {
                         owner: SourceOwner::TopLevelForm {
@@ -536,6 +553,7 @@ impl Projector {
                 width: None,
                 param: None,
                 inline_inputs: Vec::new(),
+                synthesized: false,
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::TopLevelForm {
@@ -767,6 +785,7 @@ impl Projector {
             width: None,
             param: param_node_info(&op, items),
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: self.operator_diagnostic(&op, kind),
             source: Some(NodeSource {
                 owner,
@@ -961,6 +980,7 @@ impl Projector {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source,
         });
@@ -1000,8 +1020,8 @@ impl Projector {
         let mut args = Vec::new();
         let mut item_index = start;
         while item_index < items.len() {
-            if matches!(&items[item_index], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-                item_index += 2;
+            if is_attribute_key(&items[item_index]) {
+                item_index += attribute_span_len(items, item_index);
                 continue;
             }
             args.push(ArgSource {
@@ -1021,13 +1041,15 @@ impl Projector {
             if let Expression::Symbol(symbol) = &items[item_index]
                 && symbol.starts_with('@')
             {
+                let span = attribute_span_len(items, item_index);
                 attributes.push(AttributeSource {
                     key_item_index: item_index,
                     value_item_index: item_index + 1,
+                    value_item_count: span - 1,
                     key: symbol.clone(),
                     value: self.child_expr(call, item_index + 1),
                 });
-                item_index += 2;
+                item_index += span;
                 continue;
             }
             item_index += 1;
@@ -1113,6 +1135,7 @@ impl Projector {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: Some(reason.to_string()),
             source: Some(NodeSource {
                 owner: SourceOwner::CodeIsland {
@@ -1284,10 +1307,7 @@ pub(super) fn assign_layout(patch: &mut Patch) {
 pub(super) fn dgenlisp_constant_names() -> &'static HashSet<String> {
     static CONSTANT_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
     CONSTANT_NAMES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let constants = metadata
             .get("constants")
             .and_then(serde_json::Value::as_array)
@@ -1304,10 +1324,7 @@ pub(super) fn dgenlisp_constant_names() -> &'static HashSet<String> {
 pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
     static OPERATOR_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
     OPERATOR_NAMES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1330,7 +1347,7 @@ pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
                 }
             }
         }
-        for special_form in expression_special_forms(&metadata) {
+        for special_form in expression_special_forms(metadata) {
             if let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) {
                 names.insert(name.to_string());
             }
@@ -1341,6 +1358,9 @@ pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct OperatorDocumentation {
+    /// Short kind label from the manifest (`arithmetic`, `tensor_op`, …),
+    /// rendered dimmed after the symbol name in the completion list.
+    pub(super) category: Option<String>,
     pub(super) summary: Option<String>,
     pub(super) signatures: Vec<String>,
     pub(super) inputs: Vec<OperatorPortDocumentation>,
@@ -1360,10 +1380,7 @@ pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, Oper
     static OPERATOR_DOCUMENTATION: OnceLock<HashMap<String, OperatorDocumentation>> =
         OnceLock::new();
     OPERATOR_DOCUMENTATION.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1375,6 +1392,18 @@ pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, Oper
                 continue;
             };
             let doc = OperatorDocumentation {
+                category: operator
+                    .get("category")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|category| {
+                        !category.is_empty() && !matches!(*category, "uncategorized" | "internal")
+                    })
+                    .map(|category| match category {
+                        // Preamble ops are stdlib defmacros; label them like
+                        // user-defined ones rather than leaking "preamble".
+                        "preamble" => "macro".to_string(),
+                        other => other.replace('_', " "),
+                    }),
                 summary: operator
                     .get("summary")
                     .and_then(serde_json::Value::as_str)
@@ -1446,10 +1475,7 @@ fn operator_port_documentation(
 pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, OperatorPortShape> {
     static OPERATOR_PORT_SHAPES: OnceLock<HashMap<String, OperatorPortShape>> = OnceLock::new();
     OPERATOR_PORT_SHAPES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1475,7 +1501,7 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
                 }
             }
         }
-        for special_form in expression_special_forms(&metadata) {
+        for special_form in expression_special_forms(metadata) {
             let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) else {
                 continue;
             };
@@ -1491,13 +1517,51 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
     })
 }
 
+/// Fixed arities of the dgenlisp *preamble* defmacros — the standard-library
+/// macros the backend attaches to every compiled source (`svf`, `adsr`,
+/// `polyblep`, …). Unlike builtin operators, which tolerate trailing-slot
+/// trimming, these expand as macros with a fixed parameter list, so a call
+/// with fewer arguments is an arity error. The patcher uses this to classify
+/// an unwired instance the same way it classifies a patch-local macro
+/// instance (§4.2b dead-code omission).
+pub(super) fn dgenlisp_preamble_macro_arities() -> &'static HashMap<String, usize> {
+    static PREAMBLE_MACRO_ARITIES: OnceLock<HashMap<String, usize>> = OnceLock::new();
+    PREAMBLE_MACRO_ARITIES.get_or_init(|| {
+        let metadata = crate::dgenlisp::manifest();
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+        let mut arities = HashMap::new();
+        for operator in operators {
+            if operator.get("category").and_then(serde_json::Value::as_str) != Some("preamble") {
+                continue;
+            }
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let arity = documented_required_input_count(operator);
+            if arity == 0 {
+                continue;
+            }
+            arities.insert(name.to_string(), arity);
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases.iter().filter_map(serde_json::Value::as_str) {
+                    arities.insert(alias.to_string(), arity);
+                }
+            }
+        }
+        arities
+    })
+}
+
 pub(super) fn dgenlisp_operator_required_input_counts() -> &'static HashMap<String, usize> {
     static OPERATOR_REQUIRED_INPUT_COUNTS: OnceLock<HashMap<String, usize>> = OnceLock::new();
     OPERATOR_REQUIRED_INPUT_COUNTS.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1520,7 +1584,7 @@ pub(super) fn dgenlisp_operator_required_input_counts() -> &'static HashMap<Stri
                 }
             }
         }
-        for special_form in expression_special_forms(&metadata) {
+        for special_form in expression_special_forms(metadata) {
             let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) else {
                 continue;
             };

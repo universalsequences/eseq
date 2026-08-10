@@ -1,5 +1,3 @@
-(use-defmacro simp2)
-(use-defmacro gain2)
 (make-history history1)
 (def input_r (in 2 @name Right))
 (def mod1 (in 3 @name mod1 @modulator 1))

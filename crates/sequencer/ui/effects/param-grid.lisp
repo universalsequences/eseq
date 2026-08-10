@@ -463,7 +463,7 @@
     (box :width (fx-param-group-row-panel-width controls)
          :height (fx-param-group-row-panel-height controls)
          :background-color (fx-param-grid-panel-bg all-params groups fx group-name)
-         :border-width 1 :corner-radius 7 :padding (fx-param-group-panel-padding)
+         :border-width 1 :corner-radius 12 :padding (fx-param-group-panel-padding)
          :debug-name (str "fx-param-group-" group-label)
          :on-click (fx-param-grid-panel-select-callback all-params groups fx group-name)
       (h-stack :width :fill :height :fill :gap (fx-param-group-label-gap) :align :center
@@ -505,7 +505,7 @@
         (groups (fx-param-group-names visible))
         (ungrouped (filter |p| (not (get p :group)) visible)))
     (box :debug-name "fx-param-metadata-grid"
-         :width :fill :height :fill :padding 0.525
+         :width :fill :height 9.8 :padding 0.525
          :on-click (fx-param-grid-default-section-callback visible groups fx)
       (h-stack :width :fill :height :fill :gap 1.0 :align :stretch
         (fx-param-panel-columns visible groups ungrouped fx)

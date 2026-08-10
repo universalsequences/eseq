@@ -66,6 +66,7 @@ pub use ui::tui;
 pub mod audio;
 pub mod buffer;
 pub mod defmacro_library;
+mod dgenlisp;
 pub mod editor;
 pub mod host;
 pub mod hot_reload;
@@ -2563,7 +2564,10 @@ mod tests {
             )
             .expect("install active subtree effect");
         assert_eq!(
-            runtime.current_layout.as_ref().map(|layout| layout.rect.height),
+            runtime
+                .current_layout
+                .as_ref()
+                .map(|layout| layout.rect.height),
             Some(10.0),
             "the initial flex layout should fill the viewport"
         );
@@ -3368,7 +3372,11 @@ mod tests {
     }
 
     fn install_fx_reader(runtime: &mut Runtime) {
-        runtime.register_reactive("SEQ", vec![("effects", fx_panel_value("Delay", 0.5))], false);
+        runtime.register_reactive(
+            "SEQ",
+            vec![("effects", fx_panel_value("Delay", 0.5))],
+            false,
+        );
         runtime
             .eval_str(
                 r#"
@@ -3387,7 +3395,8 @@ mod tests {
         let mut runtime = Runtime::new();
         install_fx_reader(&mut runtime);
 
-        let result = runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
+        let result =
+            runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
         assert!(!result.changed && !result.effects_dirty && !result.widgets_dirty);
         runtime.run_reactive_cycle();
         assert!(
@@ -3403,7 +3412,8 @@ mod tests {
             .unwrap();
         assert_eq!(value, Value::Number(0.9));
         // A rebuilt identical tree now compares equal: no rerun either.
-        let result = runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
+        let result =
+            runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
         assert!(!result.changed);
     }
 
@@ -3412,7 +3422,8 @@ mod tests {
         let mut runtime = Runtime::new();
         install_fx_reader(&mut runtime);
 
-        let result = runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Reverb", 0.5));
+        let result =
+            runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Reverb", 0.5));
         assert!(result.changed, "renames are structural");
         runtime.run_reactive_cycle();
         assert!(
@@ -3495,8 +3506,15 @@ mod modal_layout_tests {
         assert_eq!(closed_modal.rect.height, 0.0);
         assert_eq!(open_modal.rect.width, 0.0);
         assert_eq!(open_modal.rect.height, 0.0);
-        assert!(closed_modal.children.is_empty(), "closed modal lays out no children");
-        assert_eq!(open_modal.children.len(), 1, "open modal lays out its child");
+        assert!(
+            closed_modal.children.is_empty(),
+            "closed modal lays out no children"
+        );
+        assert_eq!(
+            open_modal.children.len(),
+            1,
+            "open modal lays out its child"
+        );
     }
 
     #[test]
@@ -3509,19 +3527,50 @@ mod modal_layout_tests {
         // centered: rect (12, 3.6) 56x16.8. Content is inset by the panel
         // padding (1.5 cols, 0.7 rows).
         let child = &modal.children[0];
-        assert!((child.rect.col - 13.5).abs() < 0.01, "col {}", child.rect.col);
-        assert!((child.rect.row - 4.3).abs() < 0.01, "row {}", child.rect.row);
-        assert!((child.rect.width - 53.0).abs() < 0.01, "width {}", child.rect.width);
-        assert!((child.rect.height - 15.4).abs() < 0.01, "height {}", child.rect.height);
+        assert!(
+            (child.rect.col - 13.5).abs() < 0.01,
+            "col {}",
+            child.rect.col
+        );
+        assert!(
+            (child.rect.row - 4.3).abs() < 0.01,
+            "row {}",
+            child.rect.row
+        );
+        assert!(
+            (child.rect.width - 53.0).abs() < 0.01,
+            "width {}",
+            child.rect.width
+        );
+        assert!(
+            (child.rect.height - 15.4).abs() < 0.01,
+            "height {}",
+            child.rect.height
+        );
 
         // Children (including the `each` rows inside scroll) stay within the
         // panel rect.
-        let panel = Rect { row: 3.6, col: 12.0, width: 56.0, height: 16.8 };
+        let panel = Rect {
+            row: 3.6,
+            col: 12.0,
+            width: 56.0,
+            height: 16.8,
+        };
         fn assert_within(node: &LayoutNode, panel: Rect) {
             // Scroll content may extend below the clip; the scroll viewport
             // itself must fit.
-            assert!(node.rect.col >= panel.col - 0.01, "{} col {}", node.widget_type, node.rect.col);
-            assert!(node.rect.row >= panel.row - 0.01, "{} row {}", node.widget_type, node.rect.row);
+            assert!(
+                node.rect.col >= panel.col - 0.01,
+                "{} col {}",
+                node.widget_type,
+                node.rect.col
+            );
+            assert!(
+                node.rect.row >= panel.row - 0.01,
+                "{} row {}",
+                node.widget_type,
+                node.rect.row
+            );
             assert!(
                 node.rect.col + node.rect.width <= panel.col + panel.width + 0.01,
                 "{} right {}",
@@ -3553,10 +3602,26 @@ mod modal_layout_tests {
 
         // Panel = 70% of the 60x40 frame centered at its (offset) origin:
         // rect (5, 0) 42x28; the child content is inset by the panel padding.
-        assert!((child.rect.col - 6.5).abs() < 0.01, "col {}", child.rect.col);
-        assert!((child.rect.row - 0.7).abs() < 0.01, "row {}", child.rect.row);
-        assert!((child.rect.width - 39.0).abs() < 0.01, "width {}", child.rect.width);
-        assert!((child.rect.height - 26.6).abs() < 0.01, "height {}", child.rect.height);
+        assert!(
+            (child.rect.col - 6.5).abs() < 0.01,
+            "col {}",
+            child.rect.col
+        );
+        assert!(
+            (child.rect.row - 0.7).abs() < 0.01,
+            "row {}",
+            child.rect.row
+        );
+        assert!(
+            (child.rect.width - 39.0).abs() < 0.01,
+            "width {}",
+            child.rect.width
+        );
+        assert!(
+            (child.rect.height - 26.6).abs() < 0.01,
+            "height {}",
+            child.rect.height
+        );
         // The subtree escapes the 30x8 tile: content extends past row 8.
         assert!(child.rect.row + child.rect.height > 8.0);
     }
@@ -3581,10 +3646,26 @@ mod modal_layout_tests {
 
         // 960x800 px becomes 96x40 cells, centered in the 200x100 frame,
         // then inset by the modal's 1.5x0.7-cell content padding.
-        assert!((child.rect.col - 53.5).abs() < 0.01, "col {}", child.rect.col);
-        assert!((child.rect.row - 30.7).abs() < 0.01, "row {}", child.rect.row);
-        assert!((child.rect.width - 93.0).abs() < 0.01, "width {}", child.rect.width);
-        assert!((child.rect.height - 38.6).abs() < 0.01, "height {}", child.rect.height);
+        assert!(
+            (child.rect.col - 53.5).abs() < 0.01,
+            "col {}",
+            child.rect.col
+        );
+        assert!(
+            (child.rect.row - 30.7).abs() < 0.01,
+            "row {}",
+            child.rect.row
+        );
+        assert!(
+            (child.rect.width - 93.0).abs() < 0.01,
+            "width {}",
+            child.rect.width
+        );
+        assert!(
+            (child.rect.height - 38.6).abs() < 0.01,
+            "height {}",
+            child.rect.height
+        );
     }
 
     #[cfg(target_os = "macos")]

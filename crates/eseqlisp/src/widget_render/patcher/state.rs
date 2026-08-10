@@ -12,16 +12,20 @@ use crate::layout::LayoutNode;
 use crate::parser::{ASTParser, Expression, Parser};
 use crate::vm::Value;
 
+use super::generate::{label_attribute, sanitize_binding};
 use super::lisp::{
-    editor_node_port_shape, node_kind_for_op, parse_editor_node_text, parse_patch_source,
+    editor_node_port_shape, node_kind_for_op, normalize_editor_node_text, parse_editor_node_text,
+    parse_patch_source,
 };
 use super::metrics::{
-    DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR,
+    AGENTIC_ANIMATION_SETTLE_SECS, AGENTIC_CLOSE_SECS, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS,
+    PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
-    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef,
-    InputPresentation, MacroPatch, MacroSignature, NodeKind, OutputPortRef, ParamNodeInfo, Patch,
-    PatchConnection, PatchNode, PatcherIntent, SourceOwner, hidden_inline_node_ids,
+    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, ExprPath,
+    InputPortRef, InputPresentation, MacroPatch, MacroSignature, NodeKind, NodeSource,
+    OutputPortRef, ParamNodeInfo, Patch, PatchConnection, PatchNode, PatcherIntent, SourceExprId,
+    SourceFormId, SourceOwner, SourceScopeId, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
     refresh_patch_inline_inputs,
 };
 use super::project::dgenlisp_operator_names;
@@ -61,6 +65,10 @@ thread_local! {
         RefCell::new(HashMap::new());
     static PATCHER_PATH_KEYS: RefCell<HashMap<String, Vec<u64>>> =
         RefCell::new(HashMap::new());
+    static PATCHER_HISTORIES: RefCell<HashMap<u64, PatcherHistory>> =
+        RefCell::new(HashMap::new());
+    static PATCHER_CLIPBOARD: RefCell<Option<PatcherClipboard>> =
+        RefCell::new(None);
 }
 
 pub(super) fn patcher_state_key(node: &LayoutNode) -> u64 {
@@ -118,13 +126,21 @@ pub(super) struct PatcherInteractionState {
     pub(super) hovered_node: Option<String>,
     pub(super) hovered_input_port: Option<InputPortRef>,
     pub(super) hovered_output_port: Option<OutputPortRef>,
+    /// Argument token hovered inside a node's label. Inlined literals draw no
+    /// port, so the text is the only place their inlet can be named; the ref
+    /// carries the argument index so it resolves through the port tooltip.
+    pub(super) hovered_label_arg: Option<InputPortRef>,
     pub(super) hover_back_button: bool,
     pub(super) selected_cable: Option<String>,
     pub(super) edit_state: PatchEditState,
     pub(super) text_edit: Option<PatcherTextEdit>,
     pub(super) agentic_bubbles: HashMap<String, AgenticBubble>,
-    pub(super) agentic_morph_nodes: HashMap<String, Instant>,
+    pub(super) agentic_morph_nodes: HashMap<String, AgenticMorph>,
     pub(super) z_order: HashMap<String, Vec<String>>,
+    /// Recently interacted node ids for the active view, oldest first. Feeds
+    /// the cmd+enter "create below" anchor and the cmd+up "connect last two"
+    /// shortcut; cleared on macro navigation.
+    pub(super) touched_nodes: Vec<String>,
     pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
@@ -195,6 +211,33 @@ pub(super) struct AgenticBubble {
     pub(super) state: AgenticBubbleState,
     pub(super) generation: u64,
     pub(super) macro_name: String,
+    /// The view (`root` or `macro:<name>`) the bubble's last submission was
+    /// composed against. Node ids are only unique per scope, so a response that
+    /// lands after the canvas drilled somewhere else must not be applied — see
+    /// `resolve_agentic_bubble_connections`.
+    pub(super) view_key: String,
+    /// What the user is typing into the follow-up box under a settled answer.
+    /// Kept separate from `prompt` so the answer that is being followed up on
+    /// stays on screen while the next question is composed.
+    pub(super) follow_up: String,
+    pub(super) follow_up_text_state: TextInputState,
+    /// Prior turns of this bubble's conversation, oldest first. Sent back with
+    /// each follow-up so the agent answers in context rather than cold.
+    pub(super) turns: Vec<AgenticTurn>,
+    /// When the bubble was opened, which drives its grow-in animation. Distinct
+    /// from `AgenticBubbleState::Pending::started_at`, which resets on submit.
+    pub(super) created_at: Instant,
+    /// Set by Escape. The bubble stays in the map, playing its shrink-out, and
+    /// is dropped by `set_patcher_interaction_state` once that finishes. It
+    /// counts as gone the moment this is set — see `is_dismissed`.
+    pub(super) closing_at: Option<Instant>,
+}
+
+/// One completed question/answer exchange on a bubble.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AgenticTurn {
+    pub(super) prompt: String,
+    pub(super) answer: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +249,37 @@ pub(super) enum AgenticBubbleTarget {
         params: Vec<String>,
         source: String,
     },
+    /// Wire an existing node into the surrounding patch
+    /// (docs/patcher-agentic-connect-spec.md §3). The variant is what keeps the
+    /// three bubbles isolated: it selects both the prompt template and the
+    /// output type the agent is allowed to return.
+    ConnectNode {
+        instance_node_id: String,
+        subject: ConnectSubject,
+    },
+}
+
+/// What the connect bubble's subject node is, and therefore what the agent is
+/// told about its inlets (spec §5.2).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ConnectSubject {
+    Macro {
+        name: String,
+        params: Vec<String>,
+        source: String,
+    },
+    Operator {
+        op: String,
+    },
+}
+
+impl ConnectSubject {
+    pub(super) fn name(&self) -> &str {
+        match self {
+            ConnectSubject::Macro { name, .. } => name.as_str(),
+            ConnectSubject::Operator { op } => op.as_str(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,7 +299,187 @@ pub(super) enum AgenticBubbleState {
     },
 }
 
+/// The pose an agentic bubble last rendered at, in model space (so it stays
+/// correct if the view pans or zooms mid-morph).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct AgenticBubblePose {
+    /// `(x, y, width, height)` in patch-model cells.
+    pub(super) model_rect: (f32, f32, f32, f32),
+    pub(super) fill: [f32; 4],
+    pub(super) border: [f32; 4],
+}
+
+/// A node that has just been materialized from an agentic bubble, and is easing
+/// from that bubble's square chrome into its own rounded node chrome.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct AgenticMorph {
+    pub(super) started_at: Instant,
+    /// The bubble's final pose. `None` when no pose was recorded (headless or
+    /// non-macOS render paths), in which case the node just appears.
+    pub(super) from: Option<AgenticBubblePose>,
+}
+
+/// What a recorded hit rect on a bubble does when clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgenticButtonKind {
+    /// The chevron on an editable prompt box.
+    SendPrompt,
+    /// The chevron on the follow-up composer under a settled answer.
+    SendFollowUp,
+    /// The header chip naming the model the bubble will run on.
+    ChooseModel,
+}
+
+/// A clickable control as it was last drawn: enough to route a click on it back
+/// to the bubble and the control that owns it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AgenticBubbleButton {
+    pub(super) bubble_id: String,
+    pub(super) kind: AgenticButtonKind,
+    /// `(col, row, width, height)` in the same widget-local space the pointer
+    /// handlers work in, like `patcher_back_button_rect`. Screen space rather
+    /// than model space is right here: unlike a morph start pose, a hit rect is
+    /// only ever consulted against the frame that drew it.
+    pub(super) rect: (f32, f32, f32, f32),
+}
+
+thread_local! {
+    /// Poses of the bubbles drawn in the most recent frame, keyed by bubble id.
+    /// The renderer rebuilds this every frame, which also prunes bubbles that
+    /// have gone away.
+    ///
+    /// This is a side channel rather than a field on `AgenticBubble` because a
+    /// bubble is removed in the same state write that inserts its node, so
+    /// there is no frame where both exist to read the start pose from — and
+    /// writing the pose back into the interaction state each frame would bump
+    /// the widget-state generation on every tick.
+    static AGENTIC_BUBBLE_POSES: RefCell<HashMap<String, AgenticBubblePose>> =
+        RefCell::new(HashMap::new());
+
+    /// Clickable bubble controls drawn in the most recent frame. Same side-channel
+    /// reasoning as the poses above: it is render-derived geometry, and it must
+    /// not bump the widget-state generation every tick.
+    static AGENTIC_BUBBLE_BUTTONS: RefCell<Vec<AgenticBubbleButton>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_agentic_bubble_buttons(buttons: Vec<AgenticBubbleButton>) {
+    AGENTIC_BUBBLE_BUTTONS.with(|cell| *cell.borrow_mut() = buttons);
+}
+
+/// The controls the last frame drew, so a test can click one where it landed
+/// rather than recomputing the layout it came from.
+#[cfg(test)]
+pub(super) fn agentic_buttons_for_test() -> Vec<AgenticBubbleButton> {
+    AGENTIC_BUBBLE_BUTTONS.with(|cell| cell.borrow().clone())
+}
+
+/// The bubble control under `(col, row)`, if the last frame drew one there.
+/// The rect is padded out a little: these are small targets, and a click that
+/// lands a pixel outside one should still hit rather than fall through to the
+/// canvas.
+pub(super) fn agentic_button_at(col: f32, row: f32) -> Option<AgenticBubbleButton> {
+    const HIT_PAD_CELLS: f32 = 0.22;
+    AGENTIC_BUBBLE_BUTTONS.with(|cell| {
+        cell.borrow()
+            .iter()
+            .find(|button| {
+                let (bx, by, bw, bh) = button.rect;
+                col >= bx - HIT_PAD_CELLS
+                    && col <= bx + bw + HIT_PAD_CELLS
+                    && row >= by - HIT_PAD_CELLS
+                    && row <= by + bh + HIT_PAD_CELLS
+            })
+            .cloned()
+    })
+}
+
+pub(super) fn set_agentic_bubble_poses(poses: HashMap<String, AgenticBubblePose>) {
+    AGENTIC_BUBBLE_POSES.with(|cell| *cell.borrow_mut() = poses);
+}
+
+pub(super) fn agentic_bubble_pose(bubble_id: &str) -> Option<AgenticBubblePose> {
+    AGENTIC_BUBBLE_POSES.with(|cell| cell.borrow().get(bubble_id).copied())
+}
+
 impl AgenticBubble {
+    /// The macro this bubble is bound to. A bound bubble's prompt is scoped to
+    /// that macro, so the name is shown in the bubble's header.
+    pub(super) fn bound_macro_name(&self) -> Option<&str> {
+        match &self.target {
+            AgenticBubbleTarget::EditMacro { macro_name, .. } => Some(macro_name.as_str()),
+            AgenticBubbleTarget::ConnectNode { subject, .. } => Some(subject.name()),
+            AgenticBubbleTarget::CreateMacro => None,
+        }
+    }
+
+    /// What the body shows before an answer arrives: the typed prompt, or a
+    /// placeholder that says what this bubble is for.
+    ///
+    /// Rendering can only wrap text whose glyph widths a measure pass has
+    /// already cached under the *exact* same string, so this and `body_text`
+    /// are the single source both passes go through — if they drift, the
+    /// renderer silently falls back or drops the bubble.
+    pub(super) fn prompt_text(&self) -> String {
+        if self.prompt.trim().is_empty() {
+            match self.target {
+                AgenticBubbleTarget::EditMacro { .. } => "ask about or edit this macro".to_string(),
+                AgenticBubbleTarget::ConnectNode { .. } => {
+                    "connect this node into the patch".to_string()
+                }
+                AgenticBubbleTarget::CreateMacro => "what do you want to build?".to_string(),
+            }
+        } else {
+            self.prompt.clone()
+        }
+    }
+
+    /// What the follow-up box under a settled answer shows: what has been typed
+    /// so far, or its placeholder. Same measure-pass contract as `prompt_text`.
+    pub(super) fn follow_up_text(&self) -> String {
+        if self.follow_up.is_empty() {
+            "Send a follow-up".to_string()
+        } else {
+            self.follow_up.clone()
+        }
+    }
+
+    /// Whether the follow-up box is showing its placeholder rather than typing.
+    pub(super) fn follow_up_is_placeholder(&self) -> bool {
+        self.follow_up.is_empty()
+    }
+
+    /// The text the body settles on for the bubble's current state.
+    pub(super) fn body_text(&self) -> String {
+        match &self.state {
+            AgenticBubbleState::Answer { text, .. } => text.clone(),
+            _ => self.prompt_text(),
+        }
+    }
+
+    /// Dismissed bubbles are still rendered while they shrink out, but are
+    /// invisible to every query that asks what the patcher is doing.
+    pub(super) fn is_dismissed(&self) -> bool {
+        self.closing_at.is_some()
+    }
+
+    /// The shrink-out has played out, so there is nothing left to draw.
+    pub(super) fn close_finished(&self) -> bool {
+        self.closing_at
+            .is_some_and(|at| at.elapsed().as_secs_f32() >= AGENTIC_CLOSE_SECS)
+    }
+
+    /// The shrink-out is done *and* the frames that draw the bubble gone have
+    /// had time to land. Dropping a bubble at `close_finished` instead is what
+    /// stranded a ghost: the widget's cached primitive run is only refreshed
+    /// while it animates, so a bubble pruned before the settle window closes
+    /// takes its "keep animating" vote with it and the last shrinking frame is
+    /// left on screen. See `AGENTIC_ANIMATION_SETTLE_SECS`.
+    pub(super) fn close_settled(&self) -> bool {
+        self.closing_at.is_some_and(|at| {
+            at.elapsed().as_secs_f32() >= AGENTIC_CLOSE_SECS + AGENTIC_ANIMATION_SETTLE_SECS
+        })
+    }
+
     pub(super) fn elapsed(&self) -> Option<Duration> {
         match self.state {
             AgenticBubbleState::Pending { started_at } => Some(started_at.elapsed()),
@@ -376,7 +630,42 @@ pub(super) fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState
     PATCHER_INTERACTION_STATES.with(|states| states.borrow().get(&key).cloned().unwrap_or_default())
 }
 
-pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionState) {
+pub(super) fn set_patcher_interaction_state(key: u64, mut state: PatcherInteractionState) {
+    prune_closed_agentic_bubbles(&mut state);
+    let changed = PATCHER_INTERACTION_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        record_patcher_history_transition(key, states.get(&key), &state);
+        let old = states.insert(key, state.clone());
+        old.as_ref() != Some(&state)
+    });
+    if changed {
+        bump_widget_state_generation();
+    }
+}
+
+/// Drop bubbles whose shrink-out has played out *and* settled. Rendering
+/// already skips them from `close_finished`, so this is bookkeeping rather than
+/// a visual change; doing it on write gives a single choke point instead of
+/// mutating state from the render path.
+fn prune_closed_agentic_bubbles(state: &mut PatcherInteractionState) {
+    if state
+        .agentic_bubbles
+        .values()
+        .any(|bubble| bubble.close_settled())
+    {
+        state
+            .agentic_bubbles
+            .retain(|_, bubble| !bubble.close_settled());
+    }
+}
+
+/// Store interaction state while an undo/redo is being applied: the edit-state
+/// transition must not be recorded as a fresh gesture (it would clobber the
+/// redo stack the application just built).
+pub(super) fn set_patcher_interaction_state_without_history(
+    key: u64,
+    state: PatcherInteractionState,
+) {
     let changed = PATCHER_INTERACTION_STATES.with(|states| {
         let mut states = states.borrow_mut();
         let old = states.insert(key, state.clone());
@@ -391,9 +680,175 @@ pub(super) fn reset_patcher_widget_state(key: u64) {
     let pan_changed = PATCHER_PAN_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
     let interaction_changed =
         PATCHER_INTERACTION_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
+    PATCHER_HISTORIES.with(|histories| histories.borrow_mut().remove(&key));
     if pan_changed || interaction_changed {
         bump_widget_state_generation();
     }
+}
+
+const PATCHER_HISTORY_LIMIT: usize = 64;
+
+/// Graph-level undo history for one patcher widget. Each undo step is a full
+/// `PatchEditState` snapshot taken at the start of a committed gesture;
+/// restoring one regenerates + recompiles through the normal semantic-change
+/// payload, so no source reconciliation is needed (spec
+/// docs/patch-vs-code-editor-spec.md §4.4). Snapshots are only valid within
+/// one base-source epoch: `reset_patcher_widget_state` (which runs after every
+/// save rewrites the source) drops the whole history.
+#[derive(Clone, Debug, Default)]
+pub(super) struct PatcherHistory {
+    pub(super) undo: Vec<PatchEditState>,
+    pub(super) redo: Vec<PatchEditState>,
+    /// `edit_state` as of the start of the in-flight gesture (an open drag or
+    /// text edit); committed as one undo step when the gesture closes.
+    pub(super) pending_gesture_base: Option<PatchEditState>,
+}
+
+/// Undo-relevant equality: the created-id counters only ever grow (a
+/// cancelled gesture keeps its bump) and must not make an otherwise reverted
+/// edit state look like a change worth an undo step.
+fn edit_states_equivalent(left: &PatchEditState, right: &PatchEditState) -> bool {
+    left.nodes == right.nodes
+        && left.deleted_nodes == right.deleted_nodes
+        && left.connections == right.connections
+        && left.deleted_connections == right.deleted_connections
+        && left.input_presentations == right.input_presentations
+        && left.created_macros == right.created_macros
+}
+
+fn push_patcher_undo_step(history: &mut PatcherHistory, base: PatchEditState) {
+    history.undo.push(base);
+    if history.undo.len() > PATCHER_HISTORY_LIMIT {
+        let excess = history.undo.len() - PATCHER_HISTORY_LIMIT;
+        history.undo.drain(..excess);
+    }
+    history.redo.clear();
+}
+
+/// Observe an interaction-state transition and fold it into undo history.
+/// A gesture is "open" while a drag or text edit is active; edit-state changes
+/// made during an open gesture coalesce into one undo step, committed on the
+/// first store with the gesture closed. A gesture that ends back at its base
+/// (e.g. Esc canceling a fresh created node) records nothing.
+fn record_patcher_history_transition(
+    key: u64,
+    previous: Option<&PatcherInteractionState>,
+    next: &PatcherInteractionState,
+) {
+    let previous_edit = previous.map(|state| &state.edit_state);
+    PATCHER_HISTORIES.with(|histories| {
+        let mut histories = histories.borrow_mut();
+        let history = histories.entry(key).or_default();
+        let default_edit = PatchEditState::default();
+        let previous_edit = previous_edit.unwrap_or(&default_edit);
+        let edit_changed = !edit_states_equivalent(previous_edit, &next.edit_state);
+        if edit_changed && history.pending_gesture_base.is_none() {
+            history.pending_gesture_base = Some(previous_edit.clone());
+        }
+        let gesture_open = next.drag.is_some() || next.text_edit.is_some();
+        if !gesture_open
+            && let Some(base) = history.pending_gesture_base.take()
+            && !edit_states_equivalent(&base, &next.edit_state)
+        {
+            push_patcher_undo_step(history, base);
+        }
+    });
+}
+
+/// Apply one undo (or redo) step to `state`, moving the replaced edit state to
+/// the opposite stack. Returns false when the stack is empty. The caller must
+/// store the state via `set_patcher_interaction_state_without_history` and emit
+/// a semantic change so the patch regenerates and recompiles.
+pub(super) fn apply_patcher_history_step(
+    key: u64,
+    state: &mut PatcherInteractionState,
+    redo: bool,
+) -> bool {
+    PATCHER_HISTORIES.with(|histories| {
+        let mut histories = histories.borrow_mut();
+        let history = histories.entry(key).or_default();
+        // A leftover gesture base should have been committed when the gesture
+        // closed; commit it now rather than losing the step.
+        if let Some(base) = history.pending_gesture_base.take()
+            && !edit_states_equivalent(&base, &state.edit_state)
+        {
+            push_patcher_undo_step(history, base);
+        }
+        let (from, to) = if redo {
+            (&mut history.redo, &mut history.undo)
+        } else {
+            (&mut history.undo, &mut history.redo)
+        };
+        let Some(mut snapshot) = from.pop() else {
+            return false;
+        };
+        // Created-id counters only ever grow: keep the newer counter so ids
+        // allocated after an undo can never collide with ids still referenced
+        // by snapshots on either stack.
+        snapshot.next_created_node = snapshot
+            .next_created_node
+            .max(state.edit_state.next_created_node);
+        snapshot.next_created_connection = snapshot
+            .next_created_connection
+            .max(state.edit_state.next_created_connection);
+        to.push(state.edit_state.clone());
+        state.edit_state = snapshot;
+        state.selected_nodes.clear();
+        state.selected_cable = None;
+        state.text_edit = None;
+        state.drag = None;
+        debug_log_edit_event(if redo { "redo" } else { "undo" }, state);
+        true
+    })
+}
+
+#[cfg(test)]
+pub(super) fn patcher_history_for_key(key: u64) -> PatcherHistory {
+    PATCHER_HISTORIES.with(|histories| histories.borrow().get(&key).cloned().unwrap_or_default())
+}
+
+/// One copied node: its editable header text plus geometry. Paste re-creates
+/// it as a created node, so fidelity matches retyping the header by hand.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PatcherClipboardNode {
+    pub(super) text: String,
+    pub(super) position: (f32, f32),
+    pub(super) width: Option<f32>,
+}
+
+/// A wire internal to the copied selection, endpoints as indices into
+/// `PatcherClipboard::nodes` so paste can remap them onto the new node ids.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PatcherClipboardConnection {
+    pub(super) from_index: usize,
+    pub(super) from_output: usize,
+    pub(super) to_index: usize,
+    pub(super) to_input: usize,
+}
+
+/// Process-local patcher clipboard, shared across patcher widgets so a
+/// selection copied in one patch can be pasted into another.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct PatcherClipboard {
+    pub(super) nodes: Vec<PatcherClipboardNode>,
+    pub(super) connections: Vec<PatcherClipboardConnection>,
+    /// Number of pastes since this clipboard was captured; staggers repeated
+    /// pastes so they don't stack on the same spot.
+    pub(super) paste_serial: u32,
+}
+
+pub(super) fn set_patcher_clipboard(clipboard: PatcherClipboard) {
+    PATCHER_CLIPBOARD.with(|slot| *slot.borrow_mut() = Some(clipboard));
+}
+
+/// Take the clipboard for a paste, bumping its serial in place.
+pub(super) fn next_patcher_clipboard_paste() -> Option<PatcherClipboard> {
+    PATCHER_CLIPBOARD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let clipboard = slot.as_mut()?;
+        clipboard.paste_serial += 1;
+        Some(clipboard.clone())
+    })
 }
 
 pub(super) fn reset_patcher_widget_states_for_path(path: impl AsRef<Path>, fallback_key: u64) {
@@ -680,13 +1135,44 @@ pub(super) fn input_presentation_key(view_key: &str, node_id: &str, input_index:
     format!("{view_key}::{node_id}:{input_index}")
 }
 
+const MAX_TOUCHED_NODES: usize = 8;
+
+pub(super) fn note_touched_node(state: &mut PatcherInteractionState, node_id: &str) {
+    state.touched_nodes.retain(|id| id != node_id);
+    state.touched_nodes.push(node_id.to_string());
+    if state.touched_nodes.len() > MAX_TOUCHED_NODES {
+        let excess = state.touched_nodes.len() - MAX_TOUCHED_NODES;
+        state.touched_nodes.drain(..excess);
+    }
+}
+
 pub(super) fn allocate_created_node(
     state: &mut PatcherInteractionState,
     view_key: &str,
     position: (f32, f32),
 ) -> String {
-    let id = format!("created-{}", state.edit_state.next_created_node);
-    state.edit_state.next_created_node += 1;
+    allocate_created_node_avoiding(state, view_key, position, &HashSet::new())
+}
+
+/// Allocate a created-node id that collides neither with other interaction
+/// edits (via the counter) nor with any id in `taken_node_ids` — the current
+/// patch model's node ids. Sources written by older builds of the generator
+/// can legitimately contain `created-N` bindings; reusing such an id would
+/// visually attach that node's cables to the new node and corrupt the next
+/// regeneration (existing edges splice through the new node).
+pub(super) fn allocate_created_node_avoiding(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    position: (f32, f32),
+    taken_node_ids: &HashSet<String>,
+) -> String {
+    let id = loop {
+        let candidate = format!("created-{}", state.edit_state.next_created_node);
+        state.edit_state.next_created_node += 1;
+        if !taken_node_ids.contains(&candidate) {
+            break candidate;
+        }
+    };
     state.edit_state.nodes.insert(
         node_edit_key(view_key, &id),
         PatcherNodeEdit {
@@ -722,9 +1208,11 @@ pub(super) fn allocate_agentic_bubble_with_target(
 ) -> String {
     let id = format!("bubble-{}", state.edit_state.next_created_node);
     state.edit_state.next_created_node += 1;
+    let view_key = active_patcher_view_key(state);
     let macro_name = match &target {
         AgenticBubbleTarget::CreateMacro => format!("agentic-{}", id.replace('_', "-")),
         AgenticBubbleTarget::EditMacro { macro_name, .. } => macro_name.clone(),
+        AgenticBubbleTarget::ConnectNode { subject, .. } => subject.name().to_string(),
     };
     state.agentic_bubbles.insert(
         id.clone(),
@@ -732,11 +1220,17 @@ pub(super) fn allocate_agentic_bubble_with_target(
             id: id.clone(),
             prompt: String::new(),
             text_state: TextInputState::default(),
+            follow_up: String::new(),
+            follow_up_text_state: TextInputState::default(),
+            turns: Vec::new(),
             position,
             target,
             state: AgenticBubbleState::Editing,
             generation: 0,
             macro_name,
+            view_key,
+            created_at: Instant::now(),
+            closing_at: None,
         },
     );
     state.selected_nodes.clear();
@@ -750,7 +1244,22 @@ pub(super) fn editing_agentic_bubble_id(state: &PatcherInteractionState) -> Opti
     state
         .agentic_bubbles
         .values()
-        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Editing))
+        .find(|bubble| {
+            !bubble.is_dismissed() && matches!(bubble.state, AgenticBubbleState::Editing)
+        })
+        .map(|bubble| bubble.id.clone())
+}
+
+/// The bubble whose follow-up box is taking keystrokes: one showing a settled
+/// answer. Answer bubbles capture typing the same way an editing bubble does,
+/// so a follow-up can be typed without any extra click or shortcut.
+pub(super) fn answering_agentic_bubble_id(state: &PatcherInteractionState) -> Option<String> {
+    state
+        .agentic_bubbles
+        .values()
+        .find(|bubble| {
+            !bubble.is_dismissed() && matches!(bubble.state, AgenticBubbleState::Answer { .. })
+        })
         .map(|bubble| bubble.id.clone())
 }
 
@@ -888,6 +1397,78 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
     changed
 }
 
+/// Drop session-created macros that nothing instantiates any more, along with
+/// the staged edits for their bodies. A created macro is only ever reachable
+/// from an editor node whose text is its name, so the node edits are the whole
+/// reference set — once the last instance node is gone the definition is dead
+/// and must not survive into the emitted source.
+///
+/// Runs to a fixpoint: collecting an outer macro removes its body edits, which
+/// can orphan a macro that only the outer one called.
+pub(super) fn prune_unreferenced_created_macros(state: &mut PatcherInteractionState) -> bool {
+    if state.edit_state.created_macros.is_empty() {
+        return false;
+    }
+    let mut pruned = false;
+    loop {
+        let referenced = state
+            .edit_state
+            .nodes
+            .values()
+            .filter_map(|edit| {
+                parse_editor_node_text(edit.text.trim())
+                    .ok()
+                    .map(|(op, _)| op)
+            })
+            .collect::<HashSet<_>>();
+        let dead = state
+            .edit_state
+            .created_macros
+            .keys()
+            .filter(|name| !referenced.contains(name.as_str()))
+            // The macro whose view is open stays: its instance may not exist
+            // yet (encapsulation stages the definition first), and collecting
+            // the view the user is standing in would be jarring.
+            .filter(|name| state.active_macro.as_deref() != Some(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if dead.is_empty() {
+            return pruned;
+        }
+        for name in &dead {
+            state.edit_state.created_macros.remove(name);
+            discard_macro_view_edits(state, name);
+        }
+        pruned = true;
+    }
+}
+
+fn discard_macro_view_edits(state: &mut PatcherInteractionState, macro_name: &str) {
+    let view = format!("macro:{macro_name}");
+    let prefix = format!("{view}::");
+    state
+        .edit_state
+        .nodes
+        .retain(|_, edit| edit.view_key != view);
+    state
+        .edit_state
+        .connections
+        .retain(|_, edit| edit.view_key != view);
+    state
+        .edit_state
+        .input_presentations
+        .retain(|_, edit| edit.view_key != view);
+    state
+        .edit_state
+        .deleted_nodes
+        .retain(|key| !key.starts_with(&prefix));
+    state
+        .edit_state
+        .deleted_connections
+        .retain(|key| !key.starts_with(&prefix));
+    state.z_order.remove(&view);
+}
+
 pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_key: &str) -> bool {
     if state.selected_nodes.is_empty() {
         return false;
@@ -916,6 +1497,9 @@ pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_ke
     });
 
     state.selected_nodes.clear();
+    state
+        .touched_nodes
+        .retain(|id| !selected_nodes.contains(id));
     state.selected_cable = None;
     state.drag = None;
     state.text_edit = None;
@@ -1028,6 +1612,16 @@ pub(super) fn patch_with_interaction_state(
 ) -> Patch {
     patch = patch_with_created_macros(patch, interaction_state);
     let macro_signatures = macro_signatures_with_visual_edits(&patch, interaction_state);
+    // Port tooltips and the agent's connect context read a macro instance's
+    // port names off `patch.macros`, so the visually resolved signature has to
+    // land there too — otherwise a session-created macro's `@name`d inlets read
+    // as `in N` until the file is regenerated and reparsed.
+    for macro_patch in &mut patch.macros {
+        if let Some(signature) = macro_signatures.get(&macro_patch.name) {
+            macro_patch.params = signature.params.clone();
+            macro_patch.outputs = signature.outputs.clone();
+        }
+    }
     patch.nodes.retain(|node| {
         !interaction_state
             .edit_state
@@ -1134,8 +1728,374 @@ pub(super) fn patch_with_interaction_state(
                 source: None,
             }),
     );
+    infer_modulatable_params(&mut patch);
+    prune_retyped_inline_mod_slots(&mut patch);
+    desugar_editor_mod_suffix_args(&mut patch);
+    drop_orphaned_inline_mod_nodes(&mut patch);
     refresh_patch_inline_inputs(&mut patch);
     patch
+}
+
+/// Modulation demand is inferred from the graph rather than declared twice.
+///
+/// Reaching a param through a `mod` accessor — the user dropping a `mod` node
+/// in front of it, or typing the `gain~` shorthand — *is* the statement "this
+/// is a host modulation target", so `@mod true @mod-mode additive` is derived
+/// from that use instead of hand-written on the param. The generator writes the
+/// inferred attributes into the emitted `param` form
+/// (`augment_param_label_with_mod` in generate.rs); nothing else reads the
+/// inference, so the emitted dsp.lisp stays self-contained.
+///
+/// Explicit attributes always win: an authored `@mod-mode` is preserved, and
+/// `@mod false` opts out entirely — a `gain~` against such a param keeps the
+/// diagnostic below.
+///
+/// Runs before `desugar_editor_mod_suffix_args`, which refuses to expand
+/// `gain~` against a param that is not modulatable.
+fn infer_modulatable_params(patch: &mut Patch) {
+    let demanded = modulation_demanded_param_names(patch);
+    if demanded.is_empty() {
+        return;
+    }
+    for node in &mut patch.nodes {
+        let label = node.label.clone();
+        let Some(param) = node.param.as_mut() else {
+            continue;
+        };
+        if param.modulatable || !demanded.contains(&param.name) || param_opts_out_of_mod(&label) {
+            continue;
+        }
+        param.modulatable = true;
+    }
+}
+
+/// An authored `@mod false` on the param form: the one way to say "reaching
+/// this through `mod` is a mistake, don't infer it".
+fn param_opts_out_of_mod(label: &str) -> bool {
+    let Ok(items) = parse_editor_node_items(label) else {
+        return false;
+    };
+    items.windows(2).any(|pair| {
+        matches!(
+            (&pair[0], &pair[1]),
+            (Expression::Symbol(key), Expression::Symbol(value))
+                if key == "@mod" && value == "false"
+        )
+    })
+}
+
+/// Params read through a `mod` accessor: a `gain~` literal awaiting desugaring,
+/// or a `mod` node fed by the param — by cable, or by a name typed straight
+/// into the accessor's own text.
+fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
+    let param_name_by_node = patch
+        .nodes
+        .iter()
+        .filter_map(|node| Some((node.id.as_str(), node.param.as_ref()?.name.as_str())))
+        .collect::<HashMap<_, _>>();
+    if param_name_by_node.is_empty() {
+        return HashSet::new();
+    }
+    let param_names = param_name_by_node.values().copied().collect::<HashSet<_>>();
+    let mod_accessor_ids = patch
+        .nodes
+        .iter()
+        .filter(|node| node.op == "mod" && node.param.is_none())
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+
+    let mut demanded = HashSet::new();
+    for node in &patch.nodes {
+        if matches!(node.kind, NodeKind::Param | NodeKind::Constant) {
+            continue;
+        }
+        let is_accessor = mod_accessor_ids.contains(node.id.as_str());
+        for arg in &node.args {
+            let (ArgValue::Literal(value) | ArgValue::SymbolRef(value)) = arg else {
+                continue;
+            };
+            match mod_suffix_base(value) {
+                Some(base) if param_names.contains(base.as_str()) => {
+                    demanded.insert(base);
+                }
+                // `mod gain` typed into the accessor's text, before any cable.
+                _ if is_accessor && param_names.contains(value.as_str()) => {
+                    demanded.insert(value.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    for connection in &patch.connections {
+        if mod_accessor_ids.contains(connection.to_node.as_str())
+            && let Some(name) = param_name_by_node.get(connection.from_node.as_str())
+        {
+            demanded.insert((*name).to_string());
+        }
+    }
+    demanded
+}
+
+/// `gain~` typed into a node's text is UI-level sugar, not DGenLisp: the real
+/// form is `(mod gain)`, and the compiler rejects the bare `gain~` symbol with
+/// "unknown symbol". Desugar it here, in the model, into exactly the structure
+/// parsing `(* x (mod gain))` from source produces — a `NestedExpr`-owned `mod`
+/// accessor node fed by the param, wired into the consumer slot with the
+/// `InlineModParam` presentation. Doing it at model level (rather than at
+/// emission) keeps the in-memory patch free of bogus `name~` symbols, so
+/// display, generation, orphan GC (§4.2b) and reparse round-trip all treat a
+/// typed `gain~` identically to a source-authored `(mod gain)`.
+///
+/// A `name~` whose base is not a modulatable param is left alone and flagged
+/// with a node diagnostic — silently emitting it would produce source the
+/// DGenLisp compiler rejects. After `infer_modulatable_params` that means one
+/// of two things: `name` is not a param at all, or it opts out with an authored
+/// `@mod false`.
+///
+/// The common flow is a *retype*: `(* x gain)` already projects a `gain -> node`
+/// edge, so typing `* gain~` must replace that plain reference with the
+/// accessor. Whatever already occupies the slot is replaced, including a cable
+/// from an unrelated node: typed text wins, matching
+/// `prune_retyped_inline_mod_slots` below, which releases an accessor cable the
+/// moment its slot is typed away from.
+///
+/// This used to bail when an unrelated cable owned the slot, on the reasoning
+/// that a slot holds exactly one thing and the cable got there first. The box
+/// went on rendering the typed `gain~` while the cable silently won the
+/// generated call, so the label lied about what compiled. Only a *typed* slot
+/// is replaced: a `name~` argument can only come from the editor, since
+/// DGenLisp source spells it `(mod name)` and projection leaves `ConnectedExpr`
+/// behind.
+/// Release argument slots whose `param~` text was typed away.
+///
+/// A slot showing `freq~` is not backed by its argument: the sugar desugars
+/// into a hidden `(mod freq)` accessor cabled into the slot with
+/// `InlineModParam` presentation, and `build_node_display_label` renders that
+/// cable in preference to the argument. So retyping the slot to anything else
+/// looked like it did nothing — the argument became `2`, the cable stayed, and
+/// the box redrew as `freq~`.
+///
+/// Runs before `desugar_editor_mod_suffix_args` so a slot retyped from one
+/// param to another (`freq~` → `stretch~`) is free by the time the new
+/// accessor is built; `drop_orphaned_inline_mod_nodes` then collects whichever
+/// accessors lost their only consumer.
+fn prune_retyped_inline_mod_slots(patch: &mut Patch) {
+    let param_names = patch
+        .nodes
+        .iter()
+        .filter_map(|node| Some((node.id.clone(), node.param.as_ref()?.name.clone())))
+        .collect::<HashMap<_, _>>();
+    let accessor_sources = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_input == 0)
+        .filter_map(|connection| {
+            let param = param_names.get(&connection.from_node)?;
+            Some((connection.to_node.clone(), param.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let nodes_by_id = patch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+
+    let stale = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::InlineModParam)
+        .filter(|connection| {
+            let Some(param) = accessor_sources.get(&connection.from_node) else {
+                return false;
+            };
+            let Some(node) = nodes_by_id.get(connection.to_node.as_str()) else {
+                return false;
+            };
+            // Only a literal argument means the slot was typed into: the
+            // desugared form leaves `ConnectedExpr` behind.
+            match node.args.get(connection.to_input) {
+                Some(ArgValue::Literal(value)) => mod_suffix_base(value).as_deref() != Some(param),
+                _ => false,
+            }
+        })
+        .map(|connection| (connection.to_node.clone(), connection.to_input))
+        .collect::<HashSet<_>>();
+    if stale.is_empty() {
+        return;
+    }
+    patch.connections.retain(|connection| {
+        connection.presentation != InputPresentation::InlineModParam
+            || !stale.contains(&(connection.to_node.clone(), connection.to_input))
+    });
+}
+
+fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
+    if !patch.nodes.iter().any(|node| {
+        node.args
+            .iter()
+            .any(|arg| matches!(arg, ArgValue::Literal(value) if mod_suffix_base(value).is_some()))
+    }) {
+        return;
+    }
+
+    let param_nodes = patch
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let param = node.param.as_ref()?;
+            Some((param.name.clone(), (node.id.clone(), param.modulatable)))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut inbound: HashMap<(String, usize), String> = HashMap::new();
+    for connection in &patch.connections {
+        inbound
+            .entry((connection.to_node.clone(), connection.to_input))
+            .or_insert_with(|| connection.from_node.clone());
+    }
+    let mut taken_ids = patch
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut accessors: Vec<PatchNode> = Vec::new();
+    let mut cables: Vec<PatchConnection> = Vec::new();
+    let mut replaced_slots: HashSet<(String, usize)> = HashSet::new();
+
+    for node in &mut patch.nodes {
+        if matches!(node.kind, NodeKind::Param | NodeKind::Constant) {
+            continue;
+        }
+        for idx in 0..node.args.len() {
+            let ArgValue::Literal(value) = &node.args[idx] else {
+                continue;
+            };
+            let Some(name) = mod_suffix_base(value) else {
+                continue;
+            };
+            let param_node = param_nodes.get(&name);
+            let existing = inbound.get(&(node.id.clone(), idx));
+            // A `name~` that resolves to nothing modulatable falls through to
+            // the diagnostic below and leaves the slot — and any cable on it —
+            // untouched. Only a real accessor displaces what is already there.
+            let Some((param_node_id, true)) = param_node else {
+                if node.diagnostic.is_none() {
+                    node.diagnostic = Some(format!(
+                        "`{name}~` requires `{name}` to be a param that allows modulation (it is not a param, or declares @mod false)"
+                    ));
+                }
+                continue;
+            };
+            if existing.is_some() {
+                replaced_slots.insert((node.id.clone(), idx));
+            }
+            let mut accessor_id = format!("{}-mod{idx}", node.id);
+            while taken_ids.contains(&accessor_id) {
+                accessor_id.push('_');
+            }
+            taken_ids.insert(accessor_id.clone());
+
+            node.args[idx] = ArgValue::ConnectedExpr;
+            accessors.push(inline_mod_accessor_node(&accessor_id, node.position));
+            cables.push(PatchConnection {
+                from_node: param_node_id.clone(),
+                from_output: 0,
+                to_node: accessor_id.clone(),
+                to_input: 0,
+                kind: ConnectionKind::Forward,
+                segment: None,
+                presentation: InputPresentation::Cable,
+                presentation_override: None,
+                source: None,
+            });
+            cables.push(PatchConnection {
+                from_node: accessor_id,
+                from_output: 0,
+                to_node: node.id.clone(),
+                to_input: idx,
+                kind: ConnectionKind::Forward,
+                segment: None,
+                presentation: InputPresentation::InlineModParam,
+                presentation_override: None,
+                source: None,
+            });
+        }
+    }
+
+    if !replaced_slots.is_empty() {
+        patch.connections.retain(|connection| {
+            !replaced_slots.contains(&(connection.to_node.clone(), connection.to_input))
+        });
+    }
+    patch.nodes.extend(accessors);
+    patch.connections.extend(cables);
+}
+
+/// The projector-synthesized `(mod param)` accessor behind `param~`. `NestedExpr`
+/// ownership is what marks it as synthesized rather than user-authored — see
+/// `inline_mod_accessor_param` in model.rs.
+fn inline_mod_accessor_node(id: &str, position: (f32, f32)) -> PatchNode {
+    PatchNode {
+        id: id.to_string(),
+        op: "mod".to_string(),
+        kind: NodeKind::Builtin,
+        label: "mod".to_string(),
+        args: vec![ArgValue::ConnectedExpr],
+        outputs: vec!["out".to_string()],
+        position,
+        width: None,
+        param: None,
+        inline_inputs: vec![None],
+        synthesized: true,
+        diagnostic: None,
+        source: Some(NodeSource {
+            owner: SourceOwner::NestedExpr {
+                expr: SourceExprId {
+                    form_id: SourceFormId {
+                        scope: SourceScopeId::Root,
+                        index: 0,
+                    },
+                    path: ExprPath::default(),
+                },
+            },
+            expr: None,
+            call_shape: None,
+        }),
+    }
+}
+
+/// `gain~` -> `gain`. Rejects a bare `~`, and anything whose base is not a
+/// plausible symbol (numbers, punctuation), so literals never get mangled.
+fn mod_suffix_base(value: &str) -> Option<String> {
+    let base = value.strip_suffix('~')?;
+    if base.is_empty() || base.parse::<f64>().is_ok() {
+        return None;
+    }
+    let mut chars = base.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    chars
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        .then(|| base.to_string())
+}
+
+/// The projector desugars `gain~` into a hidden `(mod gain)` accessor node
+/// nested inside its consumer's expression. Deleting the consumer must take
+/// the accessor with it: otherwise the helper the user never authored pops
+/// into view as a bare `gain -> mod` node, and regeneration persists it as a
+/// standalone `(def mod0 (mod gain))`.
+/// See docs/patch-vs-code-editor-spec.md §4.2b.
+fn drop_orphaned_inline_mod_nodes(patch: &mut Patch) {
+    let orphaned = orphaned_inline_mod_node_ids(patch);
+    if orphaned.is_empty() {
+        return;
+    }
+    patch.nodes.retain(|node| !orphaned.contains(&node.id));
+    patch.connections.retain(|connection| {
+        !orphaned.contains(&connection.from_node) && !orphaned.contains(&connection.to_node)
+    });
 }
 
 fn refresh_macro_instance_outputs(
@@ -1196,7 +2156,7 @@ pub(super) fn patch_with_created_macros(
     patch
 }
 
-fn macro_signatures_with_visual_edits(
+pub(super) fn macro_signatures_with_visual_edits(
     patch: &Patch,
     interaction_state: &PatcherInteractionState,
 ) -> HashMap<String, MacroSignature> {
@@ -1222,45 +2182,120 @@ fn macro_signatures_with_visual_edits(
         }
     }
 
-    for edit in interaction_state
-        .edit_state
-        .nodes
-        .values()
-        .filter(|edit| matches!(edit.origin, PatcherNodeOrigin::Created { .. }))
-    {
+    // A macro's inlet/outlet names live on the `@name` of its body's `in` /
+    // `out` nodes — that is what the generator writes into the `(defmacro …)`
+    // parameter list. Reading them back here is what makes those names visible
+    // before the file is regenerated and reparsed: a macro created in this
+    // session (Cmd+E encapsulation seeds `(defmacro name ())` and keeps the
+    // whole body in the edit state) has no projected parameters at all, so
+    // every port would otherwise fall back to `in N` / `out N`.
+    for macro_patch in &patch.macros {
+        let signature = macro_signatures
+            .entry(macro_patch.name.clone())
+            .or_insert_with(|| MacroSignature {
+                params: Vec::new(),
+                outputs: default_output_names(1),
+            });
+        for node in &macro_patch.patch.nodes {
+            match node.kind {
+                NodeKind::In => apply_interface_name(
+                    &mut signature.params,
+                    macro_interface_channel(node),
+                    label_attribute(&node.label, "@name"),
+                    "input",
+                    true,
+                ),
+                NodeKind::Out => apply_interface_name(
+                    &mut signature.outputs,
+                    macro_interface_channel(node),
+                    label_attribute(&node.label, "@name"),
+                    "out",
+                    false,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    for edit in interaction_state.edit_state.nodes.values() {
         let Some(macro_name) = edit.view_key.strip_prefix("macro:") else {
             continue;
         };
         let Ok((op, inline_args)) = parse_editor_node_text(edit.text.trim()) else {
             continue;
         };
-        if op != "in" {
+        if op != "in" && op != "out" {
             continue;
         }
-        let Some(channel) = inline_args
+        let channel = inline_args
             .first()
             .and_then(|arg| arg.parse::<usize>().ok())
-            .filter(|channel| *channel > 0)
-        else {
-            continue;
-        };
-        macro_signatures
+            .filter(|channel| *channel > 0);
+        let name = label_attribute(&edit.text, "@name");
+        let signature = macro_signatures
             .entry(macro_name.to_string())
-            .and_modify(|signature| {
-                while signature.params.len() < channel {
-                    signature
-                        .params
-                        .push(format!("input{}", signature.params.len() + 1));
-                }
-            })
             .or_insert_with(|| MacroSignature {
-                params: (0..channel)
-                    .map(|idx| format!("input{}", idx + 1))
-                    .collect(),
+                params: Vec::new(),
                 outputs: default_output_names(1),
             });
+        if op == "in" {
+            // Only inlets grow the signature: an `in K` node *is* parameter K,
+            // while the outlet count stays owned by `visual_macro_output_count`.
+            apply_interface_name(&mut signature.params, channel, name, "input", true);
+        } else {
+            apply_interface_name(&mut signature.outputs, channel, name, "out", false);
+        }
     }
     macro_signatures
+}
+
+/// The channel an `in` / `out` node inside a macro body declares, from its
+/// first positional argument and then its label text.
+fn macro_interface_channel(node: &PatchNode) -> Option<usize> {
+    output_channel_from_node(node).or_else(|| {
+        node.label
+            .split_whitespace()
+            .nth(1)
+            .and_then(|token| token.parse::<usize>().ok())
+            .filter(|channel| *channel > 0)
+    })
+}
+
+/// Name slot `channel` (1-based) of a macro's interface. `grow` extends the
+/// list with generic placeholders so a later slot can be named at all; without
+/// it an existing slot is renamed but the list never resizes.
+fn apply_interface_name(
+    slots: &mut Vec<String>,
+    channel: Option<usize>,
+    name: Option<String>,
+    placeholder: &str,
+    grow: bool,
+) {
+    let Some(channel) = channel else {
+        return;
+    };
+    if grow {
+        while slots.len() < channel {
+            slots.push(default_interface_slot_name(placeholder, slots.len() + 1));
+        }
+    }
+    let Some(name) = name
+        .map(|name| sanitize_binding(&name))
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    if let Some(slot) = slots.get_mut(channel - 1) {
+        *slot = name;
+    }
+}
+
+fn default_interface_slot_name(placeholder: &str, channel: usize) -> String {
+    if placeholder == "out" && channel == 1 {
+        "out".to_string()
+    } else {
+        format!("{placeholder}{channel}")
+    }
 }
 
 fn visual_macro_output_count(
@@ -1368,6 +2403,126 @@ pub(super) fn default_created_macro_source(name: &str) -> String {
     format!("(defmacro {name} (input) (* input 1))")
 }
 
+/// Seed source for a macro whose whole body arrives as created-node edits
+/// (Cmd+E encapsulation). `project_defmacro` takes the body as `items[3..]`,
+/// so an empty body projects to a `MacroPatch` with no nodes and no params —
+/// a clean shell. The default seed's `(* input 1)` would show up inside the
+/// macro as junk the user has to delete.
+///
+/// The seed never reaches disk: `generate_patch_source` re-emits every local
+/// macro from its `Patch` model, which by then carries the created nodes.
+pub(super) fn empty_created_macro_source(name: &str) -> String {
+    format!("(defmacro {name} ())")
+}
+
+/// Rename a macro that exists only in the interaction state. Every edit-state
+/// key is `"{view_key}::{id}"`, so the macro's whole body has to be re-keyed
+/// from `macro:{old}` to `macro:{new}` alongside the registration itself.
+///
+/// Only created macros can be renamed — a source-backed macro's name is its
+/// identity on disk and may be referenced from elsewhere.
+pub(super) fn rename_created_macro(
+    state: &mut PatcherInteractionState,
+    old: &str,
+    new: &str,
+    taken_names: &HashSet<String>,
+) -> bool {
+    if old == new || taken_names.contains(new) {
+        return false;
+    }
+    let Some(mut macro_edit) = state.edit_state.created_macros.remove(old) else {
+        return false;
+    };
+    let instance_node_id = macro_edit.instance_node_id.clone();
+    macro_edit.name = new.to_string();
+    macro_edit.source = macro_edit.source.as_deref().map(|source| {
+        if source == empty_created_macro_source(old) {
+            empty_created_macro_source(new)
+        } else if source == default_created_macro_source(old) {
+            default_created_macro_source(new)
+        } else {
+            source.to_string()
+        }
+    });
+    state
+        .edit_state
+        .created_macros
+        .insert(new.to_string(), macro_edit);
+
+    let old_view = format!("macro:{old}");
+    let new_view = format!("macro:{new}");
+    let rekey = |key: &str| -> Option<String> {
+        key.strip_prefix(&format!("{old_view}::"))
+            .map(|rest| format!("{new_view}::{rest}"))
+    };
+
+    state.edit_state.nodes = state
+        .edit_state
+        .nodes
+        .drain()
+        .map(|(key, mut edit)| {
+            let key = rekey(&key).unwrap_or(key);
+            if edit.view_key == old_view {
+                edit.view_key = new_view.clone();
+            }
+            (key, edit)
+        })
+        .collect();
+    state.edit_state.connections = state
+        .edit_state
+        .connections
+        .drain()
+        .map(|(key, mut edit)| {
+            let key = rekey(&key).unwrap_or(key);
+            if edit.view_key == old_view {
+                edit.view_key = new_view.clone();
+            }
+            (key, edit)
+        })
+        .collect();
+    state.edit_state.input_presentations = state
+        .edit_state
+        .input_presentations
+        .drain()
+        .map(|(key, mut edit)| {
+            let key = rekey(&key).unwrap_or(key);
+            if edit.view_key == old_view {
+                edit.view_key = new_view.clone();
+            }
+            (key, edit)
+        })
+        .collect();
+    state.edit_state.deleted_nodes = state
+        .edit_state
+        .deleted_nodes
+        .drain()
+        .map(|key| rekey(&key).unwrap_or(key))
+        .collect();
+    state.edit_state.deleted_connections = state
+        .edit_state
+        .deleted_connections
+        .drain()
+        .map(|key| rekey(&key).unwrap_or(key))
+        .collect();
+
+    if let Some(stack) = state.z_order.remove(&old_view) {
+        state.z_order.insert(new_view.clone(), stack);
+    }
+    if state.active_macro.as_deref() == Some(old) {
+        state.active_macro = Some(new.to_string());
+    }
+    if let Some(edit) = state
+        .edit_state
+        .nodes
+        .values_mut()
+        .find(|edit| edit.id == instance_node_id && edit.view_key != new_view)
+    {
+        edit.text = new.to_string();
+    }
+    debug_log_edit_event(&format!("rename-created-macro {old} -> {new}"), state);
+    true
+}
+
 fn apply_node_text_override(
     node: &mut PatchNode,
     text: &str,
@@ -1404,6 +2559,7 @@ pub(super) fn node_from_editor_text(
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source: None,
         };
@@ -1467,6 +2623,7 @@ pub(super) fn node_from_editor_text(
         width: None,
         param,
         inline_inputs: Vec::new(),
+        synthesized: false,
         diagnostic: parse_diagnostic.or_else(|| {
             let known =
                 dgenlisp_operator_names().contains(&op) || macro_signatures.contains_key(&op);
@@ -1512,7 +2669,7 @@ fn editor_param_node_info(
 }
 
 fn parse_editor_node_items(text: &str) -> Result<Vec<Expression>, String> {
-    let source = format!("({text})");
+    let source = format!("({})", normalize_editor_node_text(text));
     let tokens = Parser::new(source)
         .parse()
         .map_err(|error| format!("failed to tokenize node text: {error:?}"))?;

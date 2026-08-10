@@ -125,7 +125,8 @@
       :sequencer-step-selected-border '(0.90 0.92 0.96)
       :sequencer-step-off-fill        '(0.055 0.058 0.065)
       :sequencer-step-off-fill-alt    '(0.25 0.255 0.26)
-      :patcher-bg           '(0.08 0.08 0.08)
+      ;:patcher-bg           '(0.08 0.08 0.08)
+      :patcher-bg '(0.12 0.13 0.14)  ; Main rounded buffer surface
       :patcher-grid-minor   '(0.22 0.23 0.25 0.34)
       :patcher-grid-major   '(0.32 0.33 0.36 0.46)
       :patcher-text         '(0.88 0.88 0.89)
@@ -154,6 +155,43 @@
       :patcher-port-output  '(1.00 0.58 0.12)
       :patcher-edit-selection '(0.00 0.48 0.95 0.35)
       :patcher-edit-cursor  '(1.00 1.00 1.00)
+      ;; Flat (Zed-style) completion menu, shared by the code editor and the
+      ;; patcher node editor -- one `comp-*` palette drives both surfaces.
+      :comp-unselected-bg '(0.15 0.15 0.16)
+      :comp-selected-bg '(0.20 0.21 0.24)
+      :comp-border '(0.23 0.24 0.25)
+      :comp-fg '(0.30 0.98 0.75)
+      :comp-selected-fg '(0.46 1.00 0.82)
+      :comp-category-fg '(0.45 0.47 0.51)
+      :comp-doc-bg '(0.09 0.09 0.11)
+      :comp-doc-border '(0.23 0.24 0.25)
+      :comp-doc-fg '(0.66 0.67 0.72)
+      :comp-doc-title-fg '(0.46 1.00 0.82)
+      ;; Port tooltips
+      :patcher-tooltip-bg '(0.09 0.09 0.11)
+      :patcher-tooltip-border '(0.18 0.19 0.21)
+      :patcher-tooltip-text '(0.82 0.84 0.87)
+      :patcher-node-tail-text-hover '(1.00 0.80 0.00)
+      ;; Agentic bubbles (cmd+k). The card is drawn flat (AGENTIC_CARD_FLATNESS),
+      ;; so unlike the node colours these land close to as authored. The card's
+      ;; own alpha is max(border, bg), so dim its border in RGB rather than by
+      ;; lowering alpha -- that constraint is the card only; box and chip
+      ;; borders go through a shader that mixes alpha properly.
+      :patcher-agentic-card-bg '(0.165 0.160 0.152 0.975)
+      :patcher-agentic-card-border '(0.11 0.11 0.11 0.975)
+      :patcher-agentic-card-border-active '(0.21 0.21 0.21 0.975)
+      :patcher-agentic-card-error-bg '(0.20 0.12 0.12 0.975)
+      :patcher-agentic-box-bg '(0.235 0.230 0.230)
+      :patcher-agentic-box-border '(0.27 0.27 0.28)
+      :patcher-agentic-header-text '(0.82 0.83 0.86)
+      :patcher-agentic-body-text '(0.98 0.98 0.99)
+      :patcher-agentic-placeholder-text '(0.78 0.79 0.72)
+      :patcher-agentic-chip-bg '(0.52 0.53 0.56 0.42)
+      :patcher-agentic-chip-border '(0.32 0.33 0.36 0.88)
+      :patcher-agentic-chip-text '(0.82 0.83 0.86)
+      :patcher-agentic-send-bg '(0.12 0.13 0.16 0.80)
+      :patcher-agentic-send-glyph '(0.92 0.92 0.94)
+      :patcher-agentic-spinner '(0.22 0.83 0.66)
       :patcher-back-button-bg '(0.14 0.14 0.15)
       :patcher-back-button-hover-bg '(0.16 0.20 0.28)
       :patcher-back-button-border '(0.36 0.36 0.39)

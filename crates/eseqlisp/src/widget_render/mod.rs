@@ -26,14 +26,15 @@ pub mod multiband_meter;
 pub mod number_label;
 pub mod number_picker;
 pub mod patcher;
-pub mod piano_keyboard;
 pub mod phaser_notch;
+pub mod piano_keyboard;
 pub mod response_curve_editor;
 pub mod roar_filter;
 pub mod roar_shaper;
 pub mod scope;
 pub mod scroll;
 pub mod sdf_widget;
+pub mod sound_glyph;
 pub mod spectrogram;
 pub mod tabs;
 pub mod text_input;
@@ -45,7 +46,6 @@ pub mod tree;
 pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
-pub mod sound_glyph;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub mod wrap;
@@ -1394,6 +1394,7 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
     shaders.push(("tile-chrome", None, TILE_CHROME_SHADER));
     shaders.push(("tile-tab", None, TILE_TAB_SHADER));
     shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
+    shaders.push(("patcher-panel", None, PATCHER_PANEL_SHADER));
     shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
     shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
     for definition in WIDGET_DEFINITIONS {
@@ -1918,7 +1919,12 @@ fn suppresses_default_focus(node: &LayoutNode) -> bool {
 /// runs — overlay content is excluded from scene caching, and caches are
 /// bypassed while any overlay is active.
 #[cfg(target_os = "macos")]
-fn collect_modal_overlay(node: &LayoutNode, viewport: WidgetViewport, scroll_top: f32, max_rows: u16) {
+fn collect_modal_overlay(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    scroll_top: f32,
+    max_rows: u16,
+) {
     if node.children.is_empty() {
         // Closed this frame: drop any stale overlay entry we own.
         remove_overlay(node.widget_id);
@@ -3889,13 +3895,7 @@ mod tests {
         let (mut runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
         let run_index = build_metal_primitive_run_index(&runs);
         let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
-            &root,
-            viewport,
-            0.0,
-            24,
-            &mut runs,
-            &run_index,
-            &active,
+            &root, viewport, 0.0, 24, &mut runs, &run_index, &active,
         );
         assert!(stats.rebuilt_runs > 0);
         assert!(stats.reused_runs > 0);
@@ -4051,6 +4051,41 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 }
 "#;
 
+/// Flat panel chrome: solid fill, crisp uniform border, rounded corners.
+///
+/// `color_a` = border color, `color_b` = fill color, `uniform_a.x` = border
+/// width in device pixels, `corner_radius` = normalized radius (see
+/// `normalized_corner_radius`). Deliberately unlit — no gradient, no specular —
+/// so completion menus and tooltips read as flat surfaces instead of nodes.
+#[cfg(target_os = "macos")]
+pub const PATCHER_PANEL_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 localPos = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    float cornerRadius = min(in.corner_radius, min(aspect, 1.0));
+
+    float dist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
+    float derivative = max(fwidth(dist), 0.001);
+    float outerAlpha = smoothstep(derivative, -derivative, dist);
+    if (outerAlpha <= 0.001) {
+        discard_fragment();
+    }
+
+    float borderThickness = max(in.uniform_a.x, 0.0) * derivative;
+    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
+    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
+    float innerDerivative = max(fwidth(innerDist), 0.001);
+    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
+    float borderMask = outerAlpha * (1.0 - innerAlpha);
+
+    float3 color = mix(in.color_b.rgb, in.color_a.rgb, borderMask);
+    float alpha = mix(in.color_b.a, in.color_a.a, borderMask);
+    return float4(color, alpha * outerAlpha);
+}
+"#;
+
 #[cfg(target_os = "macos")]
 pub const PATCHER_PORT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
@@ -4135,18 +4170,21 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float cornerRadius = min(in.corner_radius * 1.5, min(aspect, 1.0));
 
     float nodeDist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
-    float nodeDerivative = max(fwidth(nodeDist), 0.001);
-    float outerAlpha = smoothstep(nodeDerivative, -nodeDerivative, nodeDist);
+    // Isotropic pixel size in local units. fwidth(nodeDist) would grow with the
+    // gradient direction (up to ~1.41x on the 45 degree stretch of a corner),
+    // which fattens the stroke around the curves; fwidth(localPos) does not.
+    float pixel = max(max(fwidth(localPos.x), fwidth(localPos.y)), 0.0001);
+    float outerAlpha = smoothstep(pixel, -pixel, nodeDist);
     if (outerAlpha <= 0.001) {
         discard_fragment();
     }
 
-    float borderThickness = max(in.uniform_a.x, 0.0) * nodeDerivative;
-    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
-    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
-    float innerDerivative = max(fwidth(innerDist), 0.001);
-    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
-    float borderMask = outerAlpha * (1.0 - innerAlpha);
+    // sdf_rounded_rect is a true euclidean distance, so the inner contour is
+    // just the outer one offset inward - uniform thickness by construction.
+    float borderThickness = max(in.uniform_a.x, 0.0) * pixel;
+    float innerDist = nodeDist + borderThickness;
+    float innerAlpha = smoothstep(pixel, -pixel, innerDist);
+    float borderMask = clamp(outerAlpha - innerAlpha, 0.0, 1.0);
 
     float3 normal = patcher_node_normal(
         localPos,
@@ -4159,7 +4197,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float diffuse = max(0.0, dot(normal, lightDir));
     float3 halfVector = normalize(lightDir + viewDir);
     float specularRaw = pow(max(0.0, dot(normal, halfVector)), 48.0);
-    float specularFadeDistance = clamp(nodeDerivative * 2.5, 0.01, 0.06);
+    float specularFadeDistance = clamp(pixel * 2.5, 0.01, 0.06);
     float specular = specularRaw * smoothstep(0.0, -specularFadeDistance, nodeDist);
 
     float3 bg = in.color_b.rgb;
@@ -4170,6 +4208,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float edgeShade = smoothstep(0.18, 0.98, localPos.y * 0.5 + 0.5);
     litBg *= mix(0.94, 1.04, edgeShade);
     litBorder *= mix(0.88, 1.12, edgeShade);
+
+    // Flatness dials the whole fake-3d treatment out: the bevel's diffuse, the
+    // specular, and the vertical edge shade all land in litBg/litBorder, so
+    // mixing back to the raw colours at 1.0 leaves a flat card with a clean SDF
+    // edge. A node wants the shading - at pill size it is most of what gives
+    // the node its physicality - but on a surface as large as an agentic
+    // bubble the same treatment reads as a smudge near the border.
+    float flatness = clamp(in.uniform_a.y, 0.0, 1.0);
+    litBg = mix(litBg, bg, flatness);
+    litBorder = mix(litBorder, border, flatness);
 
     float3 color = mix(litBg, litBorder, borderMask);
     return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));

@@ -1,4 +1,5 @@
 use eseqlisp::parser::{format_expression, ASTParser, Expression, Parser};
+use eseqlisp::widget_render::patcher::PatcherConnectOp;
 use std::collections::HashSet;
 
 use super::network::AgentNetworkClient;
@@ -25,6 +26,11 @@ pub struct AgenticBubbleRequest {
     pub prompt: String,
     pub suggested_macro_name: String,
     pub follow_up: Option<AgenticBubbleFollowUp>,
+    pub connect: Option<AgenticBubbleConnect>,
+    /// Earlier turns of this bubble's conversation, oldest first, as
+    /// `(question, answer)`. Replayed ahead of the current prompt so a
+    /// follow-up like "why?" resolves against what was already said.
+    pub history: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,11 +40,20 @@ pub struct AgenticBubbleFollowUp {
     pub source: String,
 }
 
+/// A connect bubble's payload: the node to wire and the surrounding patch, as
+/// assembled by the patcher (docs/patcher-agentic-connect-spec.md §5).
+#[derive(Debug, Clone)]
+pub struct AgenticBubbleConnect {
+    pub subject_node_id: String,
+    pub context: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum AgenticBubbleOutput {
     Macro { macro_name: String, source: String },
     MacroEdit { source: String },
     Answer { text: String },
+    Connections { ops: Vec<PatcherConnectOp> },
 }
 
 pub fn generate_agentic_bubble_macro(
@@ -55,14 +70,39 @@ pub fn generate_agentic_bubble_macro(
     let mut validation_error = None::<String>;
     let mut raw = String::new();
     for attempt in 0..=MAX_RETRIES {
-        let system_prompt = system_prompt(request.follow_up.is_some());
-        let prompt = user_prompt(&request, validation_error.as_deref());
-        let messages = vec![AgentMessage {
+        // A connect bubble shares no prompt text with the create and edit
+        // bubbles, so neither can bleed context into the other (spec §3).
+        let system_prompt = match &request.connect {
+            Some(_) => connect_system_prompt(),
+            None => system_prompt(request.follow_up.is_some()),
+        };
+        let prompt = match &request.connect {
+            Some(connect) => connect_user_prompt(&request, connect, validation_error.as_deref()),
+            None => user_prompt(&request, validation_error.as_deref()),
+        };
+        // Earlier turns go in verbatim; only the last user message carries the
+        // macro context and output contract, so a retry still restates them.
+        let mut messages = Vec::with_capacity(request.history.len() * 2 + 1);
+        for (question, answer) in &request.history {
+            messages.push(AgentMessage {
+                role: AgentMessageRole::User,
+                content: question.clone(),
+                reasoning_content: None,
+                tool_name: None,
+            });
+            messages.push(AgentMessage {
+                role: AgentMessageRole::Assistant,
+                content: answer.clone(),
+                reasoning_content: None,
+                tool_name: None,
+            });
+        }
+        messages.push(AgentMessage {
             role: AgentMessageRole::User,
             content: prompt,
             reasoning_content: None,
             tool_name: None,
-        }];
+        });
         eprintln!(
             "[agentic-bubble] request attempt={} macro={} model={}",
             attempt + 1,
@@ -116,6 +156,10 @@ pub fn generate_agentic_bubble_macro(
 }
 
 fn default_agentic_provider(state: &AgentProviderState) -> AgentProviderKind {
+    // An explicit `M-x choose-model` pick outranks the built-in preference.
+    if let Some(provider) = super::model_choice::agentic_provider() {
+        return provider;
+    }
     if std::env::var(AgentProviderKind::Gemini.api_key_env())
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
@@ -127,6 +171,14 @@ fn default_agentic_provider(state: &AgentProviderState) -> AgentProviderKind {
 }
 
 fn fast_model_for_provider(state: &AgentProviderState, provider: AgentProviderKind) -> String {
+    // A chosen model wins outright, but only for the provider it belongs to —
+    // if some other caller forced a different provider, fall through to that
+    // provider's own fast default rather than sending it a foreign model id.
+    if let Some(chosen) = super::model_choice::agentic_model() {
+        if super::model_choice::agentic_provider() == Some(provider) {
+            return chosen;
+        }
+    }
     if let Ok(value) = std::env::var(provider.model_override_env()) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
@@ -135,6 +187,11 @@ fn fast_model_for_provider(state: &AgentProviderState, provider: AgentProviderKi
     }
     if provider == AgentProviderKind::Gemini {
         return "gemini-3.5-flash".to_string();
+    }
+    // Anthropic ids carry no "flash"/"mini"/"nano" marker for the scan below
+    // to find, so name the fast tier outright.
+    if provider == AgentProviderKind::Anthropic {
+        return "claude-haiku-4-5".to_string();
     }
     default_model_presets()
         .into_iter()
@@ -226,13 +283,18 @@ Invalid Common Lisp style. Never do this:
   `(let ((x ,input))
      (svf x ,f ,q :bp)))`
 
-Available DGenLisp names from the bundled operator documentation:
+Available DGenLisp operators from the bundled operator documentation. Each line is
+the exact call signature. Argument counts are enforced: pass exactly the arguments
+a signature lists, no more. A `...` in a signature means the operator is variadic;
+without it the argument count is fixed. In particular `delay` takes exactly two
+arguments and has no max-delay-time argument, unlike Max/gen~.
 {available_names}
 
 Use only names from that documentation plus macro parameters and locals you define.
 Do not invent operators such as `saw`, `pulse`, `dcblock`, or `sample-rate` unless
-they appear in the available-name list above.",
-        available_names = available_dgenlisp_names().join(", ")
+they appear in the signature list above.
+Do not use `@attribute` arguments; pass positional arguments only.",
+        available_names = dgen_reference()
     )
 }
 
@@ -240,9 +302,15 @@ fn user_prompt(request: &AgenticBubbleRequest, validation_error: Option<&str>) -
     let retry = validation_error
         .map(|error| format!("\nPrevious output was invalid: {error}\nReturn a corrected macro."))
         .unwrap_or_default();
+    let continuing = if request.history.is_empty() {
+        ""
+    } else {
+        "This continues the conversation above about the same macro; resolve pronouns and \
+         shorthand against those earlier turns.\n\n"
+    };
     if let Some(follow_up) = &request.follow_up {
         return format!(
-            "Follow-up prompt: {}\n\nSelected macro name: {}\nSelected macro params: ({})\nSelected macro source:\n{}\n\nDecide whether the user wants an explanation/answer or a macro edit. For an answer, return `(answer \"...\")`. For an edit, return a complete `(defmacro {} ({}) body...)` preserving the exact name and params.\n{}{}",
+            "{continuing}Follow-up prompt: {}\n\nSelected macro name: {}\nSelected macro params: ({})\nSelected macro source:\n{}\n\nDecide whether the user wants an explanation/answer or a macro edit. For an answer, return `(answer \"...\")`. For an edit, return a complete `(defmacro {} ({}) body...)` preserving the exact name and params.\n{}{}",
             request.prompt.trim(),
             follow_up.macro_name,
             follow_up.params.join(" "),
@@ -262,10 +330,131 @@ fn user_prompt(request: &AgenticBubbleRequest, validation_error: Option<&str>) -
     )
 }
 
+fn connect_system_prompt() -> String {
+    "\
+You wire an existing node into an existing audio patch. You never write code.
+
+Output contract:
+- Output exactly one JSON object: {\"ops\": [ ... ]}.
+- No prose, no explanation, no markdown fences.
+- Each op is either
+  {\"op\": \"connect\", \"from_node\": \"<id>\", \"from_outlet\": <int>,
+   \"to_node\": \"<id>\", \"to_arg\": <int>, \"why\": \"<short reason>\"}
+  or
+  {\"op\": \"inline\", \"value\": <number>, \"to_node\": \"<id>\",
+   \"to_arg\": <int>, \"why\": \"<short reason>\"}.
+- Use node ids exactly as given. Labels are decoration and are not accepted.
+- Address inlets by argument index (the `in <index>` lines), never by drawn port
+  position.
+- Only target inlets the context marks `free`. An inlet that is cabled, holds a
+  literal, or holds an inline param already has a value; leave it alone.
+- Prefer `inline` for constants: a number belongs inside the node, not on the
+  end of a cable. Use `connect` when a signal should flow.
+- Emit no op at all for an inlet you have no good reason to fill. A short
+  correct plan beats a complete one.
+- An empty plan is {\"ops\": []}."
+        .to_string()
+}
+
+fn connect_user_prompt(
+    request: &AgenticBubbleRequest,
+    connect: &AgenticBubbleConnect,
+    validation_error: Option<&str>,
+) -> String {
+    let retry = validation_error
+        .map(|error| format!("\nPrevious output was invalid: {error}\nReturn a corrected plan."))
+        .unwrap_or_default();
+    format!(
+        "Prompt: {}\n\nWire node {} into this patch.\n\n{}{}",
+        request.prompt.trim(),
+        connect.subject_node_id,
+        connect.context,
+        retry
+    )
+}
+
+fn validate_connect_response(raw: &str) -> Result<AgenticBubbleOutput, String> {
+    let source = extract_json_source(raw);
+    let value: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| format!("connection plan is not valid JSON: {error}"))?;
+    let items = value
+        .get("ops")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "connection plan must be {\"ops\": [...]}".to_string())?;
+    let ops = items
+        .iter()
+        .map(parse_connect_op)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AgenticBubbleOutput::Connections { ops })
+}
+
+fn parse_connect_op(value: &serde_json::Value) -> Result<PatcherConnectOp, String> {
+    let field = |key: &str| -> Result<String, String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("op is missing string field `{key}`"))
+    };
+    let index = |key: &str| -> Result<usize, String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|index| index as usize)
+            .ok_or_else(|| format!("op is missing integer field `{key}`"))
+    };
+    let why = value
+        .get("why")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match field("op")?.as_str() {
+        "connect" => Ok(PatcherConnectOp::Connect {
+            from_node: field("from_node")?,
+            from_outlet: index("from_outlet")?,
+            to_node: field("to_node")?,
+            to_arg: index("to_arg")?,
+            why,
+        }),
+        "inline" => Ok(PatcherConnectOp::Inline {
+            // Numbers are accepted unquoted; the host canonicalizes the literal.
+            value: value
+                .get("value")
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| value.as_f64().map(|value| value.to_string()))
+                })
+                .ok_or_else(|| "inline op is missing `value`".to_string())?,
+            to_node: field("to_node")?,
+            to_arg: index("to_arg")?,
+            why,
+        }),
+        other => Err(format!("unknown op `{other}`")),
+    }
+}
+
+fn extract_json_source(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(start) = trimmed.find("```") {
+        let after = &trimmed[start + 3..];
+        let after = after.strip_prefix("json").unwrap_or(after);
+        let after = after.strip_prefix('\n').unwrap_or(after);
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn validate_agentic_response(
     request: &AgenticBubbleRequest,
     raw: &str,
 ) -> Result<AgenticBubbleOutput, String> {
+    if request.connect.is_some() {
+        return validate_connect_response(raw);
+    }
     if let Some(follow_up) = &request.follow_up {
         validate_follow_up_response(raw, follow_up)
     } else {
@@ -396,6 +585,7 @@ fn extract_lisp_source(raw: &str) -> String {
 
 fn validate_known_operators(body: &[Expression], params: &[Expression]) -> Result<(), String> {
     let mut allowed = dgen_operator_names();
+    let arities = dgen_operator_arities();
     allowed.insert("tuple".to_string());
     for param in params {
         if let Expression::Symbol(name) = param {
@@ -403,14 +593,18 @@ fn validate_known_operators(body: &[Expression], params: &[Expression]) -> Resul
         }
     }
     for expr in body {
-        validate_body_expr(expr, &mut allowed)?;
+        validate_body_expr(expr, &mut allowed, &arities)?;
     }
     Ok(())
 }
 
-fn validate_body_expr(expr: &Expression, allowed: &mut HashSet<String>) -> Result<(), String> {
+fn validate_body_expr(
+    expr: &Expression,
+    allowed: &mut HashSet<String>,
+    arities: &std::collections::HashMap<String, OperatorArity>,
+) -> Result<(), String> {
     let Expression::List(items) = expr else {
-        return validate_expr(expr, allowed);
+        return validate_expr(expr, allowed, arities);
     };
     match items.as_slice() {
         [Expression::Symbol(head), binding, value @ ..] if head == "def" => {
@@ -418,7 +612,7 @@ fn validate_body_expr(expr: &Expression, allowed: &mut HashSet<String>) -> Resul
                 return Err("local def must include a value expression".to_string());
             }
             for expr in value {
-                validate_expr(expr, allowed)?;
+                validate_expr(expr, allowed, arities)?;
             }
             insert_local_binding(binding, allowed)
         }
@@ -432,7 +626,7 @@ fn validate_body_expr(expr: &Expression, allowed: &mut HashSet<String>) -> Resul
         [Expression::Symbol(head), ..] if head == "make-history" => {
             Err("make-history must be `(make-history name)`".to_string())
         }
-        _ => validate_expr(expr, allowed),
+        _ => validate_expr(expr, allowed, arities),
     }
 }
 
@@ -461,16 +655,21 @@ fn insert_local_binding(binding: &Expression, allowed: &mut HashSet<String>) -> 
     }
 }
 
-fn validate_expr(expr: &Expression, allowed: &HashSet<String>) -> Result<(), String> {
+fn validate_expr(
+    expr: &Expression,
+    allowed: &HashSet<String>,
+    arities: &std::collections::HashMap<String, OperatorArity>,
+) -> Result<(), String> {
     match expr {
         Expression::List(items) => {
             if let Some(Expression::Symbol(head)) = items.first() {
                 if !allowed.contains(head) && !valid_number_symbol(head) {
                     return Err(format!("unknown operator or symbol {head}"));
                 }
+                check_arity(head, items, arities)?;
             }
             for item in items {
-                validate_expr(item, allowed)?;
+                validate_expr(item, allowed, arities)?;
             }
             Ok(())
         }
@@ -502,6 +701,196 @@ fn valid_number_symbol(symbol: &str) -> bool {
 
 fn dgen_operator_names() -> HashSet<String> {
     available_dgenlisp_names().into_iter().collect()
+}
+
+fn dgen_metadata() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../tools/dgenlisp-operators.json"))
+        .expect("bundled dgenlisp-operators.json must be valid JSON")
+}
+
+/// One call signature per operator, for the system prompt. The bundled docs carry
+/// arity and port names for every operator; a bare name list leaves the model to
+/// guess argument counts from other DSP dialects (Max/gen~ `delay` takes a third
+/// max-delay-time argument, ours does not).
+fn dgen_reference() -> String {
+    let metadata = dgen_metadata();
+    let mut lines = Vec::new();
+    if let Some(operators) = metadata
+        .get("operators")
+        .and_then(serde_json::Value::as_array)
+    {
+        for operator in operators {
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let mut line = operator_signature_text(name, operator);
+            let aliases = json_str_array(operator.get("aliases"));
+            if !aliases.is_empty() {
+                line.push_str(&format!("   [also: {}]", aliases.join(", ")));
+            }
+            lines.push(line);
+        }
+    }
+    for key in ["special_forms", "constants"] {
+        if let Some(entries) = metadata.get(key).and_then(serde_json::Value::as_array) {
+            for entry in entries {
+                let Some(name) = entry.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if name == "defmacro" {
+                    continue;
+                }
+                if key == "constants" {
+                    lines.push(name.to_string());
+                } else {
+                    lines.push(operator_signature_text(name, entry));
+                }
+            }
+        }
+    }
+    lines.sort();
+    lines.dedup();
+    lines.join("\n")
+}
+
+/// Prefer the curated signatures, skipping `@attribute` forms the validator rejects
+/// anyway. Falls back to the documented port names when every signature is
+/// attribute-only.
+fn operator_signature_text(name: &str, entry: &serde_json::Value) -> String {
+    let signatures: Vec<String> = json_str_array(entry.get("signatures"))
+        .into_iter()
+        .filter(|signature| !signature.contains('@'))
+        .collect();
+    if !signatures.is_empty() {
+        return signatures.join(" | ");
+    }
+    let mut parts = vec![name.to_string()];
+    if let Some(inputs) = entry.get("inputs").and_then(serde_json::Value::as_array) {
+        for input in inputs {
+            if let Some(input) = input.get("name").and_then(serde_json::Value::as_str) {
+                parts.push(input.to_string());
+            }
+        }
+    }
+    let (_, maximum, _) = arity_bounds(entry);
+    if maximum.map_or(true, |maximum| maximum + 1 > parts.len()) {
+        parts.push("...".to_string());
+    }
+    format!("({})", parts.join(" "))
+}
+
+#[derive(Debug, Clone)]
+struct OperatorArity {
+    minimum: Option<usize>,
+    maximum: Option<usize>,
+    signature: String,
+}
+
+fn arity_bounds(entry: &serde_json::Value) -> (Option<usize>, Option<usize>, bool) {
+    let Some(arity) = entry.get("arity") else {
+        return (None, None, false);
+    };
+    let read = |key: &str| {
+        arity
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as usize)
+    };
+    // `+`, `*`, `min`, ... document a binary arity but the parser folds n-ary calls
+    // down to nested binary ones, so they accept any number of arguments.
+    let nary = arity
+        .get("parser_rewrites_nary")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    (read("minimum"), read("maximum"), nary)
+}
+
+/// Argument-count bounds per operator name (and alias). Special forms are absent:
+/// `def`, `make-history` and friends are shape-checked separately.
+fn dgen_operator_arities() -> std::collections::HashMap<String, OperatorArity> {
+    let metadata = dgen_metadata();
+    let mut arities = std::collections::HashMap::new();
+    let Some(operators) = metadata
+        .get("operators")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return arities;
+    };
+    for operator in operators {
+        let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let (minimum, maximum, nary) = arity_bounds(operator);
+        if minimum.is_none() && (maximum.is_none() || nary) {
+            continue;
+        }
+        let arity = OperatorArity {
+            minimum,
+            maximum: if nary { None } else { maximum },
+            signature: operator_signature_text(name, operator),
+        };
+        for name in std::iter::once(name.to_string()).chain(json_str_array(operator.get("aliases")))
+        {
+            arities.insert(name, arity.clone());
+        }
+    }
+    arities
+}
+
+/// Arguments excluding `@attribute value` pairs, which are not positional.
+fn positional_arg_count(items: &[Expression]) -> usize {
+    let mut count = 0;
+    let mut index = 1;
+    while index < items.len() {
+        if matches!(&items[index], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+            index += 2;
+            continue;
+        }
+        count += 1;
+        index += 1;
+    }
+    count
+}
+
+fn check_arity(
+    head: &str,
+    items: &[Expression],
+    arities: &std::collections::HashMap<String, OperatorArity>,
+) -> Result<(), String> {
+    let Some(arity) = arities.get(head) else {
+        return Ok(());
+    };
+    let count = positional_arg_count(items);
+    if let Some(minimum) = arity.minimum {
+        if count < minimum {
+            return Err(format!(
+                "operator {head} takes at least {minimum} argument(s) but got {count}: {}",
+                arity.signature
+            ));
+        }
+    }
+    if let Some(maximum) = arity.maximum {
+        if count > maximum {
+            return Err(format!(
+                "operator {head} takes at most {maximum} argument(s) but got {count}: {}",
+                arity.signature
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn json_str_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn available_dgenlisp_names() -> Vec<String> {
@@ -559,9 +948,63 @@ fn available_dgenlisp_names() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        system_prompt, user_prompt, validate_follow_up_response, validate_macro_response,
-        AgenticBubbleFollowUp, AgenticBubbleOutput, AgenticBubbleRequest,
+        connect_system_prompt, connect_user_prompt, dgen_reference, system_prompt, user_prompt,
+        validate_connect_response, validate_follow_up_response, validate_macro_response,
+        AgenticBubbleConnect, AgenticBubbleFollowUp, AgenticBubbleOutput, AgenticBubbleRequest,
+        PatcherConnectOp,
     };
+
+    #[test]
+    fn reference_lists_call_signatures_not_bare_names() {
+        let reference = dgen_reference();
+        assert!(
+            reference.contains("(delay signal time_in_samples)"),
+            "reference must carry the delay signature: {reference}"
+        );
+        assert!(reference.contains("(svf input cutoff q mode)"));
+        // Attribute-only signatures are replaced by a positional form the validator accepts.
+        assert!(!reference.contains('@'), "reference leaks attribute forms");
+    }
+
+    #[test]
+    fn system_prompt_carries_signatures() {
+        let prompt = system_prompt(false);
+        assert!(prompt.contains("(delay signal time_in_samples)"));
+        assert!(prompt.contains("Argument counts are enforced"));
+    }
+
+    #[test]
+    fn rejects_max_msp_style_third_delay_argument() {
+        // Max/gen~ spells this `(delay signal time maxtime)`; ours has no third inlet.
+        let source = "(defmacro echo (input time) (delay input time 44100))";
+        let error = validate_macro_response(source).expect_err("three-argument delay is invalid");
+        assert!(error.contains("delay"), "{error}");
+        assert!(error.contains("at most 2"), "{error}");
+    }
+
+    #[test]
+    fn rejects_too_few_arguments() {
+        let source = "(defmacro echo (input) (delay input))";
+        let error = validate_macro_response(source).expect_err("one-argument delay is invalid");
+        assert!(error.contains("at least 2"), "{error}");
+    }
+
+    #[test]
+    fn accepts_nary_calls_for_parser_folded_operators() {
+        // `+` documents a binary arity but the parser folds n-ary calls.
+        let source = "(defmacro sum3 (a b c) (+ a b c))";
+        validate_macro_response(source).expect("n-ary + is valid");
+    }
+
+    #[test]
+    fn accepts_documented_arities() {
+        let source = "\
+(defmacro band (input f q amount)
+  (def filtered (svf input f q 1))
+  (def shaped (mix input filtered amount))
+  (clip shaped -1 1))";
+        validate_macro_response(source).expect("documented arities are valid");
+    }
 
     #[test]
     fn validates_single_named_defmacro() {
@@ -621,6 +1064,8 @@ mod tests {
             prompt: "create a formant bank".to_string(),
             suggested_macro_name: "agentic-formants".to_string(),
             follow_up: None,
+            connect: None,
+            history: Vec::new(),
         };
         let system = system_prompt(false);
         let user = user_prompt(&request, None);
@@ -630,7 +1075,9 @@ mod tests {
             assert!(prompt.contains("`(def name expr)`"));
             assert!(prompt.contains("(svf input cutoff q 1)"));
         }
-        assert!(system.contains("Available DGenLisp names from the bundled operator documentation"));
+        assert!(
+            system.contains("Available DGenLisp operators from the bundled operator documentation")
+        );
         assert!(system.contains("final expression `(tuple out1 out2 ...)`"));
         assert!(system.contains("one outlet for"));
         assert!(user.contains("multiple patcher outlets"));
@@ -645,6 +1092,8 @@ mod tests {
             prompt: "make a helper that returns dry, wet, and mixed outputs".to_string(),
             suggested_macro_name: "split-drive".to_string(),
             follow_up: None,
+            connect: None,
+            history: Vec::new(),
         };
         let user = user_prompt(&request, None);
         assert!(user.contains("use a final `(tuple ...)`"));
@@ -717,5 +1166,67 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("unknown symbol filtered"));
+    }
+
+    #[test]
+    fn connect_plan_parses_both_op_kinds() {
+        let raw = "```json\n{\"ops\": [\
+{\"op\": \"connect\", \"from_node\": \"trig-in\", \"from_outlet\": 0, \
+ \"to_node\": \"created-3\", \"to_arg\": 0, \"why\": \"trigger\"}, \
+{\"op\": \"inline\", \"value\": 0.8, \"to_node\": \"created-3\", \
+ \"to_arg\": 2, \"why\": \"decay needs a value\"}]}\n```";
+        let AgenticBubbleOutput::Connections { ops } =
+            validate_connect_response(raw).expect("valid plan")
+        else {
+            panic!("expected a connection plan");
+        };
+        assert_eq!(
+            ops[0],
+            PatcherConnectOp::Connect {
+                from_node: "trig-in".to_string(),
+                from_outlet: 0,
+                to_node: "created-3".to_string(),
+                to_arg: 0,
+                why: "trigger".to_string(),
+            }
+        );
+        assert_eq!(
+            ops[1],
+            PatcherConnectOp::Inline {
+                value: "0.8".to_string(),
+                to_node: "created-3".to_string(),
+                to_arg: 2,
+                why: "decay needs a value".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn connect_plan_rejects_defmacro_output() {
+        let error =
+            validate_connect_response("(defmacro smooth (sig amt) (mix sig amt 0.5))").unwrap_err();
+        assert!(error.contains("not valid JSON"), "{error}");
+    }
+
+    #[test]
+    fn connect_prompt_shares_no_text_with_the_create_prompt() {
+        let request = AgenticBubbleRequest {
+            prompt: "connect it".to_string(),
+            suggested_macro_name: "voice".to_string(),
+            follow_up: None,
+            connect: Some(AgenticBubbleConnect {
+                subject_node_id: "created-3".to_string(),
+                context: "created-3  voice  kind=MacroInstance\n  in  0  trig  free\n".to_string(),
+            }),
+            history: Vec::new(),
+        };
+        let connect = request.connect.clone().expect("connect");
+        let system = connect_system_prompt();
+        let user = connect_user_prompt(&request, &connect, None);
+        assert!(system.contains("{\"ops\": [ ... ]}"));
+        assert!(system.contains("marks `free`"));
+        assert!(!system.contains("defmacro"));
+        assert!(user.contains("Wire node created-3"));
+        assert!(user.contains("in  0  trig  free"));
     }
 }

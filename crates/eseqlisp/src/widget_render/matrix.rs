@@ -1375,10 +1375,7 @@ mod tests {
             .handle_event(&node, WidgetEvent::Custom(payload))
             .expect("cell-press output");
         assert_eq!(output.callback, Value::String("press-cell".to_string()));
-        assert_eq!(
-            output.args,
-            vec![Value::Number(1.0), Value::Number(3.0)]
-        );
+        assert_eq!(output.args, vec![Value::Number(1.0), Value::Number(3.0)]);
 
         let up = MATRIX_WIDGET.mouse_event(
             &node,
@@ -1398,10 +1395,7 @@ mod tests {
             .handle_event(&node, WidgetEvent::Custom(payload))
             .expect("cell-release output");
         assert_eq!(output.callback, Value::String("release-cell".to_string()));
-        assert_eq!(
-            output.args,
-            vec![Value::Number(1.0), Value::Number(3.0)]
-        );
+        assert_eq!(output.args, vec![Value::Number(1.0), Value::Number(3.0)]);
     }
 
     #[cfg(target_os = "macos")]

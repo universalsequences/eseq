@@ -279,14 +279,26 @@ enum SelectionRectStyle {
 enum HitRegion {
     Header,
     ContentLengthEnd,
-    Sidebar { lane: usize },
-    Background { time: f64 },
-    ItemBody { item: TimelineItem },
-    ItemEdgeEnd { item: TimelineItem },
+    Sidebar {
+        lane: usize,
+    },
+    Background {
+        time: f64,
+    },
+    ItemBody {
+        item: TimelineItem,
+    },
+    ItemEdgeEnd {
+        item: TimelineItem,
+    },
     /// Title-bar zones, only produced when `title-bar-height > 0`
     /// (docs/arrangement-region-editing-spec.md 3.1).
-    ItemTitleBar { item: TimelineItem },
-    ItemEdgeStart { item: TimelineItem },
+    ItemTitleBar {
+        item: TimelineItem,
+    },
+    ItemEdgeStart {
+        item: TimelineItem,
+    },
 }
 
 /// Which edge the pointer is over. Both are grabbable on a title-barred
@@ -850,7 +862,10 @@ pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
     let vp = view.time_viewport();
     (
         view.alignment_helper_grid_step(),
-        vp.metal_grid_lines(view.time_ruler.as_ref()).into_iter().map(|(x, _)| x).collect(),
+        vp.metal_grid_lines(view.time_ruler.as_ref())
+            .into_iter()
+            .map(|(x, _)| x)
+            .collect(),
         vp.metal_time_ruler_labels(view.time_ruler.as_ref()),
     )
 }
@@ -873,11 +888,9 @@ fn build_metal_primitives(
         let header_chrome_height = (view.header_height - view.header_bottom_gutter).max(0.0);
         let loop_band = if header_chrome_height > 0.2 {
             view.loop_band_rect().map(|(x, width)| {
-                let y = rect.row
-                    + (header_chrome_height * 0.55).min(header_chrome_height - 0.18);
+                let y = rect.row + (header_chrome_height * 0.55).min(header_chrome_height - 0.18);
                 let bottom_inset = 0.08_f32.min(header_chrome_height * 0.12);
-                let height =
-                    (header_chrome_height - (y - rect.row) - bottom_inset).max(0.12);
+                let height = (header_chrome_height - (y - rect.row) - bottom_inset).max(0.12);
                 (x, y, width, height)
             })
         } else {
@@ -958,9 +971,7 @@ fn build_metal_primitives(
                     return;
                 }
                 let x0 = view.x_for_time(seg_start).max(content.col);
-                let x1 = view
-                    .x_for_time(seg_end)
-                    .min(content.col + content.width);
+                let x1 = view.x_for_time(seg_end).min(content.col + content.width);
                 if x1 <= x0 {
                     return;
                 }
@@ -1008,8 +1019,7 @@ fn build_metal_primitives(
                 primitives.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
                         row: y + (height - 0.86).max(0.0) * 0.5,
-                        col: (band_end - text.chars().count() as f32 * 0.62 - 0.3)
-                            .max(content.col),
+                        col: (band_end - text.chars().count() as f32 * 0.62 - 0.3).max(content.col),
                         align_width: 0.0,
                         h_align: 0.0,
                         text,
@@ -1638,16 +1648,13 @@ fn build_metal_primitives(
     // through clip bodies (DAW convention).
     if let Some(cursor_x) = view.metal_cursor_x() {
         let line_width = (1.0 / viewport.cell_w).max(0.08);
-        let marker_width = (((8.0
-            * view.cursor_marker_scale
-            * view.cursor_marker_width_scale)
+        let marker_width = (((8.0 * view.cursor_marker_scale * view.cursor_marker_width_scale)
             / viewport.cell_w)
             .max(line_width * 4.0)
             * viewport.cell_w)
             .round()
             / viewport.cell_w;
-        let marker_height_scale =
-            view.cursor_marker_scale * view.cursor_marker_height_scale;
+        let marker_height_scale = view.cursor_marker_scale * view.cursor_marker_height_scale;
         let marker_height = ((((5.0 * marker_height_scale) / viewport.cell_h)
             .max(0.28 * marker_height_scale)
             .min(content.height))
@@ -1754,14 +1761,7 @@ fn push_item_segment_fills(
     clip: (f32, f32),
 ) {
     for segment in segments {
-        push_item_fill(
-            primitives,
-            *segment,
-            color,
-            viewport,
-            radius_px,
-            clip,
-        );
+        push_item_fill(primitives, *segment, color, viewport, radius_px, clip);
     }
 }
 
@@ -1804,7 +1804,6 @@ fn push_item_fill(
             col: rect.col,
             width: rect.width,
             height: rect.height - radius_y * 2.0,
-            
         },
         color,
         clip,
@@ -1817,8 +1816,10 @@ fn push_item_fill(
         // is centred `radius` in from both edges.
         let offset_px = (row as f32 + 0.5) * (radius_px / rows as f32);
         let above_center = radius_px - offset_px;
-        let inset_px =
-            radius_px - (radius_px * radius_px - above_center * above_center).max(0.0).sqrt();
+        let inset_px = radius_px
+            - (radius_px * radius_px - above_center * above_center)
+                .max(0.0)
+                .sqrt();
         // Boundary pixel: partial coverage becomes partial alpha.
         let solid_inset_px = inset_px.ceil();
         let coverage = (solid_inset_px - inset_px).clamp(0.0, 1.0);
@@ -1838,7 +1839,6 @@ fn push_item_fill(
                         col: rect.col + solid_inset,
                         width: solid_width,
                         height: row_height,
-                        
                     },
                     color,
                     clip,
@@ -1862,7 +1862,6 @@ fn push_item_fill(
                         col,
                         width: edge_pixel,
                         height: row_height,
-                        
                     },
                     feathered,
                     clip,
@@ -1943,15 +1942,15 @@ fn item_cycle_separator_xs(
     let view_end = view.view_start + view.view_duration;
     let visible_offset_start =
         ((view.view_start.max(item.start) - item.start) / span).clamp(0.0, 1.0);
-    let visible_offset_end =
-        ((view_end.min(item.end) - item.start) / span).clamp(0.0, 1.0);
+    let visible_offset_end = ((view_end.min(item.end) - item.start) / span).clamp(0.0, 1.0);
     if visible_offset_end <= visible_offset_start {
         return Vec::new();
     }
 
     let first_offset = (1.0 - phase) * cycle;
-    let first_visible_index =
-        ((visible_offset_start - first_offset) / cycle).ceil().max(0.0);
+    let first_visible_index = ((visible_offset_start - first_offset) / cycle)
+        .ceil()
+        .max(0.0);
     let mut offset = first_offset + first_visible_index * cycle;
     let mut separators = Vec::new();
     while offset < visible_offset_end && offset < 1.0 {
@@ -2011,10 +2010,7 @@ fn item_cycle_width_px(
     };
     let cycle_duration = (item.end - item.start).max(0.0) * cycle.max(f64::EPSILON);
     let content_width_px = view.content_rect().width * viewport.cell_w;
-    Some(
-        (cycle_duration / view.view_duration.max(0.0001)) as f32
-            * content_width_px,
-    )
+    Some((cycle_duration / view.view_duration.max(0.0001)) as f32 * content_width_px)
 }
 
 /// Draw an item's `content` payload as additional quads clipped to the item's
@@ -2055,8 +2051,7 @@ fn push_item_content_primitives(
             // Derive one source cycle directly from time, not from clamped
             // screen edges, so density stays stable when a long clip extends
             // beyond either side of the viewport.
-            let cycle_width_px =
-                item_cycle_width_px(view, item, viewport).unwrap_or(0.0) as f64;
+            let cycle_width_px = item_cycle_width_px(view, item, viewport).unwrap_or(0.0) as f64;
 
             // Cycle separators: the first boundary is the remaining part of
             // the source cycle after `phase`; later boundaries are one full
@@ -2119,9 +2114,7 @@ fn push_item_content_primitives(
                         continue;
                     }
                     let time = item.start + offset * span;
-                    if time < view.view_start
-                        || time >= view.view_start + view.view_duration
-                    {
+                    if time < view.view_start || time >= view.view_start + view.view_duration {
                         continue;
                     }
                     let dot_x = view
@@ -2899,7 +2892,10 @@ impl TimelineView {
         }
         let position = content.col as f64
             + content.width as f64 * ((time - self.view_start) / self.view_duration.max(0.0001));
-        (position as f32).clamp(content.col - content.width, content.col + content.width * 2.0)
+        (position as f32).clamp(
+            content.col - content.width,
+            content.col + content.width * 2.0,
+        )
     }
 
     fn item_selected(&self, item: &TimelineItem) -> bool {
@@ -3237,17 +3233,15 @@ impl TimelineView {
                 HitRegion::ItemBody { item }
                 | HitRegion::ItemEdgeEnd { item }
                 | HitRegion::ItemTitleBar { item }
-                | HitRegion::ItemEdgeStart { item } => {
-                    Some(action_map(vec![
-                        ("type", keyword(":select")),
-                        ("ids", list_value(vec![item.id])),
-                        ("mode", keyword(":replace")),
-                        (
-                            "time",
-                            Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
-                        ),
-                    ]))
-                }
+                | HitRegion::ItemEdgeStart { item } => Some(action_map(vec![
+                    ("type", keyword(":select")),
+                    ("ids", list_value(vec![item.id])),
+                    ("mode", keyword(":replace")),
+                    (
+                        "time",
+                        Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
+                    ),
+                ])),
                 HitRegion::ContentLengthEnd => None,
                 HitRegion::Background { time, .. } => Some(action_map(vec![
                     ("type", keyword(":clear-selection")),
@@ -3269,12 +3263,10 @@ impl TimelineView {
                 HitRegion::ItemBody { item }
                 | HitRegion::ItemEdgeEnd { item }
                 | HitRegion::ItemTitleBar { item }
-                | HitRegion::ItemEdgeStart { item } => {
-                    Some(action_map(vec![
-                        ("type", keyword(":delete-items")),
-                        ("ids", list_value(vec![item.id])),
-                    ]))
-                }
+                | HitRegion::ItemEdgeStart { item } => Some(action_map(vec![
+                    ("type", keyword(":delete-items")),
+                    ("ids", list_value(vec![item.id])),
+                ])),
                 _ => None,
             },
             TimelineTool::Scrub => Some(action_map(vec![
@@ -3342,7 +3334,8 @@ impl TimelineView {
         // leaves this lane's rect (region spec 4.2), and drag capture means
         // no other instance will report it. Every other gesture still
         // requires a hit, as before.
-        let is_marquee = matches!(gesture.get("kind"), Some(Value::Keyword(kind)) if kind == "marquee");
+        let is_marquee =
+            matches!(gesture.get("kind"), Some(Value::Keyword(kind)) if kind == "marquee");
         if current_hit.is_none() && !is_marquee {
             return None;
         }
@@ -4632,7 +4625,10 @@ mod tests {
         assert_eq!(peaks.len(), 1);
 
         assert!(items[3].kind.is_none(), "unknown kind parses to None");
-        assert!(items[3].content.is_none(), "malformed content parses to None");
+        assert!(
+            items[3].content.is_none(),
+            "malformed content parses to None"
+        );
     }
 
     /// `:cycle` is the source-cycle length relative to the item, so values
@@ -4655,11 +4651,11 @@ mod tests {
             }
             map_value_raw(entries)
         };
-        let parsed = |cycle: Value, phase: Option<Value>| {
-            match parse_item_content(&content_with_cycle(cycle, phase)) {
-                Some(TimelineItemContent::Dots { cycle, phase, .. }) => (cycle, phase),
-                _ => panic!("expected dots content"),
-            }
+        let parsed = |cycle: Value, phase: Option<Value>| match parse_item_content(
+            &content_with_cycle(cycle, phase),
+        ) {
+            Some(TimelineItemContent::Dots { cycle, phase, .. }) => (cycle, phase),
+            _ => panic!("expected dots content"),
         };
         assert_eq!(parsed(number_value(0.25), None), (0.25, 0.0));
         assert_eq!(
@@ -4763,9 +4759,10 @@ mod tests {
         // could scroll (8 lanes in a 4-row viewport).
         assert!(view.handle_touchpad_scroll(10.0, 2.0, 0.0, -30.0).is_none());
         // Vertical wheel: declined.
-        assert!(view
-            .handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
-            .is_none());
+        assert!(
+            view.handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
+                .is_none()
+        );
         // Horizontal-dominant touchpad delta still pans the time axis.
         let action = view
             .handle_touchpad_scroll(10.0, 2.0, -30.0, 2.0)
@@ -4791,9 +4788,10 @@ mod tests {
             },
         );
         assert!(view.handle_touchpad_scroll(10.0, 2.0, 0.0, -30.0).is_some());
-        assert!(view
-            .handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
-            .is_some());
+        assert!(
+            view.handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
+                .is_some()
+        );
     }
 
     /// The content-length drag gets a terminal action on release (mirroring
@@ -5497,7 +5495,10 @@ mod tests {
         // Default style (piano roll, scene lane) is unchanged: a translucent
         // blue wash with an outline, and no body relighting.
         let marquee = build(None);
-        assert!(marquee_blue(&marquee), "the default style keeps the marquee");
+        assert!(
+            marquee_blue(&marquee),
+            "the default style keeps the marquee"
+        );
         assert_eq!(
             top_color_at(&marquee, x_at(6.0), body_y),
             Some(CLIP),
@@ -5726,8 +5727,7 @@ mod tests {
             "the adjacent top corners must reveal the loop boundary"
         );
         assert!(
-            clip_fill_covers(&primitives, 59.99, 2.0)
-                && clip_fill_covers(&primitives, 60.0, 2.0),
+            clip_fill_covers(&primitives, 59.99, 2.0) && clip_fill_covers(&primitives, 60.0, 2.0),
             "abutting segment fills must meet continuously through the clip body"
         );
         assert!(
@@ -5755,18 +5755,11 @@ mod tests {
         // At a sufficiently far zoom-out each source cycle is below the
         // existing 5px legibility threshold. The clip then becomes one
         // ordinary rounded fill instead of producing hundreds of tiny arcs.
-        let zoomed_out_rect = Rect {
-            width: 3.0,
-            ..rect
-        };
+        let zoomed_out_rect = Rect { width: 3.0, ..rect };
         let zoomed_out_view = TimelineView::from_props(&node.props, zoomed_out_rect);
         assert!(
-            item_cycle_separator_xs(
-                &zoomed_out_view,
-                &zoomed_out_view.items[0],
-                viewport
-            )
-            .is_empty(),
+            item_cycle_separator_xs(&zoomed_out_view, &zoomed_out_view.items[0], viewport)
+                .is_empty(),
             "sub-5px loop cycles must collapse to one continuous fill"
         );
     }
@@ -5782,10 +5775,7 @@ mod tests {
                     ("lane", number_value(0.0)),
                     ("start", number_value(4.0)),
                     ("end", number_value(4.5)),
-                    (
-                        "label",
-                        Value::String("Pattern 123456789".to_string()),
-                    ),
+                    ("label", Value::String("Pattern 123456789".to_string())),
                 ])]),
             ),
             (
@@ -6039,14 +6029,16 @@ mod tests {
         let rendered = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::Quad(quad) if quad.color == dot_color => {
-                    Some((quad.x, quad.y))
-                }
+                MetalPrimitive::Quad(quad) if quad.color == dot_color => Some((quad.x, quad.y)),
                 _ => None,
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(rendered.len(), 2, "only the played source window is visible");
+        assert_eq!(
+            rendered.len(),
+            2,
+            "only the played source window is visible"
+        );
         assert!((rendered[0].0 - 0.0).abs() < 0.001);
         assert!((rendered[0].1 - 0.77).abs() < 0.001);
         assert!((rendered[1].0 - 10.0).abs() < 0.001);
@@ -6100,8 +6092,7 @@ mod tests {
         assert_eq!(marker.color_a, theme::CURSOR().to_rgba());
         assert_eq!(marker.uniform_a[2], 8.0, "pixel-aligned marker width");
         assert_eq!(marker.uniform_a[3], 6.0, "pixel-aligned marker height");
-        let marker_top_px = (1.0 - marker.ndc_min[1]) * viewport.vp_h * 0.5
-            + marker.uniform_b[0];
+        let marker_top_px = (1.0 - marker.ndc_min[1]) * viewport.vp_h * 0.5 + marker.uniform_b[0];
         let marker_tip_row = (marker_top_px + marker.uniform_a[3]) / viewport.cell_h;
         assert!((marker_top_px - 40.0).abs() < 0.001);
 
@@ -6109,8 +6100,7 @@ mod tests {
             .iter()
             .find_map(|primitive| match primitive {
                 MetalPrimitive::Quad(quad)
-                    if quad.color == theme::CURSOR()
-                        && (quad.y - marker_tip_row).abs() < 0.001 =>
+                    if quad.color == theme::CURSOR() && (quad.y - marker_tip_row).abs() < 0.001 =>
                 {
                     Some(*quad)
                 }
@@ -6179,8 +6169,7 @@ mod tests {
             marker.uniform_a[3], 6.0,
             "80% overall scale plus 30% height reduction"
         );
-        let marker_top_px = (1.0 - marker.ndc_min[1]) * viewport.vp_h * 0.5
-            + marker.uniform_b[0];
+        let marker_top_px = (1.0 - marker.ndc_min[1]) * viewport.vp_h * 0.5 + marker.uniform_b[0];
         let marker_tip_row = (marker_top_px + marker.uniform_a[3]) / viewport.cell_h;
         assert!((marker_top_px / viewport.cell_h - 1.35).abs() < 0.001);
         assert!(
@@ -7288,8 +7277,7 @@ mod tests {
     /// keep the raw pointer times.
     #[test]
     fn marquee_snap_grid_floors_min_and_ceils_max() {
-        let snapped =
-            single_lane_marquee_view(vec![("marquee-snap", keyword_value("grid"))]);
+        let snapped = single_lane_marquee_view(vec![("marquee-snap", keyword_value("grid"))]);
         let grid = snapped.alignment_helper_grid_step();
         assert_eq!(grid, 0.5, "fixture must sit on a known grid rung");
 
@@ -8408,7 +8396,12 @@ mod tests {
         ]);
         let view = TimelineView::from_props(
             &props,
-            Rect { row: 0.0, col: 0.0, width: 16.0, height: 8.0 },
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 16.0,
+                height: 8.0,
+            },
         );
         let item_at = |col: f32| match view.hit_test(col, 1.0) {
             Some(HitRegion::ItemEdgeEnd { item }) | Some(HitRegion::ItemEdgeStart { item }) => {
@@ -8503,7 +8496,9 @@ mod tests {
         );
         let body = with_bar.begin_gesture(8.0, 5.0).expect("body gesture");
         assert_eq!(gesture_kind(&body), "marquee");
-        assert!(marquee_from_item_body(&get_map(&body).expect("gesture map")));
+        assert!(marquee_from_item_body(
+            &get_map(&body).expect("gesture map")
+        ));
 
         // Without a title bar the body still starts a move, as it always has.
         let without_bar = title_bar_view(None);
@@ -8549,12 +8544,7 @@ mod tests {
             map.contains_key("time"),
             "the body press still carries a time so the host can park the cursor"
         );
-        let Value::List(ids) = map
-            .get("ids")
-            .expect("body clip ids")
-            .borrow()
-            .clone()
-        else {
+        let Value::List(ids) = map.get("ids").expect("body clip ids").borrow().clone() else {
             panic!("body clip ids must be a list");
         };
         assert_eq!(
@@ -8566,7 +8556,11 @@ mod tests {
         // Without a title bar (piano roll) a body press selects, as always.
         let without_bar = title_bar_view(None);
         assert_eq!(
-            action_type(&without_bar.handle_pointer_down(8.0, 5.0).expect("body press")),
+            action_type(
+                &without_bar
+                    .handle_pointer_down(8.0, 5.0)
+                    .expect("body press")
+            ),
             "select"
         );
     }
@@ -8635,7 +8629,10 @@ mod tests {
 
         // And a selected item with no region clears, as it always has.
         props.remove("selection-rect");
-        props.insert("selection".to_string(), list_value_raw(vec![number_value(1.0)]));
+        props.insert(
+            "selection".to_string(),
+            list_value_raw(vec![number_value(1.0)]),
+        );
         let action = escape(&TimelineView::from_props(&props, rect)).expect("item escape");
         assert_eq!(action_type(&action), "clear-selection");
     }
@@ -8745,10 +8742,7 @@ mod tests {
     #[test]
     fn dots_parse_optional_width_leniently() {
         let content = |width: Option<Value>| {
-            let mut dot = vec![
-                ("offset", number_value(0.25)),
-                ("value", number_value(0.5)),
-            ];
+            let mut dot = vec![("offset", number_value(0.25)), ("value", number_value(0.5))];
             if let Some(width) = width {
                 dot.push(("width", width));
             }

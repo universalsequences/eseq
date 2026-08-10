@@ -65,6 +65,8 @@ pub(crate) fn run_event_loop(
     };
     let mut frame = FrameDiffState {
         prev_editor_macro_action: (String::new(), String::new()),
+        prev_editor_macro_sidebar_fingerprint: u64::MAX,
+        prev_editor_open_macro: String::new(),
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
@@ -181,7 +183,8 @@ pub(crate) fn run_event_loop(
             }
         }
         app.graph_controller().reap_due_rack_teardowns();
-        let queued_transport_scene = shared.state
+        let queued_transport_scene = shared
+            .state
             .quantized_launches()
             .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)
             .and_then(|target| match target {
@@ -221,9 +224,7 @@ pub(crate) fn run_event_loop(
                     .state
                     .quantized_launches()
                     .pending_target(
-                        sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(
-                            track as u32,
-                        ),
+                        sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(track as u32),
                     )
                     .and_then(|target| match target {
                         sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
@@ -258,8 +259,8 @@ pub(crate) fn run_event_loop(
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
-            if editor_has_visible_buffer(&editor, "*mixer*") {
-                editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            if editor_has_visible_mixer_buffer(&editor) {
+                refresh_visible_mixer_layouts(&mut editor);
             }
             editor.mark_needs_redraw();
             frame.prev_queued_track_clips = queued_track_clips;
@@ -337,7 +338,9 @@ pub(crate) fn run_event_loop(
             if should_clear {
                 guard.take();
                 drop(guard);
-                shared.active_delete_target_version.fetch_add(1, Ordering::Relaxed);
+                shared
+                    .active_delete_target_version
+                    .fetch_add(1, Ordering::Relaxed);
                 shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -375,7 +378,8 @@ pub(crate) fn run_event_loop(
         if live_audio_analyzer.sync_visible(&editor, &app) {
             editor.mark_needs_redraw();
         }
-        if log_voice_counts && meters.last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL {
+        if log_voice_counts && meters.last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL
+        {
             log_active_voice_counts(&shared.state, &track_names);
             meters.last_voice_count_log_at = Instant::now();
         }
@@ -535,7 +539,9 @@ pub(crate) fn run_event_loop(
                             && app.history.active_gesture().is_some()
                         {
                             match app::edit::cancel_active_gesture(&mut app) {
-                                Ok(true) => editor.show_transient_message("Parameter edit canceled"),
+                                Ok(true) => {
+                                    editor.show_transient_message("Parameter edit canceled")
+                                }
                                 Ok(false) => {}
                                 Err(error) => editor.handle_host_event(HostEvent::Error(format!(
                                     "Could not cancel parameter edit: {error:?}"
@@ -591,7 +597,8 @@ pub(crate) fn run_event_loop(
                         };
                         let message = match replay {
                             app::history::HistoryReplay::Applied(result) => {
-                                let topology_changed = app.tracks.len() != track_count_before_replay;
+                                let topology_changed =
+                                    app.tracks.len() != track_count_before_replay;
                                 if !topology_changed {
                                     track_names.clone_from(&app.tracks);
                                 }
@@ -599,15 +606,20 @@ pub(crate) fn run_event_loop(
                                     app.ui.cursor_track
                                 } else {
                                     shared.current_track.load(Ordering::Relaxed)
-                                }.min(app.tracks.len().saturating_sub(1));
+                                }
+                                .min(app.tracks.len().saturating_sub(1));
                                 shared.current_track.store(replay_track, Ordering::Relaxed);
                                 *shared.bus_state.lock().unwrap() = app.buses.clone();
-                                *shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                                *shared.bus_node_ids.lock().unwrap() =
+                                    app.graph.bus_node_ids.clone();
                                 *shared.track_groups.lock().unwrap() = app.groups.clone();
                                 if topology_changed {
                                     {
                                         let mut pan_ids = shared.track_pan_ids.lock().unwrap();
-                                        *pan_ids = app.graph.track_node_ids.iter()
+                                        *pan_ids = app
+                                            .graph
+                                            .track_node_ids
+                                            .iter()
                                             .map(|ids| ids.pan_id)
                                             .collect();
                                         push_solo_mutes(shared.lg_raw, &shared.state, &pan_ids);
@@ -618,10 +630,13 @@ pub(crate) fn run_event_loop(
                                     );
                                     meters.cached_bus_peak_levels =
                                         read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-                                    (meters.cached_modulator_phases, meters.cached_modulator_levels) =
-                                        read_modulator_display_values(app.graph.lg, &app);
+                                    (
+                                        meters.cached_modulator_phases,
+                                        meters.cached_modulator_levels,
+                                    ) = read_modulator_display_values(app.graph.lg, &app);
                                     meters.last_meter_poll_at = Instant::now();
-                                    *shared.record_armed.lock().unwrap() = app.graph.record_armed.clone();
+                                    *shared.record_armed.lock().unwrap() =
+                                        app.graph.record_armed.clone();
                                     *shared.track_groups.lock().unwrap() = app.groups.clone();
                                 }
                                 let rt = editor.runtime_mut();
@@ -639,8 +654,14 @@ pub(crate) fn run_event_loop(
                                         &meters.cached_track_peak_levels,
                                     );
                                     sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
-                                    sync_modulator_phase_fields(rt, &meters.cached_modulator_phases);
-                                    sync_modulator_level_fields(rt, &meters.cached_modulator_levels);
+                                    sync_modulator_phase_fields(
+                                        rt,
+                                        &meters.cached_modulator_phases,
+                                    );
+                                    sync_modulator_level_fields(
+                                        rt,
+                                        &meters.cached_modulator_levels,
+                                    );
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
                                 sync_bus_mixer_state(rt, &app);
@@ -665,8 +686,10 @@ pub(crate) fn run_event_loop(
                                 editor.refresh_runtime_side_effects();
                                 if topology_changed {
                                     refresh_visible_track_topology_layouts(&mut editor);
-                                    frame.prev_track_playheads = track_playheads_snapshot(&shared.state, &app);
-                                    frame.prev_track_button_states = track_button_state_snapshot(&shared.state);
+                                    frame.prev_track_playheads =
+                                        track_playheads_snapshot(&shared.state, &app);
+                                    frame.prev_track_button_states =
+                                        track_button_state_snapshot(&shared.state);
                                 }
                                 if !app.buses.is_empty() {
                                     shared.ui_invalidations.push(UiInvalidation::BusMixer {
@@ -674,9 +697,9 @@ pub(crate) fn run_event_loop(
                                         change: BusMixerInvalidation::Volume,
                                     });
                                 }
-                                shared.ui_invalidations.push(UiInvalidation::Pattern(
-                                    PatternInvalidation::AllTracks,
-                                ));
+                                shared
+                                    .ui_invalidations
+                                    .push(UiInvalidation::Pattern(PatternInvalidation::AllTracks));
                                 shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
                                 shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 match shortcut {
@@ -812,7 +835,13 @@ pub(crate) fn run_event_loop(
                         let ct = shared.current_track.load(Ordering::Relaxed);
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "steps", build_steps_value(&shared.state, ct));
-                        sync_all_track_sequencer_state(rt, &shared.state, &app, ct, &shared.selected_steps);
+                        sync_all_track_sequencer_state(
+                            rt,
+                            &shared.state,
+                            &app,
+                            ct,
+                            &shared.selected_steps,
+                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
@@ -950,12 +979,9 @@ pub(crate) fn run_event_loop(
         // Flush the latest coalesced drag every loop iteration. Waiting for the
         // render boundary makes slider/knob drags feel stale and can drop the
         // final motion segment if mouse-up lands before the next frame.
-        if flush_pending_pointer_drag(
-            &mut pending_drag,
-            |mouse, precise_col, precise_row| {
-                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-            },
-        ) {
+        if flush_pending_pointer_drag(&mut pending_drag, |mouse, precise_col, precise_row| {
+            editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+        }) {
             backend.set_widget_cursor(editor.widget_cursor());
         }
         ui_loop_stats.note_gestures(gestures_started.elapsed());
@@ -970,10 +996,9 @@ pub(crate) fn run_event_loop(
         for command in drained_host_commands {
             match command {
                 HostCommand::AuthoringTransactionBegin { id, label } => {
-                    sessions.pending_lisp_history_transactions.insert(
-                        id,
-                        (label, app.history.clone(), app.history.undo_len()),
-                    );
+                    sessions
+                        .pending_lisp_history_transactions
+                        .insert(id, (label, app.history.clone(), app.history.undo_len()));
                     continue;
                 }
                 HostCommand::AuthoringTransactionEnd { id, success } => {
@@ -981,11 +1006,7 @@ pub(crate) fn run_event_loop(
                         sessions.pending_lisp_history_transactions.remove(&id)
                     {
                         if success {
-                            app::edit::squash_history_since(
-                                &mut app,
-                                checkpoint_len,
-                                label,
-                            );
+                            app::edit::squash_history_since(&mut app, checkpoint_len, label);
                         } else if let Err(error) =
                             app::edit::rollback_history_to(&mut app, checkpoint)
                         {
@@ -997,35 +1018,35 @@ pub(crate) fn run_event_loop(
                     continue;
                 }
                 HostCommand::Custom { name, payload } => {
-                let _ = current_track_for_app(&mut app, &shared.current_track);
-                match handle_macro_host_command(
-                    &name,
-                    &payload,
-                    &mut app,
-                    &shared.state,
-                    shared.current_track.load(Ordering::Relaxed),
-                ) {
-                    MacroHostCommandOutcome::Applied => {
-                        shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
-                        continue;
+                    let _ = current_track_for_app(&mut app, &shared.current_track);
+                    match handle_macro_host_command(
+                        &name,
+                        &payload,
+                        &mut app,
+                        &shared.state,
+                        shared.current_track.load(Ordering::Relaxed),
+                    ) {
+                        MacroHostCommandOutcome::Applied => {
+                            shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        MacroHostCommandOutcome::Ignored => continue,
+                        MacroHostCommandOutcome::NotMacro => {}
                     }
-                    MacroHostCommandOutcome::Ignored => continue,
-                    MacroHostCommandOutcome::NotMacro => {}
-                }
-                dispatch_custom_host_command(
-                    &name,
-                    payload,
-                    &mut app,
-                    &mut editor,
-                    &mut LoopCtx {
-                        sessions: &mut sessions,
-                        meters: &mut meters,
-                        frame: &mut frame,
-                        gesture: &mut gesture,
-                        track_names: &mut track_names,
-                        shared: &shared,
-                    },
-                );
+                    dispatch_custom_host_command(
+                        &name,
+                        payload,
+                        &mut app,
+                        &mut editor,
+                        &mut LoopCtx {
+                            sessions: &mut sessions,
+                            meters: &mut meters,
+                            frame: &mut frame,
+                            gesture: &mut gesture,
+                            track_names: &mut track_names,
+                            shared: &shared,
+                        },
+                    );
                 }
                 HostCommand::CompileInstrument { .. } | HostCommand::CompileEffect { .. } => {}
             }
@@ -1072,7 +1093,9 @@ pub(crate) fn run_event_loop(
                         } else {
                             app.ui.cursor_track.min(app.tracks.len() - 1)
                         };
-                        shared.current_track.store(restored_track, Ordering::Relaxed);
+                        shared
+                            .current_track
+                            .store(restored_track, Ordering::Relaxed);
                         app.ui.cursor_track = restored_track;
                         {
                             let mut pan_ids = shared.track_pan_ids.lock().unwrap();
@@ -1109,7 +1132,8 @@ pub(crate) fn run_event_loop(
                         } else {
                             shared.state.transport.track_playheads[ct].load(Ordering::Relaxed)
                         };
-                        let transport_playhead = shared.state.transport.playhead.load(Ordering::Relaxed);
+                        let transport_playhead =
+                            shared.state.transport.playhead.load(Ordering::Relaxed);
                         let bpm = shared.state.transport.bpm.load(Ordering::Relaxed);
                         if meters.last_cpu_ui_poll_at.elapsed() >= CPU_UI_POLL_INTERVAL {
                             meters.cached_cpu_load_bits =
@@ -1125,12 +1149,16 @@ pub(crate) fn run_event_loop(
                         meters.cached_peak_r_level = meter_display_level(f32::from_bits(
                             shared.state.transport.peak_r.load(Ordering::Relaxed),
                         ));
-                        meters.cached_track_peak_levels =
-                            read_track_peak_levels(app.graph.lg, &shared.track_pan_ids.lock().unwrap());
+                        meters.cached_track_peak_levels = read_track_peak_levels(
+                            app.graph.lg,
+                            &shared.track_pan_ids.lock().unwrap(),
+                        );
                         meters.cached_bus_peak_levels =
                             read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-                        (meters.cached_modulator_phases, meters.cached_modulator_levels) =
-                            read_modulator_display_values(app.graph.lg, &app);
+                        (
+                            meters.cached_modulator_phases,
+                            meters.cached_modulator_levels,
+                        ) = read_modulator_display_values(app.graph.lg, &app);
                         meters.last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
@@ -1148,8 +1176,16 @@ pub(crate) fn run_event_loop(
                             Value::Number(transport_playhead as f64),
                         );
                         rt.set_reactive("SEQ", "cpu-load-pct", Value::Number(cpu_load_pct as f64));
-                        rt.set_reactive("SEQ", "master-peak-l", Value::Number(meters.cached_peak_l_level));
-                        rt.set_reactive("SEQ", "master-peak-r", Value::Number(meters.cached_peak_r_level));
+                        rt.set_reactive(
+                            "SEQ",
+                            "master-peak-l",
+                            Value::Number(meters.cached_peak_l_level),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "master-peak-r",
+                            Value::Number(meters.cached_peak_r_level),
+                        );
                         rt.set_reactive(
                             "SEQ",
                             "master-recording",
@@ -1198,7 +1234,13 @@ pub(crate) fn run_event_loop(
                             rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
                         } else {
-                            sync_all_track_sequencer_state(rt, &shared.state, &app, ct, &shared.selected_steps);
+                            sync_all_track_sequencer_state(
+                                rt,
+                                &shared.state,
+                                &app,
+                                ct,
+                                &shared.selected_steps,
+                            );
                             sync_playhead_fields(
                                 rt,
                                 playhead as usize,
@@ -1234,7 +1276,8 @@ pub(crate) fn run_event_loop(
                                 "instrument-panel",
                                 build_instrument_panel_value(&app, ct, &shared.selected_steps),
                             );
-                            *shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                            *shared.accumulator_names.lock().unwrap() =
+                                build_accumulator_names(&app);
                             let selected_neural_snapshot =
                                 shared.selected_neural_neurons.lock().unwrap().clone();
                             sync_track_params_with_neural_selection(
@@ -1256,7 +1299,11 @@ pub(crate) fn run_event_loop(
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
-                                build_step_has_plocks(&shared.state, ct, &app.graph.effect_descriptors),
+                                build_step_has_plocks(
+                                    &shared.state,
+                                    ct,
+                                    &app.graph.effect_descriptors,
+                                ),
                             );
                             sync_sidebar_browser(rt, &app, ct);
                         }
@@ -1284,7 +1331,8 @@ pub(crate) fn run_event_loop(
                         frame.prev_cpu_load_bits = meters.cached_cpu_load_bits;
                         frame.prev_peak_l_level = meters.cached_peak_l_level;
                         frame.prev_peak_r_level = meters.cached_peak_r_level;
-                        frame.prev_master_recording = shared.master_recording.load(Ordering::Acquire);
+                        frame.prev_master_recording =
+                            shared.master_recording.load(Ordering::Acquire);
                         frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
                         frame.prev_modulator_phases = meters.cached_modulator_phases.clone();
                         frame.prev_modulator_levels = meters.cached_modulator_levels.clone();
@@ -1318,16 +1366,20 @@ pub(crate) fn run_event_loop(
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 
-        if let Some(completed_load) = sessions.pending_saved_instrument_load.as_ref().and_then(|pending| {
-            match pending.receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("Instrument load compile thread crashed".to_string()))
-                }
-            }
-        }) {
-            let pending = sessions.pending_saved_instrument_load
+        if let Some(completed_load) =
+            sessions
+                .pending_saved_instrument_load
+                .as_ref()
+                .and_then(|pending| match pending.receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Instrument load compile thread crashed".to_string()))
+                    }
+                })
+        {
+            let pending = sessions
+                .pending_saved_instrument_load
                 .take()
                 .expect("completed saved instrument load must have pending state");
             let _ = editor
@@ -1405,18 +1457,19 @@ pub(crate) fn run_event_loop(
             }
         }
 
-        if let Some(completed_cancel_restore) =
-            sessions.pending_instrument_cancel_restore
-                .as_ref()
-                .and_then(|pending| match pending.receiver.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        Some(Err("Instrument restore compile thread crashed".to_string()))
-                    }
-                })
+        if let Some(completed_cancel_restore) = sessions
+            .pending_instrument_cancel_restore
+            .as_ref()
+            .and_then(|pending| match pending.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Instrument restore compile thread crashed".to_string()))
+                }
+            })
         {
-            let pending = sessions.pending_instrument_cancel_restore
+            let pending = sessions
+                .pending_instrument_cancel_restore
                 .take()
                 .expect("completed cancel restore must have pending state");
             let session = pending.session;
@@ -1428,6 +1481,12 @@ pub(crate) fn run_event_loop(
                     result,
                 ) {
                     Ok(()) => {
+                        // A fork-cancel discards its draft only now that the
+                        // original is audible again; a failed restore below
+                        // hands the draft session back intact.
+                        if let Some(draft_dir) = pending.fork_draft_dir.as_deref() {
+                            let _ = std::fs::remove_dir_all(draft_dir);
+                        }
                         if let Some(buf_name) = sessions.editor_buffer_name.take() {
                             if let Err(error) = editor
                                 .runtime_mut()
@@ -1492,18 +1551,19 @@ pub(crate) fn run_event_loop(
             }
         }
 
-        if let Some(completed_cancel_restore) =
-            sessions.pending_effect_cancel_restore.as_ref().and_then(|pending| {
-                match pending.receiver.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        Some(Err("Effect restore compile thread crashed".to_string()))
-                    }
+        if let Some(completed_cancel_restore) = sessions
+            .pending_effect_cancel_restore
+            .as_ref()
+            .and_then(|pending| match pending.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Effect restore compile thread crashed".to_string()))
                 }
             })
         {
-            let pending = sessions.pending_effect_cancel_restore
+            let pending = sessions
+                .pending_effect_cancel_restore
                 .take()
                 .expect("completed effect cancel restore must have pending state");
             let session = pending.session;
@@ -1516,6 +1576,11 @@ pub(crate) fn run_event_loop(
                         result,
                     ) {
                         Ok(()) => {
+                            // See the instrument restore above: the forked
+                            // draft dir outlives a failed restore.
+                            if let Some(draft_dir) = pending.fork_draft_dir.as_deref() {
+                                let _ = std::fs::remove_dir_all(draft_dir);
+                            }
                             if let Some(buf_name) = sessions.editor_buffer_name.take() {
                                 if let Err(error) = editor
                                     .runtime_mut()
@@ -1606,18 +1671,21 @@ pub(crate) fn run_event_loop(
             }
         }
 
-        if let Some(completed_preview) = sessions.pending_instrument_preview.as_ref().and_then(|pending| {
-            match pending.receiver.try_recv() {
-                Ok(result) => Some(Ok((
-                    pending.generation,
-                    pending.source.clone(),
-                    pending.layout.clone(),
-                    result,
-                ))),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
-            }
-        }) {
+        if let Some(completed_preview) =
+            sessions
+                .pending_instrument_preview
+                .as_ref()
+                .and_then(|pending| match pending.receiver.try_recv() {
+                    Ok(result) => Some(Ok((
+                        pending.generation,
+                        pending.source.clone(),
+                        pending.layout.clone(),
+                        result,
+                    ))),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                })
+        {
             let _ = sessions.pending_instrument_preview.take();
             match completed_preview {
                 Ok((generation, source, layout, compile_result)) => {
@@ -1697,7 +1765,8 @@ pub(crate) fn run_event_loop(
         }
 
         if let Some(completed_preview) =
-            sessions.pending_effect_preview
+            sessions
+                .pending_effect_preview
                 .as_ref()
                 .and_then(|pending| match pending.receiver.try_recv() {
                     Ok(result) => Some(Ok((
@@ -1745,7 +1814,8 @@ pub(crate) fn run_event_loop(
                                                     );
                                                 }
                                                 EffectEditTarget::Bus { .. } => {
-                                                    *shared.bus_state.lock().unwrap() = app.buses.clone();
+                                                    *shared.bus_state.lock().unwrap() =
+                                                        app.buses.clone();
                                                     sync_bus_mixer_state(rt, &app);
                                                     rt.set_reactive(
                                                         "SEQ",
@@ -1880,6 +1950,43 @@ pub(crate) fn run_event_loop(
                             &source,
                         ) {
                             Ok(()) => {
+                                // The edit landed in dsp.lisp without touching
+                                // interaction state, so no writeback payload
+                                // (and therefore no compile) is coming from the
+                                // patcher — kick one here or the new macro is
+                                // visible but silent until an unrelated edit.
+                                match std::fs::read_to_string(&pending.path) {
+                                    Ok(source) => match pending.intent {
+                                        eseqlisp::widget_render::patcher::PatcherIntent::Instrument => {
+                                            if let Some(session) =
+                                                sessions.instrument_edit_session.as_mut()
+                                            {
+                                                edit_sessions::queue_instrument_preview_compile(
+                                                    session,
+                                                    &mut sessions.pending_instrument_preview,
+                                                    source,
+                                                    app.graph.sample_rate,
+                                                );
+                                            }
+                                        }
+                                        eseqlisp::widget_render::patcher::PatcherIntent::Effect => {
+                                            if let Some(session) =
+                                                sessions.effect_edit_session.as_mut()
+                                            {
+                                                edit_sessions::queue_effect_preview_compile(
+                                                    session,
+                                                    &mut sessions.pending_effect_preview,
+                                                    source,
+                                                    app.graph.sample_rate,
+                                                );
+                                            }
+                                        }
+                                    },
+                                    Err(error) => eprintln!(
+                                        "[agentic-bubble] macro edit recompile skipped path={} error={error}",
+                                        pending.path.display()
+                                    ),
+                                }
                                 editor.refresh_runtime_side_effects();
                                 editor.mark_needs_redraw();
                                 editor.handle_host_event(HostEvent::Status(format!(
@@ -1902,6 +2009,52 @@ pub(crate) fn run_event_loop(
                             }
                         }
                     }
+                    sequencer::agent::agentic_bubble::AgenticBubbleOutput::Connections { ops } => {
+                        match eseqlisp::widget_render::patcher::resolve_agentic_bubble_connections(
+                            &pending.path,
+                            pending.intent,
+                            &pending.bubble_id,
+                            pending.generation,
+                            &ops,
+                        ) {
+                            Ok(report) => {
+                                // The plan bypassed the widget's own event
+                                // handling, so nothing has told the patch to
+                                // recompile. Fire the same semantic change a
+                                // mouse-drawn cable does, or the cables appear
+                                // and the patch stays silent.
+                                editor.notify_patcher_semantic_change(&pending.path);
+                                // The applied cables and inlined values are text
+                                // the patcher has never measured, and it only
+                                // wraps text whose glyph widths a measure pass
+                                // cached.
+                                editor.runtime_mut().invalidate_layout_deferred();
+                                editor.refresh_runtime_side_effects();
+                                editor.mark_needs_redraw();
+                                let mut status = report.applied.join("; ");
+                                if !report.skipped.is_empty() {
+                                    status.push_str(&format!(
+                                        " (skipped: {})",
+                                        report.skipped.join("; ")
+                                    ));
+                                }
+                                editor.handle_host_event(HostEvent::Status(status));
+                            }
+                            Err(error) => {
+                                eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                                    &pending.path,
+                                    &pending.bubble_id,
+                                    pending.generation,
+                                    "connection plan rejected",
+                                    error.clone(),
+                                );
+                                editor.mark_needs_redraw();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Agentic bubble failed: {error}"
+                                )));
+                            }
+                        }
+                    }
                     sequencer::agent::agentic_bubble::AgenticBubbleOutput::Answer { text } => {
                         eseqlisp::widget_render::patcher::resolve_agentic_bubble_answer(
                             &pending.path,
@@ -1909,6 +2062,12 @@ pub(crate) fn run_event_loop(
                             pending.generation,
                             text,
                         );
+                        // The answer is text the patcher has never measured, and
+                        // it only wraps text whose glyph widths are cached by a
+                        // measure pass. Without a relayout the bubble draws
+                        // nothing until some later interaction forces one.
+                        editor.runtime_mut().invalidate_layout_deferred();
+                        editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
                         editor.handle_host_event(HostEvent::Status(
                             "Agentic bubble answered".to_string(),

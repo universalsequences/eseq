@@ -61,8 +61,12 @@ pub struct Theme {
     pub status_accent: Color,
     pub comp_selected_bg: Color,
     pub comp_unselected_bg: Color,
+    pub comp_border: Color,
     pub comp_fg: Color,
+    pub comp_selected_fg: Color,
+    pub comp_category_fg: Color,
     pub comp_doc_bg: Color,
+    pub comp_doc_border: Color,
     pub comp_doc_fg: Color,
     pub comp_doc_title_fg: Color,
     pub tree_row_alt_bg: Color,
@@ -136,6 +140,7 @@ pub struct Theme {
     pub patcher_node_border: Color,
     pub patcher_node_text: Color,
     pub patcher_node_tail_text: Color,
+    pub patcher_node_tail_text_hover: Color,
     pub patcher_io_node_bg: Color,
     pub patcher_io_node_border: Color,
     pub patcher_io_node_text: Color,
@@ -152,15 +157,30 @@ pub struct Theme {
     pub patcher_edit_selection: Color,
     pub patcher_edit_cursor: Color,
     pub patcher_alignment_guide: Color,
-    pub patcher_autocomplete_bg: Color,
-    pub patcher_autocomplete_border: Color,
-    pub patcher_autocomplete_selected_bg: Color,
+    pub patcher_tooltip_bg: Color,
+    pub patcher_tooltip_border: Color,
+    pub patcher_tooltip_text: Color,
     pub patcher_back_button_bg: Color,
     pub patcher_back_button_hover_bg: Color,
     pub patcher_back_button_border: Color,
     pub patcher_back_button_hover_border: Color,
     pub patcher_back_button_text: Color,
     pub patcher_back_button_hover_text: Color,
+    pub patcher_agentic_card_bg: Color,
+    pub patcher_agentic_card_border: Color,
+    pub patcher_agentic_card_border_active: Color,
+    pub patcher_agentic_card_error_bg: Color,
+    pub patcher_agentic_box_bg: Color,
+    pub patcher_agentic_box_border: Color,
+    pub patcher_agentic_header_text: Color,
+    pub patcher_agentic_body_text: Color,
+    pub patcher_agentic_placeholder_text: Color,
+    pub patcher_agentic_chip_bg: Color,
+    pub patcher_agentic_chip_border: Color,
+    pub patcher_agentic_chip_text: Color,
+    pub patcher_agentic_send_bg: Color,
+    pub patcher_agentic_send_glyph: Color,
+    pub patcher_agentic_spinner: Color,
     pub border_active: Color,
     pub border_inactive: Color,
 }
@@ -379,23 +399,42 @@ theme_slots!(
         STATUS_ACCENT,
         Color::from_hex(0x61, 0xff, 0xca)
     ),
+    // Completion popup, shared by the code editor and the patcher node editor.
+    // Both surfaces are the same widget in two hosts, so they read one palette;
+    // `comp_unselected_bg` doubles as the panel background behind the rows.
     (
         comp_selected_bg,
         COMP_SELECTED_BG,
-        Color::from_hex(0x2a, 0x2e, 0x10)
+        Color::from_hex(0x32, 0x35, 0x3d)
     ),
     (
         comp_unselected_bg,
         COMP_UNSELECTED_BG,
-        Color::from_hex(0x14, 0x14, 0x14)
+        Color::from_hex(0x17, 0x18, 0x1b)
     ),
-    (comp_fg, COMP_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
-    (comp_doc_bg, COMP_DOC_BG, Color::from_hex(0x0d, 0x0d, 0x0d)),
-    (comp_doc_fg, COMP_DOC_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
+    (comp_border, COMP_BORDER, Color::from_hex(0x2e, 0x30, 0x36)),
+    (comp_fg, COMP_FG, Color::from_hex(0x4c, 0xe0, 0x72)),
+    (
+        comp_selected_fg,
+        COMP_SELECTED_FG,
+        Color::from_hex(0x6a, 0xf0, 0x8d)
+    ),
+    (
+        comp_category_fg,
+        COMP_CATEGORY_FG,
+        Color::from_hex(0x74, 0x78, 0x82)
+    ),
+    (comp_doc_bg, COMP_DOC_BG, Color::from_hex(0x15, 0x16, 0x19)),
+    (
+        comp_doc_border,
+        COMP_DOC_BORDER,
+        Color::from_hex(0x2b, 0x2d, 0x33)
+    ),
+    (comp_doc_fg, COMP_DOC_FG, Color::from_hex(0xa8, 0xac, 0xb8)),
     (
         comp_doc_title_fg,
         COMP_DOC_TITLE_FG,
-        Color::from_hex(0xc8, 0xff, 0x00)
+        Color::from_hex(0xd8, 0xdc, 0xe8)
     ),
     (
         tree_row_alt_bg,
@@ -737,6 +776,11 @@ theme_slots!(
         Color::from_hex(0xf2, 0xf2, 0xf4)
     ),
     (
+        patcher_node_tail_text_hover,
+        PATCHER_NODE_TAIL_TEXT_HOVER,
+        Color::from_hex(0xff, 0xd1, 0x4a)
+    ),
+    (
         patcher_io_node_bg,
         PATCHER_IO_NODE_BG,
         Color::from_hex(0x18, 0x19, 0x1e)
@@ -817,19 +861,94 @@ theme_slots!(
         Color::rgba(0.38, 0.62, 1.0, 0.86)
     ),
     (
-        patcher_autocomplete_bg,
-        PATCHER_AUTOCOMPLETE_BG,
-        Color::rgba(0.11, 0.11, 0.14, 0.96)
+        patcher_tooltip_bg,
+        PATCHER_TOOLTIP_BG,
+        Color::from_hex(0x17, 0x18, 0x1b)
     ),
     (
-        patcher_autocomplete_border,
-        PATCHER_AUTOCOMPLETE_BORDER,
-        Color::from_hex(0x40, 0x40, 0x4a)
+        patcher_tooltip_border,
+        PATCHER_TOOLTIP_BORDER,
+        Color::from_hex(0x2e, 0x30, 0x36)
     ),
     (
-        patcher_autocomplete_selected_bg,
-        PATCHER_AUTOCOMPLETE_SELECTED_BG,
-        Color::rgba(0.22, 0.39, 0.68, 0.72)
+        patcher_tooltip_text,
+        PATCHER_TOOLTIP_TEXT,
+        Color::from_hex(0xd2, 0xd6, 0xdf)
+    ),
+    (
+        patcher_agentic_card_bg,
+        PATCHER_AGENTIC_CARD_BG,
+        Color::rgba(0.098, 0.100, 0.114, 0.975)
+    ),
+    (
+        patcher_agentic_card_border,
+        PATCHER_AGENTIC_CARD_BORDER,
+        Color::rgba(0.132, 0.136, 0.158, 0.975)
+    ),
+    (
+        patcher_agentic_card_border_active,
+        PATCHER_AGENTIC_CARD_BORDER_ACTIVE,
+        Color::rgba(0.188, 0.194, 0.226, 0.975)
+    ),
+    (
+        patcher_agentic_card_error_bg,
+        PATCHER_AGENTIC_CARD_ERROR_BG,
+        Color::rgba(0.135, 0.088, 0.092, 0.975)
+    ),
+    (
+        patcher_agentic_box_bg,
+        PATCHER_AGENTIC_BOX_BG,
+        Color::rgba(0.052, 0.054, 0.064, 1.0)
+    ),
+    (
+        patcher_agentic_box_border,
+        PATCHER_AGENTIC_BOX_BORDER,
+        Color::rgba(0.205, 0.212, 0.248, 1.0)
+    ),
+    (
+        patcher_agentic_header_text,
+        PATCHER_AGENTIC_HEADER_TEXT,
+        Color::from_hex(0xa8, 0xac, 0xb8)
+    ),
+    (
+        patcher_agentic_body_text,
+        PATCHER_AGENTIC_BODY_TEXT,
+        Color::from_hex(0xe0, 0xe0, 0xe0)
+    ),
+    (
+        patcher_agentic_placeholder_text,
+        PATCHER_AGENTIC_PLACEHOLDER_TEXT,
+        Color::from_hex(0xa8, 0xac, 0xb8)
+    ),
+    (
+        patcher_agentic_chip_bg,
+        PATCHER_AGENTIC_CHIP_BG,
+        Color::rgba(0.658, 0.675, 0.722, 0.12)
+    ),
+    (
+        patcher_agentic_chip_border,
+        PATCHER_AGENTIC_CHIP_BORDER,
+        Color::rgba(0.658, 0.675, 0.722, 0.30)
+    ),
+    (
+        patcher_agentic_chip_text,
+        PATCHER_AGENTIC_CHIP_TEXT,
+        Color::from_hex(0xa8, 0xac, 0xb8)
+    ),
+    (
+        patcher_agentic_send_bg,
+        PATCHER_AGENTIC_SEND_BG,
+        Color::rgba(0.658, 0.675, 0.722, 0.20)
+    ),
+    (
+        patcher_agentic_send_glyph,
+        PATCHER_AGENTIC_SEND_GLYPH,
+        Color::from_hex(0xe0, 0xe0, 0xe0)
+    ),
+    (
+        patcher_agentic_spinner,
+        PATCHER_AGENTIC_SPINNER,
+        Color::from_hex(0xa8, 0xac, 0xb8)
     ),
     (
         patcher_back_button_bg,
@@ -1034,6 +1153,66 @@ mod tests {
             named_color("patcher back button hover border"),
             Some(PATCHER_BACK_BUTTON_HOVER_BORDER())
         );
+    }
+
+    /// A theme slot has to be added in two places — the `Theme` struct and the
+    /// `theme_slots!` list — and missing either makes a `themes.lisp` override
+    /// fail *silently* rather than loudly. This drives the whole override path
+    /// for the agentic bubble slots so that cannot happen unnoticed.
+    #[test]
+    fn agentic_bubble_slots_round_trip_through_a_theme_override() {
+        let restore = current();
+        let names = [
+            "patcher-agentic-card-bg",
+            "patcher-agentic-card-border",
+            "patcher-agentic-card-border-active",
+            "patcher-agentic-card-error-bg",
+            "patcher-agentic-box-bg",
+            "patcher-agentic-box-border",
+            "patcher-agentic-header-text",
+            "patcher-agentic-body-text",
+            "patcher-agentic-placeholder-text",
+            "patcher-agentic-chip-bg",
+            "patcher-agentic-chip-border",
+            "patcher-agentic-chip-text",
+            "patcher-agentic-send-bg",
+            "patcher-agentic-send-glyph",
+            "patcher-agentic-spinner",
+        ];
+        for name in names {
+            assert!(
+                named_color(name).is_some(),
+                "{name} is not a named colour — it is missing from theme_slots!"
+            );
+        }
+
+        // The kebab-case keys a theme file actually writes.
+        let overrides = Value::Map(
+            names
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::List(vec![
+                            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.25))),
+                            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.5))),
+                            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.75))),
+                        ]))),
+                    )
+                })
+                .collect(),
+        );
+        sync_from_value(&overrides);
+        for name in names {
+            let color = named_color(name).expect("slot");
+            assert!(
+                (color.r - 0.25).abs() < 1e-4
+                    && (color.g - 0.5).abs() < 1e-4
+                    && (color.b - 0.75).abs() < 1e-4,
+                "{name} did not take the override, got {color:?}"
+            );
+        }
+        set_current(restore);
     }
 
     #[test]

@@ -1,5 +1,3 @@
-(use-defmacro simp2)
-(use-defmacro gain2)
 (def value1 1.0)
 (param height @min 10.0 @max 5000.0)
 (param width @min 3.0 @max 100.0)

@@ -6,5 +6,3 @@
   (def delay1 (delay w delay_samples))
   (write-history feedback_hist delay1)
   (- delayed_w (* g w)))
-(use-defmacro simp2)
-(use-defmacro gain2)

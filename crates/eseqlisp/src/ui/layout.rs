@@ -246,7 +246,9 @@ impl<'a> LayoutEngine<'a> {
 
     pub fn layout_with_id_offset(&self, tree: &Value, widget_id_offset: u64) -> Option<LayoutNode> {
         let _layout_geometry = LayoutPassGeometryGuard::install(
-            self.effective_frame_viewport(), self.cell_w, self.cell_h,
+            self.effective_frame_viewport(),
+            self.cell_w,
+            self.cell_h,
         );
         let size = self.measure(tree, self.root_constraints(), DEFAULT_FONT_SIZE)?;
         let root_rect = self.root_rect(tree, size, 0.0, 0.0);
@@ -2257,7 +2259,10 @@ mod tests {
         )
         .expect_err("a size-affecting prop change must not be reused");
 
-        assert!(error.starts_with("size-props:"), "unexpected reason {error}");
+        assert!(
+            error.starts_with("size-props:"),
+            "unexpected reason {error}"
+        );
         assert_eq!(
             node_signature(layout.as_ref()),
             before,

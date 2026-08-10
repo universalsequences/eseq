@@ -104,9 +104,23 @@ impl Cell {
 
 // ── Completion popup ──────────────────────────────────────────────────────────
 
+/// Shared geometry for the patcher and code-editor completion overlays.
+pub const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 14.0;
+pub const AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX: f32 = 1.0;
+pub const AUTOCOMPLETE_ROW_CORNER_RADIUS_PX: f32 = 8.0;
+
+/// Cell size of the code-editor completion popup, as a fraction of the buffer's
+/// own text cell (`text_cell_*_scale`). Laying the popup out on the raw terminal
+/// grid made it read far larger than the code it completes; keeping it relative
+/// to the text cell also lets it track the editor's text zoom.
+pub const AUTOCOMPLETE_TEXT_CELL_SCALE: f32 = 0.82;
+/// Gap between the bottom of the cursor's text row and the top of the popup.
+pub const AUTOCOMPLETE_ANCHOR_GAP_PX: f32 = 3.0;
+
 #[derive(Clone, Debug)]
 pub struct CompletionEntry {
     pub label: String,
+    pub category: Option<String>,
     pub selected: bool,
 }
 

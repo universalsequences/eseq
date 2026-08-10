@@ -64,6 +64,12 @@ pub(crate) struct ParamSyncRevision {
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
     pub(crate) prev_editor_macro_action: (String, String),
+    /// Hash of the active edit-session source; the macro sidebar values
+    /// (`editor-patch-macros` / `editor-library-macros`) republish on change.
+    pub(crate) prev_editor_macro_sidebar_fingerprint: u64,
+    /// Macro view open in the patcher ("" = root), mirrored to
+    /// `SEQ.editor-open-macro` for the sidebar's selected row.
+    pub(crate) prev_editor_open_macro: String,
     pub(crate) prev_playing: bool,
     pub(crate) prev_bpm: u32,
     pub(crate) prev_playhead: u32,

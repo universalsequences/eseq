@@ -22,7 +22,9 @@
     :status_dirty_bg "#9a6700" :status_dirty_fg "#ffffff"
     :status_pos_bg "#eaeef2" :status_accent "#0c7d9d"
     :comp_selected_bg "#ddf4ff" :comp_unselected_bg "#f6f8fa"
-    :comp_fg "#1a1a2e" :comp_doc_bg "#f6f8fa"
+    :comp_border "#d0d7de" :comp_fg "#1a1a2e"
+    :comp_selected_fg "#0969da" :comp_category_fg "#57606a"
+    :comp_doc_bg "#f6f8fa" :comp_doc_border "#d0d7de"
     :comp_doc_fg "#1a1a2e" :comp_doc_title_fg "#0969da"
     :widget_focus_bg "#ddf4ff"
     :widget_label_fg "#1a1a2e"
@@ -54,7 +56,9 @@
     :status_dirty_bg "#db4b4b" :status_dirty_fg "#c0caf5"
     :status_pos_bg "#292e42" :status_accent "#7dcfff"
     :comp_selected_bg "#292e42" :comp_unselected_bg "#1f2335"
-    :comp_fg "#c0caf5" :comp_doc_bg "#1b1e2d"
+    :comp_border "#2f334d" :comp_fg "#c0caf5"
+    :comp_selected_fg "#7aa2f7" :comp_category_fg "#565f89"
+    :comp_doc_bg "#1b1e2d" :comp_doc_border "#2f334d"
     :comp_doc_fg "#c0caf5" :comp_doc_title_fg "#7aa2f7"
     :widget_focus_bg "#394b70"
     :widget_label_fg "#c0caf5"
@@ -86,7 +90,9 @@
     :status_dirty_bg "#ff6767" :status_dirty_fg "#15141b"
     :status_pos_bg "#2e2b38" :status_accent "#61ffca"
     :comp_selected_bg "#2e2b38" :comp_unselected_bg "#15141b"
-    :comp_fg "#edecee" :comp_doc_bg "#15141b"
+    :comp_border "#322f3d" :comp_fg "#edecee"
+    :comp_selected_fg "#a277ff" :comp_category_fg "#6d6a7c"
+    :comp_doc_bg "#15141b" :comp_doc_border "#322f3d"
     :comp_doc_fg "#cdccce" :comp_doc_title_fg "#a277ff"
     :widget_focus_bg "#5a4b8a"
     :widget_label_fg "#edecee"
@@ -118,7 +124,9 @@
     :status_dirty_bg "#cc4466" :status_dirty_fg "#ffffff"
     :status_pos_bg "#162640" :status_accent "#5ccfe6"
     :comp_selected_bg "#1a2e48" :comp_unselected_bg "#0e1a30"
-    :comp_fg "#c8d8f0" :comp_doc_bg "#0a1224"
+    :comp_border "#1e3252" :comp_fg "#c8d8f0"
+    :comp_selected_fg "#4a9ef5" :comp_category_fg "#6a86ab"
+    :comp_doc_bg "#0a1224" :comp_doc_border "#1e3252"
     :comp_doc_fg "#c8d8f0" :comp_doc_title_fg "#4a9ef5"
     :widget_focus_bg "#1e3a5a"
     :widget_label_fg "#c8d8f0"
@@ -248,6 +256,24 @@
       :patcher-port-output  '(1.00 0.58 0.12)
       :patcher-edit-selection '(0.00 0.48 0.95 0.35)
       :patcher-edit-cursor  '(1.00 1.00 1.00)
+      ;; Agentic bubbles (cmd+k). The card is drawn flat, so these land close
+      ;; to as authored -- but the card's own alpha is max(border, bg), so dim
+      ;; the border in RGB rather than by lowering its alpha.
+      :patcher-agentic-card-bg '(0.098 0.100 0.114 0.975)
+      :patcher-agentic-card-border '(0.132 0.136 0.158 0.975)
+      :patcher-agentic-card-border-active '(0.188 0.194 0.226 0.975)
+      :patcher-agentic-card-error-bg '(0.135 0.088 0.092 0.975)
+      :patcher-agentic-box-bg '(0.052 0.054 0.064)
+      :patcher-agentic-box-border '(0.205 0.212 0.248)
+      :patcher-agentic-header-text '(0.66 0.67 0.72)
+      :patcher-agentic-body-text '(0.88 0.88 0.89)
+      :patcher-agentic-placeholder-text '(0.66 0.67 0.72)
+      :patcher-agentic-chip-bg '(0.658 0.675 0.722 0.12)
+      :patcher-agentic-chip-border '(0.658 0.675 0.722 0.30)
+      :patcher-agentic-chip-text '(0.66 0.67 0.72)
+      :patcher-agentic-send-bg '(0.658 0.675 0.722 0.20)
+      :patcher-agentic-send-glyph '(0.88 0.88 0.89)
+      :patcher-agentic-spinner '(0.66 0.67 0.72)
       :patcher-back-button-bg '(0.14 0.14 0.15)
       :patcher-back-button-hover-bg '(0.16 0.20 0.28)
       :patcher-back-button-border '(0.36 0.36 0.39)

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "pitchless_delay_control",
+  "params": [
+    "target",
+    "fade_rate"
+  ],
+  "outputs": [
+    "out",
+    "out2",
+    "out3"
+  ]
+}

@@ -1,9 +1,12 @@
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
-use super::super::text_input::{TextInputState, cache_char_widths, text_width_from_char_cache};
+use super::super::text_input::TextInputState;
 use super::alignment::*;
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
+use super::encapsulate::{
+    BodyKey, EncapsulationPlan, EncapsulationRefusal, PlannedCable, plan_encapsulation,
+};
 use super::geometry::*;
 use super::interaction::*;
 use super::metrics::*;
@@ -14,6 +17,8 @@ use super::model::{
 use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
+use super::text::{apply_patcher_autocomplete, patcher_autocomplete_suggestions};
+use super::text_metrics::{cache_text_widths, measured_cursor_offset, measured_text_width};
 use super::writeback::{
     WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
     emit_patch_writeback_result_with_library,
@@ -28,7 +33,7 @@ use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
@@ -103,6 +108,132 @@ fn writeback_with_library_adds_import_for_used_library_macro() {
     .source;
 
     assert!(emitted.contains("(use-defmacro shape)"));
+}
+
+#[test]
+fn library_macro_used_inside_local_macro_emits_import() {
+    let library = temp_defmacro_library(
+        "nested-import",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let source = "(defmacro wrap (x)\n  (* x 1))\n\
+         (def input (in 1))\n(def out1 (wrap input))\n(out out1 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let mut state = PatcherInteractionState {
+        active_macro: Some("wrap".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    let created = allocate_created_node(&mut state, "macro:wrap", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:wrap", &created))
+        .unwrap()
+        .text = "shape".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let wrap = visible
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "wrap")
+        .expect("local macro scope");
+    assert!(
+        wrap.patch
+            .nodes
+            .iter()
+            .any(|node| node.op == "shape" && node.kind == NodeKind::MacroInstance),
+        "a library macro call staged inside a local macro must project as a macro instance"
+    );
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(use-defmacro shape)"),
+        "library macros referenced from inside a local defmacro must still be imported:\n{}",
+        generated.source
+    );
+}
+
+#[test]
+fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
+    let library = temp_defmacro_library("drop", &[("shape", "(defmacro shape (x) (* x 2))")]);
+    let source = "(def input (in 1))\n(out input 1)";
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-macro-drop-{}.lisp",
+        std::process::id()
+    ));
+    fs::write(&path, source).unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+
+    let payload = Value::Map(HashMap::from([(
+        "name".to_string(),
+        std::rc::Rc::new(std::cell::RefCell::new(Value::String("shape".to_string()))),
+    )]));
+    assert!(
+        handle_patcher_drop(&node, "sample", &payload, 40.0, 15.0).is_none(),
+        "non-macro drags must be rejected"
+    );
+
+    let output = handle_patcher_drop(&node, "dgen-macro", &payload, 40.0, 15.0)
+        .expect("macro drop should emit a writeback output");
+
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.text == "shape"),
+        "drop should stage a created node calling the macro"
+    );
+
+    let Value::Map(payload) = &output.args[0] else {
+        panic!("writeback payload should be a map");
+    };
+    assert!(
+        matches!(&*payload.get("status").unwrap().borrow(), Value::Keyword(kind) if kind == "valid"),
+        "drop writeback should be valid"
+    );
+    let Value::String(emitted) = payload.get("source").unwrap().borrow().clone() else {
+        panic!("payload source should be a string");
+    };
+    assert!(
+        emitted.contains("(use-defmacro shape)"),
+        "emitted source should import the dropped library macro:\n{emitted}"
+    );
+}
+
+#[test]
+fn navigate_patcher_view_preserves_staged_edits() {
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-navigate-{}.lisp",
+        std::process::id()
+    ));
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    allocate_created_text_node(&mut state, "root", "gain2");
+    set_patcher_interaction_state(key, state);
+
+    navigate_patcher_view_for_path(&path, Some("shape"));
+    assert_eq!(active_macro_view_for_path(&path), Some("shape".to_string()));
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.text == "gain2"),
+        "navigation must preserve staged edits"
+    );
+
+    navigate_patcher_view_for_path(&path, None);
+    assert_eq!(active_macro_view_for_path(&path), None);
 }
 
 #[test]
@@ -595,6 +726,94 @@ fn library_macro_autosave_keeps_package_macro_when_adding_library_dependency() {
 }
 
 #[test]
+fn save_macro_to_library_does_not_replay_edits_already_in_the_emitted_source() {
+    let library = temp_defmacro_library("save-emitted", &[]);
+    let path = temp_patcher_dsp_path("patcher-save-macro-emitted-source");
+    fs::write(
+        &path,
+        "(defmacro shape (x) (* x 2))\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.stable_widget_id = Some(778_899);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.nodes.insert(
+        node_edit_key("root", "created-0"),
+        PatcherNodeEdit {
+            view_key: "root".to_string(),
+            id: "created-0".to_string(),
+            origin: PatcherNodeOrigin::Created {
+                created_id: "created-0".to_string(),
+            },
+            text: "0.74".to_string(),
+            position: (40.0, 60.0),
+            width: None,
+        },
+    );
+    set_patcher_interaction_state(key, state.clone());
+
+    // What the editor session holds as `last_valid_source`: the emitted
+    // revision, pending edits already baked in.
+    let Value::Map(payload) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let payload_string = |field: &str| {
+        payload
+            .get(field)
+            .and_then(|value| match &*value.borrow() {
+                Value::String(value) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("payload is missing `{field}`"))
+    };
+    let emitted_source = payload_string("source");
+    let emitted_layout = payload_string("layout");
+    assert_eq!(
+        emitted_source.matches("0.74").count(),
+        1,
+        "emitted source should already carry the created node once:\n{emitted_source}"
+    );
+
+    let action = ActiveMacroLibraryAction {
+        macro_name: "shape".to_string(),
+        kind: MacroLibraryActionKind::SaveToLibrary,
+    };
+    let result = apply_macro_library_action_for_emitted_source(
+        &path,
+        &emitted_source,
+        Some(&emitted_layout),
+        PatcherIntent::Instrument,
+        &library,
+        &action,
+        &state,
+    )
+    .unwrap();
+
+    assert!(result.source.contains("(use-defmacro shape)"));
+    assert!(!result.source.contains("(defmacro shape"));
+    assert_eq!(
+        result.source.matches("0.74").count(),
+        1,
+        "saving to the library must not re-apply edits the emitted source already has:\n{}",
+        result.source
+    );
+    assert_eq!(
+        result.source.matches("(shape ").count(),
+        1,
+        "the macro call site must not be duplicated:\n{}",
+        result.source
+    );
+}
+
+#[test]
 fn save_local_macro_to_library_replaces_local_def_with_import() {
     let library = temp_defmacro_library("save-action", &[]);
     let path = temp_patcher_dsp_path("patcher-save-macro-to-library");
@@ -678,6 +897,80 @@ fn save_local_macro_to_library_replaces_local_def_with_import() {
         23.0
     );
     assert!(package_dir.join("manifest.json").exists());
+}
+
+#[test]
+fn save_local_macro_to_library_declares_its_library_dependencies() {
+    let library = temp_defmacro_library(
+        "save-action-deps",
+        &[("simp8", "(defmacro simp8 (x) (* x 8))")],
+    );
+    let path = temp_patcher_dsp_path("patcher-save-macro-deps");
+    fs::write(
+        &path,
+        "(use-defmacro simp8)\n(defmacro shape (x) (simp8 x))\n\
+         (def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    let state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let source = fs::read_to_string(&path).unwrap();
+    let result = emit_patch_writeback_result_with_library(
+        &source,
+        PatcherIntent::Instrument,
+        &state,
+        &library,
+    )
+    .unwrap();
+    let layout = writeback_layout_for_source(
+        &result.source,
+        PatcherIntent::Instrument,
+        &node.props,
+        &root_patch,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
+    apply_macro_library_action(
+        result.source,
+        layout,
+        &PatcherMacroLibraryAction {
+            kind: PatcherMacroLibraryActionKind::SaveToLibrary,
+            macro_name: "shape".to_string(),
+        },
+        &root_patch,
+        PatcherIntent::Instrument,
+        &node.props,
+        &library,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
+
+    let saved = fs::read_to_string(library.root().join("shape").join("macro.lisp")).unwrap();
+    assert!(
+        saved.contains("(use-defmacro simp8)"),
+        "a saved package must declare the library macros its body calls:\n{saved}"
+    );
+    // The reloaded package resolves its own dependency when materialized.
+    let reloaded = DefmacroLibrary::load(library.root()).unwrap();
+    assert_eq!(reloaded.package("shape").unwrap().imports, vec!["simp8"]);
+    let materialized = reloaded
+        .materialize_source("(use-defmacro shape)\n(def y (shape 1))")
+        .unwrap();
+    assert!(
+        materialized.source.contains("(defmacro simp8"),
+        "materializing the saved package must pull its dependency in:\n{}",
+        materialized.source
+    );
 }
 
 #[test]
@@ -830,6 +1123,63 @@ impl TextMeasurer for FixedWidthTextMeasurer {
     }
 }
 
+/// One cell-width-times-`PRIMED_GLYPH_ADVANCE_CELLS` per character, whatever
+/// the text: the geometry fixtures below are written against a uniform advance.
+#[cfg(target_os = "macos")]
+struct MonospaceTextMeasurer;
+
+/// Glyph advance, in layout cells per character, the patcher geometry fixtures
+/// are dimensioned for.
+#[cfg(target_os = "macos")]
+const PRIMED_GLYPH_ADVANCE_CELLS: f32 = 1.16;
+
+#[cfg(target_os = "macos")]
+impl TextMeasurer for MonospaceTextMeasurer {
+    fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+        text.chars().count() as f32 * PRIMED_GLYPH_ADVANCE_CELLS * 10.0
+    }
+
+    fn line_height_px(&self, _font_size: f32) -> f32 {
+        20.0
+    }
+}
+
+/// Node geometry — and the text hit test, which returns `None` outright on a
+/// miss — reads exact glyph advances out of the cache the measure pass fills.
+/// That pass never runs under test, so a fixture that computes node rects or
+/// double-clicks a node has to prime the cache itself.
+///
+/// Every node's drawn label and its editable text go in, which also pins the
+/// average advance the width estimator calibrates against, so labels not listed
+/// here come out at the same uniform advance.
+#[cfg(target_os = "macos")]
+fn prime_patcher_text_metrics(patch: &Patch) {
+    let measurer = MonospaceTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    for node in &patch.nodes {
+        let inbound = patch
+            .connections
+            .iter()
+            .filter(|connection| connection.to_node == node.id)
+            .map(|connection| connection.to_input)
+            .collect::<HashSet<_>>();
+        for text in [
+            node_display_label(node),
+            editable_node_text(node, &inbound),
+        ] {
+            cache_text_widths(text, node_font_size(node), &measure_ctx);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prime_patcher_text_metrics(_patch: &Patch) {}
+
 struct VariableWidthTextMeasurer;
 
 impl TextMeasurer for VariableWidthTextMeasurer {
@@ -891,13 +1241,94 @@ fn inner_prim(prim: &MetalPrimitive) -> &MetalPrimitive {
     crate::widget_render::innermost_primitive(prim)
 }
 
+/// Sizes, in cells, of the agentic-bubble bodies in `prims`. Bubbles share the
+/// `patcher-node` chrome shader with real nodes (so the completion morph can
+/// interpolate between them), so they are told apart by size — a bubble is far
+/// larger than any node.
+#[cfg(target_os = "macos")]
+fn agentic_bubble_body_sizes(
+    prims: &[MetalPrimitive],
+    viewport: WidgetViewport,
+) -> Vec<(f32, f32)> {
+    prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::WidgetInstance {
+                widget_type,
+                instance,
+                ..
+            } if widget_type == "patcher-node" => {
+                let width = (instance.ndc_max[0] - instance.ndc_min[0]) / 2.0 * viewport.vp_w
+                    / viewport.cell_w;
+                let height = (instance.ndc_min[1] - instance.ndc_max[1]) / 2.0 * viewport.vp_h
+                    / viewport.cell_h;
+                (width > 10.0 && height > 4.0).then_some((width, height))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Backdate every bubble past its grow-in, so tests about a bubble's settled
+/// layout or state aren't reading a frame mid-animation.
+fn settle_agentic_bubbles(state: &mut PatcherInteractionState) {
+    let settled = Instant::now() - Duration::from_secs_f32(AGENTIC_APPEAR_SECS + 0.01);
+    for bubble in state.agentic_bubbles.values_mut() {
+        bubble.created_at = settled;
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn effective_z(prim: &MetalPrimitive) -> i32 {
     crate::widget_render::effective_z_index(prim)
 }
 
+// Bootstraps a layout sidecar the way an explicit save would; opening a patch
+// no longer writes one (docs/patch-vs-code-editor-spec.md §3.5).
+fn save_layout_sidecar_for(path: &std::path::Path) {
+    let (_path, patch) = load_patch_from_props(&patcher_props_for_path(path)).unwrap();
+    sidecar::save_current_layout(path, &patch, &PatcherInteractionState::default()).unwrap();
+}
+
 #[test]
-fn missing_layout_sidecar_is_materialized_on_first_load() {
+fn editor_surface_decision_requires_authored_sidecar_and_clean_projection() {
+    let path = temp_patcher_dsp_path("patcher-surface-decision");
+    let clean_source =
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+    fs::write(&path, clean_source).unwrap();
+
+    assert!(
+        !source_opens_in_patch_editor(&path, clean_source, PatcherIntent::Instrument),
+        "no sidecar → code editor"
+    );
+
+    save_layout_sidecar_for(&path);
+    assert!(
+        source_opens_in_patch_editor(&path, clean_source, PatcherIntent::Instrument),
+        "authored sidecar + clean projection → patch editor"
+    );
+
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    json["version"] = serde_json::json!(1);
+    json.as_object_mut().unwrap().remove("authored");
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    assert!(
+        !source_opens_in_patch_editor(&path, clean_source, PatcherIntent::Instrument),
+        "pre-authored (v1) sidecars were auto-materialized on open and never count as authored"
+    );
+
+    save_layout_sidecar_for(&path);
+    let island_source = format!("{clean_source}\n(let ((x 1)) x)\n");
+    assert!(
+        !source_opens_in_patch_editor(&path, &island_source, PatcherIntent::Instrument),
+        "source that projects code islands → code editor even with an authored sidecar"
+    );
+}
+
+#[test]
+fn missing_layout_sidecar_is_not_written_on_load() {
     let path = temp_patcher_dsp_path("patcher-sidecar-materialize");
     fs::write(
         &path,
@@ -907,17 +1338,26 @@ fn missing_layout_sidecar_is_materialized_on_first_load() {
 
     let (_path, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
-    let sidecar = fs::read_to_string(&sidecar_path).expect("sidecar should be written");
-    let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+    assert!(
+        !sidecar_path.exists(),
+        "opening a patch must not write a layout sidecar; layout persists only on explicit save"
+    );
+    assert!(patch.nodes.iter().any(|node| node.id == "phase"));
 
-    assert_eq!(json["version"], 1);
+    save_layout_sidecar_for(&path);
+    let sidecar = fs::read_to_string(&sidecar_path).expect("explicit save writes the sidecar");
+    let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+    assert_eq!(json["version"], 3);
+    assert_eq!(
+        json["authored"], true,
+        "saved sidecars mark the item as patch-authored"
+    );
     assert!(
         json["root"]["nodes"]
             .as_object()
             .expect("root nodes")
             .contains_key("phase")
     );
-    assert!(patch.nodes.iter().any(|node| node.id == "phase"));
 }
 
 #[test]
@@ -928,11 +1368,17 @@ fn existing_layout_sidecar_preserves_positions_without_materializing_new_nodes()
         "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
     )
     .unwrap();
-    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     json["root"]["nodes"]["phase"] = serde_json::json!({ "x": 123.0, "y": 45.0 });
+    // Layout-vs-source reconciliation only happens on the projecting paths
+    // (pre-v3 migration, promotion, agentic edits): once a graph payload
+    // exists it is authoritative and source edits behind it are out of
+    // contract (spec §4.1b). Drop the payload so this exercises that path.
+    json["version"] = serde_json::json!(2);
+    json.as_object_mut().unwrap().remove("graph");
     fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
 
     fs::write(
@@ -969,7 +1415,7 @@ fn layout_sidecar_preserves_optional_node_widths() {
         "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
     )
     .unwrap();
-    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -1260,7 +1706,7 @@ fn macro_layout_sidecar_is_scoped_by_macro_name() {
         "(defmacro op (sig) (def shaped (* sig 0.5)) shaped)\n(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(def out1 (op phase))\n(out out1 1 @name audio)",
     )
     .unwrap();
-    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -1329,10 +1775,10 @@ fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
     fs::write(&sidecar_path, "{ not json").unwrap();
     let (_path, reparsed) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
     assert!(reparsed.nodes.iter().any(|node| node.id == "phase"));
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&sidecar_path).unwrap())
-            .is_ok(),
-        "malformed sidecar should be replaced with a valid materialized layout"
+    assert_eq!(
+        fs::read_to_string(&sidecar_path).unwrap(),
+        "{ not json",
+        "a malformed sidecar is left untouched on load; layout falls back in-memory only"
     );
 }
 
@@ -1583,9 +2029,13 @@ fn move_all_persistence_nodes(
         }
         let position = persistence_position(seed, idx, scope_bias);
         set_node_edit_position(state, view_key, node, position, node_display_label(node));
-        expectations
-            .nodes
-            .push(expected_node(view_key, &node.id, position));
+        // Regeneration canonicalizes non-symbol ids (e.g. `*#0` -> `mul-0`)
+        // into binding names; expectations follow the emitted identity.
+        expectations.nodes.push(expected_node(
+            view_key,
+            &generate::sanitize_binding(&node.id),
+            position,
+        ));
     }
 }
 
@@ -1840,33 +2290,37 @@ fn build_persistence_case(
             }
             connect_output_to_input(&mut state, "root", &literal, &phasor, 0);
             connect_output_to_input(&mut state, "root", &phasor, "tri", 1);
+            // Interaction-created ids never persist; expectations use the
+            // deterministic op-derived emitted bindings.
+            let literal = "value";
+            let phasor = "phasor-2";
             expectations
                 .nodes
-                .push(expected_node("root", "value1", literal_position));
+                .push(expected_node("root", literal, literal_position));
             expectations
                 .nodes
-                .push(expected_node("root", "phasor1", phasor_position));
+                .push(expected_node("root", phasor, phasor_position));
             expectations
                 .connections
-                .push(expected_connection("root", "value1", 0, "phasor1", 0));
+                .push(expected_connection("root", literal, 0, phasor, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "trigger", 0, "phasor1", 1));
+                .push(expected_connection("root", "trigger", 0, phasor, 1));
             expectations
                 .connections
-                .push(expected_connection("root", "phasor1", 0, "tri", 1));
+                .push(expected_connection("root", phasor, 0, "tri", 1));
             expectations
                 .source_contains
-                .push("(def value1 0.5)".to_string());
+                .push(format!("(def {literal} 0.5)"));
             expectations
                 .source_contains
-                .push("(def phasor1 (phasor value1 trigger))".to_string());
+                .push(format!("(def {phasor} (phasor {literal} trigger))"));
             expectations
                 .source_contains
-                .push("(def tri (triangle phase phasor1))".to_string());
+                .push(format!("(def tri (triangle phase {phasor}))"));
             expectations
                 .source_not_contains
-                .push("(def phasor1 (phasor 0.5".to_string());
+                .push(format!("(def {phasor} (phasor 0.5"));
         }
         2 => {
             let mul_position = persistence_position(seed, 0, 20.0);
@@ -1883,30 +2337,34 @@ fn build_persistence_case(
             connect_output_to_input(&mut state, "root", "phase", &multiply, 0);
             connect_output_to_input(&mut state, "root", &multiply, &cosine, 0);
             connect_output_to_input(&mut state, "root", &cosine, "tri", 0);
+            // Emitted bindings: "* 2" -> mul; "cos" -> cos-2 (operator names
+            // are reserved, so op-named nodes get a suffix).
+            let multiply = "mul";
+            let cosine = "cos-2";
             expectations
                 .nodes
-                .push(expected_node("root", "mul1", mul_position));
+                .push(expected_node("root", multiply, mul_position));
             expectations
                 .nodes
-                .push(expected_node("root", "cos1", cos_position));
+                .push(expected_node("root", cosine, cos_position));
             expectations
                 .connections
-                .push(expected_connection("root", "phase", 0, "mul1", 0));
+                .push(expected_connection("root", "phase", 0, multiply, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "mul1", 0, "cos1", 0));
+                .push(expected_connection("root", multiply, 0, cosine, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "cos1", 0, "tri", 0));
+                .push(expected_connection("root", cosine, 0, "tri", 0));
             expectations
                 .source_contains
-                .push("(def mul1 (* phase 2.0))".to_string());
+                .push(format!("(def {multiply} (* phase 2))"));
             expectations
                 .source_contains
-                .push("(def cos1 (cos mul1))".to_string());
+                .push(format!("(def {cosine} (cos {multiply}))"));
             expectations
                 .source_contains
-                .push("(def tri (triangle cos1 0.1))".to_string());
+                .push(format!("(def tri (triangle {cosine} 0.1))"));
         }
         3 => {
             for (idx, connection) in visible_persistence_connections(&root_patch)
@@ -1926,9 +2384,9 @@ fn build_persistence_case(
                 );
                 expectations.segments.push(expected_segment(
                     "root",
-                    &connection.from_node,
+                    &generate::sanitize_binding(&connection.from_node),
                     connection.from_output,
-                    &connection.to_node,
+                    &generate::sanitize_binding(&connection.to_node),
                     connection.to_input,
                     row,
                 ));
@@ -1965,45 +2423,40 @@ fn build_persistence_case(
             }
             connect_output_to_input(&mut state, "macro:fold", &literal, &phasor, 0);
             connect_output_to_input(&mut state, "macro:fold", &phasor, "shaped", 2);
+            // Interaction-created ids never persist (op-derived bindings).
+            let literal = "value";
+            let phasor = "phasor-2";
             expectations
                 .nodes
-                .push(expected_node("macro:fold", "value1", literal_position));
+                .push(expected_node("macro:fold", literal, literal_position));
             expectations
                 .nodes
-                .push(expected_node("macro:fold", "phasor1", phasor_position));
+                .push(expected_node("macro:fold", phasor, phasor_position));
+            expectations
+                .connections
+                .push(expected_connection("macro:fold", literal, 0, phasor, 0));
+            expectations
+                .connections
+                .push(expected_connection("macro:fold", "amt", 0, phasor, 1));
             expectations.connections.push(expected_connection(
                 "macro:fold",
-                "value1",
-                0,
-                "phasor1",
-                0,
-            ));
-            expectations.connections.push(expected_connection(
-                "macro:fold",
-                "amt",
-                0,
-                "phasor1",
-                1,
-            ));
-            expectations.connections.push(expected_connection(
-                "macro:fold",
-                "phasor1",
+                phasor,
                 0,
                 "shaped",
                 2,
             ));
             expectations
                 .source_contains
-                .push("(def value1 0.125)".to_string());
+                .push(format!("(def {literal} 0.125)"));
             expectations
                 .source_contains
-                .push("(def phasor1 (phasor value1 amt))".to_string());
+                .push(format!("(def {phasor} (phasor {literal} amt))"));
             expectations
                 .source_contains
-                .push("(def shaped (mix sig amt phasor1))".to_string());
+                .push(format!("(def shaped (mix sig amt {phasor}))"));
             expectations
                 .source_not_contains
-                .push("(def phasor1 (phasor 0.125".to_string());
+                .push(format!("(def {phasor} (phasor 0.125"));
         }
         5 => {
             let value_position = persistence_position(seed, 0, 25.0);
@@ -2019,24 +2472,27 @@ fn build_persistence_case(
                 .insert(connection_edit_key("root", &source_connection_id(old)));
             connect_output_to_input(&mut state, "root", &value, &shaper, 0);
             connect_output_to_input(&mut state, "root", &shaper, "shaped", 0);
+            // Interaction-created ids never persist (op-derived bindings).
+            let value = "value";
+            let shaper = "mix-2";
             expectations
                 .nodes
-                .push(expected_node("root", "value1", value_position));
+                .push(expected_node("root", value, value_position));
             expectations
                 .nodes
-                .push(expected_node("root", "mix1", shaper_position));
+                .push(expected_node("root", shaper, shaper_position));
             expectations
                 .connections
-                .push(expected_connection("root", "value1", 0, "mix1", 0));
+                .push(expected_connection("root", value, 0, shaper, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "phase", 0, "mix1", 1));
+                .push(expected_connection("root", "phase", 0, shaper, 1));
             expectations
                 .connections
-                .push(expected_connection("root", "mix1", 0, "shaped", 0));
+                .push(expected_connection("root", shaper, 0, "shaped", 0));
             expectations
                 .source_contains
-                .push("(def mix1 (mix value1 phase 0.25))".to_string());
+                .push(format!("(def {shaper} (mix {value} phase 0.25))"));
         }
         6 => {
             let rate = root_patch
@@ -2101,9 +2557,9 @@ fn build_persistence_case(
             );
             expectations.segments.push(expected_segment(
                 "root",
-                &connection.from_node,
+                &generate::sanitize_binding(&connection.from_node),
                 connection.from_output,
-                &connection.to_node,
+                &generate::sanitize_binding(&connection.to_node),
                 connection.to_input,
                 row,
             ));
@@ -2390,7 +2846,7 @@ fn node_size_uses_cached_proportional_character_widths() {
         cell_h: 20.0,
         inherited_font_size: NODE_FONT_SIZE,
     };
-    cache_char_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
+    cache_text_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
 
     let node = PatchNode {
         id: "wide-narrow".to_string(),
@@ -2403,6 +2859,7 @@ fn node_size_uses_cached_proportional_character_widths() {
         width: None,
         param: None,
         inline_inputs: Vec::new(),
+        synthesized: false,
         diagnostic: None,
         source: None,
     };
@@ -2436,6 +2893,86 @@ fn agentic_bubble_cmd_k_creates_ephemeral_prompt_without_source_write() {
     let state = get_patcher_interaction_state(patcher_state_key(&node));
     assert_eq!(state.agentic_bubbles.len(), 1);
     assert!(editing_agentic_bubble_id(&state).is_some());
+}
+
+#[test]
+fn escape_dismisses_agentic_bubble_through_a_shrink_out_before_dropping_it() {
+    let path = temp_patcher_source_path("agentic-bubble-escape-close");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "an answer".to_string(),
+        answered_at: Instant::now(),
+    };
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect(
+        "the bubble outlives Escape so it can shrink out; dropping it here would make it vanish",
+    );
+    assert!(bubble.is_dismissed());
+    assert!(
+        !bubble.close_finished(),
+        "the shrink-out has only just started"
+    );
+    assert!(
+        PATCHER_WIDGET.wants_animation_frames(&node),
+        "a dismissed bubble keeps frames coming until it has shrunk away"
+    );
+    assert!(
+        !patcher_has_text_edit(&node),
+        "a dismissed bubble must release text capture immediately, not when it finishes animating"
+    );
+
+    // The shrink-out has played out, but the frame that draws the bubble *gone*
+    // has not landed yet. Both the bubble and its claim on animation frames
+    // have to outlive that gap: a widget's cached primitive run is only
+    // refreshed while it animates, so pruning here would strand the last
+    // shrinking frame on screen as a ghost until an unrelated event marked the
+    // patcher dirty.
+    let backdate = |ago: f32| {
+        let mut state = get_patcher_interaction_state(key);
+        if let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id) {
+            bubble.closing_at = Some(Instant::now() - Duration::from_secs_f32(ago));
+        }
+        set_patcher_interaction_state(key, state);
+    };
+
+    backdate(AGENTIC_CLOSE_SECS + 0.01);
+    assert!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .contains_key(&bubble_id),
+        "a bubble outlives the end of its shrink-out until the erase frame lands"
+    );
+    assert!(
+        PATCHER_WIDGET.wants_animation_frames(&node),
+        "frames must keep coming past the shrink-out so the bubble is drawn gone"
+    );
+
+    // Settled: the erase frame has had time to render, so it can go.
+    backdate(AGENTIC_CLOSE_SECS + AGENTIC_ANIMATION_SETTLE_SECS + 0.01);
+    assert!(
+        !get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .contains_key(&bubble_id),
+        "a settled shrink-out is pruned on the next state write"
+    );
+    assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
 }
 
 #[test]
@@ -2516,6 +3053,210 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
     assert!(matches!(bubble.state, AgenticBubbleState::Pending { .. }));
 }
 
+/// Clicking the send chevron submits exactly as Enter does. The chevron's hit
+/// rect is recorded by the render pass, so the bubble has to be drawn first.
+#[cfg(target_os = "macos")]
+#[test]
+fn clicking_the_agentic_send_chevron_submits_the_prompt() {
+    let path = temp_patcher_source_path("agentic-bubble-send-click");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    settle_agentic_bubbles(&mut state);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .prompt = "warm folded sine".to_string();
+    set_patcher_interaction_state(key, state);
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        "warm folded sine".to_string(),
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let _ = build_metal_primitives_for_patcher(&node, viewport);
+
+    let button = super::state::agentic_buttons_for_test()
+        .into_iter()
+        .find(|button| button.bubble_id == bubble_id)
+        .expect("render records a send chevron for an editable prompt");
+    let (col, row, width, height) = button.rect;
+
+    let click = |col: f32, row: f32| -> Option<WidgetEvent> {
+        match PATCHER_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            row,
+            None,
+            None,
+            KeyModifiers::NONE,
+            10.0,
+            20.0,
+        ) {
+            MouseEventOutcome::Dispatch(event) => Some(event),
+            _ => None,
+        }
+    };
+
+    // A click just outside the disc is the canvas's, not the button's.
+    assert!(
+        click(col - 4.0, row + height * 0.5).is_none(),
+        "a click away from the chevron must fall through to the patcher"
+    );
+    assert!(matches!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .get(&bubble_id)
+            .expect("bubble")
+            .state,
+        AgenticBubbleState::Editing
+    ));
+
+    let event = click(col + width * 0.5, row + height * 0.5)
+        .expect("clicking the chevron dispatches a submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("status").expect("status").borrow(),
+        Value::Keyword(status) if status == "agentic-submit"
+    ));
+    assert!(matches!(
+        &*map.get("prompt").expect("prompt").borrow(),
+        Value::String(prompt) if prompt == "warm folded sine"
+    ));
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(
+        matches!(bubble.state, AgenticBubbleState::Pending { .. }),
+        "the clicked bubble goes pending just as Enter would leave it"
+    );
+}
+
+/// The header's model chip names the model the bubble will run on, and clicking
+/// it asks the host to open `M-x choose-model`. The picker itself is the host's
+/// — the patcher only raises the request.
+#[cfg(target_os = "macos")]
+#[test]
+fn clicking_the_agentic_model_chip_asks_the_host_for_the_picker() {
+    let path = temp_patcher_source_path("agentic-bubble-model-chip");
+    fs::write(&path, "(out 0)").expect("write source");
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "agent-model".to_string(),
+        Value::String("claude-opus-5".to_string()),
+    );
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    settle_agentic_bubbles(&mut state);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    set_patcher_interaction_state(key, state);
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        "what do you want to build?".to_string(),
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let _ = build_metal_primitives_for_patcher(&node, viewport);
+
+    let chip = super::state::agentic_buttons_for_test()
+        .into_iter()
+        .find(|button| {
+            button.bubble_id == bubble_id
+                && button.kind == super::state::AgenticButtonKind::ChooseModel
+        })
+        .expect("an editable bubble with a model prop draws a model chip");
+    let (col, row, width, height) = chip.rect;
+
+    let outcome = PATCHER_WIDGET.mouse_event(
+        &node,
+        MouseEventKind::Down(MouseButton::Left),
+        col + width * 0.5,
+        row + height * 0.5,
+        None,
+        None,
+        KeyModifiers::NONE,
+        10.0,
+        20.0,
+    );
+    let MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Map(map))) = outcome else {
+        panic!("clicking the model chip should dispatch a custom event");
+    };
+    // The host reads this with `(get event :status)`, which looks the keyword up
+    // as a plain string key — so the key must be "status", not ":status".
+    assert!(
+        matches!(
+            &*map.get("status").expect("status key").borrow(),
+            Value::Keyword(status) if status == super::AGENTIC_CHOOSE_MODEL_STATUS
+        ),
+        "the chip raises the choose-model request the host branches on"
+    );
+    // Asking for the picker must not disturb the prompt being typed.
+    assert!(matches!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .get(&bubble_id)
+            .expect("bubble")
+            .state,
+        AgenticBubbleState::Editing
+    ));
+}
+
 #[test]
 fn pending_agentic_bubble_requests_animation_frames() {
     let path = temp_patcher_source_path("agentic-bubble-animation");
@@ -2530,6 +3271,7 @@ fn pending_agentic_bubble_requests_animation_frames() {
     bubble.state = AgenticBubbleState::Pending {
         started_at: Instant::now(),
     };
+    settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
     assert!(PATCHER_WIDGET.wants_animation_frames(&node));
@@ -2544,6 +3286,30 @@ fn pending_agentic_bubble_requests_animation_frames() {
     set_patcher_interaction_state(key, state);
 
     assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
+}
+
+#[test]
+fn freshly_opened_agentic_bubble_requests_animation_frames_for_its_grow_in() {
+    let path = temp_patcher_source_path("agentic-bubble-appear-animation");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    set_patcher_interaction_state(key, state);
+    assert!(
+        PATCHER_WIDGET.wants_animation_frames(&node),
+        "a just-opened bubble animates even though it is only Editing"
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+    assert!(
+        !PATCHER_WIDGET.wants_animation_frames(&node),
+        "an idle Editing bubble stops requesting frames once it has grown in"
+    );
 }
 
 #[test]
@@ -2699,6 +3465,64 @@ fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
     );
 }
 
+/// A library macro is imported, not defined in the patch, so scanning the
+/// file's text for its `defmacro` finds nothing. That miss used to read as "no
+/// macro is selected", silently downgrading Cmd+K into the create-a-new-macro
+/// flow instead of asking about the macro under the cursor.
+#[test]
+fn cmd_k_on_a_library_macro_targets_that_macro_rather_than_creating_a_new_one() {
+    let Some(root) = crate::defmacro_library::default_library_root() else {
+        panic!("the shared defmacro library should be present in the repo");
+    };
+    let library = crate::defmacro_library::DefmacroLibrary::load(&root).expect("load library");
+    let Some(package) = library.packages().values().next().cloned() else {
+        panic!("the shared defmacro library should contain at least one macro");
+    };
+    let args = package
+        .params
+        .iter()
+        .map(|_| "0".to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let path = temp_patcher_source_path("agentic-bubble-library-macro");
+    fs::write(
+        &path,
+        format!(
+            "(use-defmacro {})\n(def voiced ({} {}))\n(out voiced)",
+            package.name, package.name, args
+        ),
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("voiced".to_string());
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.values().next().expect("bubble");
+    match &bubble.target {
+        AgenticBubbleTarget::EditMacro {
+            macro_name, source, ..
+        } => {
+            assert_eq!(macro_name, &package.name);
+            assert!(
+                source.contains(&format!("(defmacro {}", package.name)),
+                "the bubble must carry the library macro's source, got {source:?}"
+            );
+        }
+        other => panic!("cmd+k on a library macro must target it, got {other:?}"),
+    }
+}
+
 #[test]
 fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
     let path = temp_patcher_source_path("agentic-bubble-edit-target");
@@ -2735,8 +3559,151 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
             assert_eq!(params, &vec!["sig".to_string(), "amt".to_string()]);
             assert!(source.contains("(defmacro smooth"));
         }
-        AgenticBubbleTarget::CreateMacro => panic!("expected edit target"),
+        other => panic!("expected edit target, got {other:?}"),
     }
+}
+
+/// A bubble opened on a selected macro is scoped to it, so it says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
+    let path = temp_patcher_source_path("agentic-bubble-bound-label");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("shaped".to_string());
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let mut state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.values().next().expect("edit bubble");
+    assert_eq!(bubble.bound_macro_name(), Some("smooth"));
+    assert!(
+        bubble.prompt_text().contains("macro"),
+        "a bound bubble's placeholder says what it is for, got {:?}",
+        bubble.prompt_text()
+    );
+    let measurer = VariableWidthTextMeasurer;
+    cache_agentic_bubble_text_widths(
+        bubble,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    assert!(
+        prims.iter().any(|prim| matches!(
+            inner_prim(prim),
+            MetalPrimitive::ProportionalText(text)
+                if text.text.contains("smooth") && text.h_align > 0.5
+        )),
+        "a macro-bound bubble names the macro on its header line"
+    );
+}
+
+/// A settled answer carries a follow-up composer under its body, below the last
+/// answer line, so the conversation reads as still open.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_answer_renders_a_follow_up_composer_below_its_body() {
+    let path = temp_patcher_source_path("agentic-bubble-follow-up-render");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "It crossfades toward amt.".to_string(),
+        answered_at: Instant::now() - Duration::from_secs_f32(AGENTIC_ANSWER_RESIZE_SECS + 0.01),
+    };
+    let measurer = VariableWidthTextMeasurer;
+    cache_agentic_bubble_text_widths(
+        bubble,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    let row_of = |needle: &str| {
+        prims
+            .iter()
+            .find_map(|prim| match inner_prim(prim) {
+                MetalPrimitive::ProportionalText(text) if text.text.contains(needle) => {
+                    Some(text.row)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected text containing {needle:?}"))
+    };
+    assert!(
+        row_of("Send a follow-up") > row_of("crossfades"),
+        "the follow-up composer sits below the answer body"
+    );
 }
 
 #[test]
@@ -2846,6 +3813,135 @@ fn agentic_bubble_answer_resolution_keeps_source_unchanged() {
     );
 }
 
+/// Typing at a settled answer composes a follow-up, and Enter sends it as the
+/// next turn of the same conversation: the answered exchange rides along as
+/// history so the agent is not asked the question cold.
+#[test]
+fn agentic_bubble_follow_up_submits_with_prior_turn_as_history() {
+    let path = temp_patcher_source_path("agentic-bubble-follow-up");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (1.0, 1.0),
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id: "shaped".to_string(),
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+        },
+    );
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.prompt = "what does it do?".to_string();
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+    resolve_agentic_bubble_answer(&path, &bubble_id, 1, "It crossfades toward amt.");
+
+    for ch in "why?".chars() {
+        PATCHER_WIDGET.key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+    }
+    let typed = get_patcher_interaction_state(key);
+    let typed = typed.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert_eq!(typed.follow_up, "why?");
+    assert!(
+        matches!(&typed.state, AgenticBubbleState::Answer { text, .. } if text.contains("crossfades")),
+        "the answer stays on screen while the follow-up is composed"
+    );
+
+    let event = PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .expect("submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("prompt").expect("prompt").borrow(),
+        Value::String(prompt) if prompt == "why?"
+    ));
+    let Value::List(history) = &*map.get("history").expect("history").borrow() else {
+        panic!("history should be a list");
+    };
+    let history: Vec<String> = history
+        .iter()
+        .map(|item| match &*item.borrow() {
+            Value::String(text) => text.clone(),
+            other => panic!("history entries should be strings, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        history,
+        vec![
+            "what does it do?".to_string(),
+            "It crossfades toward amt.".to_string()
+        ]
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(matches!(bubble.state, AgenticBubbleState::Pending { .. }));
+    assert_eq!(bubble.generation, 2);
+    assert!(
+        bubble.follow_up.is_empty(),
+        "the composer clears once its follow-up is sent"
+    );
+}
+
+/// Command chords keep working with an answer on screen, so the follow-up box
+/// cannot swallow the patcher's own shortcuts.
+#[test]
+fn agentic_bubble_follow_up_leaves_command_chords_to_the_patcher() {
+    let path = temp_patcher_source_path("agentic-bubble-follow-up-chords");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (1.0, 1.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "an answer".to_string(),
+        answered_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(
+        bubble.follow_up.is_empty(),
+        "cmd+c must not type into the follow-up box"
+    );
+}
+
 #[test]
 fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
     let path = temp_patcher_source_path("agentic-bubble-edit-resolve");
@@ -2890,6 +3986,253 @@ fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
     let state = get_patcher_interaction_state(key);
     assert!(!state.agentic_bubbles.contains_key(&bubble_id));
     assert!(state.agentic_morph_nodes.contains_key("shaped"));
+}
+
+/// A freshly opened bubble grows into its box: it scales up, fades in, squares
+/// off, and holds its prompt text back until the box has formed.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_grows_into_its_box_on_open() {
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let rect = Rect {
+        col: 5.0,
+        row: 8.0,
+        width: 18.0,
+        height: 5.8,
+    };
+    let fill = crate::backend::Color::rgba(0.1, 0.15, 0.2, 0.94);
+    let border = crate::backend::Color::rgba(0.3, 0.8, 0.9, 1.0);
+    let appear_at = |ago: Duration| {
+        agentic_appear_chrome(Instant::now() - ago, rect, fill, border, viewport, 1.0)
+    };
+
+    let (grown, corner, faded, _, text_visible) =
+        appear_at(Duration::ZERO).expect("grow-in in flight at t=0");
+    assert!(
+        grown.width < rect.width && grown.height < rect.height,
+        "grow-in starts smaller than the settled box, got {grown:?}"
+    );
+    assert!(
+        (grown.col + grown.width * 0.5 - (rect.col + rect.width * 0.5)).abs() < 1e-3,
+        "grow-in scales about the box's centre"
+    );
+    assert!(
+        corner > SQUARE_CORNER_RADIUS * 10.0,
+        "grow-in starts rounded before squaring off, got {corner}"
+    );
+    assert!(faded.a < fill.a, "grow-in fades in, got alpha {}", faded.a);
+    assert!(
+        !text_visible,
+        "prompt text is held back while the box forms"
+    );
+
+    let (grown, corner, faded, _, text_visible) =
+        appear_at(Duration::from_secs_f32(AGENTIC_APPEAR_SECS * 0.9))
+            .expect("grow-in still in flight near the end");
+    assert!(
+        (grown.width - rect.width).abs() < 0.5,
+        "grow-in lands on the settled box, got {grown:?}"
+    );
+    let resting = agentic_card_corner_radius(rect, viewport, 1.0);
+    assert!(
+        (corner - resting).abs() < 0.02,
+        "grow-in settles on the card's resting radius {resting}, got {corner}"
+    );
+    assert!((faded.a - fill.a).abs() < 1e-3, "fade completes early");
+    assert!(text_visible, "prompt text is shown once the box has formed");
+
+    assert!(
+        appear_at(Duration::from_secs_f32(AGENTIC_APPEAR_SECS + 0.01)).is_none(),
+        "a settled bubble draws with no grow-in adjustment"
+    );
+}
+
+/// Escape plays the grow-in backwards: the box shrinks, fades, and re-rounds,
+/// and its text goes at once so it never overflows the shrinking box.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_shrinks_out_when_dismissed() {
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let rect = Rect {
+        col: 5.0,
+        row: 8.0,
+        width: 18.0,
+        height: 5.8,
+    };
+    let fill = crate::backend::Color::rgba(0.1, 0.15, 0.2, 0.94);
+    let border = crate::backend::Color::rgba(0.3, 0.8, 0.9, 1.0);
+    let close_at = |ago: Duration| {
+        agentic_close_chrome(Instant::now() - ago, rect, fill, border, viewport, 1.0)
+    };
+
+    let (start, _, start_fill, _, text_visible) =
+        close_at(Duration::ZERO).expect("shrink-out in flight at t=0");
+    assert!(
+        (start.width - rect.width).abs() < 0.2,
+        "shrink-out starts at the settled box, got {start:?}"
+    );
+    assert!(
+        (start_fill.a - fill.a).abs() < 1e-3,
+        "shrink-out starts fully opaque"
+    );
+    assert!(!text_visible, "text goes as soon as the box starts closing");
+
+    let (late, corner, late_fill, _, _) =
+        close_at(Duration::from_secs_f32(AGENTIC_CLOSE_SECS * 0.9))
+            .expect("shrink-out still in flight near the end");
+    assert!(
+        late.width < start.width && late.height < start.height,
+        "shrink-out shrinks the box, got {late:?}"
+    );
+    assert!(
+        (late.col + late.width * 0.5 - (rect.col + rect.width * 0.5)).abs() < 1e-3,
+        "shrink-out collapses toward the box's centre"
+    );
+    assert!(
+        corner > SQUARE_CORNER_RADIUS * 10.0,
+        "shrink-out re-rounds on the way out, got {corner}"
+    );
+    assert!(
+        late_fill.a < start_fill.a,
+        "shrink-out fades as it collapses"
+    );
+
+    assert!(
+        close_at(Duration::from_secs_f32(AGENTIC_CLOSE_SECS + 0.01)).is_none(),
+        "a finished shrink-out draws nothing"
+    );
+}
+
+/// The completion morph eases the node's chrome out of the bubble's square box
+/// and into its own rounded chrome, then hands off to the resting node.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_completion_morph_interpolates_bubble_box_into_node_chrome() {
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let origin = (1.0, 2.0);
+    let zoom = 1.0;
+    let node_rect = Rect {
+        col: 21.0,
+        row: 12.0,
+        width: 5.8,
+        height: 1.58,
+    };
+    let bg = theme::PATCHER_NODE_BG();
+    let border = theme::PATCHER_NODE_BORDER();
+    let pose = AgenticBubblePose {
+        model_rect: (4.0, 6.0, 18.0, 5.8),
+        fill: [0.1, 0.15, 0.2, 0.94],
+        border: [0.3, 0.8, 0.9, 1.0],
+    };
+    let morph_at = |ago: Duration| AgenticMorph {
+        started_at: Instant::now() - ago,
+        from: Some(pose),
+    };
+
+    let (rect, corner, fill, _, flatness) = agentic_morph_chrome(
+        &morph_at(Duration::ZERO),
+        node_rect,
+        bg,
+        border,
+        viewport,
+        origin,
+        zoom,
+    )
+    .expect("morph in flight at t=0");
+    assert!(
+        (rect.col - 5.0).abs() < 0.2 && (rect.width - 18.0).abs() < 0.2,
+        "morph starts at the bubble's rect, got {rect:?}"
+    );
+    let bubble_resting = agentic_card_corner_radius(rect, viewport, zoom);
+    assert!(
+        (corner - bubble_resting).abs() < 1e-3,
+        "morph starts at the card's resting radius {bubble_resting}, got {corner}"
+    );
+    assert!(
+        (fill.r - pose.fill[0]).abs() < 0.02,
+        "morph starts at the bubble's fill"
+    );
+    assert!(
+        (flatness - AGENTIC_CARD_FLATNESS).abs() < 1e-3,
+        "morph starts as flat as the card it came from, got {flatness}"
+    );
+
+    let (rect, corner, fill, _, landed_flatness) = agentic_morph_chrome(
+        &morph_at(Duration::from_secs_f32(AGENTIC_MORPH_SHAPE_SECS)),
+        node_rect,
+        bg,
+        border,
+        viewport,
+        origin,
+        zoom,
+    )
+    .expect("morph still in flight while the border settles");
+    assert!(
+        (rect.col - node_rect.col).abs() < 0.1 && (rect.width - node_rect.width).abs() < 0.1,
+        "shape lands on the node's rect, got {rect:?}"
+    );
+    assert!(
+        corner > bubble_resting * 1.5,
+        "shape opens up past the card's radius {bubble_resting} into the node's, got {corner}"
+    );
+    assert!(
+        (fill.r - bg.r).abs() < 0.01,
+        "colour lands on the node's background"
+    );
+    assert!(
+        (landed_flatness - NODE_CHROME_FLATNESS).abs() < 1e-3,
+        "the node's bevel has fully arrived by the end of the shape window, got {landed_flatness}"
+    );
+
+    assert!(
+        agentic_morph_chrome(
+            &morph_at(Duration::from_secs_f32(AGENTIC_MORPH_COLOR_SECS + 0.01)),
+            node_rect,
+            bg,
+            border,
+            viewport,
+            origin,
+            zoom,
+        )
+        .is_none(),
+        "a finished morph hands off to the resting node chrome"
+    );
 }
 
 #[test]
@@ -2956,7 +4299,7 @@ fn agentic_bubble_macro_edit_rematerializes_edited_macro_layout_scope() {
         "(defmacro smooth (sig amt) (def shaped (mix sig amt 0.5)) shaped)\n(def input (in 1))\n(def out1 (smooth input 0.25))\n(out out1)",
     )
     .expect("write source");
-    load_patch_from_props(&patcher_props_for_path(&path)).expect("materialize sidecar");
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("read sidecar"))
@@ -3156,6 +4499,7 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         },
     );
     set_patcher_interaction_state(patcher_state_key(&node), state);
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let original_sidecar: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -3168,10 +4512,24 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         Some(Value::String(layout)) => layout,
         other => panic!("expected emitted layout string, got {other:?}"),
     };
+    // Interaction-created ids never persist as bindings (they would collide
+    // with the next session's `created-N` counter); the layout keys the node
+    // by its emitted op-derived binding, carrying the created position.
     assert!(
         !layout.contains(&created),
-        "emitted layout should be reconciled to emitted source ids"
+        "interaction-created id must not leak into the emitted layout: {layout}"
     );
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    let emitted_id = layout_json["root"]["nodes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, position)| {
+            (position["x"].as_f64().unwrap_or(f64::NAN) - 222.0).abs() < 0.0001
+                && (position["y"].as_f64().unwrap_or(f64::NAN) - 33.0).abs() < 0.0001
+        })
+        .map(|(id, _)| id.clone())
+        .expect("emitted layout should carry the created node position under its new binding");
 
     let installed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -3194,7 +4552,7 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         reloaded
             .nodes
             .iter()
-            .any(|patch_node| patch_node.id == "mul1"),
+            .any(|patch_node| patch_node.id == emitted_id),
         "saved source and sidecar should reload with emitted ids"
     );
 }
@@ -3332,12 +4690,19 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
         Some(Value::String(layout)) => layout,
         other => panic!("expected emitted layout string, got {other:?}"),
     };
+    // Interaction-created ids never persist; the multiply is emitted under
+    // its deterministic op-derived binding.
+    let emitted_multiply = "mul";
     assert!(
-        source.contains("(def mul1 (* phase 3.0))"),
+        source.contains(&format!("(def {emitted_multiply} (* phase 3))")),
         "created multiply should be materialized before final save:\n{source}"
     );
+    assert!(
+        !source.contains(&multiply),
+        "interaction-created id must not leak into generated source:\n{source}"
+    );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
-    let mul_layout = &layout_json["root"]["nodes"]["mul1"];
+    let mul_layout = &layout_json["root"]["nodes"][emitted_multiply];
     assert!(
         (mul_layout["x"].as_f64().unwrap() - placed_position.0 as f64).abs() < 0.0001
             && (mul_layout["y"].as_f64().unwrap() - placed_position.1 as f64).abs() < 0.0001,
@@ -3353,7 +4718,7 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
     let mul = reloaded
         .nodes
         .iter()
-        .find(|patch_node| patch_node.id == "mul1")
+        .find(|patch_node| patch_node.id == emitted_multiply)
         .expect("finalized patch should reload generated multiply node");
     assert_eq!(mul.position, placed_position);
 }
@@ -3517,26 +4882,47 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         Some(Value::String(layout)) => layout,
         other => panic!("expected emitted layout string, got {other:?}"),
     };
+    // Interaction-created ids never persist; the chain is emitted under
+    // deterministic op-derived bindings ("mul", "cos-2" — "cos" itself is a
+    // reserved operator name).
+    let emitted_multiply = "mul";
+    let emitted_cosine = "cos-2";
     assert!(
-        source.contains("(def mul1 (* phase 1.0))")
-            && source.contains("(def cos1 (cos mul1)")
-            && source.contains("(* cos1 env velocity"),
+        source.contains(&format!("(def {emitted_multiply} (* phase 1))"))
+            && source.contains(&format!("(def {emitted_cosine} (cos {emitted_multiply})"))
+            && source.contains(&format!("(* {emitted_cosine} env velocity")),
         "created replacement chain should be materialized before save:\n{source}"
+    );
+    assert!(
+        !source.contains(&multiply) && !source.contains(&cosine),
+        "interaction-created ids must not leak into generated source:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
     assert!(
-        (layout_json["root"]["nodes"]["mul1"]["x"].as_f64().unwrap() - mul_position.0 as f64).abs()
+        (layout_json["root"]["nodes"][emitted_multiply]["x"]
+            .as_f64()
+            .unwrap()
+            - mul_position.0 as f64)
+            .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["mul1"]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][emitted_multiply]["y"]
+                .as_f64()
+                .unwrap()
                 - mul_position.1 as f64)
                 .abs()
                 < 0.0001,
         "emitted layout should keep created multiply position: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"]["cos1"]["x"].as_f64().unwrap() - cos_position.0 as f64).abs()
+        (layout_json["root"]["nodes"][emitted_cosine]["x"]
+            .as_f64()
+            .unwrap()
+            - cos_position.0 as f64)
+            .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["cos1"]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][emitted_cosine]["y"]
+                .as_f64()
+                .unwrap()
                 - cos_position.1 as f64)
                 .abs()
                 < 0.0001,
@@ -3551,7 +4937,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         reloaded
             .nodes
             .iter()
-            .find(|patch_node| patch_node.id == "mul1")
+            .find(|patch_node| patch_node.id == emitted_multiply)
             .unwrap()
             .position,
         mul_position
@@ -3560,7 +4946,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         reloaded
             .nodes
             .iter()
-            .find(|patch_node| patch_node.id == "cos1")
+            .find(|patch_node| patch_node.id == emitted_cosine)
             .unwrap()
             .position,
         cos_position
@@ -3615,9 +5001,16 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
         other => panic!("expected emitted layout string, got {other:?}"),
     };
 
+    // Interaction-created ids never persist as bindings; the constant gets a
+    // deterministic op-derived name ("value") and the phasor an op-derived
+    // name that never shadows the operator itself.
     assert!(
-        source.contains("(def value1 0.3)") && source.contains("(def phasor1 (phasor value1))"),
+        source.contains("(def value 0.3)") && source.contains("(def phasor-2 (phasor value))"),
         "created literal should materialize as a named constant feeding phasor:\n{source}"
+    );
+    assert!(
+        !source.contains(&literal) && !source.contains(&phasor),
+        "interaction-created ids must not leak into generated source:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
     assert!(
@@ -3625,19 +5018,23 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
         "layout should not use literal text as the saved node id: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"]["value1"]["x"]
-            .as_f64()
-            .unwrap()
-            - literal_position.0 as f64)
+        (layout_json["root"]["nodes"]["value"]["x"].as_f64().unwrap() - literal_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["value1"]["y"]
-                .as_f64()
-                .unwrap()
+            && (layout_json["root"]["nodes"]["value"]["y"].as_f64().unwrap()
                 - literal_position.1 as f64)
                 .abs()
                 < 0.0001,
-        "layout should keep the visible constant position under value1: {layout}"
+        "layout should keep the visible constant position under the emitted binding: {layout}"
+    );
+    assert!(
+        (layout_json["root"]["nodes"]["phasor-2"]["x"]
+            .as_f64()
+            .unwrap()
+            - phasor_position.0 as f64)
+            .abs()
+            < 0.0001,
+        "layout should keep the created phasor position under the emitted binding: {layout}"
     );
 }
 
@@ -5206,6 +6603,7 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         width: None,
         param: None,
         inline_inputs: Vec::new(),
+        synthesized: false,
         diagnostic: None,
         source: None,
     });
@@ -10108,6 +11506,338 @@ fn port_tooltips_use_macro_parameter_and_output_names() {
     );
 }
 
+fn inline_arg_tooltip_patch_source() -> &'static str {
+    "(defmacro fm-operator (carrier modulator index) (+ carrier (* modulator index)))\n\
+     (def pitch (in 1 @name pitch))\n\
+     (def fm1 (fm-operator pitch (phasor 2) 1.0))\n\
+     (def fm2 (fm-operator pitch 0.5 1.0))\n\
+     (out fm1 1)"
+}
+
+#[test]
+fn label_arg_spans_track_argument_indices_not_token_order() {
+    let mut patch = parse(inline_arg_tooltip_patch_source());
+
+    // A connected argument still draws a `?`, so both of fm1's displayed
+    // arguments are spanned and here token order happens to match arg order.
+    let fm1 = patch.nodes.iter().find(|node| node.id == "fm1").unwrap();
+    assert_eq!(node_display_label(fm1), "fm-operator ? 1");
+    assert_eq!(
+        node_display_label_arg_spans(fm1),
+        vec![(1, 12..13), (2, 14..15)]
+    );
+
+    // An argument the projector could not represent renders nothing at all, so
+    // the label's first token is the node's *third* argument.
+    let fm2 = patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "fm2")
+        .unwrap();
+    fm2.args[1] = ArgValue::Literal("<expr>".to_string());
+    let label = node_display_label(fm2);
+    let spans = node_display_label_arg_spans(fm2);
+    assert_eq!(label, "fm-operator 1");
+    assert_eq!(spans, vec![(2, 12..13)]);
+    let (_, span) = spans[0].clone();
+    assert_eq!(
+        label
+            .chars()
+            .skip(span.start)
+            .take(span.len())
+            .collect::<String>(),
+        "1",
+        "the span must select the token the label actually drew"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn cache_inline_arg_label_widths(patch: &Patch, node_id: &str) -> String {
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    let node = patch.nodes.iter().find(|node| node.id == node_id).unwrap();
+    let label = node_display_label(node);
+    cache_text_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
+    label
+}
+
+/// Center of the `arg_index` token of `label`, in the same coordinates the
+/// renderer draws it at.
+#[cfg(target_os = "macos")]
+fn label_arg_center_col(
+    label: &str,
+    spans: &[(usize, std::ops::Range<usize>)],
+    arg_index: usize,
+    node_rect: Rect,
+    zoom: f32,
+) -> f32 {
+    let (_, span) = spans.iter().find(|(idx, _)| *idx == arg_index).unwrap();
+    let start = measured_cursor_offset(label, NODE_FONT_SIZE, span.start).unwrap();
+    let end = measured_cursor_offset(label, NODE_FONT_SIZE, span.end).unwrap();
+    node_rect.col + NODE_TEXT_COL_OFFSET * zoom + (start + end) * 0.5 * zoom
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hit_patcher_label_arg_picks_the_token_under_the_pointer() {
+    let patch = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&patch, "fm2");
+    let spans =
+        node_display_label_arg_spans(patch.nodes.iter().find(|node| node.id == "fm2").unwrap());
+
+    let state = PatcherInteractionState::default();
+    let ordered = ordered_patch_nodes(&patch, &state, "root");
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let pan = PatcherPanState::default();
+    let zoom = patcher_zoom(&pan);
+    let node_rect = patch_node_rects(&patch, draw_rect, &pan)["fm2"];
+    let row = node_rect.row + node_rect.height * 0.5;
+
+    for arg_index in [1usize, 2usize] {
+        let col = label_arg_center_col(&label, &spans, arg_index, node_rect, zoom);
+        assert_eq!(
+            hit_patcher_label_arg(&patch, &ordered, draw_rect, &pan, col, row)
+                .map(|arg| (arg.node_id, arg.input_index)),
+            Some(("fm2".to_string(), arg_index)),
+            "pointer over the token for argument {arg_index} must hit it"
+        );
+    }
+
+    assert_eq!(
+        hit_patcher_label_arg(
+            &patch,
+            &ordered,
+            draw_rect,
+            &pan,
+            node_rect.col + NODE_TEXT_COL_OFFSET * zoom,
+            row,
+        ),
+        None,
+        "the operator name is not an argument token"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hovered_port_wins_over_the_label_token_under_the_same_pointer() {
+    let path = temp_patcher_source_path("label-arg-hover-precedence");
+    fs::write(&path, inline_arg_tooltip_patch_source()).expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let parsed = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&parsed, "fm1");
+    let spans =
+        node_display_label_arg_spans(parsed.nodes.iter().find(|node| node.id == "fm1").unwrap());
+
+    let (patch, pan, _view_key) =
+        load_interactive_patch_for_node(&node).expect("interactive patch");
+    let zoom = patcher_zoom(&pan);
+    let node_rect = patch_node_rects(&patch, node.rect, &pan)["fm1"];
+    // The `?` token for argument 1 sits under the node's top edge, where its
+    // input port is also drawn.
+    let col = label_arg_center_col(&label, &spans, 1, node_rect, zoom);
+
+    // Tiny cells blow the port's pixel hit radius up to cover the whole node,
+    // so both targets are live at this one point.
+    handle_patcher_pointer_moved(&node, col, node_rect.row, 0.5, 0.5);
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.hovered_input_port.is_some(),
+        "the port must be hovered at this point for the precedence check to mean anything"
+    );
+    assert_eq!(
+        state.hovered_label_arg, None,
+        "a hovered port is the more specific target and must win"
+    );
+
+    // With large cells only the label token is in range.
+    handle_patcher_pointer_moved(&node, col, node_rect.row, 1000.0, 1000.0);
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.hovered_input_port, None);
+    assert_eq!(
+        state
+            .hovered_label_arg
+            .map(|arg| (arg.node_id, arg.input_index)),
+        Some(("fm1".to_string(), 1))
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hovered_inline_arg_renders_the_same_tooltip_as_its_port() {
+    let patch = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&patch, "fm2");
+    let expected = input_port_tooltip(
+        &patch,
+        &InputPortRef {
+            node_id: "fm2".to_string(),
+            input_index: 1,
+        },
+    )
+    .expect("port tooltip");
+    assert_eq!(expected, "in 2: modulator");
+
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_text_widths(preview(&expected, 48), 10.5, &measure_ctx);
+
+    let state = PatcherInteractionState {
+        hovered_label_arg: Some(InputPortRef {
+            node_id: "fm2".to_string(),
+            input_index: 1,
+        }),
+        ..PatcherInteractionState::default()
+    };
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let pan = PatcherPanState::default();
+    let zoom = patcher_zoom(&pan);
+    let node_rect = patch_node_rects(&patch, draw_rect, &pan)["fm2"];
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        draw_rect,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 100.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &pan,
+        &state,
+    );
+
+    let tooltips = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ProportionalText(text) if text.text == expected => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tooltips.len(),
+        1,
+        "hovering an inlined argument must draw exactly one tooltip"
+    );
+    let spans =
+        node_display_label_arg_spans(patch.nodes.iter().find(|node| node.id == "fm2").unwrap());
+    let token_col = label_arg_center_col(&label, &spans, 1, node_rect, zoom);
+    assert!(
+        (tooltips[0].col - token_col).abs() < node_rect.width,
+        "the tooltip must be anchored over the token, not at the node origin"
+    );
+    assert!(
+        tooltips[0].row < node_rect.row,
+        "the tooltip sits above the node like the input port tooltip does"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hovered_inline_arg_token_is_tinted_apart_from_the_rest_of_the_label() {
+    let patch = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&patch, "fm2");
+    assert_eq!(label, "fm-operator 0.5 1");
+
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let pan = PatcherPanState::default();
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 100.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let label_runs = |state: &PatcherInteractionState| {
+        let mut prims = Vec::new();
+        draw_patch(&mut prims, &patch, draw_rect, viewport, &pan, state);
+        prims
+            .iter()
+            .filter_map(|prim| match inner_prim(prim) {
+                MetalPrimitive::ProportionalText(text)
+                    if "fm-operator 0.5 1".contains(text.text.trim())
+                        && !text.text.trim().is_empty() =>
+                {
+                    Some((text.text.clone(), text.fg.to_rgba()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let unhovered = label_runs(&PatcherInteractionState::default());
+    assert!(
+        !unhovered
+            .iter()
+            .any(|(_, color)| *color == theme::PATCHER_NODE_TAIL_TEXT_HOVER().to_rgba()),
+        "nothing is tinted while no argument is hovered: {unhovered:?}"
+    );
+
+    let hovered = label_runs(&PatcherInteractionState {
+        hovered_label_arg: Some(InputPortRef {
+            node_id: "fm2".to_string(),
+            input_index: 1,
+        }),
+        ..PatcherInteractionState::default()
+    });
+    let tinted = hovered
+        .iter()
+        .filter(|(_, color)| *color == theme::PATCHER_NODE_TAIL_TEXT_HOVER().to_rgba())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tinted.len(),
+        1,
+        "exactly the hovered token is tinted: {hovered:?}"
+    );
+    assert_eq!(tinted[0].0, "0.5");
+    assert!(
+        hovered.iter().any(|(text, color)| text.trim() == "1"
+            && *color == theme::PATCHER_NODE_TAIL_TEXT().to_rgba()),
+        "the rest of the tail keeps the ordinary color: {hovered:?}"
+    );
+}
+
 #[test]
 fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
     let patch = parse(
@@ -11550,7 +13280,7 @@ fn segment_row_drag_clamps_normal_and_wraparound_cases() {
 }
 
 #[test]
-fn super_y_toggles_selected_cable_segmentation() {
+fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() {
     let source = r#"
         (def pitch (in 1 @name pitch))
         (def sig (phasor pitch))
@@ -11586,13 +13316,31 @@ fn super_y_toggles_selected_cable_segmentation() {
         animation: Default::default(),
     };
     let key = patcher_state_key(&node);
-    set_patcher_interaction_state(
+    set_patcher_pan_state(
         key,
-        PatcherInteractionState {
-            selected_cable: Some(selected_cable.clone()),
+        PatcherPanState {
+            zoom: 1.6,
+            viewport_width: node.rect.width,
+            viewport_height: node.rect.height,
+            content_width: node.rect.width,
+            content_height: node.rect.height,
             ..Default::default()
         },
     );
+    let mut interaction = PatcherInteractionState {
+        selected_cable: Some(selected_cable.clone()),
+        ..Default::default()
+    };
+    set_connection_segment_edit(
+        &mut interaction,
+        "root",
+        patch.connections.first().unwrap(),
+        Some(CableSegmentInfo {
+            is_segmented: false,
+            segment_row: 0.0,
+        }),
+    );
+    set_patcher_interaction_state(key, interaction);
 
     let initial_state = get_patcher_interaction_state(key);
     let initial_patch = patch_with_interaction_state(patch.clone(), &initial_state, "root");
@@ -11602,6 +13350,33 @@ fn super_y_toggles_selected_cable_segmentation() {
         .find(|connection| source_connection_id(connection) == selected_cable)
         .and_then(|connection| connection.segment.as_ref())
         .is_some_and(|segment| segment.is_segmented);
+    assert!(!initially_segmented, "test cable must begin unsegmented");
+
+    let pan = get_patcher_pan_state(key);
+    let node_rects = patch_node_rects(&initial_patch, node.rect, &pan);
+    let input_indices = patch_input_indices(&initial_patch);
+    let input_slot_counts = patch_input_slot_counts(&initial_patch, &input_indices);
+    let output_counts = patch_output_counts(&initial_patch);
+    let connection = initial_patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == selected_cable)
+        .unwrap();
+    let (start, end) = connection_endpoints(
+        connection,
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    let expected_rendered_row = (start.1 + end.1) * 0.5;
+    let expected_model_row = screen_to_model(
+        node.rect,
+        &pan,
+        ((start.0 + end.0) * 0.5, expected_rendered_row),
+    )
+    .1;
 
     assert!(
         PATCHER_WIDGET
@@ -11624,6 +13399,17 @@ fn super_y_toggles_selected_cable_segmentation() {
         .and_then(|connection| connection.segment)
         .unwrap();
     assert_ne!(segment.is_segmented, initially_segmented);
+    assert!(
+        (segment.segment_row - expected_model_row).abs() < 1e-5,
+        "Cmd+Y must store the midpoint in model coordinates: got {}, expected {}",
+        segment.segment_row,
+        expected_model_row
+    );
+    let rendered_row = patcher_origin(node.rect, &pan).1 + segment.segment_row * patcher_zoom(&pan);
+    assert!(
+        (rendered_row - expected_rendered_row).abs() < 1e-5,
+        "new segment rendered at {rendered_row}, expected cable midpoint {expected_rendered_row}"
+    );
 }
 
 #[test]
@@ -12469,6 +14255,7 @@ fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
         .find(|node| node.id == "b")
         .unwrap()
         .width = Some(20.0);
+    prime_patcher_text_metrics(&patch);
     let mut snap = AlignmentSnapState::default();
     let selected = HashSet::from(["a".to_string()]);
 
@@ -12616,6 +14403,7 @@ fn patcher_node_drag_release_reports_layout_change_for_host_layout_payload() {
     let node = patcher_test_node(&path);
     let key = patcher_state_key(&node);
     let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let original_sidecar: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -12969,6 +14757,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
 
+    prime_patcher_text_metrics(&root_patch);
     let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
     let macro_rect = rects.get(&macro_node.id).unwrap();
     assert!(handle_patcher_double_click(
@@ -13252,6 +15041,8 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(
@@ -13266,6 +15057,8 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("mul").map(Vec::as_slice), Some(&[0][..]));
@@ -13297,6 +15090,8 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("hist").map(Vec::as_slice), Some(&[0][..]));
@@ -13382,6 +15177,7 @@ fn double_clicking_node_edits_display_text_in_memory() {
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
 
+    prime_patcher_text_metrics(&root_patch);
     let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
     let pitch_rect = rects.get(&pitch.id).unwrap();
     assert!(handle_patcher_double_click(
@@ -13538,6 +15334,56 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
     });
     set_patcher_interaction_state(key, state);
     assert!(patcher_has_text_edit(&node));
+
+    // A follow-up composer counts as text entry too, or the editor treats the
+    // space bar as a transport key and words run together as they are typed.
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (1.0, 1.0));
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .state = AgenticBubbleState::Answer {
+        text: "an answer".to_string(),
+        answered_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+    assert!(patcher_has_text_edit(&node));
+}
+
+#[test]
+fn patcher_autocomplete_documents_patcher_only_history_node() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "hist".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 4,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let history = suggestions
+        .iter()
+        .find(|suggestion| suggestion.name == "history")
+        .expect("patcher history completion");
+    let docs = history
+        .documentation
+        .as_ref()
+        .expect("patcher history documentation");
+
+    assert_eq!(docs.category.as_deref(), Some("patcher"));
+    assert_eq!(docs.signatures, vec!["(history)"]);
+    assert_eq!(docs.inputs.len(), 1);
+    assert_eq!(docs.outputs.len(), 1);
+    assert!(
+        !dgenlisp_operator_names().contains("history"),
+        "history is a patcher graph convenience, not a DGenLisp operator"
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert_eq!(edit.text, "history ");
 }
 
 #[test]
@@ -13887,6 +15733,73 @@ fn defmacro_created_node_promotes_to_macro_instance_text() {
             .iter()
             .any(|macro_patch| macro_patch.name == "saturate")
     );
+}
+
+#[test]
+fn defmacro_created_inside_macro_view_promotes_and_writes_back() {
+    let source = "(defmacro reverb (input) (* input 0.5))\n(def sig (in 1))\n(def wet (reverb sig))\n(out wet 1)";
+    let root_patch = parse(source);
+    let mut state = PatcherInteractionState {
+        active_macro: Some("reverb".to_string()),
+        ..Default::default()
+    };
+    let view_key = "macro:reverb";
+    let created_id = allocate_created_node(&mut state, view_key, (3.0, 4.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, &created_id))
+        .unwrap()
+        .text = "defmacro comb".to_string();
+
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        view_key,
+        &created_id,
+    ));
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .get(&node_edit_key(view_key, &created_id))
+            .map(|edit| edit.text.as_str()),
+        Some("comb")
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(defmacro comb (input) (* input 1.0))"),
+        "created macro should emit as a top-level defmacro:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(defmacro reverb"),
+        "enclosing macro must survive:\n{emitted}"
+    );
+}
+
+#[test]
+fn defmacro_created_inside_its_own_macro_view_is_refused() {
+    let root_patch = parse("(def sig (in 1))\n(out sig 1)");
+    let mut state = PatcherInteractionState {
+        active_macro: Some("comb".to_string()),
+        ..Default::default()
+    };
+    let view_key = "macro:comb";
+    let created_id = allocate_created_node(&mut state, view_key, (3.0, 4.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, &created_id))
+        .unwrap()
+        .text = "defmacro comb".to_string();
+
+    assert!(!promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        view_key,
+        &created_id,
+    ));
 }
 
 #[test]
@@ -16147,12 +18060,21 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
 fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     let mut state = PatcherInteractionState::default();
     let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    let edit_text = "mi".to_string();
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_text_widths(edit_text.clone(), NODE_FONT_SIZE, &measure_ctx);
     state.text_edit = Some(PatcherTextEdit {
-        node_id: created_id,
-        text: "phasor".to_string(),
+        node_id: created_id.clone(),
+        text: edit_text,
         original_text: String::new(),
         state: TextInputState {
-            cursor_pos: 6,
+            cursor_pos: 2,
             selection_anchor: None,
             selecting: false,
         },
@@ -16160,16 +18082,19 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let pan = PatcherPanState::default();
+    let node_rect = patch_node_rects(&patch, draw_rect, &pan)[&created_id];
     let mut prims = Vec::new();
     draw_patch(
         &mut prims,
         &patch,
-        Rect {
-            row: 0.0,
-            col: 0.0,
-            width: 100.0,
-            height: 40.0,
-        },
+        draw_rect,
         WidgetViewport {
             cell_w: 10.0,
             cell_h: 20.0,
@@ -16183,23 +18108,30 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
             scroll_left: 0.0,
             inherited_hover: false,
         },
-        &PatcherPanState::default(),
+        &pan,
         &state,
     );
 
-    let cursor_count = prims
+    let cursors = prims
         .iter()
-        .filter(|prim| {
-            matches!(
-                inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
-                    if rect.color == theme::PATCHER_EDIT_CURSOR()
-            )
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ForegroundRect(rect) if rect.color == theme::PATCHER_EDIT_CURSOR() => {
+                Some(rect)
+            }
+            _ => None,
         })
-        .count();
+        .collect::<Vec<_>>();
     assert_eq!(
-        cursor_count, 1,
+        cursors.len(),
+        1,
         "active patcher text edit should render exactly one foreground cursor"
+    );
+    let zoom = patcher_zoom(&pan);
+    let expected_col = node_rect.col + (NODE_TEXT_COL_OFFSET + 2.2) * zoom;
+    assert!(
+        (cursors[0].rect.col - expected_col).abs() < 0.001,
+        "cursor must use the measured 18px + 4px glyph advances; expected {expected_col}, got {}",
+        cursors[0].rect.col,
     );
 }
 
@@ -16276,38 +18208,148 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     set_patcher_pan_state(key, pan);
     let mut state = PatcherInteractionState::default();
     allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
-
-    let prims = build_metal_primitives_for_patcher(
-        &node,
-        WidgetViewport {
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        "what do you want to build?".to_string(),
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
             cell_w: 10.0,
             cell_h: 20.0,
-            vp_w: 1000.0,
-            vp_h: 800.0,
-            time_seconds: 0.0,
-            focused_widget_id: None,
-            focused_branch: false,
-            overlay_viewport_bottom: 40.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
-            inherited_hover: false,
+            inherited_font_size: 13.0,
         },
     );
 
-    let foreground_bubble_rects = prims
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let prims = build_metal_primitives_for_patcher(&node, viewport);
+
+    assert_eq!(
+        agentic_bubble_body_sizes(&prims, viewport).len(),
+        1,
+        "agentic bubble body must render exactly one chrome instance"
+    );
+    let bubble_z = prims
         .iter()
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
-                    if rect.rect.width > 10.0 && rect.rect.height > 4.0
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-node"
+                        && (instance.ndc_max[0] - instance.ndc_min[0]) / 2.0 * viewport.vp_w
+                            / viewport.cell_w
+                            > 10.0
             )
         })
-        .count();
-    assert_eq!(
-        foreground_bubble_rects, 1,
+        .map(effective_z)
+        .max()
+        .expect("bubble chrome");
+    let node_z = prims
+        .iter()
+        .filter(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, .. }
+                    if widget_type == "patcher-port" || widget_type == "patcher-cable"
+            )
+        })
+        .map(effective_z)
+        .max()
+        .unwrap_or(i32::MIN);
+    assert!(
+        bubble_z > node_z,
         "agentic bubble body must render in the foreground layer above cables and ports"
+    );
+}
+
+/// An answer arrives in a much bigger box than the pending spinner it replaces.
+/// The box eases between the two layouts instead of snapping.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_answer_eases_the_bubble_from_the_pending_box_to_the_answer_box() {
+    let path = temp_patcher_source_path("agentic-bubble-answer-resize");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+
+    let prompt = "what does this macro do".to_string();
+    let answer = "It shapes the incoming signal with a one-pole lowpass and mixes the result back against the dry input.".to_string();
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let measurer = VariableWidthTextMeasurer;
+    let ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: 13.0,
+    };
+    let width_after = |elapsed: Duration| {
+        let mut state = PatcherInteractionState::default();
+        let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+        let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+        bubble.prompt = prompt.clone();
+        bubble.state = AgenticBubbleState::Answer {
+            text: answer.clone(),
+            answered_at: Instant::now() - elapsed,
+        };
+        // Measure exactly what a real measure pass would, so this test fails if
+        // the pending layout stops being measured once an answer lands — the
+        // resize silently degrades to a snap when its start layout can't wrap.
+        cache_agentic_bubble_text_widths(bubble, &ctx);
+        settle_agentic_bubbles(&mut state);
+        set_patcher_interaction_state(key, state);
+        let prims = build_metal_primitives_for_patcher(&node, viewport);
+        agentic_bubble_body_sizes(&prims, viewport)
+            .into_iter()
+            .next()
+            .expect("answer bubble body")
+            .0
+    };
+
+    let settled = width_after(Duration::from_secs_f32(AGENTIC_ANSWER_RESIZE_SECS + 0.01));
+    let arriving = width_after(Duration::ZERO);
+    let midway = width_after(Duration::from_secs_f32(AGENTIC_ANSWER_RESIZE_SECS * 0.5));
+
+    assert!(
+        settled > 30.0,
+        "a settled answer uses the wide answer layout, got {settled}"
+    );
+    assert!(
+        arriving < settled - 5.0,
+        "the box starts near the pending layout rather than jumping to the answer size, got {arriving} vs settled {settled}"
+    );
+    assert!(
+        arriving < midway && midway < settled,
+        "the box eases between the two layouts, got {arriving} -> {midway} -> {settled}"
     );
 }
 
@@ -16326,40 +18368,43 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
     let mut state = PatcherInteractionState::default();
     let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
     let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    let answer = "This macro implements a virtual-analog TR-707-style kick drum synthesizer:\n\n1. **Envelopes**: It uses three separate decay histories triggered by 'trig'.\n2. **Pitch Modulation**: The fast envelope creates a rapid downward pitch sweep applied to both resonators."
+        .to_string();
     bubble.state = AgenticBubbleState::Answer {
-        text: "This macro implements a virtual-analog TR-707-style kick drum synthesizer:\n\n1. **Envelopes**: It uses three separate decay histories triggered by 'trig'.\n2. **Pitch Modulation**: The fast envelope creates a rapid downward pitch sweep applied to both resonators."
-            .to_string(),
+        text: answer.clone(),
         answered_at: Instant::now(),
     };
+    settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
-
-    let prims = build_metal_primitives_for_patcher(
-        &node,
-        WidgetViewport {
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        answer,
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
             cell_w: 10.0,
             cell_h: 20.0,
-            vp_w: 1000.0,
-            vp_h: 800.0,
-            time_seconds: 0.0,
-            focused_widget_id: None,
-            focused_branch: false,
-            overlay_viewport_bottom: 40.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
-            inherited_hover: false,
+            inherited_font_size: 13.0,
         },
     );
 
-    let body_width = prims
-        .iter()
-        .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ForegroundRect(rect)
-                if rect.rect.width > 10.0 && rect.rect.height > 4.0 =>
-            {
-                Some(rect.rect.width)
-            }
-            _ => None,
-        })
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let prims = build_metal_primitives_for_patcher(&node, viewport);
+
+    let (body_width, _) = agentic_bubble_body_sizes(&prims, viewport)
+        .into_iter()
         .next()
         .expect("answer bubble body");
     assert!(
@@ -16386,9 +18431,21 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
         answer_lines.len() > 1,
         "answer text should wrap into multiple rendered lines"
     );
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: 13.0,
+    };
+    for line in &answer_lines {
+        cache_text_widths((*line).to_string(), 13.0, &measure_ctx);
+    }
     let max_answer_line_width = answer_lines
         .iter()
-        .map(|line| text_width_from_char_cache(line, 13.0, 13.0 * 0.62 / 10.0))
+        .map(|line| {
+            measured_text_width(line, 13.0)
+                .expect("rendered answer line must have measured glyph advances")
+        })
         .fold(0.0, f32::max);
     assert!(
         max_answer_line_width <= body_width - 1.3 + 0.1,
@@ -16502,30 +18559,72 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         "selected operator documentation should render in a separate panel to the right"
     );
     assert!(
-        prims
-            .iter()
-            .filter(|prim| {
-                matches!(
-                    inner_prim(prim),
-                    MetalPrimitive::WidgetInstance { widget_type, instance, .. }
-                        if widget_type == "patcher-node"
-                            && instance.color_a == theme::PATCHER_AUTOCOMPLETE_BORDER().to_rgba()
-                            && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
-                )
-            })
-            .count()
-            >= 2,
-        "autocomplete list and selected-documentation panels should both render full bordered chrome"
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-panel"
+                        && instance.color_a == theme::COMP_BORDER().to_rgba()
+                        && instance.color_b == theme::COMP_UNSELECTED_BG().to_rgba()
+            )
+        }),
+        "autocomplete list should render flat panel chrome, not node chrome"
     );
     assert!(
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
-                    if rect.color == theme::PATCHER_AUTOCOMPLETE_SELECTED_BG()
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-panel"
+                        && instance.color_a == theme::COMP_DOC_BORDER().to_rgba()
+                        && instance.color_b == theme::COMP_DOC_BG().to_rgba()
             )
         }),
-        "autocomplete panel should render the selected row highlight"
+        "documentation panel should render flat panel chrome with its own themed colors"
+    );
+    assert!(
+        !prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-node"
+                        && instance.color_b == theme::COMP_UNSELECTED_BG().to_rgba()
+            )
+        }),
+        "autocomplete chrome must not reuse the node shader"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "box"
+                        && instance.color_a == theme::COMP_SELECTED_BG().to_rgba()
+                        && instance.corner_radius > 0.0
+            )
+        }),
+        "autocomplete panel should render the selected row as a rounded highlight bar"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::ProportionalText(text)
+                    if text.text == "biquad"
+                        && text.fg == theme::COMP_SELECTED_FG()
+            )
+        }),
+        "selected suggestion name should use the themed accent text color"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::ProportionalText(text)
+                    if text.fg == theme::COMP_CATEGORY_FG()
+            )
+        }),
+        "suggestion rows should render the operator category in the dimmed category color"
     );
 }
 
@@ -16676,7 +18775,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         cell_h: 20.0,
         inherited_font_size: NODE_FONT_SIZE,
     };
-    cache_char_widths(label, NODE_FONT_SIZE, &measure_ctx);
+    cache_text_widths(label, NODE_FONT_SIZE, &measure_ctx);
 
     let patch = Patch {
         nodes: vec![PatchNode {
@@ -16693,12 +18792,15 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source: None,
         }],
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let mut prims = Vec::new();
     draw_patch(
@@ -16742,5 +18844,4886 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         tail - head,
         2.5 * DEFAULT_ZOOM,
         "tail should start after the measured width of `in `, not after a fixed visual gap"
+    );
+}
+
+// ── Deterministic generation round-trip (docs/patch-vs-code-editor-spec.md §4.2) ──
+
+const GENERATION_STARTER_INSTRUMENT: &str = r#"(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(def velocity (in 3 @name velocity))
+(def trigger (in 4 @name trigger))
+(def clock (in 5 @name clock))
+(def mod1 (in 6 @name mod1 @modulator 1))
+(def mod2 (in 7 @name mod2 @modulator 2))
+(def mod3 (in 8 @name mod3 @modulator 3))
+(def mod4 (in 9 @name mod4 @modulator 4))
+
+(param attack @group amp @env amp-env @role attack @default 5 @min 0 @max 1000 @unit ms)
+(param decay @group amp @env amp-env @role decay @default 120 @min 1 @max 2000 @unit ms)
+(param sustain @group amp @env amp-env @role sustain @default 0.8 @min 0 @max 1)
+(param release @group amp @env amp-env @role release @default 180 @min 1 @max 5000 @unit ms)
+(param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+
+(def env (adsr gate trigger attack decay sustain release))
+(def phase (phasor pitch))
+(out (* phase env velocity (mod gain)) 1 @name audio)
+"#;
+
+fn generation_scope_signature(
+    lines: &mut Vec<String>,
+    scope_label: &str,
+    patch: &Patch,
+    mapped: &dyn Fn(&str, &str) -> String,
+) {
+    let mut nodes = patch
+        .nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "{scope_label} node {} op={} kind={:?}",
+                mapped(scope_label, &node.id),
+                node.op,
+                node.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    nodes.sort();
+    lines.append(&mut nodes);
+    let mut connections = patch
+        .connections
+        .iter()
+        .map(|connection| {
+            format!(
+                "{scope_label} cable {}:{}->{}:{} {:?}",
+                mapped(scope_label, &connection.from_node),
+                connection.from_output,
+                mapped(scope_label, &connection.to_node),
+                connection.to_input,
+                connection.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    connections.sort();
+    lines.append(&mut connections);
+}
+
+fn generation_semantic_signature(patch: &Patch, mapped: &dyn Fn(&str, &str) -> String) -> String {
+    let mut lines = Vec::new();
+    generation_scope_signature(&mut lines, "root", patch, mapped);
+    let mut macros = patch
+        .macros
+        .iter()
+        .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Local))
+        .collect::<Vec<_>>();
+    macros.sort_by(|a, b| a.name.cmp(&b.name));
+    for macro_patch in macros {
+        lines.push(format!(
+            "macro {} params={:?} outputs={:?}",
+            macro_patch.name, macro_patch.params, macro_patch.outputs
+        ));
+        generation_scope_signature(
+            &mut lines,
+            &format!("macro:{}", macro_patch.name),
+            &macro_patch.patch,
+            mapped,
+        );
+    }
+    let mut host_modulators = patch
+        .host_modulators
+        .iter()
+        .map(|input| {
+            format!(
+                "host-mod {} ch={} slot={}",
+                input.name, input.channel, input.slot
+            )
+        })
+        .collect::<Vec<_>>();
+    host_modulators.sort();
+    lines.append(&mut host_modulators);
+    lines.join("\n")
+}
+
+fn assert_generation_roundtrip(
+    case_name: &str,
+    source: &str,
+    intent: PatcherIntent,
+    library: Option<&DefmacroLibrary>,
+) {
+    let parse = |text: &str| match library {
+        Some(library) => parse_patch_source_with_library(text, intent, library),
+        None => parse_patch_source(text, intent),
+    };
+    let p0 = parse(source).unwrap_or_else(|error| panic!("{case_name}: parse failed: {error}"));
+    assert!(
+        p0.diagnostics.is_empty(),
+        "{case_name}: fixture source should project cleanly: {:?}",
+        p0.diagnostics
+    );
+    let g1 = generate::generate_patch_source(&p0, intent)
+        .unwrap_or_else(|error| panic!("{case_name}: generation failed: {error}"));
+    assert!(
+        g1.source.starts_with(";; generated by the patch editor"),
+        "{case_name}: generated source must carry the provenance header:\n{}",
+        g1.source
+    );
+    let p1 = parse(&g1.source).unwrap_or_else(|error| {
+        panic!(
+            "{case_name}: generated source failed to parse: {error}\n{}",
+            g1.source
+        )
+    });
+    assert!(
+        p1.diagnostics.is_empty()
+            && !p1
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::CodeIsland),
+        "{case_name}: generated source must project with zero code islands: {:?}\n{}",
+        p1.diagnostics,
+        g1.source
+    );
+
+    // parse(generate(patch)) == patch (modulo layout/positions): the model
+    // survives through the deterministic rename map.
+    let renames = g1.renamed_node_ids.clone();
+    let mapped = move |scope: &str, id: &str| {
+        renames
+            .get(&(scope.to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    let identity = |_: &str, id: &str| id.to_string();
+    assert_eq!(
+        generation_semantic_signature(&p0, &mapped),
+        generation_semantic_signature(&p1, &identity),
+        "{case_name}: reparsing the generated source must reproduce the model\n{}",
+        g1.source
+    );
+
+    // generate(parse(generate(patch))) == generate(patch): byte-identical fixpoint.
+    let g2 = generate::generate_patch_source(&p1, intent)
+        .unwrap_or_else(|error| panic!("{case_name}: regeneration failed: {error}"));
+    assert_eq!(
+        g1.source, g2.source,
+        "{case_name}: generator must reach a byte-identical fixpoint"
+    );
+    // And the canonical model's ids are stable across another round.
+    let p2 = parse(&g2.source).unwrap();
+    assert_eq!(
+        generation_semantic_signature(&p1, &identity),
+        generation_semantic_signature(&p2, &identity),
+        "{case_name}: canonical model ids must be stable across regeneration"
+    );
+}
+
+#[test]
+fn generation_roundtrip_starter_instrument() {
+    assert_generation_roundtrip(
+        "starter-instrument",
+        GENERATION_STARTER_INSTRUMENT,
+        PatcherIntent::Instrument,
+        None,
+    );
+}
+
+#[test]
+fn generation_roundtrip_lexilush_effect() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sequencer/effects/lexilush/dsp.lisp");
+    let source = fs::read_to_string(&path).unwrap();
+    assert_generation_roundtrip("lexilush", &source, PatcherIntent::Effect, None);
+}
+
+#[test]
+fn generation_roundtrip_defmacro_library_patch() {
+    let library = temp_defmacro_library(
+        "generation-roundtrip",
+        &[(
+            "shape2",
+            "(defmacro shape2 (x amt) (* (tanh (* x amt)) 0.5))",
+        )],
+    );
+    let source = "(use-defmacro shape2)\n\
+                  (def input (in 1 @name input))\n\
+                  (param drive @min 1 @max 10 @default 2)\n\
+                  (defmacro warm (sig) (def soft (tanh sig)) soft)\n\
+                  (def shaped (shape2 input drive))\n\
+                  (def warmed (warm shaped))\n\
+                  (out warmed 1 @name audio)\n";
+    assert_generation_roundtrip(
+        "library-patch",
+        source,
+        PatcherIntent::Effect,
+        Some(&library),
+    );
+    // the import must survive regeneration
+    let p0 = parse_patch_source_with_library(source, PatcherIntent::Effect, &library).unwrap();
+    let generated = generate::generate_patch_source(&p0, PatcherIntent::Effect).unwrap();
+    assert!(
+        generated.source.contains("(use-defmacro shape2)"),
+        "library imports must be regenerated:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(defmacro warm"),
+        "local defmacros must be regenerated:\n{}",
+        generated.source
+    );
+}
+
+#[test]
+fn generation_roundtrip_history_feedback_effect() {
+    let source = "(def in-l (in 1 @name signal))\n\
+                  (param decay @min 0 @max 1 @default 0.5)\n\
+                  (make-history loop)\n\
+                  (def wet (+ in-l (* (read-history loop) decay)))\n\
+                  (def delayed (delay wet 4800))\n\
+                  (write-history loop delayed)\n\
+                  (out delayed 1 @name out-l)\n";
+    assert_generation_roundtrip("history-feedback", source, PatcherIntent::Effect, None);
+}
+
+// ── Promotion / eject sidecar flips (spec §3.3 / §3.4) ──
+
+#[test]
+fn promote_source_to_patch_stamps_authored_sidecar_for_clean_source() {
+    let path = temp_patcher_dsp_path("patcher-promote-clean");
+    let source = "(def input (in 1 @name input))\n(out input 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    assert!(!sidecar::sidecar_is_authored(&path));
+    promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
+    assert!(sidecar::sidecar_is_authored(&path));
+    assert!(source_opens_in_patch_editor(
+        &path,
+        source,
+        PatcherIntent::Effect
+    ));
+}
+
+#[test]
+fn promote_source_to_patch_refuses_code_islands_with_diagnostics() {
+    let path = temp_patcher_dsp_path("patcher-promote-islands");
+    let source = "(def input (in 1 @name input))\n(let ((x 1)) x)\n(out input 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    let error = promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap_err();
+    assert!(
+        error.contains("Cannot open as patch"),
+        "promotion refusal should surface diagnostics: {error}"
+    );
+    assert!(!sidecar::sidecar_is_authored(&path));
+}
+
+#[test]
+fn eject_flips_authored_flag_but_keeps_layout_for_repromotion() {
+    let path = temp_patcher_dsp_path("patcher-eject-keeps-layout");
+    let source = "(def input (in 1 @name input))\n(out input 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let before: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    eject_patch_authored_sidecar(&path).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(after["authored"], serde_json::json!(false));
+    assert_eq!(after["version"], serde_json::json!(3));
+    assert_eq!(
+        after["root"]["nodes"], before["root"]["nodes"],
+        "eject must keep layout data for re-promotion"
+    );
+    assert!(!sidecar::sidecar_is_authored(&path));
+    // re-promotion restores patch routing with the same layout
+    promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
+    assert!(sidecar::sidecar_is_authored(&path));
+    let repromoted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(repromoted["root"]["nodes"], before["root"]["nodes"]);
+}
+
+// ── Created-node identity vs source bindings (regression: node-splice bug) ──
+//
+// Older generated sources persisted interaction ids (`created-N`) as binding
+// names. A fresh session's `created-N` counter then collided with those source
+// node ids: the existing node's cables visually spliced into the newly created
+// node, and regeneration rewired a→b into a→c→b for real (deleting c then
+// destroyed a→b). These tests pin both halves of the fix: allocation skips
+// taken ids, and the generator never emits interaction ids as bindings.
+
+const POISONED_CREATED_ID_SOURCE: &str = "(def gate (in 1 @name gate))\n\
+     (def created-1 (phasor 220))\n\
+     (def created-0 (* created-1 6.28))\n\
+     (def created-2 (cos created-0))\n\
+     (out created-2 1 @name audio)\n";
+
+#[test]
+fn double_click_created_node_id_skips_ids_taken_by_source_nodes() {
+    let path = temp_patcher_dsp_path("patcher-created-id-collision");
+    fs::write(&path, POISONED_CREATED_ID_SOURCE).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+
+    assert!(handle_patcher_double_click(&node, 90.0, 90.0));
+    let state = get_patcher_interaction_state(key);
+    let created = state
+        .text_edit
+        .as_ref()
+        .expect("double-click on empty canvas should start a created-node text edit")
+        .node_id
+        .clone();
+    assert!(
+        !root_patch.nodes.iter().any(|source| source.id == created),
+        "created node id '{created}' must not collide with a source node id"
+    );
+
+    // (a) no connection may touch the created node, (b) every pre-existing
+    // connection survives verbatim.
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert!(
+        visible
+            .connections
+            .iter()
+            .all(|connection| connection.from_node != created && connection.to_node != created),
+        "no cable may attach to a freshly created node"
+    );
+    let connection_ids = |patch: &Patch| {
+        let mut ids = patch
+            .connections
+            .iter()
+            .map(source_connection_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        connection_ids(&visible),
+        connection_ids(&root_patch),
+        "pre-existing connections must survive node creation verbatim"
+    );
+
+    // (c) deleting the created node leaves the semantic signature unchanged.
+    // (Created nodes are deleted by dropping their interaction edit, as
+    // `delete_selected_nodes` does — they have no source to mark deleted.)
+    let mut state = state;
+    state.text_edit = None;
+    state
+        .edit_state
+        .nodes
+        .remove(&node_edit_key("root", &created));
+    let after_delete = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let identity = |_: &str, id: &str| id.to_string();
+    assert_eq!(
+        generation_semantic_signature(&after_delete, &identity),
+        generation_semantic_signature(&root_patch, &identity),
+        "deleting the created node must not change the patch model"
+    );
+    let generated =
+        generate::generate_patch_source(&after_delete, PatcherIntent::Instrument).unwrap();
+    let reparsed = parse(&generated.source);
+    let renames = generated.renamed_node_ids.clone();
+    let mapped = move |scope: &str, id: &str| {
+        renames
+            .get(&(scope.to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    assert_eq!(
+        generation_semantic_signature(&reparsed, &identity),
+        generation_semantic_signature(&root_patch, &mapped),
+        "regeneration after create+delete must reproduce the original model"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn generated_source_never_persists_interaction_created_ids() {
+    let patch = parse(POISONED_CREATED_ID_SOURCE);
+    let mut state = PatcherInteractionState::default();
+    // Simulate the fixed allocation path: the id skips taken source ids.
+    let taken = patch
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    let created = allocate_created_node_avoiding(&mut state, "root", (50.0, 50.0), &taken);
+    assert!(!taken.contains(&created));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &created))
+        .unwrap()
+        .text = "tanh gate".to_string();
+    let visible = sidecar::root_patch_with_interaction(&patch, &state);
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("(def created-"),
+        "generated source must not contain interaction-created binding names:\n{}",
+        generated.source
+    );
+    // The poisoned legacy ids are healed to op-derived names, and the rename
+    // map carries their layout to the new bindings.
+    for legacy in ["created-0", "created-1", "created-2"] {
+        assert!(
+            generated
+                .renamed_node_ids
+                .contains_key(&("root".to_string(), legacy.to_string())),
+            "legacy created-N source node '{legacy}' should be renamed on regeneration"
+        );
+    }
+    // Pre-existing edges survive (modulo renames): a→b never becomes a→c→b.
+    let reparsed = parse(&generated.source);
+    let renames = generated.renamed_node_ids.clone();
+    let renamed = move |id: &str| {
+        renames
+            .get(&("root".to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    for (from, to, to_input) in [
+        ("created-1", "created-0", 0usize),
+        ("created-0", "created-2", 0usize),
+        ("created-2", "audio", 0usize),
+    ] {
+        assert!(
+            reparsed.connections.iter().any(|connection| {
+                connection.from_node == renamed(from)
+                    && connection.to_node == renamed(to)
+                    && connection.to_input == to_input
+            }),
+            "edge {from}->{to}:{to_input} must survive regeneration:\n{}",
+            generated.source
+        );
+    }
+}
+
+// ── Dead-code omission (regression: disconnected nodes invalidated the patch) ──
+//
+// Liveness = "reaches some out node". Dead nodes with incomplete calls
+// (empty/unknown op, missing-input gap, unfilled macro arity) are omitted from
+// the generated source and live on in the interaction state + layout payload;
+// dead nodes with complete calls are still emitted as unused defs so they
+// survive save + reload. Live nodes keep the existing missing-input sentinel
+// behavior.
+
+fn bug3_starter_node_and_key(name: &str) -> (LayoutNode, u64) {
+    let path = temp_patcher_dsp_path(name);
+    fs::write(
+        &path,
+        "(def input (in 1 @name input))\n\
+         (def shaped (tanh input))\n\
+         (out shaped 1 @name audio)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    load_patch_from_props(&node.props).unwrap();
+    (node, key)
+}
+
+fn bug3_macro_instance_state(instance_text: &str) -> (PatcherInteractionState, String) {
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", instance_text);
+    state.edit_state.created_macros.insert(
+        "softfold".to_string(),
+        PatcherMacroEdit {
+            name: "softfold".to_string(),
+            instance_node_id: instance.clone(),
+            source: Some("(defmacro softfold (sig amt) (tanh (* sig amt)))".to_string()),
+        },
+    );
+    (state, instance)
+}
+
+fn payload_field(
+    map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+    key: &str,
+) -> Option<Value> {
+    map.get(key).map(|value| value.borrow().clone())
+}
+
+#[test]
+fn disconnected_created_macro_instance_keeps_patch_valid_without_a_call() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-macro-disconnected");
+    let (state, instance) = bug3_macro_instance_state("softfold");
+    set_patcher_interaction_state(key, state);
+
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    assert_eq!(
+        payload_field(&map, "status"),
+        Some(Value::Keyword("valid".to_string())),
+        "a disconnected macro instance must not invalidate the patch: {:?}",
+        payload_field(&map, "diagnostic")
+    );
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source");
+    };
+    assert!(
+        source.contains("(defmacro softfold"),
+        "the macro definition must persist even without call sites:\n{source}"
+    );
+    assert!(
+        !source.contains("(softfold")
+            || !source
+                .replace("(defmacro softfold", "")
+                .contains("(softfold"),
+        "no call to the disconnected macro instance may be emitted:\n{source}"
+    );
+    // (d) the omitted instance keeps its layout in the emitted layout payload.
+    let Some(Value::String(layout)) = payload_field(&map, "layout") else {
+        panic!("expected layout");
+    };
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert!(
+        !layout_json["root"]["nodes"][&instance].is_null(),
+        "omitted node's position must survive in the layout payload: {layout}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn partially_wired_dead_macro_instance_keeps_patch_valid() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-macro-partial");
+    let (mut state, instance) = bug3_macro_instance_state("softfold");
+    // Wire inlet 1 only; the output still reaches no out node.
+    connect_output_to_input(&mut state, "root", "input", &instance, 0);
+    set_patcher_interaction_state(key, state);
+
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    assert_eq!(
+        payload_field(&map, "status"),
+        Some(Value::Keyword("valid".to_string())),
+        "a partially wired dead macro instance must not invalidate the patch: {:?}",
+        payload_field(&map, "diagnostic")
+    );
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source");
+    };
+    assert!(
+        source.contains("(defmacro softfold") && !source.contains("(softfold input"),
+        "partially wired dead instance must not emit a call:\n{source}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn fully_wired_macro_instance_emits_call_and_enforces_signature() {
+    let (node, key) = bug3_starter_node_and_key("patcher-live-macro-wired");
+    let (mut state, instance) = bug3_macro_instance_state("softfold");
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    // Route input through the instance into the out (replacing shaped→audio).
+    let old = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == "audio")
+        .unwrap();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(old)));
+    connect_output_to_input(&mut state, "root", "input", &instance, 0);
+    connect_output_to_input(&mut state, "root", "shaped", &instance, 1);
+    connect_output_to_input(&mut state, "root", &instance, "audio", 0);
+    set_patcher_interaction_state(key, state.clone());
+
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    assert_eq!(
+        payload_field(&map, "status"),
+        Some(Value::Keyword("valid".to_string())),
+        "a fully wired macro instance should produce a valid patch: {:?}",
+        payload_field(&map, "diagnostic")
+    );
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source");
+    };
+    assert!(
+        source.contains("(softfold input shaped)"),
+        "live instance must emit its call:\n{source}"
+    );
+
+    // Once live, the signature is enforced: drop inlet 2 and the incomplete
+    // call surfaces instead of being silently omitted.
+    let mut broken = state;
+    broken
+        .edit_state
+        .connections
+        .retain(|_, edit| !(edit.to.node_id == instance && edit.to.input_index == 1));
+    set_patcher_interaction_state(key, broken);
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let status = payload_field(&map, "status");
+    let live_incomplete_surfaced = status != Some(Value::Keyword("valid".to_string()))
+        || matches!(
+            payload_field(&map, "source"),
+            Some(Value::String(source)) if source.contains("__patcher_missing_input__")
+        );
+    assert!(
+        live_incomplete_surfaced,
+        "a live macro instance with a missing input must surface a diagnostic, not vanish"
+    );
+    reset_patcher_widget_state(key);
+}
+
+// ── Preamble (stdlib defmacro) instances follow the same dead-code rule ──
+//
+// `svf`, `adsr`, `polyblep`, … are defmacros the backend attaches to every
+// compiled source. They have a fixed arity just like a patch-local macro, so
+// an unwired/partially wired dead instance must be omitted rather than emitted
+// as `(svf)` — which is an arity error at compile time.
+
+fn preamble_instance_source(node: &LayoutNode) -> (Value, String) {
+    let Value::Map(map) = patcher_writeback_payload(node) else {
+        panic!("expected payload map");
+    };
+    let status = payload_field(&map, "status").unwrap_or(Value::Nil);
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source: {:?}", payload_field(&map, "diagnostic"));
+    };
+    (status, source)
+}
+
+#[test]
+fn disconnected_created_preamble_macro_instance_emits_no_call() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-preamble-disconnected");
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", "svf");
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a disconnected preamble macro instance must not invalidate the patch:\n{source}"
+    );
+    assert!(
+        !source.contains("(svf"),
+        "no call to the unwired preamble macro instance may be emitted:\n{source}"
+    );
+    assert!(
+        parse_patch_source(&source, PatcherIntent::Effect).is_ok(),
+        "regenerated source must reparse cleanly:\n{source}"
+    );
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let Some(Value::String(layout)) = payload_field(&map, "layout") else {
+        panic!("expected layout");
+    };
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert!(
+        !layout_json["root"]["nodes"][&instance].is_null(),
+        "omitted preamble node's position must survive in the layout payload: {layout}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn partially_wired_dead_preamble_macro_instance_emits_no_call() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-preamble-partial");
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", "svf");
+    connect_output_to_input(&mut state, "root", "input", &instance, 0);
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a partially wired dead preamble instance must not invalidate the patch:\n{source}"
+    );
+    assert!(
+        !source.contains("(svf"),
+        "partially wired dead preamble instance must not emit a call:\n{source}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn dead_preamble_macro_rule_is_generic_not_svf_specific() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-preamble-generic");
+    let mut state = PatcherInteractionState::default();
+    let _ = allocate_created_text_node(&mut state, "root", "polyblep");
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a disconnected `polyblep` instance must not invalidate the patch:\n{source}"
+    );
+    assert!(
+        !source.contains("(polyblep"),
+        "unwired dead `polyblep` must be omitted just like `svf`:\n{source}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn fully_wired_preamble_macro_instance_emits_call_and_round_trips() {
+    let (node, key) = bug3_starter_node_and_key("patcher-live-preamble-wired");
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", "svf 1200 0.7 0");
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let old = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == "audio")
+        .unwrap();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(old)));
+    connect_output_to_input(&mut state, "root", "shaped", &instance, 0);
+    connect_output_to_input(&mut state, "root", &instance, "audio", 0);
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a fully wired preamble instance should produce a valid patch:\n{source}"
+    );
+    assert!(
+        source.contains("(svf shaped 1200 0.7 0)"),
+        "live preamble instance must emit its full call:\n{source}"
+    );
+    let reparsed = parse_patch_source(&source, PatcherIntent::Effect)
+        .expect("regenerated source must reparse cleanly");
+    let svf_node = reparsed
+        .nodes
+        .iter()
+        .find(|candidate| candidate.op == "svf")
+        .expect("svf node must round-trip");
+    assert_eq!(svf_node.diagnostic, None);
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn dead_but_complete_nodes_are_still_emitted_as_unused_defs() {
+    // Documented policy choice: a valid dead def is preserved (omitting it
+    // would lose the node on save + reload); only incomplete dead nodes are
+    // dropped from the source.
+    let source = "(def input (in 1 @name input))\n\
+                  (def unused (tanh input))\n\
+                  (out input 1 @name audio)\n";
+    let patch = parse(source);
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Effect).unwrap();
+    assert!(
+        generated.source.contains("(def unused (tanh input))"),
+        "complete dead defs must survive regeneration:\n{}",
+        generated.source
+    );
+}
+
+#[test]
+fn empty_created_node_does_not_invalidate_generation() {
+    let patch = parse(
+        "(def input (in 1 @name input))\n\
+         (out input 1 @name audio)\n",
+    );
+    let mut state = PatcherInteractionState::default();
+    let created = allocate_created_node(&mut state, "root", (30.0, 30.0));
+    let visible = sidecar::root_patch_with_interaction(&patch, &state);
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Effect)
+        .expect("an uncommitted empty node must not break generation");
+    assert!(
+        !generated.source.contains(&created) && !generated.source.contains("()"),
+        "empty created node must be omitted from the source:\n{}",
+        generated.source
+    );
+    let identity = |_: &str, id: &str| id.to_string();
+    assert_eq!(
+        generation_semantic_signature(&parse(&generated.source), &identity),
+        generation_semantic_signature(&patch, &identity),
+        "empty created node must not change the emitted model"
+    );
+}
+
+#[test]
+fn typing_into_created_node_never_mutates_source_nodes() {
+    // Regression (typing-lag / node-splice family): when the created node's
+    // interaction id collided with a `created-N` source binding, every
+    // keystroke of the in-canvas text edit also overrode the SOURCE node's
+    // op/label/args — visibly corrupting the existing node and its cables
+    // while typing. Unique allocation keeps keystrokes scoped to the new node.
+    let path = temp_patcher_dsp_path("patcher-typing-scoped-to-created-node");
+    fs::write(&path, POISONED_CREATED_ID_SOURCE).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let source_ops = root_patch
+        .nodes
+        .iter()
+        .map(|patch_node| (patch_node.id.clone(), patch_node.op.clone()))
+        .collect::<HashMap<_, _>>();
+
+    assert!(handle_patcher_double_click(&node, 90.0, 90.0));
+    for ch in "tanh".chars() {
+        let event = PATCHER_WIDGET.key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(event.is_some(), "text edit should consume typed keys");
+        let state = get_patcher_interaction_state(key);
+        let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+        for (id, op) in &source_ops {
+            let matching_ops = visible
+                .nodes
+                .iter()
+                .filter(|visible_node| visible_node.id == *id)
+                .map(|visible_node| visible_node.op.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching_ops,
+                vec![op.clone()],
+                "typing into the created node must not touch source node '{id}'"
+            );
+        }
+    }
+    reset_patcher_widget_state(key);
+}
+
+const INLINE_MOD_CONSUMER_SOURCE: &str = r#"
+(def signal (in 1))
+(param gain @default 0.5 @mod true @mod-mode additive)
+(def scaled (* signal (mod gain)))
+(out scaled 1)
+"#;
+
+/// Deleting the node that consumed `gain~` must not resurrect the hidden
+/// `mod` accessor node the projector synthesized for the sugar.
+#[test]
+fn deleting_inline_mod_consumer_drops_the_hidden_mod_node() {
+    let root_patch = parse(INLINE_MOD_CONSUMER_SOURCE);
+    let mod_node_id = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "mod")
+        .expect("projector synthesizes a hidden mod node for gain~")
+        .id
+        .clone();
+    assert!(hidden_inline_node_ids(&root_patch).contains(&mod_node_id));
+
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("scaled".to_string());
+    assert!(delete_selected_nodes(&mut state, "root"));
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert!(
+        !visible.nodes.iter().any(|node| node.id == mod_node_id),
+        "the hidden mod accessor must be dropped with its only consumer, nodes={:?}",
+        visible
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.op.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        visible.nodes.iter().any(|node| node
+            .param
+            .as_ref()
+            .is_some_and(|param| param.name == "gain")),
+        "the gain param node itself must survive"
+    );
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("(mod "),
+        "regeneration must not persist an orphaned mod accessor:\n{}",
+        generated.source
+    );
+
+    let reparsed = parse(&generated.source);
+    assert!(
+        !reparsed.nodes.iter().any(|node| node.op == "mod"),
+        "reparsing the regenerated source must not surface a mod node:\n{}",
+        generated.source
+    );
+}
+
+/// A user-authored standalone `(def m (mod gain))` is a real node: it must
+/// survive regeneration even when nothing consumes it.
+#[test]
+fn explicit_standalone_mod_def_round_trips_when_unused() {
+    let patch = parse(
+        r#"
+(def signal (in 1))
+(param gain @default 0.5 @mod true @mod-mode additive)
+(def gmod (mod gain))
+(out signal 1)
+"#,
+    );
+    assert!(
+        patch.nodes.iter().any(|node| node.op == "mod"),
+        "explicit mod def should project as a node"
+    );
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(mod "),
+        "an explicitly authored mod def must survive regeneration:\n{}",
+        generated.source
+    );
+    let reparsed = parse(&generated.source);
+    assert!(
+        reparsed.nodes.iter().any(|node| node.op == "mod"),
+        "explicit mod node must reparse:\n{}",
+        generated.source
+    );
+}
+
+/// Retype a node's text to reference `param~`: the sugar must desugar in the
+/// model, so generation emits `(mod param)` and never the bogus `param~`
+/// symbol (which the DGenLisp compiler rejects with "unknown symbol").
+#[test]
+fn editing_node_text_to_mod_suffix_generates_mod_expression_and_round_trips() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+(def scaled (* signal gain))
+(out scaled 1)
+"#,
+    );
+    let scaled = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", scaled, node_display_label(scaled));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "scaled"))
+        .unwrap()
+        .text = "* gain~".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let scaled = visible
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    assert_eq!(node_display_label(scaled), "* gain~");
+    assert_eq!(
+        source_connection_for_input(&visible, "scaled", 1).presentation,
+        InputPresentation::InlineModParam
+    );
+    let accessor_id = visible
+        .nodes
+        .iter()
+        .find(|node| node.op == "mod")
+        .expect("typed gain~ must synthesize a mod accessor node")
+        .id
+        .clone();
+    assert!(
+        hidden_inline_node_ids(&visible).contains(&accessor_id),
+        "the synthesized accessor must be hidden from the canvas"
+    );
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("gain~"),
+        "the `gain~` sugar must never reach generated DGenLisp:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod gain)"),
+        "typed `gain~` must generate a nested (mod gain):\n{}",
+        generated.source
+    );
+
+    // Round trip: the regenerated source reparses back to the same sugar.
+    let reparsed = parse(&generated.source);
+    let scaled = reparsed
+        .nodes
+        .iter()
+        .find(|node| node.op == "*")
+        .expect("reparsed multiply node");
+    assert_eq!(node_display_label(scaled), "* gain~");
+}
+
+/// The user's exact flow: make an existing plain param modulatable by editing
+/// its text, then retype each reference to `name~`. Order of the edits within
+/// the session must not matter — both are applied at commit time.
+#[test]
+fn making_param_modulatable_then_typing_mod_suffix_regenerates_valid_source() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(def carrier (in 2))
+(param modindex @default 0.5 @min 0 @max 1)
+(def a (* signal modindex))
+(def b (* carrier modindex))
+(def summed (+ a b))
+(out summed 1)
+"#,
+    );
+    let mut state = PatcherInteractionState::default();
+    // References are retyped FIRST, while `modindex` is still a plain param.
+    for id in ["a", "b"] {
+        let node = root_patch
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("reference node");
+        ensure_source_node_edit(&mut state, "root", node, node_display_label(node));
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", id))
+            .unwrap()
+            .text = "* modindex~".to_string();
+    }
+    // ...and only then is the param made modulatable.
+    let param = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "modindex")
+        .expect("modindex param");
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "modindex"))
+        .unwrap()
+        .text = "param modindex @min 0 @max 1 @mod true @mod-mode additive".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    // Each reference gets its OWN accessor node, exactly as two source-authored
+    // `(mod modindex)` uses would project.
+    assert_eq!(
+        visible.nodes.iter().filter(|node| node.op == "mod").count(),
+        2,
+        "each `modindex~` reference owns its own accessor"
+    );
+    for id in ["a", "b"] {
+        let node = visible
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("reference node");
+        assert_eq!(node_display_label(node), "* modindex~");
+        assert_eq!(node.diagnostic, None, "{id} should not be flagged");
+    }
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("modindex~"),
+        "generated source must not contain the sugar:\n{}",
+        generated.source
+    );
+    assert_eq!(
+        generated.source.matches("(mod modindex)").count(),
+        2,
+        "both references must emit a nested (mod modindex):\n{}",
+        generated.source
+    );
+    let reparsed = parse(&generated.source);
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "regenerated source must reparse cleanly: {:?}\n{}",
+        reparsed.diagnostics,
+        generated.source
+    );
+
+    // Deleting a consumer GCs its accessor (§4.2b) — no phantom mod node, no
+    // standalone `(def mod0 (mod modindex))` in the regenerated source.
+    let mut after_delete_state = state.clone();
+    after_delete_state.selected_nodes.insert("b".to_string());
+    assert!(delete_selected_nodes(&mut after_delete_state, "root"));
+    let after_delete = sidecar::root_patch_with_interaction(&root_patch, &after_delete_state);
+    assert_eq!(
+        after_delete
+            .nodes
+            .iter()
+            .filter(|node| node.op == "mod")
+            .count(),
+        1,
+        "deleting a `modindex~` consumer must take its accessor with it"
+    );
+    let regenerated =
+        generate::generate_patch_source(&after_delete, PatcherIntent::Instrument).unwrap();
+    assert_eq!(
+        regenerated.source.matches("(mod modindex)").count(),
+        1,
+        "only the surviving reference may emit an accessor:\n{}",
+        regenerated.source
+    );
+}
+
+/// `cutoff~` against a plain `(param cutoff …)` is the whole declaration:
+/// the accessor is synthesized and the emitted source gains the attributes and
+/// the modulator inputs that make it real.
+#[test]
+fn mod_suffix_infers_modulatable_param() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param cutoff @default 1000)
+(def filtered (* signal cutoff))
+(out filtered 1)
+"#,
+    );
+    let filtered = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", filtered, node_display_label(filtered));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "filtered"))
+        .unwrap()
+        .text = "* cutoff~".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert_eq!(
+        visible.nodes.iter().filter(|node| node.op == "mod").count(),
+        1,
+        "`cutoff~` must synthesize the accessor without a hand-written @mod true"
+    );
+    let filtered = visible
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    assert_eq!(filtered.diagnostic, None);
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated
+            .source
+            .contains("(param cutoff @default 1000 @mod true @mod-mode additive)"),
+        "inferred attributes must reach the emitted param form:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod cutoff)"),
+        "the accessor must emit:\n{}",
+        generated.source
+    );
+    for slot in 1..=4 {
+        assert!(
+            generated.source.contains(&format!(
+                "(def mod{slot} (in {channel} @name mod{slot} @modulator {slot}))",
+                channel = slot + 5
+            )),
+            "a modulatable param needs its modulator inputs:\n{}",
+            generated.source
+        );
+    }
+    let reparsed = parse(&generated.source);
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "regenerated source must reparse cleanly: {:?}\n{}",
+        reparsed.diagnostics,
+        generated.source
+    );
+    assert!(
+        reparsed
+            .nodes
+            .iter()
+            .any(|node| node.param.as_ref().is_some_and(|param| param.modulatable)),
+        "the inferred attribute must survive the round trip"
+    );
+}
+
+/// An authored `@mod false` is the opt-out: `cutoff~` against it stays a user
+/// error, flagged on the node rather than silently desugared.
+#[test]
+fn mod_suffix_on_opted_out_param_is_flagged_not_desugared() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param cutoff @default 1000 @mod false)
+(def filtered (* signal cutoff))
+(out filtered 1)
+"#,
+    );
+    let filtered = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", filtered, node_display_label(filtered));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "filtered"))
+        .unwrap()
+        .text = "* cutoff~".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert!(
+        !visible.nodes.iter().any(|node| node.op == "mod"),
+        "an opted-out param must not get a synthesized mod accessor"
+    );
+    let filtered = visible
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    assert!(
+        filtered
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("@mod false")),
+        "expected an opt-out diagnostic, got {:?}",
+        filtered.diagnostic
+    );
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("@mod true"),
+        "opt-out must not be overridden:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("@modulator"),
+        "nothing is modulatable, so no modulator inputs:\n{}",
+        generated.source
+    );
+}
+
+/// A `mod` node the user dropped in front of a param declares it just as well
+/// as the `~` shorthand does.
+#[test]
+fn mod_node_fed_by_param_infers_modulatable() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param depth @default 0.5)
+(def m (mod depth))
+(def filtered (* signal m))
+(out filtered 1)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated
+            .source
+            .contains("(param depth @default 0.5 @mod true @mod-mode additive)"),
+        "a `mod` accessor is a declaration:\n{}",
+        generated.source
+    );
+}
+
+/// Inference fills gaps; it never overrides. An authored `@mod-mode` survives
+/// even though additive is what the inference would have picked.
+#[test]
+fn authored_mod_mode_survives_inference() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param depth @default 0.5 @mod true @mod-mode multiply)
+(def m (mod depth))
+(def filtered (* signal m))
+(out filtered 1)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("@mod-mode multiply"),
+        "authored mod-mode must win:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("additive"),
+        "inference must not append a second mode:\n{}",
+        generated.source
+    );
+}
+
+/// A patch with nothing modulatable stays exactly as lean as it was — no
+/// stray attributes, no modulator inputs nobody asked for.
+#[test]
+fn params_without_modulation_demand_stay_bare() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param cutoff @default 1000)
+(def filtered (* signal cutoff))
+(out filtered 1)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(param cutoff @default 1000)"),
+        "an unmodulated param must stay bare:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("@modulator"),
+        "no modulator inputs without demand:\n{}",
+        generated.source
+    );
+}
+
+/// Effects get their modulator inputs too — `EFFECT_TEMPLATE` ships none, so
+/// inference is the only thing that can put them there. Channels 3-6, past the
+/// stereo input pair.
+#[test]
+fn effect_intent_materializes_modulator_inputs_after_the_stereo_pair() {
+    let root_patch = parse(
+        r#"
+(def input_l (in 1 @name Left))
+(param drive @default 0.5)
+(def processed (* input_l (mod drive)))
+(out processed 1 @name Left)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Effect).unwrap();
+    for slot in 1..=4 {
+        assert!(
+            generated.source.contains(&format!(
+                "(def mod{slot} (in {channel} @name mod{slot} @modulator {slot}))",
+                channel = slot + 2
+            )),
+            "effect modulator inputs start at channel 3:\n{}",
+            generated.source
+        );
+    }
+}
+
+#[test]
+fn default_layout_never_overlaps_wide_params_and_named_inputs() {
+    let patch = parse(
+        r#"
+            (param attack 0.01 0.001 2.0)
+            (param decay 0.2 0.001 2.0)
+            (param sustain 0.5 0.0 1.0)
+            (param release 0.4 0.001 4.0)
+            (param detune 0.0 -12.0 12.0)
+            (param drive 1.0 0.0 8.0)
+            (param level 0.8 0.0 1.0)
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def clock (in 5 @name clock))
+            (def osc (phasor pitch))
+            (def env (adsr gate attack decay sustain release))
+            (def sig (* osc env))
+            (out sig 1 @name audio)
+            "#,
+    );
+
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let rects = patch
+        .nodes
+        .iter()
+        .map(|node| {
+            let input_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+            let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
+            let (width, height) = node_size_for_ports(node, input_count, output_count);
+            (
+                node.id.clone(),
+                Rect {
+                    col: node.position.0,
+                    row: node.position.1,
+                    width,
+                    height,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // Every node must be sized from its label, not collapsed to the minimum
+    // width: the auto layout runs before any glyph advance is measured. The
+    // width it uses also has to cover what the node really renders as - a
+    // layout that packs by half the rendered width overlaps on screen while
+    // every layout-side assertion still agrees with itself.
+    for (id, rect) in &rects {
+        let node = patch.nodes.iter().find(|node| &node.id == id).unwrap();
+        let label = node_display_label(node);
+        if label.chars().count() > 12 {
+            assert!(
+                rect.width > NODE_MIN_WIDTH,
+                "node {id} with label {label:?} should be wider than the minimum: {rect:?}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        for scale in [1.0_f64, 2.0] {
+            let rendered = rendered_label_width_cells(&label, node_font_size(node), scale);
+            assert!(
+                rect.width >= rendered * 0.9,
+                "node {id} is laid out at {:.2} cells but renders {rendered:.2} cells wide \
+                 at scale {scale}: label={label:?}",
+                rect.width
+            );
+        }
+    }
+
+    for (a_idx, (a_id, a)) in rects.iter().enumerate() {
+        for (b_id, b) in rects.iter().skip(a_idx + 1) {
+            let overlaps_x = a.col < b.col + b.width && b.col < a.col + a.width;
+            let overlaps_y = a.row < b.row + b.height && b.row < a.row + a.height;
+            assert!(
+                !(overlaps_x && overlaps_y),
+                "default layout placed {a_id} {a:?} overlapping {b_id} {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn default_layout_keeps_named_inputs_clear_of_the_param_stack() {
+    let patch = parse(
+        r#"
+            (param attack 0.01 0.001 2.0)
+            (param decay 0.2 0.001 2.0)
+            (param sustain 0.5 0.0 1.0)
+            (param release 0.4 0.001 4.0)
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def osc (phasor pitch))
+            (def env (adsr gate attack decay sustain release))
+            (def sig (* osc env))
+            (out sig 1 @name audio)
+            "#,
+    );
+    let node = |id: &str| patch.nodes.iter().find(|node| node.id == id).unwrap();
+    let width = |id: &str| {
+        let input_indices = patch_input_indices(&patch);
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = patch_output_counts(&patch);
+        let target = node(id);
+        node_size_for_ports(
+            target,
+            input_slot_counts.get(&target.id).copied().unwrap_or(0),
+            output_counts.get(&target.id).copied().unwrap_or(0),
+        )
+        .0
+    };
+
+    let param_right_edge = ["attack", "decay", "sustain", "release"]
+        .into_iter()
+        .map(|id| node(id).position.0 + width(id))
+        .fold(0.0_f32, f32::max);
+    for input in ["gate", "pitch"] {
+        assert!(
+            node(input).position.0 >= param_right_edge,
+            "named input {input} at {:?} should start right of the param stack edge {param_right_edge}",
+            node(input).position
+        );
+    }
+
+    // Signal flow still reads top-down: sources on top, out at the bottom.
+    let sources_bottom = ["attack", "gate", "pitch"]
+        .into_iter()
+        .map(|id| node(id).position.1)
+        .fold(0.0_f32, f32::max);
+    let out_row = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .expect("out node")
+        .position
+        .1;
+    assert!(
+        out_row > sources_bottom,
+        "out node should sit below every source: out_row={out_row} sources_bottom={sources_bottom}"
+    );
+}
+
+/// True rendered width of `text` in layout cells, measured the way the macOS
+/// backend does: CoreText advances of the system font at `font_size * scale`
+/// device pixels, over a monospace cell of `MONO_CELL_POINTS * scale` device
+/// pixels. Both sides carry the scale factor, so the ratio cancels it - which
+/// is exactly what a cells-per-character estimate has to reproduce.
+#[cfg(target_os = "macos")]
+fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
+    use crate::glyph_atlas::SizedFontCache;
+
+    // `MetalBackend` builds the layout atlas from JetBrains Mono at the app's
+    // monospace point size; its advance is a flat 0.6em.
+    const MONO_CELL_POINTS: f64 = 13.0;
+    const MONO_ADVANCE_EM: f64 = 0.6;
+    let cell_w = (MONO_CELL_POINTS * MONO_ADVANCE_EM * scale) as f32;
+    let mut fonts = SizedFontCache::new(14.0 * scale, scale).expect("system font");
+    fonts.measure_text(text, (font_size * 10.0).round() as u16) / cell_w
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn estimated_label_width_matches_the_rendered_width_at_every_display_scale() {
+    let labels = [
+        "param attack 0.01 0.001 2",
+        "in 3 @name velocity",
+        "adsr attack decay sustain release",
+        "param resonant-lowpass-cutoff 0.5 0.001 0.999 @unit hz @curve exp",
+    ];
+    // Retina (2.0) is the case that a pixel-based estimate gets wrong by the
+    // scale factor while still looking plausible at 1.0.
+    for scale in [1.0_f64, 2.0] {
+        for label in labels {
+            for font_size in [NODE_FONT_SIZE, CODE_NODE_FONT_SIZE] {
+                let estimated = estimated_label_width_cells(label, font_size);
+                let rendered = rendered_label_width_cells(label, font_size, scale);
+                let ratio = estimated / rendered;
+                assert!(
+                    (0.9..=1.35).contains(&ratio),
+                    "estimated width should track the rendered width at scale {scale} \
+                     (font {font_size}): estimated={estimated:.2} rendered={rendered:.2} \
+                     ratio={ratio:.2} label={label:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn estimated_label_width_calibrates_against_measured_advances() {
+    let measurer = FixedWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        // A retina cell: two device pixels per logical point.
+        cell_w: 16.0,
+        cell_h: 32.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    let sample = "param attack 0.01".to_string();
+    cache_text_widths(sample.clone(), NODE_FONT_SIZE, &measure_ctx);
+    let measured = measured_text_width(&sample, NODE_FONT_SIZE).expect("cached advance");
+    assert!(
+        (measured - measurer.measure_text_px(&sample, NODE_FONT_SIZE) / measure_ctx.cell_w).abs()
+            < 0.01,
+        "cached advances are stored in cells: {measured}"
+    );
+
+    // A label the cache has never seen has to be estimated from the advances
+    // the cache does hold, in the same (cell) unit.
+    let unmeasured = "in 3 @name velocity";
+    let estimated = estimated_label_width_cells(unmeasured, NODE_FONT_SIZE);
+    let expected = measurer.measure_text_px(unmeasured, NODE_FONT_SIZE) / measure_ctx.cell_w;
+    let ratio = estimated / expected;
+    assert!(
+        (0.9..=1.2).contains(&ratio),
+        "an unmeasured label should be estimated from the measured advances: \
+         estimated={estimated} expected={expected} ratio={ratio}"
+    );
+}
+
+/// The bubble header shares one row between the status (which widens as the
+/// elapsed counter ticks) and the bound macro name, so the name has to be cut
+/// to whatever is left instead of running under the status text.
+#[test]
+#[cfg(target_os = "macos")]
+fn bound_macro_name_is_truncated_to_the_header_space_left() {
+    let name = "a-very-long-macro-name-that-cannot-fit";
+    let full = estimated_label_width_cells(name, AGENTIC_HEADER_FONT_SIZE);
+
+    assert_eq!(
+        truncated_to_width_cells(name, AGENTIC_HEADER_FONT_SIZE, full + 1.0).as_deref(),
+        Some(name),
+        "a name with room to spare should render whole"
+    );
+
+    let fitted = truncated_to_width_cells(name, AGENTIC_HEADER_FONT_SIZE, full * 0.4)
+        .expect("a partial name still fits");
+    assert!(fitted.ends_with('…'), "a cut name should be marked: {fitted}");
+    assert!(fitted.chars().count() > 1, "some of the name should survive");
+    assert!(
+        estimated_label_width_cells(&fitted, AGENTIC_HEADER_FONT_SIZE) <= full * 0.4,
+        "the truncated name should fit the space given: {fitted}"
+    );
+
+    assert_eq!(
+        truncated_to_width_cells(name, AGENTIC_HEADER_FONT_SIZE, 0.0),
+        None,
+        "with no room at all the name should be dropped rather than clipped"
+    );
+}
+
+#[test]
+fn cmd_enter_creates_empty_node_below_selected_node() {
+    let path = temp_patcher_source_path("cmd-enter-create-below");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let anchor = allocate_created_text_node(&mut state, &view_key, "sine 220");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &anchor))
+        .unwrap()
+        .position = (5.0, 5.0);
+    state.selected_nodes.clear();
+    state.selected_nodes.insert(anchor.clone());
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(event.is_some(), "cmd+enter should be consumed");
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state
+        .text_edit
+        .as_ref()
+        .expect("cmd+enter should open a text edit on the new node");
+    assert_ne!(edit.node_id, anchor);
+    assert!(edit.text.is_empty());
+    let created = state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(&view_key, &edit.node_id))
+        .expect("created node edit");
+    assert_eq!(created.position.0, 5.0, "new node keeps the anchor column");
+    assert!(
+        created.position.1 > 5.0,
+        "new node should sit below the anchor: {:?}",
+        created.position
+    );
+}
+
+#[test]
+fn cmd_up_connects_last_two_touched_nodes_on_first_ports() {
+    let path = temp_patcher_source_path("cmd-up-connect");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let upper = allocate_created_text_node(&mut state, &view_key, "sine 220");
+    let lower = allocate_created_text_node(&mut state, &view_key, "mul 0.5");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &upper))
+        .unwrap()
+        .position = (4.0, 2.0);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &lower))
+        .unwrap()
+        .position = (4.0, 9.0);
+    note_touched_node(&mut state, &upper);
+    note_touched_node(&mut state, &lower);
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(
+        matches!(
+            event,
+            Some(crate::widget_render::WidgetEvent::Custom(Value::Keyword(ref kind)))
+                if kind == "semantic-change"
+        ),
+        "cmd+up should emit a semantic change"
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let connection = state
+        .edit_state
+        .connections
+        .values()
+        .next()
+        .expect("created connection edit");
+    assert_eq!(connection.from.node_id, upper);
+    assert_eq!(connection.from.output_index, 0);
+    assert_eq!(connection.to.node_id, lower);
+    assert_eq!(connection.to.input_index, 0);
+}
+
+#[test]
+fn cmd_up_touch_order_ignores_vertical_order_for_direction() {
+    // Touching the lower node first must still cable the upper node's outlet
+    // into the lower node's inlet — signal flows down the canvas.
+    let path = temp_patcher_source_path("cmd-up-connect-reversed-touch");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let upper = allocate_created_text_node(&mut state, &view_key, "sine 220");
+    let lower = allocate_created_text_node(&mut state, &view_key, "mul 0.5");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &upper))
+        .unwrap()
+        .position = (4.0, 2.0);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &lower))
+        .unwrap()
+        .position = (4.0, 9.0);
+    note_touched_node(&mut state, &lower);
+    note_touched_node(&mut state, &upper);
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let connection = state
+        .edit_state
+        .connections
+        .values()
+        .next()
+        .expect("created connection edit");
+    assert_eq!(connection.from.node_id, upper);
+    assert_eq!(connection.to.node_id, lower);
+}
+
+#[test]
+fn patcher_undo_redo_round_trips_created_node() {
+    let path = temp_patcher_source_path("patcher-undo-created");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let created = allocate_created_text_node(&mut state, "root", "cycle 220");
+    set_patcher_interaction_state(key, state);
+    assert_eq!(
+        patcher_history_for_key(key).undo.len(),
+        1,
+        "create is one undo step"
+    );
+
+    let undone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(undone.is_some(), "undo should be consumed");
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created)),
+        "undo should remove the created node"
+    );
+    let history = patcher_history_for_key(key);
+    assert_eq!(history.undo.len(), 0);
+    assert_eq!(history.redo.len(), 1);
+
+    let redone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('Z'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(redone.is_some(), "redo should be consumed");
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created)),
+        "redo should restore the created node"
+    );
+
+    // Redo stack is now empty: a second redo is not consumed.
+    let empty_redo = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(
+        empty_redo.is_none(),
+        "empty redo stack should not consume the key"
+    );
+}
+
+#[test]
+fn patcher_undo_restores_deleted_selection() {
+    let path = temp_patcher_source_path("patcher-undo-delete");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let created = allocate_created_text_node(&mut state, "root", "cycle 220");
+    state.selected_nodes.insert(created.clone());
+    set_patcher_interaction_state(key, state);
+
+    let deleted = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(deleted.is_some(), "delete should be consumed");
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created))
+    );
+    assert_eq!(
+        patcher_history_for_key(key).undo.len(),
+        2,
+        "create and delete are separate undo steps"
+    );
+
+    let undone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(undone.is_some());
+    let state = get_patcher_interaction_state(key);
+    let restored = state
+        .edit_state
+        .nodes
+        .get(&node_edit_key("root", &created))
+        .expect("undo should restore the deleted node");
+    assert_eq!(restored.text, "cycle 220");
+}
+
+#[test]
+fn patcher_undo_gesture_coalescing_skips_noop_transitions() {
+    let path = temp_patcher_source_path("patcher-undo-noop");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    // Hover/selection churn without edit-state changes records nothing.
+    let mut state = get_patcher_interaction_state(key);
+    state.hovered_node = Some("input".to_string());
+    set_patcher_interaction_state(key, state.clone());
+    state.selected_nodes.insert("input".to_string());
+    set_patcher_interaction_state(key, state.clone());
+    assert_eq!(patcher_history_for_key(key).undo.len(), 0);
+
+    // A text-edit gesture that ends back at its base (cancelled created node)
+    // records nothing either.
+    let created = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    text::begin_patcher_text_edit(&mut state, created, String::new(), 0);
+    set_patcher_interaction_state(key, state.clone());
+    cancel_patcher_text_edit(&mut state, "root");
+    set_patcher_interaction_state(key, state);
+    assert_eq!(patcher_history_for_key(key).undo.len(), 0);
+}
+
+#[test]
+fn patcher_copy_paste_duplicates_selection_and_wires() {
+    let path = temp_patcher_source_path("patcher-copy-paste");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let source_node = allocate_created_text_node(&mut state, "root", "cycle 220");
+    let dest_node = allocate_created_text_node(&mut state, "root", "mul 0.5");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &source_node))
+        .unwrap()
+        .position = (3.0, 4.0);
+    connect_output_to_input(&mut state, "root", &source_node, &dest_node, 0);
+    state.selected_nodes.insert(source_node.clone());
+    state.selected_nodes.insert(dest_node.clone());
+    set_patcher_interaction_state(key, state);
+
+    let copied = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(copied.is_some(), "copy should be consumed");
+
+    // Paste arrives with SUPER rewritten to CONTROL by
+    // normalize_command_shortcuts; the widget accepts either.
+    let pasted = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('v'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    );
+    assert!(pasted.is_some(), "paste should be consumed");
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.edit_state.nodes.len(), 4, "paste adds two nodes");
+    assert_eq!(state.selected_nodes.len(), 2, "pasted nodes are selected");
+    assert!(!state.selected_nodes.contains(&source_node));
+    assert!(!state.selected_nodes.contains(&dest_node));
+
+    let pasted_texts = state
+        .selected_nodes
+        .iter()
+        .map(|id| {
+            state.edit_state.nodes[&node_edit_key("root", id)]
+                .text
+                .clone()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        pasted_texts,
+        HashSet::from(["cycle 220".to_string(), "mul 0.5".to_string()])
+    );
+
+    let internal_wire = state.edit_state.connections.values().find(|edit| {
+        state.selected_nodes.contains(&edit.from.node_id)
+            && state.selected_nodes.contains(&edit.to.node_id)
+    });
+    assert!(
+        internal_wire.is_some(),
+        "the wire internal to the selection is remapped onto the pasted nodes"
+    );
+
+    let pasted_cycle = state
+        .selected_nodes
+        .iter()
+        .map(|id| &state.edit_state.nodes[&node_edit_key("root", id)])
+        .find(|edit| edit.text == "cycle 220")
+        .unwrap();
+    assert_eq!(
+        pasted_cycle.position,
+        (5.0, 6.0),
+        "first paste offsets the copied position by one paste step"
+    );
+
+    // Undo removes the whole paste as one step.
+    let undone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(undone.is_some());
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state.edit_state.nodes.len(),
+        2,
+        "undo removes both pasted nodes"
+    );
+}
+
+#[test]
+fn patcher_paste_rejects_macro_self_reference() {
+    let path = temp_patcher_source_path("patcher-paste-macro-guard");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+
+    set_patcher_clipboard(PatcherClipboard {
+        nodes: vec![PatcherClipboardNode {
+            text: "wobble 1".to_string(),
+            position: (0.0, 0.0),
+            width: None,
+        }],
+        connections: Vec::new(),
+        paste_serial: 0,
+    });
+    let mut state = PatcherInteractionState::default();
+    state.active_macro = Some("wobble".to_string());
+    assert!(
+        !paste_patcher_clipboard(&node, &mut state, "macro:wobble"),
+        "a macro view must not gain a node calling the macro it defines"
+    );
+    assert!(state.edit_state.nodes.is_empty());
+}
+
+#[test]
+fn regeneration_without_a_library_keeps_use_defmacro_headers() {
+    // The compiler materializes library defmacros from `(use-defmacro …)`
+    // alone. Parsed without a library the call degrades to an unknown-operator
+    // builtin, and dropping the header here would leave a file that can never
+    // compile again — no cable edit can bring the import back.
+    let source = "(use-defmacro pitch-transpose)\n(def pitch (in 2 @name pitch))\n\
+                  (def pt (pitch-transpose pitch 1))\n(out pt 1 @name audio)\n";
+    let patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    assert_eq!(patch.imports, vec!["pitch-transpose".to_string()]);
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .unwrap()
+        .source;
+    assert!(
+        generated.contains("(use-defmacro pitch-transpose)"),
+        "regeneration must keep the import:\n{generated}"
+    );
+}
+
+#[test]
+fn regeneration_without_a_library_drops_an_unused_import() {
+    let source = "(use-defmacro pitch-transpose)\n(def pitch (in 2 @name pitch))\n\
+                  (out pitch 1 @name audio)\n";
+    let patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .unwrap()
+        .source;
+    assert!(
+        !generated.contains("use-defmacro"),
+        "an import nothing calls is still garbage-collected:\n{generated}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cmd+E encapsulation (docs/patcher-encapsulate-spec.md)
+// ---------------------------------------------------------------------------
+
+fn encapsulation_plan(source: &str, selected: &[&str]) -> EncapsulationPlan {
+    let patch = parse(source);
+    let selection = selected
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
+    plan_encapsulation(&patch, &selection, "sub1".to_string()).expect("plan")
+}
+
+fn encapsulation_refusal(source: &str, selected: &[&str]) -> EncapsulationRefusal {
+    let patch = parse(source);
+    let selection = selected
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
+    plan_encapsulation(&patch, &selection, "sub1".to_string()).expect_err("refusal")
+}
+
+fn body_text(plan: &EncapsulationPlan, key: &BodyKey) -> String {
+    plan.body_nodes
+        .iter()
+        .find(|planned| planned.key == *key)
+        .unwrap_or_else(|| panic!("missing body node {key:?}"))
+        .text
+        .clone()
+}
+
+fn encapsulate_via_key_event(node: &LayoutNode) -> Option<WidgetEvent> {
+    PATCHER_WIDGET.key_event(
+        node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    )
+}
+
+#[test]
+fn empty_created_macro_seed_projects_to_a_bare_macro_scope() {
+    // The seed for an encapsulated macro must contribute no body nodes of its
+    // own; the body arrives entirely as created-node edits.
+    let patch = parse(&format!(
+        "{}\n(def g (in 1 @name gate))\n(out 1 g)\n",
+        empty_created_macro_source("sub1")
+    ));
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "sub1")
+        .expect("sub1 projected");
+    assert!(macro_patch.params.is_empty());
+    assert!(macro_patch.patch.nodes.is_empty());
+    assert!(patch.diagnostics.is_empty(), "{:?}", patch.diagnostics);
+}
+
+#[test]
+fn encapsulation_shares_one_inlet_across_a_fanned_out_source() {
+    // One external source feeding three selected nodes is ONE macro parameter
+    // that fans out inside, not three.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def b (* g 3))\n\
+         (def c (* g 4))\n\
+         (out 1 (+ (+ a b) c))\n",
+        &["a", "b", "c"],
+    );
+
+    assert_eq!(plan.inlets.len(), 1, "{:?}", plan.inlets);
+    assert_eq!(plan.inlets[0].external_source.node_id, "g");
+    assert_eq!(plan.inlets[0].internal_destinations.len(), 3);
+    let inlet_cables = plan
+        .body_cables
+        .iter()
+        .filter(|cable| cable.from == BodyKey::Inlet(0))
+        .count();
+    assert_eq!(inlet_cables, 3, "the `in` node fans out inside the macro");
+}
+
+#[test]
+fn encapsulation_shares_one_outlet_across_a_fanned_out_internal_source() {
+    // The Swift SubpatchEncapsulator keys outlets on the external destination
+    // and would emit two identical outlets here; keying on the internal source
+    // port gives one return value with two parent cables.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def x (+ a 1))\n\
+         (def y (- a 1))\n\
+         (out 1 (* x y))\n",
+        &["a"],
+    );
+
+    assert_eq!(plan.outlets.len(), 1, "{:?}", plan.outlets);
+    assert_eq!(plan.outlets[0].internal_source.node_id, "a");
+    let mut destinations = plan.outlets[0]
+        .external_destinations
+        .iter()
+        .map(|port| port.node_id.clone())
+        .collect::<Vec<_>>();
+    destinations.sort();
+    assert_eq!(destinations, vec!["x".to_string(), "y".to_string()]);
+}
+
+#[test]
+fn encapsulation_without_crossing_outputs_still_returns_a_value() {
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def b (* a 3))\n\
+         (out 1 g)\n",
+        &["a", "b"],
+    );
+
+    assert_eq!(plan.inlets.len(), 1);
+    assert_eq!(plan.outlets.len(), 1, "a macro must return something");
+    assert_eq!(plan.outlets[0].internal_source.node_id, "b");
+    assert!(plan.outlets[0].external_destinations.is_empty());
+}
+
+#[test]
+fn encapsulation_port_order_is_independent_of_connection_vec_order() {
+    let source = "(def g (in 1 @name gate))\n\
+                  (def p (in 2 @name pitch))\n\
+                  (def hi (* g 2))\n\
+                  (def lo (* p 3))\n\
+                  (def a (+ hi lo))\n\
+                  (out 1 a)\n";
+    let selection = ["a"]
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
+
+    let mut forward = parse(source);
+    set_patch_node_position(&mut forward, "hi", (0.0, 0.0));
+    set_patch_node_position(&mut forward, "lo", (10.0, 0.0));
+    let mut reversed = forward.clone();
+    reversed.connections.reverse();
+
+    let forward_plan = plan_encapsulation(&forward, &selection, "sub1".to_string()).unwrap();
+    let reversed_plan = plan_encapsulation(&reversed, &selection, "sub1".to_string()).unwrap();
+
+    let ports = |plan: &EncapsulationPlan| {
+        plan.inlets
+            .iter()
+            .map(|inlet| {
+                (
+                    inlet.external_source.node_id.clone(),
+                    inlet.internal_destinations[0].input_index,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ports(&forward_plan), ports(&reversed_plan));
+    assert_eq!(
+        ports(&forward_plan),
+        vec![("hi".to_string(), 0), ("lo".to_string(), 1)],
+        "inlet order follows the internal destination slots"
+    );
+}
+
+#[test]
+fn encapsulated_node_text_keeps_argument_slots_aligned() {
+    // A two-cable `(- a b)` renders as a bare `-` through `node_display_label`,
+    // and a recreated bare `-` has a single input slot — the second cable would
+    // be silently dropped at generation. Every slot up to the highest used one
+    // gets an explicit token.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def p (in 2 @name pitch))\n\
+         (def d (- g p))\n\
+         (out 1 d)\n",
+        &["d"],
+    );
+    assert_eq!(body_text(&plan, &BodyKey::Moved("d".to_string())), "- ?");
+
+    // A trailing literal survives as a literal, and the cabled slot 0 stays
+    // implicit.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n(def m (* g 0.5))\n(out 1 m)\n",
+        &["m"],
+    );
+    assert_eq!(body_text(&plan, &BodyKey::Moved("m".to_string())), "* 0.5");
+}
+
+#[test]
+fn encapsulation_hoists_a_slot_zero_literal_into_its_own_constant() {
+    // A created node's arguments always begin with an implicit cable slot, so a
+    // literal sitting at index 0 cannot survive as text. Left alone it
+    // regenerates as `(* __patcher_missing_input__ 2 3)`.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n(def a (* 2 3))\n(out 1 (+ a g))\n",
+        &["a"],
+    );
+
+    assert_eq!(body_text(&plan, &BodyKey::Moved("a".to_string())), "* 3");
+    assert_eq!(
+        body_text(&plan, &BodyKey::HoistedConstant("a".to_string())),
+        "2"
+    );
+    assert!(
+        plan.body_cables.contains(&PlannedCable {
+            from: BodyKey::HoistedConstant("a".to_string()),
+            from_output: 0,
+            to: BodyKey::Moved("a".to_string()),
+            to_input: 0,
+        }),
+        "{:?}",
+        plan.body_cables
+    );
+}
+
+#[test]
+fn encapsulation_refuses_scope_bound_nodes() {
+    for (source, selected) in [
+        (
+            "(def gain (param gain 0.5))\n(def a (* gain 2))\n(out 1 a)\n",
+            vec!["gain", "a"],
+        ),
+        (
+            "(def g (in 1 @name gate))\n(def a (* g 2))\n(out 1 a)\n",
+            vec!["g", "a"],
+        ),
+    ] {
+        assert_eq!(
+            encapsulation_refusal(source, &selected),
+            EncapsulationRefusal::ScopeBoundNode,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn encapsulation_refuses_a_non_convex_selection() {
+    // `a -> mid -> c` with a and c selected: collapsing them into one atomic
+    // call makes `instance -> mid -> instance`, a cycle the generator cannot
+    // emit. (Max's `p` subpatch is not atomic and tolerates this.)
+    assert_eq!(
+        encapsulation_refusal(
+            "(def g (in 1 @name gate))\n\
+             (def a (* g 2))\n\
+             (def mid (+ a 1))\n\
+             (def c (* mid 3))\n\
+             (out 1 c)\n",
+            &["a", "c"],
+        ),
+        EncapsulationRefusal::NotConvex
+    );
+}
+
+#[test]
+fn encapsulation_allows_a_history_that_moves_wholly_inside() {
+    // Macros own per-expansion histories (see `latch_on_trigger` in
+    // instruments/core/triton/dsp.lisp), so this must not be refused.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (make-history h)\n\
+         (def prev (read-history h))\n\
+         (def nxt (* prev 0.5))\n\
+         (write-history h nxt)\n\
+         (out 1 (+ prev g))\n",
+        &["h", "nxt"],
+    );
+    assert_eq!(
+        body_text(&plan, &BodyKey::Moved("h".to_string())),
+        "history"
+    );
+    assert_eq!(plan.outlets.len(), 1);
+    assert_eq!(plan.outlets[0].internal_source.node_id, "h");
+}
+
+#[test]
+fn encapsulation_refuses_a_history_written_and_read_across_the_boundary() {
+    assert_eq!(
+        encapsulation_refusal(
+            "(def g (in 1 @name gate))\n\
+             (make-history h)\n\
+             (def prev (read-history h))\n\
+             (def outside (* g 2))\n\
+             (write-history h outside)\n\
+             (out 1 (+ prev g))\n",
+            &["h"],
+        ),
+        EncapsulationRefusal::HistoryStraddlesBoundary
+    );
+}
+
+#[test]
+fn cmd_e_encapsulates_the_selection_and_regenerates_a_defmacro() {
+    let path = temp_patcher_source_path("encapsulate-end-to-end");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+
+    assert!(encapsulate_via_key_event(&node).is_some(), "cmd+e consumed");
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.contains_key("sub1"),
+        "{:?}",
+        state.edit_state.created_macros
+    );
+    assert_eq!(state.selected_nodes.len(), 1, "the instance is selected");
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+
+    assert!(
+        source.contains("(defmacro sub1 (input1)"),
+        "one inferred parameter:\n{source}"
+    );
+    assert!(source.contains("(sub1 g)"), "instance call:\n{source}");
+    assert!(
+        !source.contains("__patcher_missing_input__"),
+        "no unfilled slots:\n{source}"
+    );
+
+    // The generated source must round-trip: reparsing it is what the save path
+    // does before it accepts the payload.
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+    assert!(
+        reparsed.macros.iter().any(|m| m.name == "sub1"),
+        "sub1 survives the round trip"
+    );
+}
+
+#[test]
+fn cmd_e_encapsulation_is_a_single_undo_step() {
+    let path = temp_patcher_source_path("encapsulate-undo");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    let before = get_patcher_interaction_state(key).edit_state.clone();
+
+    encapsulate_via_key_event(&node);
+    assert!(
+        get_patcher_interaction_state(key)
+            .edit_state
+            .created_macros
+            .contains_key("sub1")
+    );
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(event.is_some(), "cmd+z consumed");
+
+    let after = get_patcher_interaction_state(key).edit_state.clone();
+    assert!(
+        after.created_macros.is_empty(),
+        "one undo removes the whole encapsulation: {:?}",
+        after.created_macros
+    );
+    assert_eq!(after.deleted_nodes, before.deleted_nodes);
+    assert_eq!(after.nodes.len(), before.nodes.len());
+}
+
+#[test]
+fn encapsulated_macro_body_layout_survives_the_save_payload() {
+    // Regression for the sidecar overlay gap: a macro created in this session
+    // has no scope in the on-disk patch, and requiring one dropped its whole
+    // body layout from the emitted sidecar.
+    let path = temp_patcher_dsp_path("encapsulate-layout");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let layout = sidecar::current_layout_json(&root_patch, &state).expect("layout json");
+    let parsed: serde_json::Value = serde_json::from_str(&layout).expect("parse layout");
+
+    let scope = parsed
+        .get("macros")
+        .and_then(|macros| macros.get("sub1"))
+        .and_then(|scope| scope.get("nodes"))
+        .and_then(|nodes| nodes.as_object())
+        .expect("sub1 layout scope");
+    assert!(
+        scope.len() >= 4,
+        "in + out + two moved nodes carry positions: {scope:?}"
+    );
+}
+
+#[test]
+fn retyping_an_encapsulated_instance_renames_the_macro() {
+    let path = temp_patcher_source_path("encapsulate-rename");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let instance_id = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+    let body_edits = state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| edit.view_key == "macro:sub1")
+        .count();
+    assert!(body_edits > 0);
+
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: instance_id.clone(),
+        text: "wobble".to_string(),
+        original_text: "sub1".to_string(),
+        state: TextInputState::default(),
+        autocomplete_selected: 0,
+    });
+    assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
+
+    assert!(state.edit_state.created_macros.contains_key("wobble"));
+    assert!(!state.edit_state.created_macros.contains_key("sub1"));
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .filter(|edit| edit.view_key == "macro:wobble")
+            .count(),
+        body_edits,
+        "the whole body is re-keyed to the new scope"
+    );
+    assert!(
+        state
+            .edit_state
+            .connections
+            .values()
+            .all(|edit| edit.view_key != "macro:sub1")
+    );
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(source.contains("(defmacro wobble"), "{source}");
+    assert!(!source.contains("sub1"), "{source}");
+}
+
+#[test]
+fn encapsulation_with_two_outlets_returns_a_tuple() {
+    let path = temp_patcher_source_path("encapsulate-tuple");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def b (+ g 1))\n\
+         (out 1 (* a b))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+
+    assert!(
+        source.contains("(tuple "),
+        "two outlets return a tuple:\n{source}"
+    );
+    assert!(
+        source.contains("(def (") && source.contains("(sub1 g)"),
+        "the instance destructures both outputs:\n{source}"
+    );
+    assert!(!source.contains("__patcher_missing_input__"), "{source}");
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+}
+
+/// A macro created in this session keeps its whole body in the interaction
+/// state, so its projected `MacroSignature` has no parameters — the port names
+/// have to come from the body's `in` / `out` nodes and their `@name`, or every
+/// inlet on the instance reads as the bare `in N` fallback.
+#[test]
+fn session_created_macro_ports_use_their_body_name_attributes() {
+    let path = temp_patcher_source_path("encapsulate-port-names");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n\
+         (def h (in 2 @name pitch))\n\
+         (def a (* g h))\n\
+         (def b (+ a 1))\n\
+         (out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let instance_id = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+
+    // The encapsulator's own `@name`s, before the file is ever regenerated.
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    assert_eq!(
+        input_port_tooltip(
+            &visible,
+            &InputPortRef {
+                node_id: instance_id.clone(),
+                input_index: 1,
+            },
+        ),
+        Some("in 2: input2".to_string())
+    );
+
+    // Renaming the inlet inside the macro view must show up on the instance.
+    let inlet_edit_id = state
+        .edit_state
+        .nodes
+        .values()
+        .find(|edit| edit.view_key == "macro:sub1" && edit.text.starts_with("in 2"))
+        .map(|edit| edit.id.clone())
+        .expect("inlet 2 body edit");
+    for edit in state.edit_state.nodes.values_mut() {
+        if edit.id == inlet_edit_id {
+            edit.text = "in 2 @name fmod".to_string();
+        }
+    }
+
+    let visible = patch_with_interaction_state(root_patch, &state, "root");
+    assert_eq!(
+        input_port_tooltip(
+            &visible,
+            &InputPortRef {
+                node_id: instance_id,
+                input_index: 1,
+            },
+        ),
+        Some("in 2: fmod".to_string()),
+        "the inlet's @name is the port name"
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn encapsulating_a_node_fed_by_param_sugar_keeps_the_mod_accessor_outside() {
+    // `gain~` is UI sugar for a hidden `(mod gain)` accessor node. `mod` needs a
+    // real modulatable param, which a macro parameter is not, so the accessor
+    // has to stay in the enclosing scope and feed an ordinary inlet.
+    let path = temp_patcher_source_path("encapsulate-mod-sugar");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n\
+         (def gain (param gain 0.5 @mod true))\n\
+         (def a (* g (mod gain)))\n\
+         (out 1 a)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let before = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let accessor = before
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "mod")
+        .expect("mod accessor node")
+        .id
+        .clone();
+    assert!(
+        hidden_inline_node_ids(&before).contains(&accessor),
+        "the accessor starts hidden behind the `gain~` sugar"
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let plan_view = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    assert!(
+        !hidden_inline_node_ids(&plan_view).contains(&accessor),
+        "the accessor is a real node on the canvas once it feeds the instance"
+    );
+    assert!(
+        plan_view
+            .nodes
+            .iter()
+            .any(|patch_node| patch_node.id == accessor),
+        "the accessor is not garbage-collected as an orphan"
+    );
+
+    let body_text = state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| edit.view_key == "macro:sub1")
+        .map(|edit| edit.text.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        body_text.iter().all(|text| !text.contains('~')),
+        "the moved node must not carry `gain~` into the macro: {body_text:?}"
+    );
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(source.contains("(mod gain)"), "{source}");
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+}
+
+#[test]
+fn cmd_e_encapsulates_inside_a_macro_view() {
+    let path = temp_patcher_source_path("encapsulate-in-macro");
+    fs::write(
+        &path,
+        "(defmacro shaper (drive)\n\
+        \x20 (def scaled (* drive 2))\n\
+        \x20 (def curved (tanh scaled))\n\
+        \x20 (* curved 0.5))\n\
+        (def g (in 1 @name gate))\n\
+        (out 1 (shaper g))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    // Navigate into the macro, then select two of its body nodes.
+    let mut state = get_patcher_interaction_state(key);
+    state.active_macro = Some("shaper".to_string());
+    state.selected_nodes = ["scaled".to_string(), "curved".to_string()]
+        .into_iter()
+        .collect();
+    set_patcher_interaction_state(key, state);
+    assert_eq!(
+        active_patcher_view_key(&get_patcher_interaction_state(key)),
+        "macro:shaper"
+    );
+
+    assert!(encapsulate_via_key_event(&node).is_some(), "cmd+e consumed");
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.contains_key("sub1"),
+        "{:?}",
+        state.edit_state.created_macros
+    );
+    // The instance lands in the macro we were editing, not at the root.
+    let instance_id = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+    let instance_edit = state
+        .edit_state
+        .nodes
+        .get(&node_edit_key("macro:shaper", &instance_id))
+        .expect("instance edit lives in the macro view");
+    assert_eq!(instance_edit.text, "sub1");
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.view_key == "macro:sub1"),
+        "the new macro has a body of its own"
+    );
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+
+    assert!(
+        source.contains("(defmacro sub1 (input1)"),
+        "the new macro is a top-level defmacro:\n{source}"
+    );
+    assert!(
+        source.contains("(defmacro shaper (drive)"),
+        "the enclosing macro survives:\n{source}"
+    );
+    assert!(
+        source.contains("(sub1 drive)"),
+        "the instance calls the new macro from inside `shaper`:\n{source}"
+    );
+    assert!(!source.contains("__patcher_missing_input__"), "{source}");
+
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+    // A macro calling a macro emitted after it must still compile — the
+    // generator orders local macros alphabetically, not by dependency.
+    compile_patch_source_with_dgenlisp(&source)
+        .unwrap_or_else(|error| panic!("generated source must compile:\n{error}\n{source}"));
+}
+
+#[test]
+fn encapsulating_inside_a_macro_never_names_the_macro_after_itself() {
+    // A macro gaining an instance of itself would be infinite expansion. The
+    // generated name is checked against every macro in scope, which includes
+    // the one being edited.
+    let path = temp_patcher_source_path("encapsulate-in-sub1");
+    fs::write(
+        &path,
+        "(defmacro sub1 (drive)\n\
+        \x20 (def scaled (* drive 2))\n\
+        \x20 (def curved (tanh scaled))\n\
+        \x20 (* curved 0.5))\n\
+        (def g (in 1 @name gate))\n\
+        (out 1 (sub1 g))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.active_macro = Some("sub1".to_string());
+    state.selected_nodes = ["scaled".to_string(), "curved".to_string()]
+        .into_iter()
+        .collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state.edit_state.created_macros.contains_key("sub1"),
+        "the existing `sub1` must not be shadowed"
+    );
+    assert!(
+        state.edit_state.created_macros.contains_key("sub2"),
+        "{:?}",
+        state.edit_state.created_macros
+    );
+}
+// ---------------------------------------------------------------------------
+// Orphaned-macro collection
+// ---------------------------------------------------------------------------
+
+/// Encapsulate, then delete the instance. The staged definition has to go with
+/// it — otherwise it lands in the emitted source as a macro nothing calls, and
+/// the patch collects invisible orphans as macros are added and removed.
+#[test]
+fn deleting_the_last_instance_of_a_session_created_macro_collects_the_definition() {
+    let path = temp_patcher_source_path("collect-created-macro");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let instance = state
+        .edit_state
+        .created_macros
+        .get("sub1")
+        .map(|edit| edit.instance_node_id.clone())
+        .expect("encapsulation staged `sub1` with an instance");
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = std::iter::once(instance).collect();
+    set_patcher_interaction_state(key, state);
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Backspace,
+                    modifiers: KeyModifiers::NONE,
+                },
+            )
+            .is_some(),
+        "delete consumed"
+    );
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.is_empty(),
+        "the orphaned macro is collected: {:?}",
+        state.edit_state.created_macros
+    );
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .all(|edit| edit.view_key != "macro:sub1"),
+        "its staged body edits go with it"
+    );
+
+    let source = fs::read_to_string(&path).expect("read source");
+    let emitted =
+        emit_patch_writeback(&source, PatcherIntent::Instrument, &state).expect("writeback");
+    assert!(
+        !emitted.contains("defmacro sub1"),
+        "no orphan definition reaches the source:\n{emitted}"
+    );
+}
+
+/// Collection is by reference count, not by the recorded instance node: a
+/// second instance keeps the definition alive when the first one is deleted.
+#[test]
+fn deleting_one_of_two_instances_keeps_a_session_created_macro() {
+    let path = temp_patcher_source_path("keep-created-macro");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let first = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+    // A second call site, the way dragging the macro out of the sidebar makes one.
+    let second = allocate_created_node(&mut state, "root", (40.0, 40.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &second))
+        .expect("second instance")
+        .text = "sub1".to_string();
+    state.selected_nodes = std::iter::once(first).collect();
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.contains_key("sub1"),
+        "the surviving instance keeps the definition alive"
+    );
+}
+
+/// A macro that only an orphaned macro called must go too — collection runs to
+/// a fixpoint rather than one level deep.
+#[test]
+fn collecting_an_orphaned_macro_cascades_to_the_macros_only_it_called() {
+    let mut state = PatcherInteractionState::default();
+    for (name, view, text) in [
+        ("outer", "root", "outer"),
+        ("inner", "macro:outer", "inner"),
+    ] {
+        let id = allocate_created_node(&mut state, view, (0.0, 0.0));
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key(view, &id))
+            .expect("node edit")
+            .text = text.to_string();
+        state.edit_state.created_macros.insert(
+            name.to_string(),
+            PatcherMacroEdit {
+                name: name.to_string(),
+                instance_node_id: id,
+                source: None,
+            },
+        );
+    }
+    assert_eq!(state.edit_state.created_macros.len(), 2);
+
+    // Drop the root instance of `outer`; `inner` is only reachable through it.
+    state
+        .edit_state
+        .nodes
+        .retain(|_, edit| edit.view_key != "root");
+    assert!(prune_unreferenced_created_macros(&mut state));
+    assert!(
+        state.edit_state.created_macros.is_empty(),
+        "both go: {:?}",
+        state.edit_state.created_macros
+    );
+}
+
+#[test]
+fn editor_node_text_keeps_bracketed_attribute_arrays_out_of_positional_args() {
+    // `[` / `]` are not lexer delimiters, so `@data [1 4 5 6]` arrives as the token run
+    // `@data`, `[1`, 4, 5, `6]`. The array tail must not leak into the positional slots.
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor 4 4 @data [1 4 5 6]").unwrap(),
+        ("tensor".to_string(), vec!["4".to_string(), "4".to_string()])
+    );
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor @shape [3 3] @data [1 4 5 6]").unwrap(),
+        ("tensor".to_string(), Vec::<String>::new())
+    );
+    // Nested arrays and a single-token array both close correctly.
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor @shape [4] @data [[1 2] [3 4]] 7").unwrap(),
+        ("tensor".to_string(), vec!["7".to_string()])
+    );
+}
+
+#[test]
+fn editor_node_text_normalizes_commas_inside_arrays() {
+    // A comma is the unquote token, so `[1,4,5,6]` would otherwise lex into Unquote nodes.
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor 4 4 @data [1,4,5,6]").unwrap(),
+        super::lisp::parse_editor_node_text("tensor 4 4 @data [1 4 5 6]").unwrap()
+    );
+}
+
+#[test]
+fn patch_source_with_tensor_data_attribute_projects_no_extra_inputs() {
+    let patch = parse("(def t (tensor @shape [3 3] @data [0 1 0  1 -4 1  0 1 0]))\n");
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "tensor")
+        .expect("tensor node");
+    assert!(
+        node.args.is_empty(),
+        "attribute array elements must not become inputs, got {:?}",
+        node.args
+    );
+}
+
+#[test]
+fn tensor_data_attribute_survives_writeback_round_trip() {
+    let source = "(def t (tensor @shape [3 3] @data [0 1 0  1 -4 1  0 1 0]))\n";
+    let patch = parse(source);
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(
+        generated.contains("@shape [3 3]") && generated.contains("@data [0 1 0 1 -4 1 0 1 0]"),
+        "generated source lost the attribute arrays:\n{generated}"
+    );
+}
+
+#[test]
+fn editor_created_tensor_node_shows_and_emits_its_attributes() {
+    let node = node_from_editor_text(
+        "t",
+        "tensor 4 4 @data [1,4,5,6]",
+        (0.0, 0.0),
+        &HashMap::new(),
+        false,
+    );
+    assert_eq!(
+        node_display_label(&node),
+        "tensor 4 4 @data [1 4 5 6]",
+        "the node body must keep showing its attribute array"
+    );
+    // The positional slots stop at the two shape arguments: the array elements must not
+    // have claimed inlets of their own.
+    assert_eq!(node_display_input_slots(&node).len(), 2);
+}
+
+#[test]
+fn auto_layout_keeps_generated_cable_lanes_clear_of_nodes() {
+    let sources = [
+        r#"
+        (def freq (in 1 @name freq))
+        (def idx (in 2 @name mod_index))
+        (def fb (in 3 @name feedback))
+        (def warp (in 4 @name warp))
+        (def base (phasor freq))
+        (def carrier (phasor (* freq 1.4142)))
+        (def fbh (history))
+        (def phase (* (+ base (* fbh fb)) twopi))
+        (def m (sin phase))
+        (def mixed (+ carrier (* (* m (+ warp idx)) idx)))
+        (def h2 (history))
+        (out 1 (sin (+ (* mixed twopi) (* h2 fb))))
+        (out 2 (cos (+ (* mixed twopi) h2)))
+        "#,
+        r#"
+        (def a (in 1 @name a))
+        (def b (in 2 @name b))
+        (def c (in 3 @name c))
+        (def d (in 4 @name d))
+        (def e (in 5 @name e))
+        (def hub (+ a b c d e))
+        (out 1 (* (+ hub a) (+ hub b)))
+        (out 2 (* (+ hub c) (+ hub d)))
+        "#,
+    ];
+
+    for source in sources {
+        let patch = parse(source);
+        let input_indices = patch_input_indices(&patch);
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = patch_output_counts(&patch);
+        let node_box = |node: &PatchNode| {
+            let inputs = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+            let outputs = output_counts.get(&node.id).copied().unwrap_or(0);
+            node_size_for_ports(node, inputs, outputs)
+        };
+        let find = |id: &str| patch.nodes.iter().find(|node| node.id == id);
+
+        for connection in &patch.connections {
+            let Some(segment) = connection.segment else {
+                continue;
+            };
+            let (Some(from), Some(to)) = (find(&connection.from_node), find(&connection.to_node))
+            else {
+                continue;
+            };
+            let row = segment.segment_row;
+
+            // The horizontal run spans outlet x to inlet x, at the segment row.
+            let outlet_x = from.position.0
+                + port_x_offset(
+                    connection.from_output,
+                    output_counts.get(&from.id).copied().unwrap_or(1),
+                    node_box(from).0,
+                );
+            let inlet_slot = input_indices
+                .get(&to.id)
+                .and_then(|indices| {
+                    indices
+                        .iter()
+                        .position(|input| *input == connection.to_input)
+                })
+                .unwrap_or(0);
+            let inlet_x = to.position.0
+                + port_x_offset(
+                    inlet_slot,
+                    input_slot_counts.get(&to.id).copied().unwrap_or(1),
+                    node_box(to).0,
+                );
+            let lane_left = outlet_x.min(inlet_x);
+            let lane_right = outlet_x.max(inlet_x);
+
+            for node in &patch.nodes {
+                if node.id == from.id || node.id == to.id {
+                    continue;
+                }
+                let (width, height) = node_box(node);
+                let (left, top) = node.position;
+                let crosses_rows = row > top && row < top + height;
+                let crosses_columns = lane_right > left && lane_left < left + width;
+                assert!(
+                    !(crosses_rows && crosses_columns),
+                    "cable {}->{} lane at row {row} is drawn through node {} at ({left}, {top})",
+                    connection.from_node,
+                    connection.to_node,
+                    node.id,
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agentic connect (docs/patcher-agentic-connect-spec.md)
+// ---------------------------------------------------------------------------
+
+const CONNECT_TEST_SOURCE: &str = "\
+(defmacro voice (trig freq decay) (* trig (* freq decay)))
+(def cutoff (param cutoff @default 500 @min 20 @max 12000))
+(def sig (in 1))
+(def filtered (svf sig cutoff 0.7 0))
+(out filtered)";
+
+/// A patcher holding `CONNECT_TEST_SOURCE` plus an unwired `voice` instance,
+/// which is the shape the create bubble leaves behind.
+fn connect_test_node(name: &str) -> (LayoutNode, u64, String) {
+    let path = temp_patcher_source_path(name);
+    fs::write(&path, CONNECT_TEST_SOURCE).expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_node(&mut state, "root", (10.0, 10.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &instance))
+        .expect("created node edit")
+        .text = "voice".to_string();
+    set_patcher_interaction_state(key, state);
+    (node, key, instance)
+}
+
+fn connect_test_patch(node: &LayoutNode, key: u64) -> Patch {
+    let state = get_patcher_interaction_state(key);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let view_key = active_patcher_view_key(&state);
+    let patch = active_patcher_patch(&root_patch, &state);
+    patch_with_interaction_state(patch, &state, &view_key)
+}
+
+fn connect_op_connect(from: &str, from_outlet: usize, to: &str, to_arg: usize) -> PatcherConnectOp {
+    PatcherConnectOp::Connect {
+        from_node: from.to_string(),
+        from_outlet,
+        to_node: to.to_string(),
+        to_arg,
+        why: "test".to_string(),
+    }
+}
+
+fn connect_op_inline(value: &str, to: &str, to_arg: usize) -> PatcherConnectOp {
+    PatcherConnectOp::Inline {
+        value: value.to_string(),
+        to_node: to.to_string(),
+        to_arg,
+        why: "test".to_string(),
+    }
+}
+
+fn apply_connect_ops(key: u64, patch: &Patch, ops: &[PatcherConnectOp]) -> PatcherConnectReport {
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let report = connect::apply_connect_plan(&mut state, patch, &view_key, ops);
+    set_patcher_interaction_state(key, state);
+    report
+}
+
+#[test]
+fn cmd_shift_k_opens_a_connect_bubble_for_the_selected_macro_instance() {
+    let (node, key, instance) = connect_test_node("connect-open-bubble");
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance.clone());
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+
+    assert!(event.is_some(), "cmd+shift+k should be consumed");
+    let state = get_patcher_interaction_state(key);
+    let bubble = state
+        .agentic_bubbles
+        .values()
+        .next()
+        .expect("connect bubble");
+    match &bubble.target {
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id,
+            subject:
+                ConnectSubject::Macro {
+                    name,
+                    params,
+                    source,
+                },
+        } => {
+            assert_eq!(instance_node_id, &instance);
+            assert_eq!(name, "voice");
+            assert_eq!(
+                params,
+                &vec!["trig".to_string(), "freq".to_string(), "decay".to_string()]
+            );
+            assert!(source.contains("(defmacro voice"));
+        }
+        other => panic!("expected a macro connect target, got {other:?}"),
+    }
+    assert_eq!(bubble.bound_macro_name(), Some("voice"));
+}
+
+#[test]
+fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
+    let (node, key, instance) = connect_test_node("connect-no-selection");
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(event.is_none(), "no selection should not open a bubble");
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance);
+    state.selected_nodes.insert("filtered".to_string());
+    set_patcher_interaction_state(key, state);
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(event.is_none(), "multi-selection should not open a bubble");
+    assert!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .is_empty(),
+        "no bubble should exist"
+    );
+}
+
+#[test]
+fn connect_context_reports_every_argument_occupancy() {
+    let (node, key, instance) = connect_test_node("connect-context");
+    let patch = connect_test_patch(&node, key);
+    let context = connect::connect_context(
+        &patch,
+        &instance,
+        &ConnectSubject::Macro {
+            name: "voice".to_string(),
+            params: vec!["trig".to_string(), "freq".to_string(), "decay".to_string()],
+            source: "(defmacro voice (trig freq decay) body)".to_string(),
+        },
+    );
+
+    assert!(context.contains(&format!("subject: node {instance}")));
+    assert!(context.contains("(defmacro voice (trig freq decay) body)"));
+    // All four §5.4 states, from one patch.
+    assert!(
+        context.contains("in  0  input  cabled from sig:0"),
+        "cabled inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("in  1  cutoff  inline param cutoff"),
+        "inline param inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("in  2  q  literal \"0.7\""),
+        "literal inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("in  0  trig  free"),
+        "free inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("out 0  out"),
+        "outlets missing:\n{context}"
+    );
+}
+
+#[test]
+fn connect_plan_wires_a_cable_and_inlines_a_literal() {
+    let (node, key, instance) = connect_test_node("connect-apply");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_inline("0.8", &instance, 2),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    assert!(
+        patch.connections.iter().any(|connection| {
+            connection.from_node == "sig"
+                && connection.to_node == instance
+                && connection.to_input == 0
+                && connection.presentation == InputPresentation::Cable
+        }),
+        "cable missing"
+    );
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert_eq!(wired.args[2], ArgValue::Literal("0.8".to_string()));
+    // Inlining takes the port away rather than adding a node or a cable.
+    let ports = patch_input_indices(&patch);
+    assert_eq!(ports.get(&instance), Some(&vec![0, 1]));
+}
+
+#[test]
+fn connect_plan_rejects_ops_that_do_not_target_a_free_argument() {
+    let (node, key, instance) = connect_test_node("connect-validation");
+    let patch = connect_test_patch(&node, key);
+    let cases = vec![
+        (connect_op_connect("sig", 0, "nope", 0), "no node `nope`"),
+        (
+            connect_op_connect("nope", 0, &instance, 0),
+            "no node `nope`",
+        ),
+        (connect_op_connect("sig", 0, &instance, 9), "out of range"),
+        (connect_op_connect("sig", 4, &instance, 0), "out of range"),
+        (
+            connect_op_connect(&instance, 0, &instance, 0),
+            "self-connection",
+        ),
+        // A cabled inlet is NOT rejected — it sums (see
+        // `connect_plan_fans_two_cables_into_one_inlet`). The slots below have
+        // no drawn port at all, so they remain invalid wiring targets.
+        (
+            connect_op_connect("sig", 0, "filtered", 1),
+            "inline param cutoff",
+        ),
+        (
+            connect_op_connect("sig", 0, "filtered", 2),
+            "literal \"0.7\"",
+        ),
+        (connect_op_inline("(* 2 2)", &instance, 1), "not a number"),
+        (connect_op_inline("gain", &instance, 1), "not a number"),
+        // The first input slot is the implicit signal inlet: the editor's own
+        // text round trip cannot address it.
+        (
+            connect_op_inline("0.5", &instance, 0),
+            "cannot hold an inline literal",
+        ),
+    ];
+    for (op, expected) in cases {
+        let report = apply_connect_ops(key, &patch, std::slice::from_ref(&op));
+        assert!(report.applied.is_empty(), "{op:?} should not apply");
+        assert_eq!(report.skipped.len(), 1, "{op:?}");
+        assert!(
+            report.skipped[0].contains(expected),
+            "{op:?} skipped for the wrong reason: {}",
+            report.skipped[0]
+        );
+    }
+}
+
+#[test]
+fn connect_plan_rejects_a_second_op_for_the_same_argument() {
+    let (node, key, instance) = connect_test_node("connect-duplicate-arg");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 1),
+            connect_op_inline("440", &instance, 1),
+        ],
+    );
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("another op already targets this argument"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn connect_plan_applies_valid_ops_and_skips_the_rest() {
+    let (node, key, instance) = connect_test_node("connect-partial");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            // `filtered`'s arg 2 holds the literal 0.7: no port is drawn, so it
+            // is not a wiring target.
+            connect_op_connect("sig", 0, "filtered", 2),
+            connect_op_inline("0.5", &instance, 2),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert_eq!(wired.args[2], ArgValue::Literal("0.5".to_string()));
+    assert!(
+        !patch
+            .connections
+            .iter()
+            .any(|connection| connection.to_node == "filtered" && connection.to_input == 2),
+        "the skipped op must not have cabled the literal slot"
+    );
+}
+
+/// An inlet sums its cables, so a plan may fan several sources into one — the
+/// agentic path gets the same affordance a cable drag has.
+#[test]
+fn connect_plan_fans_two_cables_into_one_inlet() {
+    let (node, key, instance) = connect_test_node("connect-fan-in");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("filtered", 0, &instance, 0),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let mut sources = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == instance && connection.to_input == 0)
+        .map(|connection| connection.from_node.clone())
+        .collect::<Vec<_>>();
+    sources.sort();
+    assert_eq!(
+        sources,
+        vec!["filtered".to_string(), "sig".to_string()],
+        "both cables land on the one inlet"
+    );
+    // What they generate is `two_cables_on_one_inlet_emit_a_sum`'s job; this
+    // instance is dead-code-pruned (§4.2b) and never reaches the source.
+}
+
+/// An `inline` op rewrites the slot's literal, so it still cannot share an
+/// argument with anything — including a `connect` that would otherwise sum.
+#[test]
+fn connect_plan_still_rejects_an_inline_sharing_an_argument_with_a_cable() {
+    let (node, key, instance) = connect_test_node("connect-inline-conflict");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 1),
+            connect_op_inline("440", &instance, 1),
+        ],
+    );
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("another op already targets this argument"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_whole_connect_plan_is_one_undo_step() {
+    let (node, key, instance) = connect_test_node("connect-undo");
+    let before = get_patcher_interaction_state(key).edit_state.clone();
+    let patch = connect_test_patch(&node, key);
+    apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("filtered", 0, &instance, 1),
+            connect_op_inline("0.8", &instance, 2),
+        ],
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    assert!(
+        apply_patcher_history_step(key, &mut state, false),
+        "the plan should have pushed an undo step"
+    );
+    set_patcher_interaction_state_without_history(key, state.clone());
+    // Allocation counters deliberately survive an undo so ids are never reused.
+    assert_eq!(state.edit_state.connections, before.connections);
+    assert_eq!(state.edit_state.nodes, before.nodes);
+    assert_eq!(
+        state.edit_state.input_presentations,
+        before.input_presentations
+    );
+    // One step, not three: the node the plan wired is still there.
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &instance)),
+        "one undo must not reach past the plan"
+    );
+}
+
+#[test]
+fn resolving_a_connect_bubble_applies_the_plan_and_closes_it() {
+    let (node, key, instance) = connect_test_node("connect-resolve");
+    let path = prop_str(&node.props, "path").expect("path");
+    let mut state = get_patcher_interaction_state(key);
+    state::register_patcher_path_key(std::path::Path::new(&path), key);
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (10.0, 10.0),
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id: instance.clone(),
+            subject: ConnectSubject::Macro {
+                name: "voice".to_string(),
+                params: vec!["trig".to_string(), "freq".to_string(), "decay".to_string()],
+                source: "(defmacro voice (trig freq decay) body)".to_string(),
+            },
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let report = resolve_agentic_bubble_connections(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        0,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("nope", 0, &instance, 1),
+        ],
+    )
+    .expect("plan applies");
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state.agentic_bubbles.contains_key(&bubble_id),
+        "a resolved connect bubble should be gone"
+    );
+    // The plan never writes source (spec §1).
+    assert_eq!(
+        fs::read_to_string(&path).expect("read source"),
+        CONNECT_TEST_SOURCE
+    );
+}
+
+#[test]
+fn a_connect_plan_with_no_valid_op_leaves_the_bubble_for_retry() {
+    let (node, key, instance) = connect_test_node("connect-resolve-refused");
+    let path = prop_str(&node.props, "path").expect("path");
+    let mut state = get_patcher_interaction_state(key);
+    state::register_patcher_path_key(std::path::Path::new(&path), key);
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (10.0, 10.0),
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id: instance.clone(),
+            subject: ConnectSubject::Operator {
+                op: "voice".to_string(),
+            },
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let error = resolve_agentic_bubble_connections(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        0,
+        // A cabled inlet would sum; `filtered`'s arg 2 holds the literal 0.7
+        // and draws no port, so it is a wiring target nothing can rescue.
+        &[connect_op_connect("sig", 0, "filtered", 2)],
+    )
+    .expect_err("nothing should apply");
+    assert!(error.contains("literal \"0.7\""), "{error}");
+    assert!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .contains_key(&bubble_id),
+        "the bubble must survive so cmd+r can retry"
+    );
+}
+
+#[test]
+fn connect_bubble_submit_payload_carries_the_patch_context() {
+    let (node, key, instance) = connect_test_node("connect-submit");
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance.clone());
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    let mut state = get_patcher_interaction_state(key);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .prompt = "connect it".to_string();
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .expect("submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("target").expect("target").borrow(),
+        Value::Keyword(target) if target == "connect-node"
+    ));
+    assert!(matches!(
+        &*map.get("target-node-id").expect("target node id").borrow(),
+        Value::String(id) if id == &instance
+    ));
+    let context = map.get("connect-context").expect("connect context");
+    let Value::String(context) = &*context.borrow() else {
+        panic!("connect context should be a string");
+    };
+    assert!(context.contains("in  0  trig  free"), "{context}");
+    assert!(context.contains("cabled from sig:0"), "{context}");
+}
+
+/// The renderer can only wrap text a measure pass has cached, so a bubble whose
+/// placeholder is not measured silently disappears.
+#[cfg(target_os = "macos")]
+#[test]
+fn connect_bubble_renders_its_placeholder_and_subject_badge() {
+    let (node, key, instance) = connect_test_node("connect-render");
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance);
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    let bubble = state
+        .agentic_bubbles
+        .values()
+        .next()
+        .expect("connect bubble");
+    let measurer = VariableWidthTextMeasurer;
+    cache_agentic_bubble_text_widths(
+        bubble,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    assert!(
+        prims.iter().any(|prim| matches!(
+            inner_prim(prim),
+            MetalPrimitive::ProportionalText(text) if text.text.contains("connect this node")
+        )),
+        "the connect placeholder must be measured, or the bubble draws nothing"
+    );
+    assert!(
+        prims.iter().any(|prim| matches!(
+            inner_prim(prim),
+            MetalPrimitive::ProportionalText(text)
+                if text.text.contains("voice") && text.h_align > 0.5
+        )),
+        "a connect bubble names its subject on the header line"
+    );
+}
+
+/// Two literals on one node are one text edit. Composed separately, the second
+/// would overwrite the first while the report still claimed both landed.
+#[test]
+fn two_inline_ops_on_one_node_both_survive() {
+    let (node, key, instance) = connect_test_node("connect-two-inlines");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_inline("0.8", &instance, 1),
+            connect_op_inline("0.3", &instance, 2),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert_eq!(wired.args[1], ArgValue::Literal("0.8".to_string()));
+    assert_eq!(wired.args[2], ArgValue::Literal("0.3".to_string()));
+}
+
+/// All-or-nothing per node: a composed text that will not round-trip must not
+/// land a subset of its literals while reporting all of them applied.
+#[test]
+fn inline_ops_that_cannot_compose_are_all_skipped() {
+    let (node, key, instance) = connect_test_node("connect-inline-compose-refused");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            // Argument 0 is the implicit signal inlet, which no node text can
+            // address, so neither op may land.
+            connect_op_inline("0.8", &instance, 0),
+            connect_op_inline("0.3", &instance, 2),
+        ],
+    );
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert_eq!(report.skipped.len(), 2, "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert!(
+        wired
+            .args
+            .iter()
+            .all(|arg| matches!(arg, ArgValue::ConnectedExpr)),
+        "no literal should have landed, got {:?}",
+        wired.args
+    );
+}
+
+/// The patcher's `:on-change` callback is the only thing that recompiles a
+/// patch. A plan applied from the host never passes through the widget's own
+/// event handling, so without an explicit notification the cables appear and
+/// the patch stays silent.
+#[test]
+fn resolving_a_connect_plan_reaches_the_patcher_on_change_callback() {
+    let path = temp_patcher_source_path("connect-on-change");
+    fs::write(
+        &path,
+        "(def sig (in 1))\n(def shaped (* sig __patcher_missing_input__))\n(out shaped 1)",
+    )
+    .expect("write source");
+    let escaped_path = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 30);
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            r#"(def changes (state 0))
+(effect-buffer "*patcher-connect-test*"
+  (patcher :intent :instrument :width :fill :height :fill :path "{escaped_path}"
+    :on-change (lambda (event) (set! changes (+ changes 1)))))"#
+        ))
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let patcher_buffer_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*patcher-connect-test*")
+        .expect("patcher buffer")
+        .id;
+    editor.set_active_buffer(patcher_buffer_id);
+    editor.update_tile_rects(80, 30);
+    editor.sync_layout_to_active_leaf();
+    let layout = editor.widget_layout().expect("patcher layout");
+    let key = patcher_state_key(&layout);
+
+    let mut state = get_patcher_interaction_state(key);
+    state::register_patcher_path_key(&path, key);
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (2.0, 3.0),
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id: "shaped".to_string(),
+            subject: ConnectSubject::Operator {
+                op: "*".to_string(),
+            },
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let changes = |editor: &mut Editor| {
+        editor
+            .runtime_mut()
+            .eval_str("changes")
+            .expect("read changes")
+            .expect("changes value")
+    };
+    let before = changes(&mut editor);
+
+    let report = resolve_agentic_bubble_connections(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        0,
+        &[connect_op_inline("0.5", "shaped", 1)],
+    )
+    .expect("plan applies");
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(
+        changes(&mut editor),
+        before,
+        "applying a plan does not itself notify the callback"
+    );
+
+    assert!(
+        editor.notify_patcher_semantic_change(&path),
+        "the patcher showing this path should be found"
+    );
+    let Value::Number(after) = changes(&mut editor) else {
+        panic!("changes should be a number");
+    };
+    let Value::Number(before) = before else {
+        panic!("changes should be a number");
+    };
+    assert!(
+        after > before,
+        "the connect plan must reach the on-change callback that recompiles"
+    );
+    assert!(
+        !editor.notify_patcher_semantic_change(std::path::Path::new("/nope/dsp.lisp")),
+        "an unrelated path notifies nothing"
+    );
+}
+
+/// A node being typed into is projected as a bare builtin carrying the whole
+/// typed text as its op, so re-attaching the attribute suffix doubled its label
+/// and stretched the node to roughly twice the width of the text it showed.
+#[test]
+fn editing_node_label_does_not_repeat_its_attributes() {
+    let macro_arities = HashMap::new();
+    let text = "param breath @min 0.25 @max 1 @default 0.5";
+    let editing = node_from_editor_text("p", text, (0.0, 0.0), &macro_arities, true);
+    assert_eq!(node_display_label(&editing), text);
+
+    let committed = node_from_editor_text("p", text, (0.0, 0.0), &macro_arities, false);
+    assert_eq!(node_display_label(&committed), text);
+    assert_eq!(
+        super::display::node_size(&editing).0,
+        super::display::node_size(&committed).0,
+        "a node should not resize just because it is being edited"
+    );
+}
+
+
+/// The motivating bug for spec §4.1b: a node typed as `mymacro ? 0.3 ? 0.9`
+/// reopened with `0.3` as a separate number node cabled into the inlet.
+///
+/// Generated lisp cannot distinguish an inline literal from a wired constant
+/// node — both print as `(mymacro pitch 0.3 pitch 0.9)` — so the projector
+/// resolves it by rule and pulls any literal followed by a connected argument
+/// out into a constant node. The graph payload records the model itself, so
+/// the distinction no longer has to survive a parse.
+#[test]
+fn graph_payload_keeps_inline_literals_next_to_cabled_inputs() {
+    let path = temp_patcher_dsp_path("patcher-payload-inline-args");
+    let source = "(defmacro mymacro (a b c d) (* (+ a b) (+ c d)))\n\
+                  (def pitch (in 1 @name pitch))\n\
+                  (def voice (mymacro pitch 0.3 pitch 0.9))\n\
+                  (out voice 1 @name audio)";
+    fs::write(&path, source).unwrap();
+
+    // Projecting the source is lossy in exactly this way; that is the behavior
+    // the payload exists to bypass, so assert it rather than assume it.
+    let (_, projected) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(
+        projected
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant && node.op == "0.3"),
+        "projecting the source pulls the inline literal out into a constant node"
+    );
+
+    // The model the user actually authored: `0.3` typed inline in the box.
+    let mut patch = projected.clone();
+    patch
+        .nodes
+        .retain(|node| !(node.kind == NodeKind::Constant && node.op == "0.3"));
+    patch
+        .connections
+        .retain(|connection| connection.from_node != "0.3");
+    let voice = patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "voice")
+        .unwrap();
+    voice.args[1] = ArgValue::Literal("0.3".to_string());
+
+    sidecar::save_current_layout(&path, &patch, &PatcherInteractionState::default()).unwrap();
+
+    let (_, reloaded) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    let voice = reloaded
+        .nodes
+        .iter()
+        .find(|node| node.id == "voice")
+        .expect("macro instance survives the round trip");
+    assert_eq!(
+        voice.args[1],
+        ArgValue::Literal("0.3".to_string()),
+        "inline literal stays inline: args were {:?}",
+        voice.args
+    );
+    assert_eq!(
+        voice.args[3],
+        ArgValue::Literal("0.9".to_string()),
+        "the trailing literal is unaffected"
+    );
+    assert!(
+        !reloaded
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant),
+        "no constant node is materialized for an inline literal"
+    );
+    assert!(
+        !reloaded
+            .connections
+            .iter()
+            .any(|connection| connection.to_node == "voice" && connection.to_input == 1),
+        "and nothing is cabled into the inlet the literal fills"
+    );
+}
+
+/// A patch with `extra` cabled into `mixed`'s inlet 0 on top of `base`, which
+/// is the Max/gen~ summing-inlet shape: two cables landing on one inlet.
+fn patch_with_summed_inlet() -> Patch {
+    let mut patch = parse(
+        r#"
+(def pitch (in 1 @name pitch))
+(def base (* pitch 0.5))
+(def extra (* pitch 0.25))
+(def mixed (phasor base))
+(out mixed 1 @name audio)
+"#,
+    );
+    patch.connections.push(PatchConnection {
+        from_node: "extra".to_string(),
+        from_output: 0,
+        to_node: "mixed".to_string(),
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
+        source: None,
+    });
+    patch
+}
+
+/// Max/gen~ inlets sum their cables. Every dgenlisp inlet is a float or a
+/// tensor and both sum, so this holds on any inlet rather than an opted-in set.
+#[test]
+fn two_cables_on_one_inlet_emit_a_sum() {
+    let patch = patch_with_summed_inlet();
+    let generated =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(phasor (+ base extra))"),
+        "both cables must reach the inlet as a sum:\n{}",
+        generated.source
+    );
+}
+
+/// The sum's terms are ordered by endpoint, not by the patch's connection
+/// order — which drag order perturbs — so saving an untouched patch is a no-op.
+#[test]
+fn summed_inlet_emission_order_is_stable_across_connection_order() {
+    let patch = patch_with_summed_inlet();
+    let forward =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+
+    let mut reversed = patch.clone();
+    reversed.connections.reverse();
+    let reversed =
+        generate::generate_patch_source(&reversed, PatcherIntent::Instrument).unwrap();
+
+    assert_eq!(
+        forward.source, reversed.source,
+        "connection order must not change the generated text"
+    );
+}
+
+/// `out` is an inlet like any other: two cables into it sum. Terms are ordered
+/// by source binding (`extra` before `mixed`), not by drop order — `+` is
+/// commutative, and a stable order is what keeps saves byte-identical.
+#[test]
+fn two_cables_on_an_out_inlet_emit_a_sum() {
+    let mut patch = patch_with_summed_inlet();
+    patch.connections.retain(|connection| {
+        !(connection.from_node == "extra" && connection.to_node == "mixed")
+    });
+    patch.connections.push(PatchConnection {
+        from_node: "extra".to_string(),
+        from_output: 0,
+        to_node: "audio".to_string(),
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
+        source: None,
+    });
+    let generated =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(out (+ extra mixed) 1"),
+        "an out taking two cables sums them:\n{}",
+        generated.source
+    );
+}
+
+/// The generated `(+ base extra)` reparses into a visible `+` node that has no
+/// counterpart in the model, so a summed inlet only round-trips through the
+/// graph payload — which, per spec §4.1b, is the load SOT for authored patches.
+#[test]
+fn summed_inlet_survives_the_graph_payload_round_trip() {
+    let path = temp_patcher_dsp_path("patcher-summed-inlet");
+    let patch = patch_with_summed_inlet();
+    let generated =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    fs::write(&path, &generated.source).unwrap();
+
+    // Projecting the generated source is lossy in exactly this way; that is
+    // what the payload exists to bypass, so assert it rather than assume it.
+    let projected = parse_patch_source(&generated.source, PatcherIntent::Instrument).unwrap();
+    assert!(
+        projected.nodes.iter().any(|node| node.op == "+"),
+        "reparsing the sum materializes a `+` node that the model never had"
+    );
+
+    sidecar::save_current_layout(&path, &patch, &PatcherInteractionState::default()).unwrap();
+    let (_, reloaded) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+
+    assert!(
+        !reloaded.nodes.iter().any(|node| node.op == "+"),
+        "the payload reloads the authored model, with no phantom `+` node"
+    );
+    let inlet_cables = reloaded
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "mixed" && connection.to_input == 0)
+        .map(|connection| connection.from_node.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inlet_cables,
+        vec!["base", "extra"],
+        "both cables come back on the same inlet"
+    );
+
+    // And the model that comes back regenerates the same source.
+    let regenerated =
+        generate::generate_patch_source(&reloaded, PatcherIntent::Instrument).unwrap();
+    assert_eq!(
+        generated.source, regenerated.source,
+        "a summed inlet reaches a byte-identical fixpoint through the payload"
+    );
+}
+
+/// A v2 sidecar has no graph payload: it must still load by projecting the
+/// source (spec §4.1b migration), and materialize a payload on the next save.
+#[test]
+fn pre_v3_sidecars_load_by_projecting_and_migrate_on_save() {
+    let path = temp_patcher_dsp_path("patcher-payload-migration");
+    let source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+    fs::write(&path, source).unwrap();
+    save_layout_sidecar_for(&path);
+
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert!(
+        json.get("graph").is_some(),
+        "a patch-editor save writes a graph payload"
+    );
+    json["version"] = serde_json::json!(2);
+    json.as_object_mut().unwrap().remove("graph");
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let (_, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(
+        patch.nodes.iter().any(|node| node.id == "phase"),
+        "v2 sidecar still opens by projecting the source"
+    );
+
+    save_layout_sidecar_for(&path);
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(json["version"], serde_json::json!(3));
+    assert!(json.get("graph").is_some(), "next save materializes v3");
+}
+
+/// The payload is gated on `authored` (spec §3.2): agent-authored instruments
+/// have no sidecar and open from source, and an ejected item's payload is
+/// stale by design and must not be consulted.
+#[test]
+fn graph_payload_is_ignored_for_unauthored_items() {
+    let path = temp_patcher_dsp_path("patcher-payload-unauthored");
+    let source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+    fs::write(&path, source).unwrap();
+    save_layout_sidecar_for(&path);
+
+    // Eject, then hand-edit the code the way the code editor would.
+    sidecar::set_sidecar_authored(&path, false).unwrap();
+    let edited = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(def shaped (* phase 0.5))\n(out shaped 1 @name audio)";
+    fs::write(&path, edited).unwrap();
+
+    let (_, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(
+        patch.nodes.iter().any(|node| node.id == "shaped"),
+        "an unauthored item projects the edited source, never the stale payload"
+    );
+}
+
+
+
+
+
+/// A payload can be written from a projection that had no defmacro library in
+/// hand — the call then sits in the model as an unknown-operator `Builtin`.
+/// Before rev 3 every open re-projected and the mistake healed itself; now that
+/// loads trust the payload, operator resolution has to be recomputed against
+/// the library instead of frozen (spec §4.1b).
+#[test]
+fn payload_load_reresolves_library_macros_and_stale_diagnostics() {
+    let library_root = std::env::temp_dir().join(format!(
+        "patcher-payload-library-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(library_root.join("shape")).unwrap();
+    fs::write(
+        library_root.join("shape").join("macro.lisp"),
+        "(defmacro shape (x) (* x 2))",
+    )
+    .unwrap();
+
+    let path = temp_patcher_dsp_path("patcher-payload-library");
+    let source = "(use-defmacro shape)\n(def input (in 1 @name pitch))\n(def out1 (shape input))\n(out out1 1 @name audio)";
+    fs::write(&path, source).unwrap();
+
+    // Save a sidecar from a library-less projection: `shape` is an unknown
+    // operator, and no library macro exists in the model at all.
+    let unresolved = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let call = unresolved
+        .nodes
+        .iter()
+        .find(|node| node.op == "shape")
+        .expect("the call projects even without the library");
+    assert_eq!(call.kind, NodeKind::Builtin);
+    assert!(call.diagnostic.is_some(), "and carries a stale diagnostic");
+    sidecar::save_current_layout(&path, &unresolved, &PatcherInteractionState::default()).unwrap();
+
+    let mut props = patcher_props_for_path(&path);
+    props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library_root.to_string_lossy().into()),
+    );
+    let (_, reloaded) = load_patch_from_props(&props).unwrap();
+
+    let call = reloaded
+        .nodes
+        .iter()
+        .find(|node| node.op == "shape")
+        .expect("call survives the payload round trip");
+    assert_eq!(
+        call.kind,
+        NodeKind::MacroInstance,
+        "the library macro resolves on load"
+    );
+    assert_eq!(call.diagnostic, None, "and the stale diagnostic clears");
+    assert!(
+        reloaded.macros.iter().any(|macro_patch| {
+            macro_patch.name == "shape" && matches!(macro_patch.origin, MacroOrigin::Library { .. })
+        }),
+        "library packages are available even when the payload carried none"
+    );
+
+    let generated = generate::generate_patch_source(&reloaded, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(use-defmacro shape)"),
+        "and regeneration still imports it:\n{}",
+        generated.source
+    );
+}
+
+
+
+
+
+/// "Save macro to library" used to rebuild the root model by parsing the
+/// emitted source, so every inline literal came back as a standalone constant
+/// node with no saved position — the patch visibly re-laid itself out the
+/// moment a macro was saved. The action now works off the layout's graph
+/// payload, which is the model the patcher actually holds (spec §4.1b).
+#[test]
+fn save_macro_to_library_preserves_inline_literals_and_drops_local_definition() {
+    let library = temp_defmacro_library("save-preserves-inline", &[]);
+    let path = temp_patcher_dsp_path("save-preserves-inline");
+    // `mix` takes an inline literal followed by a cabled argument — the shape
+    // the projector rewrites into a constant node.
+    let source = "(defmacro shape (x)\n  (* x 2))\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def other (in 2 @name other))\n\
+                  (def mixed (mix input 0.3 other))\n\
+                  (def out1 (shape mixed))\n\
+                  (out out1 1 @name audio)";
+    fs::write(&path, source).unwrap();
+    let mut props = patcher_props_for_path(&path);
+    props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().to_string_lossy().into()),
+    );
+
+    // The model as the patcher holds it: `0.3` inline, no constant node.
+    let mut live = load_patch_from_props(&props).unwrap().1;
+    live.nodes
+        .retain(|node| !(node.kind == NodeKind::Constant && node.op == "0.3"));
+    live.connections
+        .retain(|connection| connection.from_node != "0.3");
+    let mixed = live.nodes.iter_mut().find(|node| node.id == "mixed").unwrap();
+    mixed.args[1] = ArgValue::Literal("0.3".to_string());
+    sidecar::save_current_layout(&path, &live, &PatcherInteractionState::default()).unwrap();
+    let before = fs::read_to_string(sidecar::sidecar_path_for_source(&path)).unwrap();
+
+    let action = ActiveMacroLibraryAction {
+        kind: MacroLibraryActionKind::SaveToLibrary,
+        macro_name: "shape".to_string(),
+    };
+    let result = apply_macro_library_action_for_emitted_source(
+        &path,
+        source,
+        Some(&before),
+        PatcherIntent::Instrument,
+        &library,
+        &action,
+        &PatcherInteractionState::default(),
+    )
+    .unwrap();
+
+    let after: serde_json::Value = serde_json::from_str(&result.layout).unwrap();
+    let nodes = after["graph"]["nodes"].as_array().unwrap();
+    assert!(
+        !nodes.iter().any(|node| node["kind"] == "constant"),
+        "the inline literal must not be re-materialized as a constant node: {:?}",
+        nodes.iter().map(|node| node["id"].clone()).collect::<Vec<_>>()
+    );
+    let mixed = nodes
+        .iter()
+        .find(|node| node["id"] == "mixed")
+        .expect("the mix node survives");
+    assert_eq!(
+        mixed["args"][1],
+        serde_json::json!({ "kind": "literal", "value": "0.3" }),
+        "and stays inline in its argument slot"
+    );
+    assert!(
+        after["graph"]["macros"]
+            .as_array()
+            .is_none_or(|macros| macros.iter().all(|entry| entry["name"] != "shape")),
+        "the saved macro's local definition is dropped from the payload; the \
+         package reattaches with Library origin on the next load"
+    );
+    assert!(result.source.contains("(use-defmacro shape)"));
+    assert!(!result.source.contains("(defmacro shape"));
+}
+
+#[test]
+fn retyping_an_inline_mod_slot_releases_its_accessor_cable() {
+    let source = "(defmacro bank (a b c d)\n  (+ a b c d))\n\
+                  (param freq @default 1 @min 0 @max 2 @mod true)\n\
+                  (param stretch @default 1 @min 0 @max 2 @mod true)\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def voice (bank input (mod freq) (mod stretch) (mod stretch)))\n\
+                  (out voice 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "voice").unwrap();
+    let base = node_display_label(node);
+    assert_eq!(base, "bank freq~ stretch~ stretch~");
+
+    let retype = |text: &str| {
+        let mut state = PatcherInteractionState::default();
+        set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", "voice"))
+            .unwrap()
+            .text = text.to_string();
+        patch_with_interaction_state(patch.clone(), &state, "root")
+    };
+
+    let applied = retype("bank 2 stretch~ stretch~");
+    let voice = applied.nodes.iter().find(|node| node.id == "voice").unwrap();
+    assert_eq!(
+        node_display_label(voice),
+        "bank 2 stretch~ stretch~",
+        "the typed literal must win over the stale accessor cable"
+    );
+    assert!(
+        !applied.connections.iter().any(|connection| {
+            connection.to_node == "voice"
+                && connection.to_input == 1
+                && connection.presentation == InputPresentation::InlineModParam
+        }),
+        "and the accessor cable into that slot is gone"
+    );
+
+    // Retyping one param to another rebuilds the accessor against the new one.
+    let applied = retype("bank stretch~ stretch~ stretch~");
+    let voice = applied.nodes.iter().find(|node| node.id == "voice").unwrap();
+    assert_eq!(node_display_label(voice), "bank stretch~ stretch~ stretch~");
+    assert_eq!(
+        voice.inline_inputs.get(1).and_then(|input| input.as_ref()),
+        Some(&super::model::InlineInput::ModParam("stretch".to_string())),
+    );
+}
+
+/// Typing `param~` into a slot an unrelated cable already owns must replace the
+/// cable. This used to bail: the box rendered the typed `stiffness~` while the
+/// cable silently won the generated call, so you got a modulatable param that
+/// nothing read and an inlet still drawn on a slot showing inline text.
+#[test]
+fn typing_a_mod_suffix_over_an_unrelated_cable_replaces_it() {
+    let source = "(defmacro sax-bore (a b c d f)\n  (+ a b c d f))\n\
+                  (param stiffness @min 0 @max 1 @default 0.8)\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def voice (sax-bore input input 0.1 0.03 0.2))\n\
+                  (out voice 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "voice").unwrap();
+    let base = node_display_label(node);
+    // The cabled slot renders as `?`; that is the token being typed over.
+    assert_eq!(base, "sax-bore ? 0.1 0.03 0.2");
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "voice"))
+        .unwrap()
+        .text = base.replacen('?', "stiffness~", 1);
+    let applied = patch_with_interaction_state(patch.clone(), &state, "root");
+
+    let voice = applied.nodes.iter().find(|node| node.id == "voice").unwrap();
+    assert_eq!(
+        voice.inline_inputs.get(1).and_then(|input| input.as_ref()),
+        Some(&super::model::InlineInput::ModParam("stiffness".to_string())),
+        "the typed sugar must desugar even though a cable held the slot"
+    );
+    assert!(
+        !applied.connections.iter().any(|connection| {
+            connection.to_node == "voice"
+                && connection.to_input == 1
+                && connection.from_node == "input"
+        }),
+        "and the cable it replaced is gone"
+    );
+    assert_eq!(
+        patch_input_indices(&applied).get("voice"),
+        Some(&vec![0]),
+        "an inline slot draws no inlet"
+    );
+
+    let generated = generate::generate_patch_source(&applied, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated
+            .source
+            .contains("(sax-bore input (mod stiffness) 0.1 0.03 0.2)"),
+        "the generated call must read the param, not the replaced cable:\n{}",
+        generated.source
+    );
+}
+
+/// `(mod X)` resolves only against a BARE top-level `(param X …)` form, so a
+/// param the source bound under another name — `(def value (param embouchure
+/// …))` — has to shed its wrapper once it becomes modulatable. Emitting
+/// `(mod value)`, or keeping the wrapper and emitting `(mod embouchure)`, both
+/// failed to compile with "does not reference a parameter".
+#[test]
+fn modulating_a_def_wrapped_param_emits_a_bare_param_form() {
+    let source = "(defmacro jet (a b c d)\n  (+ a b c d))\n\
+                  (def value (param embouchure @default 1 @min 0 @max 2))\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def voice (jet input embouchure 0.5 0.25))\n\
+                  (out voice 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "voice").unwrap();
+    let base = node_display_label(node);
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "voice"))
+        .unwrap()
+        .text = base.replacen("embouchure", "embouchure~", 1);
+    let applied = patch_with_interaction_state(patch.clone(), &state, "root");
+
+    let generated = generate::generate_patch_source(&applied, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(param embouchure"),
+        "the modulatable param is emitted bare, not def-wrapped:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("(def value (param"),
+        "the `def value` wrapper must not survive:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod embouchure)"),
+        "and the accessor names the param, not the binding:\n{}",
+        generated.source
+    );
+    compile_patch_source_with_dgenlisp(&generated.source)
+        .expect("the regenerated patch must compile");
+}
+
+
+// ---------------------------------------------------------------------------
+// Editable node text keeps cabled slots (regression: a two-cable `-` retyped
+// as a bare `-` lost its second cable)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn editable_node_text_spells_out_trailing_cabled_slots() {
+    let patch = parse("(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))");
+    let subtract = patch.nodes.iter().find(|node| node.id == "d").unwrap();
+    let inbound = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "d")
+        .map(|connection| connection.to_input)
+        .collect::<HashSet<_>>();
+    assert_eq!(inbound, HashSet::from([0, 1]));
+
+    // The drawn label stops at the last written argument. Editable text cannot:
+    // `-` documents a single input, so a bare `-` rebuilds as a one-slot node
+    // and the second cable is dropped with no diagnostic.
+    assert_eq!(node_display_label(subtract), "-");
+    let text = editable_node_text(subtract, &inbound);
+    assert_eq!(text, "- ?");
+    let rebuilt = node_from_editor_text("d", &text, (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(rebuilt.args.len(), 2, "{rebuilt:?}");
+}
+
+#[test]
+fn double_clicking_a_two_cable_operator_opens_editable_text_with_both_slots() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-edit-two-cable");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_text_metrics(&root_patch);
+
+    let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+    let subtract_rect = rects.get("d").unwrap();
+    assert!(handle_patcher_double_click(
+        &node,
+        subtract_rect.col + NODE_TEXT_COL_OFFSET,
+        subtract_rect.row + subtract_rect.height * 0.5,
+    ));
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state.text_edit.as_ref().map(|edit| edit.text.as_str()),
+        Some("- ?")
+    );
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .get(&node_edit_key("root", "d"))
+            .map(|edit| edit.text.as_str()),
+        Some("- ?")
+    );
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn copying_a_two_cable_operator_pastes_it_with_both_cables() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-copy-two-cable");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes = HashSet::from(["a".to_string(), "b".to_string(), "d".to_string()]);
+    assert!(copy_selected_patcher_nodes(&node, &state, "root"));
+    assert!(paste_patcher_clipboard(&node, &mut state, "root"));
+
+    let pasted = patch_with_interaction_state(root_patch, &state, "root");
+    let subtract = pasted
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "-" && state.selected_nodes.contains(&patch_node.id))
+        .expect("pasted subtract node");
+    assert_eq!(subtract.args.len(), 2, "{subtract:?}");
+    let inbound = pasted
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == subtract.id)
+        .map(|connection| connection.to_input)
+        .collect::<HashSet<_>>();
+    assert_eq!(inbound, HashSet::from([0, 1]), "{:?}", pasted.connections);
+    let _ = fs::remove_file(path);
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate cables (an inlet sums, so a repeated edge doubles the signal)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dragging_the_same_cable_twice_does_not_add_a_second_connection() {
+    let source = "(def pitch (in 1 @name pitch))\n\
+                  (def gate (in 2 @name gate))\n\
+                  (def tone (phasor pitch))\n\
+                  (out tone 1)";
+    let path = temp_patcher_source_path("patcher-duplicate-cable");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_text_metrics(&root_patch);
+
+    let pan = PatcherPanState::default();
+    let rects = patch_node_rects(&root_patch, node.rect, &pan);
+    let input_indices = patch_input_indices(&root_patch);
+    let input_slot_counts = patch_input_slot_counts(&root_patch, &input_indices);
+    let output_counts = patch_output_counts(&root_patch);
+    let gate_output = port_center(*rects.get("gate").unwrap(), 0, output_counts["gate"], false);
+    let tone_input = port_center(
+        *rects.get("tone").unwrap(),
+        0,
+        input_slot_counts["tone"],
+        true,
+    );
+
+    let drag_once = || {
+        handle_patcher_pointer_down(
+            &node,
+            gate_output.0,
+            gate_output.1,
+            KeyModifiers::empty(),
+            10.0,
+            20.0,
+        );
+        handle_patcher_pointer_drag(
+            &node,
+            tone_input.0,
+            tone_input.1,
+            KeyModifiers::empty(),
+            10.0,
+            20.0,
+        );
+        handle_patcher_pointer_up(&node, tone_input.0, tone_input.1);
+    };
+    drag_once();
+    let after_first = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let count_of = |patch: &Patch| {
+        patch
+            .connections
+            .iter()
+            .filter(|connection| connection.from_node == "gate" && connection.to_node == "tone")
+            .count()
+    };
+    assert_eq!(count_of(&after_first), 1, "the first drag must wire once");
+
+    drag_once();
+    let after_second =
+        patch_with_interaction_state(root_patch, &get_patcher_interaction_state(key), "root");
+    assert_eq!(
+        count_of(&after_second),
+        1,
+        "a repeated drag must not double the inlet's summed signal"
+    );
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn connect_plan_rejects_a_cable_the_patch_already_carries() {
+    let (node, key, _instance) = connect_test_node("connect-existing-cable");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(key, &patch, &[connect_op_connect("sig", 0, "filtered", 0)]);
+
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("already connected"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn connect_plan_rejects_wiring_a_hidden_inline_accessor() {
+    let patch = parse(
+        r#"
+            (def signal (in 1))
+            (param gain @default 0.5 @mod true @mod-mode additive)
+            (def scaled (* signal (mod gain)))
+            "#,
+    );
+    let hidden = hidden_inline_node_ids(&patch)
+        .into_iter()
+        .next()
+        .expect("the `gain~` sugar projects a hidden inline accessor");
+
+    // The agent is never offered it as an endpoint in the first place.
+    let context = connect::connect_context(
+        &patch,
+        "scaled",
+        &ConnectSubject::Operator {
+            op: "*".to_string(),
+        },
+    );
+    assert!(
+        !context.contains(&hidden),
+        "hidden accessor {hidden} must not be listed:\n{context}"
+    );
+
+    // And a plan naming it anyway is skipped rather than applied as an
+    // undrawable cable.
+    let mut state = PatcherInteractionState::default();
+    let report = connect::apply_connect_plan(
+        &mut state,
+        &patch,
+        "root",
+        &[connect_op_connect(&hidden, 0, "scaled", 0)],
+    );
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert!(
+        report.skipped[0].contains("inline parameter accessor"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_rejected_op_does_not_poison_its_argument_for_a_later_valid_one() {
+    let (node, key, instance) = connect_test_node("connect-claim-rollback");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            // Not a number: rejected, and must leave the slot claimable.
+            connect_op_inline("gain", &instance, 1),
+            connect_op_connect("sig", 0, &instance, 1),
+        ],
+    );
+
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].contains("not a number"), "{report:?}");
+    let wired = connect_test_patch(&node, key);
+    assert!(
+        wired.connections.iter().any(|connection| {
+            connection.from_node == "sig"
+                && connection.to_node == instance
+                && connection.to_input == 1
+        }),
+        "the valid op must still have been applied"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// History writes sum like any other inlet
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_cables_into_one_history_emit_a_single_summed_write() {
+    let source = "(make-history h)\n\
+                  (def sig (in 1 @name sig))\n\
+                  (def other (in 2 @name other))\n\
+                  (def delta (- sig (read-history h)))\n\
+                  (out delta 1)\n\
+                  (write-history h sig)";
+    let patch = parse(source);
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .unwrap()
+        .id
+        .clone();
+    let mut state = PatcherInteractionState::default();
+    connect_output_to_input(&mut state, "root", "other", &history, 0);
+
+    let visible = sidecar::root_patch_with_interaction(&patch, &state);
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert_eq!(
+        generated.source.matches("(write-history").count(),
+        1,
+        "a history's cables sum into one write:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(write-history h (+ "),
+        "the two cables must be summed:\n{}",
+        generated.source
     );
 }

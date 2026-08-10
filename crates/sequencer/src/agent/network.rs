@@ -8,8 +8,8 @@ use std::time::Duration;
 use super::actions::{AgentAppAction, AgentSessionContext};
 use super::protocol::{AgentToolRuntime, ToolCall, ToolCallOutcome, ToolSpec};
 use super::providers::{
-    build_openai_responses_payload, AgentMessage, AgentMessageRole, AgentProviderKind,
-    AgentTurnRequest,
+    anthropic_messages, build_openai_responses_payload, AgentMessage, AgentMessageRole,
+    AgentProviderKind, AgentTurnRequest, ANTHROPIC_MAX_TOKENS,
 };
 use super::store::AgentKind;
 
@@ -17,6 +17,8 @@ const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/comple
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_READ_ONLY_TOOL_CALLS: usize = 4;
 const MAX_REPEAT_TOOL_FAILURES: usize = 2;
@@ -186,6 +188,7 @@ impl AgentNetworkClient {
                 &request,
                 progress,
             ),
+            AgentProviderKind::Anthropic => self.execute_anthropic_turn(&request, progress),
         }
     }
 
@@ -211,6 +214,9 @@ impl AgentNetworkClient {
                 .map(|result| result.text),
             AgentProviderKind::DeepSeek => self
                 .execute_openai_compatible_turn(OpenAiCompatibleProvider::DeepSeek, &request, None)
+                .map(|result| result.text),
+            AgentProviderKind::Anthropic => self
+                .execute_anthropic_turn(&request, None)
                 .map(|result| result.text),
         }
     }
@@ -682,6 +688,224 @@ impl AgentNetworkClient {
                 .into_error(tool_outcomes),
         )
     }
+
+    fn execute_anthropic_turn(
+        &self,
+        request: &AgentTurnRequest,
+        progress: Option<&ToolProgressCallback<'_>>,
+    ) -> Result<AgentTurnResult, AgentTurnError> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| AgentTurnError {
+            message: "Missing required ANTHROPIC_API_KEY.".to_string(),
+            tool_outcomes: Vec::new(),
+        })?;
+        let mut messages = anthropic_messages(&request.messages);
+        let tools = anthropic_tools(&request.tools);
+        let mut tool_outcomes = Vec::new();
+        let mut pending_actions = Vec::new();
+        let mut last_failure_signature = None::<String>;
+        let mut repeated_failure_rounds = 0usize;
+        let mut last_tool_signature = None::<String>;
+        let mut repeated_tool_call_rounds = 0usize;
+        let mut read_only_tool_calls = 0usize;
+        let enforce_read_only_budget = has_artifact_action_tools(&request.tools);
+
+        for round in 1..=MAX_TOOL_ROUNDS {
+            let mut payload = json!({
+                "model": request.model,
+                "max_tokens": ANTHROPIC_MAX_TOKENS,
+                "system": request.system_prompt,
+                "messages": messages,
+            });
+            if !tools.is_empty() {
+                payload
+                    .as_object_mut()
+                    .expect("anthropic payload is an object")
+                    .insert("tools".to_string(), json!(tools));
+            }
+
+            eprintln!(
+                "[agent-net] Anthropic request send model={} round={} messages={} tools={}",
+                request.model,
+                round,
+                messages.len(),
+                tools.len()
+            );
+            let response = self
+                .http
+                .post(ANTHROPIC_MESSAGES_URL)
+                .header("x-api-key", api_key.clone())
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header(CONTENT_TYPE, "application/json")
+                .json(&payload)
+                .send()
+                .map_err(|error| AgentTurnError {
+                    message: format!("Anthropic request failed: {}", format_reqwest_error(&error)),
+                    tool_outcomes: tool_outcomes.clone(),
+                })?;
+            let status = response.status();
+            eprintln!(
+                "[agent-net] Anthropic response status={} round={}",
+                status, round
+            );
+            if !status.is_success() {
+                let body = response
+                    .text()
+                    .unwrap_or_else(|_| "<failed to read response body>".to_string());
+                return Err(AgentTurnError {
+                    message: format!("Anthropic request failed: HTTP {status} body: {body}"),
+                    tool_outcomes: tool_outcomes.clone(),
+                });
+            }
+            let response: AnthropicMessageResponse =
+                response.json().map_err(|error| AgentTurnError {
+                    message: format!("Failed to decode Anthropic response: {error}"),
+                    tool_outcomes: tool_outcomes.clone(),
+                })?;
+
+            // A safety-classifier decline is a *successful* HTTP 200 with an
+            // empty (or partial) content array, so it has to be checked before
+            // the content blocks are read or it reads as an empty answer.
+            if response.stop_reason.as_deref() == Some("refusal") {
+                let detail = response
+                    .stop_details
+                    .as_ref()
+                    .map(|details| {
+                        let category = details.category.as_deref().unwrap_or("unspecified");
+                        match details.explanation.as_deref() {
+                            Some(explanation) => format!(" ({category}: {explanation})"),
+                            None => format!(" ({category})"),
+                        }
+                    })
+                    .unwrap_or_default();
+                return Err(
+                    format!("Anthropic declined this request{detail}.").into_error(tool_outcomes)
+                );
+            }
+
+            let assistant_text = extract_anthropic_text(&response.content);
+            let tool_uses = extract_anthropic_tool_uses(&response.content);
+            eprintln!(
+                "[agent-net] Anthropic response decoded round={} text_len={} tool_calls={}",
+                round,
+                assistant_text.len(),
+                tool_uses.len()
+            );
+
+            if tool_uses.is_empty() {
+                return Ok(AgentTurnResult {
+                    text: assistant_text,
+                    reasoning_content: None,
+                    tool_outcomes,
+                    pending_actions,
+                });
+            }
+
+            let tool_signature = anthropic_tool_call_signature(&tool_uses);
+            if last_tool_signature.as_deref() == Some(tool_signature.as_str()) {
+                repeated_tool_call_rounds += 1;
+            } else {
+                repeated_tool_call_rounds = 1;
+                last_tool_signature = Some(tool_signature.clone());
+            }
+            if repeated_tool_call_rounds >= MAX_REPEAT_TOOL_CALL_ROUNDS {
+                return Err(
+                    format!("Agent repeated the same tool-call plan: {tool_signature}")
+                        .into_error(tool_outcomes),
+                );
+            }
+
+            // The assistant turn is echoed back verbatim: thinking blocks carry
+            // signatures the API rejects if they are edited or reconstructed.
+            messages.push(json!({
+                "role": "assistant",
+                "content": response.content,
+            }));
+
+            let mut result_blocks = Vec::new();
+            let mut round_outcomes = Vec::new();
+            for tool_use in tool_uses {
+                eprintln!(
+                    "[agent-net] Anthropic tool start round={} name={}",
+                    round, tool_use.name
+                );
+                let call = ToolCall {
+                    name: tool_use.name.clone(),
+                    arguments: tool_use.input.clone(),
+                };
+                if let Some(progress) = progress {
+                    progress(&call);
+                }
+                let outcome = if enforce_read_only_budget && is_read_only_tool(&call.name) {
+                    read_only_tool_calls += 1;
+                    if read_only_tool_calls > MAX_READ_ONLY_TOOL_CALLS {
+                        read_only_tool_budget_outcome(&call.name)
+                    } else {
+                        self.tools.execute(call, &request.session_context)
+                    }
+                } else {
+                    self.tools.execute(call, &request.session_context)
+                };
+                eprintln!(
+                    "[agent-net] Anthropic tool finish round={} name={} ok={} pending_actions={}",
+                    round,
+                    outcome.name,
+                    outcome.ok,
+                    outcome.pending_actions.len()
+                );
+                pending_actions.extend(outcome.pending_actions.clone());
+                result_blocks.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": outcome.content.clone(),
+                    "is_error": !outcome.ok,
+                }));
+                round_outcomes.push(outcome.clone());
+                tool_outcomes.push(outcome);
+            }
+
+            if round_outcomes
+                .iter()
+                .any(|outcome| !outcome.pending_actions.is_empty())
+            {
+                return Ok(AgentTurnResult {
+                    text: assistant_text,
+                    reasoning_content: None,
+                    tool_outcomes,
+                    pending_actions,
+                });
+            }
+
+            if let Some(signature) = repeated_failure_signature(&round_outcomes) {
+                if last_failure_signature.as_deref() == Some(signature.as_str()) {
+                    repeated_failure_rounds += 1;
+                } else {
+                    repeated_failure_rounds = 1;
+                    last_failure_signature = Some(signature.clone());
+                }
+                if repeated_failure_rounds >= MAX_REPEAT_TOOL_FAILURES {
+                    return Err(
+                        format!("Agent repeated the same failing tool call: {signature}")
+                            .into_error(tool_outcomes),
+                    );
+                }
+            } else {
+                repeated_failure_rounds = 0;
+                last_failure_signature = None;
+            }
+
+            // Every tool_result for one assistant turn goes back in a single
+            // user message — splitting them is rejected by the API.
+            messages.push(json!({
+                "role": "user",
+                "content": result_blocks,
+            }));
+        }
+
+        Err(
+            format_tool_loop_error("Anthropic", MAX_TOOL_ROUNDS, last_tool_signature.as_deref())
+                .into_error(tool_outcomes),
+        )
+    }
 }
 
 fn openai_compatible_chat_payload(
@@ -895,6 +1119,52 @@ fn sanitize_gemini_schema(value: &Value) -> Value {
     }
 }
 
+fn anthropic_tools(specs: &[ToolSpec]) -> Vec<Value> {
+    specs
+        .iter()
+        .map(|spec| {
+            json!({
+                "name": spec.name,
+                "description": spec.description,
+                // The Messages API takes JSON Schema directly, so unlike the
+                // OpenAI and Gemini paths no key stripping is needed.
+                "input_schema": spec.input_schema,
+            })
+        })
+        .collect()
+}
+
+fn extract_anthropic_text(content: &[Value]) -> String {
+    content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extract_anthropic_tool_uses(content: &[Value]) -> Vec<AnthropicToolUse> {
+    content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|block| {
+            Some(AnthropicToolUse {
+                id: block.get("id").and_then(Value::as_str)?.to_string(),
+                name: block.get("name").and_then(Value::as_str)?.to_string(),
+                input: block.get("input").cloned().unwrap_or_else(|| json!({})),
+            })
+        })
+        .collect()
+}
+
+fn anthropic_tool_call_signature(tool_uses: &[AnthropicToolUse]) -> String {
+    tool_uses
+        .iter()
+        .map(|call| format!("{}({})", call.name, call.input))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn extract_gemini_text(parts: &[GeminiPart]) -> String {
     parts
         .iter()
@@ -1098,6 +1368,34 @@ struct OpenAiToolFunction {
 
 fn openai_tool_call_type() -> String {
     "function".to_string()
+}
+
+/// The Messages API response. `content` stays raw so the assistant turn can be
+/// echoed back byte-for-byte on the next round — thinking blocks carry
+/// signatures the API rejects if they are rebuilt from parsed fields.
+#[derive(Debug, Deserialize)]
+struct AnthropicMessageResponse {
+    #[serde(default)]
+    content: Vec<Value>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    stop_details: Option<AnthropicStopDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStopDetails {
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    explanation: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AnthropicToolUse {
+    id: String,
+    name: String,
+    input: Value,
 }
 
 #[derive(Debug, Deserialize)]

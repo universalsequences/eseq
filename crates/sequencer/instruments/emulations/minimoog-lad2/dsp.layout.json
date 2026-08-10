@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "authored": false,
   "root": {
     "nodes": {
       "*#0": {
@@ -208,10 +209,6 @@
       },
       "mod#0": {
         "x": 120.70223,
-        "y": 75.26001
-      },
-      "mod#1": {
-        "x": 286.6089,
         "y": 75.26001
       },
       "mod#2": {
@@ -568,10 +565,6 @@
         "segmented": true,
         "y": 70.25001
       },
-      "filter_env_amount:0->mod#1:0": {
-        "segmented": true,
-        "y": 46.130005
-      },
       "filtered:0->*#10:0": {
         "segmented": true,
         "y": 146.21628
@@ -599,10 +592,6 @@
       "mod#0:0->pw:0": {
         "segmented": true,
         "y": 80.01127
-      },
-      "mod#1:0->contour:1": {
-        "segmented": true,
-        "y": 77.531265
       },
       "mod#2:0->+#1:0": {
         "segmented": true,

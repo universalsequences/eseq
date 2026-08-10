@@ -37,6 +37,48 @@ pub(crate) enum ActiveDeleteTarget {
     },
 }
 
+/// Which editing surface a dsp edit session uses
+/// (docs/patch-vs-code-editor-spec.md §3.2): the patch editor for
+/// patch-authored content and new drafts, a plain DGenLisp text buffer for
+/// everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EditorSurface {
+    Patch,
+    Code,
+}
+
+pub(super) fn editor_surface_for_existing(
+    path: &Path,
+    source: &str,
+    intent: eseqlisp::widget_render::patcher::PatcherIntent,
+) -> EditorSurface {
+    if eseqlisp::widget_render::patcher::source_opens_in_patch_editor(path, source, intent) {
+        EditorSurface::Patch
+    } else {
+        EditorSurface::Code
+    }
+}
+
+pub(super) fn editor_surface_label(surface: EditorSurface) -> &'static str {
+    match surface {
+        EditorSurface::Patch => "patch",
+        EditorSurface::Code => "code",
+    }
+}
+
+/// What an in-editor Fork (`fork-editor-session`) has to be able to undo.
+///
+/// Forking mid-edit converts an `EditExisting` session into a `CreateDraft`
+/// one *on the live track*, so the usual "cancel a draft = delete the draft
+/// track / effect slot" is wrong: the track is real and was playing the
+/// original before the fork. Cancel restores that original instead.
+#[derive(Debug, Clone)]
+pub(super) struct ForkRestore {
+    /// The source the editor was opened over, used as the compile asset base.
+    pub(super) origin_path: PathBuf,
+    pub(super) persisted_source: String,
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum InstrumentEditMode {
     EditExisting {
@@ -61,7 +103,10 @@ pub(super) struct InstrumentEditSession {
     pub(super) visible_revision_valid: bool,
     pub(super) preview_generation: u64,
     pub(super) run_mode: CustomInstrumentRunMode,
+    pub(super) surface: EditorSurface,
     pub(super) mode: InstrumentEditMode,
+    /// `Some` only for drafts produced by forking a live edit session.
+    pub(super) fork_restore: Option<ForkRestore>,
 }
 
 impl InstrumentEditSession {
@@ -73,6 +118,7 @@ impl InstrumentEditSession {
         track: usize,
         persisted_source: String,
         run_mode: CustomInstrumentRunMode,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -85,7 +131,9 @@ impl InstrumentEditSession {
             visible_revision_valid: true,
             preview_generation: 0,
             run_mode,
+            surface,
             mode: InstrumentEditMode::EditExisting { persisted_source },
+            fork_restore: None,
         }
     }
 
@@ -98,6 +146,7 @@ impl InstrumentEditSession {
         temp_dir: PathBuf,
         draft_track: usize,
         original_track: usize,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -110,11 +159,13 @@ impl InstrumentEditSession {
             visible_revision_valid: true,
             preview_generation: 0,
             run_mode: CustomInstrumentRunMode::Instrument,
+            surface,
             mode: InstrumentEditMode::CreateDraft {
                 temp_dir,
                 draft_track,
                 original_track,
             },
+            fork_restore: None,
         }
     }
 }
@@ -129,6 +180,16 @@ pub(super) struct PendingInstrumentPreview {
 pub(super) struct PendingInstrumentCancelRestore {
     pub(super) session: InstrumentEditSession,
     pub(super) persisted_source: String,
+    /// Draft dir of a `fork-editor-session` draft being cancelled, deleted
+    /// only once the restore compile lands.
+    ///
+    /// Cancelling a forked draft used to rewrite `session.path` back to the
+    /// original and delete the draft dir up front. When the restore compile
+    /// then failed, the session pushed back into the editor still said
+    /// `CreateDraft { temp_dir }` for a directory that no longer existed while
+    /// its path pointed at the original patch, so a retry had nowhere to write.
+    /// The session is now left untouched and this is applied on success only.
+    pub(super) fork_draft_dir: Option<PathBuf>,
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
@@ -322,7 +383,10 @@ pub(super) struct EffectEditSession {
     pub(super) last_valid_layout: Option<String>,
     pub(super) visible_revision_valid: bool,
     pub(super) preview_generation: u64,
+    pub(super) surface: EditorSurface,
     pub(super) mode: EffectEditMode,
+    /// `Some` only for drafts produced by forking a live edit session.
+    pub(super) fork_restore: Option<ForkRestore>,
 }
 
 impl EffectEditSession {
@@ -332,6 +396,7 @@ impl EffectEditSession {
         buffer_name: String,
         target: EffectEditTarget,
         persisted_source: String,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -342,7 +407,9 @@ impl EffectEditSession {
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
+            surface,
             mode: EffectEditMode::EditExisting { persisted_source },
+            fork_restore: None,
         }
     }
 
@@ -353,6 +420,7 @@ impl EffectEditSession {
         target: EffectEditTarget,
         source: String,
         temp_dir: PathBuf,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -363,7 +431,9 @@ impl EffectEditSession {
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
+            surface,
             mode: EffectEditMode::CreateDraft { temp_dir },
+            fork_restore: None,
         }
     }
 }
@@ -373,6 +443,72 @@ pub(super) struct PendingEffectPreview {
     pub(super) source: String,
     pub(super) layout: Option<String>,
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
+}
+
+/// Kick the preview compile pipeline for a source the host produced itself,
+/// rather than one the patcher handed over in a `preview-*-patch` payload.
+///
+/// The agentic macro edit rewrites `dsp.lisp` directly and touches no
+/// interaction state, so the patcher never emits a writeback payload and the
+/// usual compile never fires: the new macro showed up on the canvas but stayed
+/// inaudible until some unrelated edit forced a recompile.
+pub(super) fn queue_instrument_preview_compile(
+    session: &mut InstrumentEditSession,
+    pending: &mut Option<PendingInstrumentPreview>,
+    source: String,
+    sample_rate: u32,
+) {
+    session.preview_generation = session.preview_generation.wrapping_add(1);
+    session.visible_revision_valid = false;
+    let generation = session.preview_generation;
+    let asset_base = session.path.parent().map(std::path::Path::to_path_buf);
+    let compile_source = source.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = sequencer::lisp_host::compile_and_load_instrument_with_origin(
+            &compile_source,
+            sample_rate,
+            asset_base.as_deref(),
+            sequencer::lisp_host::DGenSourceOrigin::Draft,
+        );
+        let _ = tx.send(result);
+    });
+    *pending = Some(PendingInstrumentPreview {
+        generation,
+        source,
+        layout: None,
+        receiver: rx,
+    });
+}
+
+/// Effect counterpart of `queue_instrument_preview_compile`.
+pub(super) fn queue_effect_preview_compile(
+    session: &mut EffectEditSession,
+    pending: &mut Option<PendingEffectPreview>,
+    source: String,
+    sample_rate: u32,
+) {
+    session.preview_generation = session.preview_generation.wrapping_add(1);
+    session.visible_revision_valid = false;
+    let generation = session.preview_generation;
+    let asset_base = session.path.parent().map(std::path::Path::to_path_buf);
+    let compile_source = source.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = sequencer::lisp_host::compile_and_load_with_origin(
+            &compile_source,
+            sample_rate,
+            asset_base.as_deref(),
+            sequencer::lisp_host::DGenSourceOrigin::Draft,
+        );
+        let _ = tx.send(result);
+    });
+    *pending = Some(PendingEffectPreview {
+        generation,
+        source,
+        layout: None,
+        receiver: rx,
+    });
 }
 
 pub(super) fn editor_macro_action_strings(
@@ -535,6 +671,9 @@ pub(super) fn staged_library_macro_flush_status(macros: &[String]) -> Option<Str
 
 pub(super) struct PendingEffectCancelRestore {
     pub(super) session: EffectEditSession,
+    /// Draft dir of a `fork-editor-session` draft being cancelled — see
+    /// [`PendingInstrumentCancelRestore::fork_draft_dir`].
+    pub(super) fork_draft_dir: Option<PathBuf>,
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
@@ -546,6 +685,115 @@ pub(super) struct PendingAgenticBubble {
     pub(super) receiver: std::sync::mpsc::Receiver<
         Result<sequencer::agent::agentic_bubble::AgenticBubbleOutput, String>,
     >,
+}
+
+/// Macro sidebar facts scanned from a patch source: top-level
+/// `(defmacro name (params...) body...)` forms (with the head symbols each
+/// body calls, for nesting) and `(use-defmacro name)` library imports.
+pub(super) struct PatchMacroScan {
+    /// (name, params, called head symbols in definition order, deduped)
+    pub(super) locals: Vec<(String, Vec<String>, Vec<String>)>,
+    pub(super) imports: Vec<String>,
+}
+
+fn collect_call_head_symbols(expr: &Expression, seen: &mut Vec<String>) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    if let Some(Expression::Symbol(head)) = items.first() {
+        if !seen.contains(head) {
+            seen.push(head.clone());
+        }
+    }
+    for item in items {
+        collect_call_head_symbols(item, seen);
+    }
+}
+
+pub(super) fn scan_patch_macro_source(source: &str) -> PatchMacroScan {
+    let mut scan = PatchMacroScan {
+        locals: Vec::new(),
+        imports: Vec::new(),
+    };
+    let Ok(tokens) = Parser::new(source.to_string()).parse() else {
+        return scan;
+    };
+    let Ok(exprs) = ASTParser::new(tokens).parse() else {
+        return scan;
+    };
+    for expr in &exprs {
+        let Expression::List(items) = expr else {
+            continue;
+        };
+        match items.as_slice() {
+            [
+                Expression::Symbol(head),
+                Expression::Symbol(name),
+                Expression::List(params),
+                body @ ..,
+            ] if head == "defmacro" => {
+                let params = params
+                    .iter()
+                    .filter_map(|param| match param {
+                        Expression::Symbol(param) => Some(param.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut calls = Vec::new();
+                for expr in body {
+                    collect_call_head_symbols(expr, &mut calls);
+                }
+                calls.retain(|call| call != name);
+                scan.locals.push((name.clone(), params, calls));
+            }
+            [Expression::Symbol(head), Expression::Symbol(name)] if head == "use-defmacro" => {
+                scan.imports.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+    scan
+}
+
+pub(super) fn build_patch_macro_sidebar_value(
+    entries: &[(String, Vec<String>, Vec<String>)],
+) -> Value {
+    Value::List(
+        entries
+            .iter()
+            .map(|(name, params, calls)| {
+                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
+                    ("name", Value::String(name.clone())),
+                    ("params", values::build_string_list(params)),
+                    ("calls", values::build_string_list(calls)),
+                ])))
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn build_library_macro_sidebar_value(
+    entries: &[eseqlisp::widget_render::patcher::MacroLibrarySidebarEntry],
+    used: &[String],
+) -> Value {
+    Value::List(
+        entries
+            .iter()
+            .map(|(name, params, outputs, summary, imports)| {
+                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
+                    ("name", Value::String(name.clone())),
+                    ("params", values::build_string_list(params)),
+                    ("outputs", values::build_string_list(outputs)),
+                    (
+                        "summary",
+                        Value::String(summary.clone().unwrap_or_default()),
+                    ),
+                    ("calls", values::build_string_list(imports)),
+                    ("used", Value::Bool(used.contains(name))),
+                ])))
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn extract_macro_name_from_defmacro(source: &str) -> Option<String> {
@@ -566,15 +814,29 @@ pub(super) fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -
     let buffer_name = escape_lisp_string(buffer_name);
     let path = escape_lisp_string(&path.to_string_lossy());
     format!(
-        "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :instrument\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-instrument-patch\" event))))\n"
+        // The `M-x choose-model` picker is mounted in the patcher's own
+        // buffer rather than a sibling tile: a modal only receives pointer
+        // input through the *active* tile's layout, and the patch editor's
+        // canvas is the active tile. Closed, it has zero layout footprint.
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (choose-model-panel)\n    (patcher\n      :intent :instrument\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (choose-model-current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (choose-model-open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
     )
+}
+
+pub(super) fn instrument_code_buffer_name(name: &str) -> String {
+    format!("*instrument-code:{name}*")
+}
+
+pub(super) fn effect_code_buffer_name(name: &str) -> String {
+    format!("*effect-code:{name}*")
 }
 
 pub(super) fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
     let buffer_name = escape_lisp_string(buffer_name);
     let path = escape_lisp_string(&path.to_string_lossy());
     format!(
-        "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :effect\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-effect-patch\" event))))\n"
+        // Mounted alongside the patcher for the same reason as the
+        // instrument variant above.
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (choose-model-panel)\n    (patcher\n      :intent :effect\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (choose-model-current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (choose-model-open)\n          (host-command \"preview-effect-patch\" event))))))\n"
     )
 }
 
@@ -906,6 +1168,19 @@ pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
 
 pub(super) fn track_meter_bindings_visible(mixer_visible: bool, sequencer_visible: bool) -> bool {
     mixer_visible || sequencer_visible
+}
+
+/// `*patch-mixer*` (the reduced strip in the patch editor) renders the same
+/// meter/strip bindings as `*mixer*`, so anything gated on mixer visibility
+/// must treat either buffer as "the mixer is on screen".
+pub(super) fn editor_has_visible_mixer_buffer(editor: &Editor) -> bool {
+    editor_has_visible_buffer(editor, "*mixer*")
+        || editor_has_visible_buffer(editor, "*patch-mixer*")
+}
+
+pub(super) fn refresh_visible_mixer_layouts(editor: &mut Editor) {
+    editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+    editor.refresh_visible_layouts_for_buffer_named("*patch-mixer*");
 }
 
 pub(super) fn reconciled_track_index(

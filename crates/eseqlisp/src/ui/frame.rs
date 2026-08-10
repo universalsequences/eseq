@@ -286,13 +286,23 @@ fn build_render_frame_with_layout_viewport(
         leaf.widget_viewport_width = layout_width;
         leaf.widget_viewport_height = layout_height;
     }
-    let (_, max_h) = editor.clamp_widget_scroll_offsets();
-    if editor.widget_layout().is_none() {
-        editor.active_leaf_mut().widget_scroll_left = 0.0;
-    } else if editor.active_leaf().widget_scroll_left > max_h {
-        editor.active_leaf_mut().widget_scroll_left = max_h;
-    }
     let view_mode = editor.active_buffer().view_mode;
+    let (_, max_h) = if view_mode == ViewMode::UiOnly {
+        editor.clamp_widget_scroll_offsets()
+    } else {
+        // Text and widget layouts share the leaf's horizontal offset. While
+        // text is visible, its cursor-visibility policy owns that offset;
+        // clamping it to widget bounds here would make every frame snap back
+        // before the cursor scroll is synchronized.
+        editor.clamp_widget_vertical_scroll_offset()
+    };
+    if view_mode == ViewMode::UiOnly {
+        if editor.widget_layout().is_none() {
+            editor.active_leaf_mut().widget_scroll_left = 0.0;
+        } else if editor.active_leaf().widget_scroll_left > max_h {
+            editor.active_leaf_mut().widget_scroll_left = max_h;
+        }
+    }
     let (text_cell_width_scale, text_cell_height_scale) = {
         let buffer = editor.active_buffer();
         editor.text_cell_scales_for_buffer(buffer)
@@ -854,6 +864,34 @@ mod tests {
     }
 
     #[test]
+    fn cached_active_ui_frame_flushes_deferred_layout_before_cache_lookup() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str("(effect (box :width :fill :height :fill))")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+
+        let _ = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        let initial_revision = editor.widget_layout_revision();
+        assert!(editor.active_leaf().cached_inactive_frame.is_some());
+
+        editor.runtime_mut().invalidate_layout_deferred();
+        let frame = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+
+        assert!(
+            editor.widget_layout_revision() > initial_revision,
+            "deferred widget layout must settle before an otherwise matching UI frame is reused"
+        );
+        assert_eq!(
+            frame.tiles[0].frame.widget_layout_cache_key,
+            editor.widget_layout_revision(),
+        );
+    }
+
+    #[test]
     fn cached_active_ui_frame_tracks_widget_focus_changes() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -969,6 +1007,14 @@ fn build_tiled_render_frame_impl(
     // Ensure cached rects are up to date, then reuse them.
     editor.update_tile_rects(total_width as u16, total_height as u16);
     editor.sync_reactive_bindings_for_visible_layouts();
+    // Widget input can defer layout until frame construction. Settle that work
+    // before snapshotting tile revisions or consulting the frame cache: the
+    // new layout may contain measurements required by the current widget
+    // state (for example proportional-text caret geometry in the patcher).
+    editor.runtime_mut().flush_deferred_layout_invalidation();
+    let layout_width = editor.runtime().layout_cols_exact();
+    editor.position_inline_widget_layout(layout_width);
+    editor.sync_layout_to_active_leaf();
     let dirty_widget_ids = editor.take_dirty_widget_ids();
     if !dirty_widget_ids.is_empty() {
         let tile_ids = editor.tile_root.leaf_ids();
@@ -1610,6 +1656,7 @@ fn build_completion(
             .take(visible_count)
             .map(|(idx, item)| CompletionEntry {
                 label: item.label.clone(),
+                category: item.category.clone(),
                 selected: idx == comp.selected,
             })
             .collect();

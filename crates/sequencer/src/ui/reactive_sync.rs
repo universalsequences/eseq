@@ -87,6 +87,7 @@ pub(super) fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
         "*sequencer*",
         "*samples*",
         "*mixer*",
+        "*patch-mixer*",
         "*track*",
         "*fx*",
         "*piano-roll*",

@@ -138,7 +138,13 @@ fn summarize_diff_leaf(value: &Value) -> String {
 /// Walk two values in parallel and record the paths where they differ.
 /// Recurses only into lists and maps; everything else is a leaf compared
 /// with PartialEq. Stops once `limit` diffs have been collected.
-fn collect_value_diffs(previous: &Value, next: &Value, path: &str, out: &mut Vec<String>, limit: usize) {
+fn collect_value_diffs(
+    previous: &Value,
+    next: &Value,
+    path: &str,
+    out: &mut Vec<String>,
+    limit: usize,
+) {
     if out.len() >= limit {
         return;
     }
@@ -275,11 +281,7 @@ fn classify_value_delta(stored: &Value, next: &Value) -> ReactiveValueDelta {
     }
 }
 
-fn patch_value_cells(
-    stored: &Rc<RefCell<Value>>,
-    next: &Rc<RefCell<Value>>,
-    patched: &mut usize,
-) {
+fn patch_value_cells(stored: &Rc<RefCell<Value>>, next: &Rc<RefCell<Value>>, patched: &mut usize) {
     enum Step {
         Recurse,
         Write(Value),
@@ -538,7 +540,9 @@ impl ReactiveRegistry {
                         eprintln!("[reactive-diff] {namespace}.{field}{line}");
                     }
                     if diffs.len() >= DIFF_LIMIT {
-                        eprintln!("[reactive-diff] {namespace}.{field}: ... (truncated at {DIFF_LIMIT})");
+                        eprintln!(
+                            "[reactive-diff] {namespace}.{field}: ... (truncated at {DIFF_LIMIT})"
+                        );
                     }
                 }
             }

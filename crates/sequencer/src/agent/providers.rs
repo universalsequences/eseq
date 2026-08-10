@@ -7,15 +7,23 @@ use super::protocol::{ToolCall, ToolCallOutcome, ToolSpec};
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
 const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_KEY";
+const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 const OPENAI_MODEL_ENV: &str = "SEQUENCER_OPENAI_MODEL";
 const GEMINI_MODEL_ENV: &str = "SEQUENCER_GEMINI_MODEL";
 const DEEPSEEK_MODEL_ENV: &str = "SEQUENCER_DEEPSEEK_MODEL";
+const ANTHROPIC_MODEL_ENV: &str = "SEQUENCER_ANTHROPIC_MODEL";
+/// `max_tokens` is required by the Messages API and caps thinking *plus*
+/// response text. Thinking is on by default on Claude Opus 5, so a tight cap
+/// truncates mid-answer; these turns are non-streaming, so stay under the
+/// SDK/HTTP timeout budget rather than reaching for the 128K ceiling.
+pub const ANTHROPIC_MAX_TOKENS: u32 = 16_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentProviderKind {
     OpenAi,
     Gemini,
     DeepSeek,
+    Anthropic,
 }
 
 impl AgentProviderKind {
@@ -24,6 +32,7 @@ impl AgentProviderKind {
             AgentProviderKind::OpenAi => "OpenAI",
             AgentProviderKind::Gemini => "Gemini",
             AgentProviderKind::DeepSeek => "DeepSeek",
+            AgentProviderKind::Anthropic => "Anthropic",
         }
     }
 
@@ -32,6 +41,7 @@ impl AgentProviderKind {
             AgentProviderKind::OpenAi => OPENAI_API_KEY_ENV,
             AgentProviderKind::Gemini => GEMINI_API_KEY_ENV,
             AgentProviderKind::DeepSeek => DEEPSEEK_API_KEY_ENV,
+            AgentProviderKind::Anthropic => ANTHROPIC_API_KEY_ENV,
         }
     }
 
@@ -40,6 +50,7 @@ impl AgentProviderKind {
             AgentProviderKind::OpenAi => OPENAI_MODEL_ENV,
             AgentProviderKind::Gemini => GEMINI_MODEL_ENV,
             AgentProviderKind::DeepSeek => DEEPSEEK_MODEL_ENV,
+            AgentProviderKind::Anthropic => ANTHROPIC_MODEL_ENV,
         }
     }
 }
@@ -108,6 +119,12 @@ pub fn default_model_presets() -> Vec<AgentModelPreset> {
             capability: ModelCapability::Balanced,
         },
         AgentModelPreset {
+            id: "gpt-5.6-luna".to_string(),
+            display_name: "GPT-5.6 Luna".to_string(),
+            provider: AgentProviderKind::OpenAi,
+            capability: ModelCapability::Cheap,
+        },
+        AgentModelPreset {
             id: "gpt-5-mini".to_string(),
             display_name: "GPT-5 mini".to_string(),
             provider: AgentProviderKind::OpenAi,
@@ -149,6 +166,32 @@ pub fn default_model_presets() -> Vec<AgentModelPreset> {
             provider: AgentProviderKind::Gemini,
             capability: ModelCapability::Cheap,
         },
+        // Anthropic model ids carry no date suffix — `claude-opus-5`, not
+        // `claude-opus-5-20260101`. A suffixed id 404s at the Messages API.
+        AgentModelPreset {
+            id: "claude-opus-5".to_string(),
+            display_name: "Claude Opus 5".to_string(),
+            provider: AgentProviderKind::Anthropic,
+            capability: ModelCapability::Balanced,
+        },
+        AgentModelPreset {
+            id: "claude-fable-5".to_string(),
+            display_name: "Claude Fable 5".to_string(),
+            provider: AgentProviderKind::Anthropic,
+            capability: ModelCapability::Balanced,
+        },
+        AgentModelPreset {
+            id: "claude-sonnet-5".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            provider: AgentProviderKind::Anthropic,
+            capability: ModelCapability::Balanced,
+        },
+        AgentModelPreset {
+            id: "claude-haiku-4-5".to_string(),
+            display_name: "Claude Haiku 4.5".to_string(),
+            provider: AgentProviderKind::Anthropic,
+            capability: ModelCapability::Fast,
+        },
         AgentModelPreset {
             id: "deepseek-v4-pro".to_string(),
             display_name: "DeepSeek V4 Pro".to_string(),
@@ -171,6 +214,7 @@ impl AgentProviderState {
             AgentProviderKind::OpenAi,
             AgentProviderKind::Gemini,
             AgentProviderKind::DeepSeek,
+            AgentProviderKind::Anthropic,
         ]
         .into_iter()
         .map(|provider| ProviderAvailability {
@@ -246,6 +290,54 @@ pub fn build_gemini_generate_content_payload(request: &AgentTurnRequest) -> Valu
         "tools": [{
             "functionDeclarations": request.tools.iter().map(gemini_tool_json).collect::<Vec<_>>()
         }]
+    })
+}
+
+/// Anthropic's Messages API takes the system prompt as a top-level field
+/// rather than a `system`-role message, and requires an explicit `max_tokens`.
+pub fn build_anthropic_messages_payload(request: &AgentTurnRequest) -> Value {
+    json!({
+        "model": request.model,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "system": request.system_prompt,
+        "messages": anthropic_messages(&request.messages),
+        "tools": request.tools.iter().map(anthropic_tool_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Messages API history. The transcript's tool rows are dropped for the same
+/// reason as on OpenAI: they no longer carry the `tool_use` ids that pair them
+/// with an assistant turn. System rows become user turns — the mid-conversation
+/// `role: "system"` message is model-gated, and a 400 there would be worse than
+/// a slightly weaker signal.
+pub fn anthropic_messages(messages: &[AgentMessage]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for message in messages {
+        if matches!(message.role, AgentMessageRole::Tool) {
+            continue;
+        }
+        let role = match message.role {
+            AgentMessageRole::Assistant => "assistant",
+            _ => "user",
+        };
+        // The first message must be a user turn, so drop any leading assistant
+        // rows rather than letting the API reject the whole request.
+        if out.is_empty() && role == "assistant" {
+            continue;
+        }
+        out.push(json!({
+            "role": role,
+            "content": [{ "type": "text", "text": message.content }],
+        }));
+    }
+    out
+}
+
+fn anthropic_tool_json(spec: &ToolSpec) -> Value {
+    json!({
+        "name": spec.name,
+        "description": spec.description,
+        "input_schema": spec.input_schema,
     })
 }
 
@@ -343,9 +435,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_gemini_generate_content_payload, build_openai_responses_payload,
-        default_model_presets, normalize_openai_tool_call, AgentMessage, AgentMessageRole,
-        AgentProviderKind, AgentProviderState, AgentTurnRequest, ModelCapability,
+        build_anthropic_messages_payload, build_gemini_generate_content_payload,
+        build_openai_responses_payload, default_model_presets, normalize_openai_tool_call,
+        AgentMessage, AgentMessageRole, AgentProviderKind, AgentProviderState, AgentTurnRequest,
+        ModelCapability,
     };
     use crate::agent::actions::AgentSessionContext;
     use crate::agent::protocol::AgentToolRuntime;
@@ -353,7 +446,7 @@ mod tests {
     #[test]
     fn provider_state_contains_both_backends() {
         let state = AgentProviderState::from_env();
-        assert_eq!(state.providers.len(), 3);
+        assert_eq!(state.providers.len(), 4);
         assert!(state
             .providers
             .iter()
@@ -366,6 +459,78 @@ mod tests {
             .providers
             .iter()
             .any(|entry| entry.provider == AgentProviderKind::DeepSeek));
+        assert!(state
+            .providers
+            .iter()
+            .any(|entry| entry.provider == AgentProviderKind::Anthropic));
+    }
+
+    #[test]
+    fn anthropic_presets_are_available() {
+        let presets = default_model_presets();
+        for id in [
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+        ] {
+            let preset = presets
+                .iter()
+                .find(|preset| preset.id == id)
+                .unwrap_or_else(|| panic!("{id} preset"));
+            assert_eq!(preset.provider, AgentProviderKind::Anthropic);
+        }
+        assert_eq!(
+            AgentProviderKind::Anthropic.api_key_env(),
+            "ANTHROPIC_API_KEY"
+        );
+        // Model ids are complete as written — a date suffix would 404.
+        assert!(!presets
+            .iter()
+            .any(|preset| preset.provider == AgentProviderKind::Anthropic
+                && preset.id.contains("-2026")));
+    }
+
+    #[test]
+    fn anthropic_payload_lifts_the_system_prompt_out_of_messages() {
+        let request = AgentTurnRequest {
+            model: "claude-opus-5".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: vec![
+                // A leading assistant row would make the API reject the whole
+                // request, so it must be dropped rather than forwarded.
+                AgentMessage {
+                    role: AgentMessageRole::Assistant,
+                    content: "stale".to_string(),
+                    tool_name: None,
+                    reasoning_content: None,
+                },
+                AgentMessage {
+                    role: AgentMessageRole::User,
+                    content: "make a bright pad".to_string(),
+                    tool_name: None,
+                    reasoning_content: None,
+                },
+                AgentMessage {
+                    role: AgentMessageRole::Tool,
+                    content: "tool chatter".to_string(),
+                    tool_name: Some("lookup_dgen_docs".to_string()),
+                    reasoning_content: None,
+                },
+            ],
+            tools: Vec::new(),
+            session_context: AgentSessionContext::default(),
+        };
+        let payload = build_anthropic_messages_payload(&request);
+        assert_eq!(payload["system"], json!("You are helpful."));
+        assert_eq!(payload["max_tokens"], json!(super::ANTHROPIC_MAX_TOKENS));
+        let messages = payload["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], json!("user"));
+        assert_eq!(
+            messages[0]["content"][0]["text"],
+            json!("make a bright pad")
+        );
     }
 
     #[test]
@@ -388,6 +553,17 @@ mod tests {
             .expect("deepseek flash preset");
         assert_eq!(preset.provider, AgentProviderKind::DeepSeek);
         assert_eq!(preset.capability, ModelCapability::Fast);
+    }
+
+    #[test]
+    fn gpt_5_6_luna_is_available() {
+        let presets = default_model_presets();
+        let preset = presets
+            .iter()
+            .find(|preset| preset.id == "gpt-5.6-luna")
+            .expect("GPT-5.6 Luna preset");
+        assert_eq!(preset.provider, AgentProviderKind::OpenAi);
+        assert_eq!(preset.capability, ModelCapability::Cheap);
     }
 
     #[test]

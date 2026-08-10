@@ -16,6 +16,11 @@
 (defstate sbrowser-selected-tags (list))
 (defstate sbrowser-auditioned-sample "")
 (defstate sbrowser-loading-instrument-name "")
+;; Last instrument / custom effect highlighted in the browser tree. Fork acts on
+;; it — the tree widget has no context menu, so the action lives in the panel
+;; toolbar instead (docs/instrument-fork-spec.md §3.5).
+(defstate sbrowser-selected-instrument-name "")
+(defstate sbrowser-selected-audio-effect-name "")
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -27,6 +32,10 @@
 (defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
 
 (defwidget editor-spinner
+  ;; Sized to sit inside `sbrowser-editor-status-row`'s 1.35-row height — the
+  ;; row does not clip, so an oversized spinner paints over its neighbours.
+  ;; The dot row spans x = -0.72..0.72 in local space, so keep the box wider
+  ;; than it is tall or the outer dots run off the edges.
   :width 3.0 :height 1.25
   :animates true
   :shader
@@ -54,6 +63,8 @@
         (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p4))))))))
 
 (def sbrowser-editor-status-row (text color)
+  ;; :center, not :baseline — the spinner is a bare SDF with no text baseline
+  ;; to align against.
   (h-stack :width :fill :height 1.35 :gap 0.5 :align :center
     (editor-spinner :width 2.8 :height 1.15)
     (label text
@@ -457,11 +468,23 @@
 
 (def sbrowser-select-audio-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
-    (if (= kind "header")
-      false
-      (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
-        (status (str label))
-        (status "Choose an effect")))))
+    (do
+      ;; Only custom (dsp.lisp-backed) effects can be forked; builtins are Rust.
+      (set! sbrowser-selected-audio-effect-name
+        (if (= kind "custom-audio-effect") (get item :name) ""))
+      (if (= kind "header")
+        false
+        (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
+          (status (str label))
+          (status "Choose an effect"))))))
+
+(def sbrowser-fork-selected-audio-effect ()
+  (if (= sbrowser-selected-audio-effect-name "")
+    (status "Select a custom effect to fork")
+    (do
+      (set! sbrowser-editor-name "")
+      (host-command "enter-fork-effect-editor"
+        (dict :source sbrowser-selected-audio-effect-name)))))
 
 (def sbrowser-enter-new-effect-editor ()
   (set! sbrowser-editor-name "")
@@ -707,13 +730,24 @@
 
 (def sbrowser-focus-create-item (item)
   (let ((kind (get item :kind)))
-    (if (= kind "header")
-      false
-      (if (or (= kind "instrument") (= kind "builtin-instrument"))
-        (status (str (get item :label)))
-        (if (= kind "folder")
-          (status (str "Folder: " (get item :label)))
-          (status "Choose an instrument"))))))
+    (do
+      (set! sbrowser-selected-instrument-name
+        (if (= kind "instrument") (get item :name) ""))
+      (if (= kind "header")
+        false
+        (if (or (= kind "instrument") (= kind "builtin-instrument"))
+          (status (str (get item :label)))
+          (if (= kind "folder")
+            (status (str "Folder: " (get item :label)))
+            (status "Choose an instrument")))))))
+
+(def sbrowser-fork-selected-instrument ()
+  (if (= sbrowser-selected-instrument-name "")
+    (status "Select a saved instrument to fork")
+    (do
+      (set! sbrowser-editor-name "")
+      (host-command "enter-fork-instrument-editor"
+        (dict :source sbrowser-selected-instrument-name)))))
 
 (def sbrowser-drop-instrument-on-folder (event)
   (let ((payload (get event :payload))
@@ -874,8 +908,23 @@
                 :on-activate (lambda (item) (sbrowser-activate-sample item))
                 :on-modified-activate (lambda (item) (sbrowser-modified-activate-sample item))))))))))
 
+(def sbrowser-instruments-toolbar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (button
+        (if (= sbrowser-selected-instrument-name "")
+          "Fork…"
+          (str "Fork " sbrowser-selected-instrument-name))
+        :variant :secondary
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-fork-selected-instrument)
+        :color :white))))
+
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
+    (sbrowser-instruments-toolbar)
     (sbrowser-instrument-loading-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
@@ -902,6 +951,16 @@
         :height 1.3
         :font-size 10.5
         :on-click |x y r| (sbrowser-enter-new-effect-editor)
+        :color :white)
+      (button
+        (if (= sbrowser-selected-audio-effect-name "")
+          "Fork…"
+          (str "Fork " sbrowser-selected-audio-effect-name))
+        :variant :secondary
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-fork-selected-audio-effect)
         :color :white))))
 
 (def sbrowser-audio-fx-panel ()
@@ -1189,6 +1248,15 @@
     "Fork Macro"
     "Save Macro to Library"))
 
+;; Fork is offered exactly when the primary button means "overwrite the shared
+;; definition" — i.e. edit-instrument / edit-effect. It has nothing to fork from
+;; in the new-* draft modes, and hides behind the macro action like everything
+;; else in that stack.
+(def sbrowser-editor-fork-available? ()
+  (and (not (sbrowser-editor-macro-action?))
+       (or (= SEQ.editor-mode "edit-instrument")
+           (= SEQ.editor-mode "edit-effect"))))
+
 (def sbrowser-editor-header ()
   (box :width :fill :padding 0.25
     (v-stack :width :fill :gap 0.4
@@ -1196,20 +1264,16 @@
         (label
           (if (sbrowser-editor-macro-action?) "Defmacro"
             (if (= SEQ.editor-mode "new-instrument") "New Instrument"
-              (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
+              (if (= SEQ.editor-mode "edit-instrument")
+                (if (= SEQ.editor-surface "code") "Edit Instrument (code)" "Edit Instrument")
                 (if (= SEQ.editor-mode "new-effect") "New Effect"
-                  (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
+                  (if (= SEQ.editor-mode "edit-effect")
+                    (if (= SEQ.editor-surface "code") "Edit Effect (code)" "Edit Effect")
                     "Editor")))))
           :font-size 12
           :color :white
-          :bg :transparent)
-        (box :bg :dark-gray :width 6 :height 1.5 :align :center
-          :on-click |x y r|
-            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
-          (label "cancel"
-            :font-size 9
-            :color (if SEQ.editor-canceling :dim :gray)
-            :bg :transparent)))
+          :bg :transparent))
+      
       (if (sbrowser-editor-macro-action?)
         (v-stack :width :fill :gap 0.35
           (label "Current macro"
@@ -1229,57 +1293,28 @@
             :color :white
             :bg :transparent))
         (if (= SEQ.editor-mode "new-instrument")
-        (v-stack :width :fill :gap 0.35
-          (label "Draft patch"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (label (str "track " (+ SEQ.current-track 1))
-            :font-size 11
-            :color :white
-            :bg :transparent)
-          (label "Mode"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (h-stack :width :fill :gap 0.35
-            (button "Instrument"
-              :variant (if (= SEQ.editor-instrument-run-mode "instrument") :primary :secondary)
-              :width 8.5
-              :height 1.2
-              :font-size 9
-              :on-click |x y r|
-                (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
-              :color :white)
-            (button "Free Patch"
-              :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
-              :width 8.5
-              :height 1.2
-              :font-size 9
-              :on-click |x y r|
-                (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
-              :color :white))
-          (label "Save as"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (text-input
-            :width :fill
-            :value sbrowser-editor-name
-            :placeholder "instrument-name"
-            :on-change (lambda (v) (set! sbrowser-editor-name v))
-            :height 1.5
-            :font-size 12))
-        (if (= SEQ.editor-mode "new-effect")
           (v-stack :width :fill :gap 0.35
-            (label "Draft patch"
+            (label "Mode"
               :font-size 9
               :color :gray
               :bg :transparent)
-            (label (str "track " (+ SEQ.current-track 1))
-              :font-size 11
-              :color :white
-              :bg :transparent)
+            (h-stack :width :fill :gap 0.35
+              (button "Instrument"
+                :variant (if (= SEQ.editor-instrument-run-mode "instrument") :primary :secondary)
+                :width 8.5
+                :height 1.2
+                :font-size 9
+                :on-click |x y r|
+                (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
+                :color :white)
+              (button "Free Patch"
+                :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
+                :width 8.5
+                :height 1.2
+                :font-size 9
+                :on-click |x y r|
+                (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
+                :color :white))
             (label "Save as"
               :font-size 9
               :color :gray
@@ -1287,15 +1322,36 @@
             (text-input
               :width :fill
               :value sbrowser-editor-name
-              :placeholder "effect-name"
+              :placeholder "instrument-name"
               :on-change (lambda (v) (set! sbrowser-editor-name v))
               :height 1.5
               :font-size 12))
-          ;; For edit modes, show the file name
-          (label SEQ.editor-buffer-name
-            :font-size 10
-            :color :gray
-            :bg :transparent))))
+          (if (= SEQ.editor-mode "new-effect")
+            (v-stack :width :fill :gap 0.35
+              (label "Draft patch"
+                :font-size 9
+                :color :gray
+                :bg :transparent)
+              (label (str "track " (+ SEQ.current-track 1))
+                :font-size 11
+                :color :white
+                :bg :transparent)
+              (label "Save as"
+                :font-size 9
+                :color :gray
+                :bg :transparent)
+              (text-input
+                :width :fill
+                :value sbrowser-editor-name
+                :placeholder "effect-name"
+                :on-change (lambda (v) (set! sbrowser-editor-name v))
+                :height 1.5
+                :font-size 12))
+            ;; For edit modes, show the file name
+            (label SEQ.editor-buffer-name
+              :font-size 10
+              :color :gray
+              :bg :transparent))))
       ;; Status display
       (if SEQ.editor-canceling
         (sbrowser-editor-status-row "Canceling..." :gray)
@@ -1307,32 +1363,90 @@
               :color :red
               :bg :transparent)
             (box))))
+      ;; Eval button (code editor only): compile + hot-swap the buffer
+      (if (= SEQ.editor-surface "code")
+        (button "Eval (C-c C-c)"
+          :variant :secondary
+          :width 13
+          :height 1.2
+          :font-size 10
+          :on-click |x y r|
+          (host-command "evaluate-editor-source" (dict))
+          :color :white)
+        (box))
+      ;; Open as patch (code editor, edit-existing): promote to the patch editor
+      (if (and (= SEQ.editor-surface "code")
+          (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+        (button "Open as patch"
+          :variant :secondary
+          :width 13
+          :height 1.2
+          :font-size 10
+          :on-click |x y r|
+          (host-command "promote-editor-to-patch" (dict))
+          :color :white)
+        (box))
+      ;; Eject to code (patch editor, edit-existing only)
+      (if (and (= SEQ.editor-surface "patch")
+          (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+        (button "Eject to code"
+          :variant :secondary
+          :width 13
+          :height 1.2
+          :font-size 10
+          :on-click |x y r|
+          (host-command "eject-editor-to-code" (dict))
+          :color :white)
+        (box))
       ;; Save button
       (if (sbrowser-editor-busy?)
         (box :height 1.2)
-        (button
-          (if (sbrowser-editor-macro-action?)
-            (sbrowser-editor-macro-action-label)
-            (if (= SEQ.editor-mode "new-instrument")
-            "Finalize"
-            (if (= SEQ.editor-mode "new-effect")
-              "Save & Add"
-            "Save")))
-          :variant :primary
-          :width (if (sbrowser-editor-macro-action?) 13.5 10)
-          :height 1.2
-          :font-size 11
-          :on-click |x y r|
+        (h-stack :align :baseline
+          (button
+            (if (sbrowser-editor-macro-action?)
+              (sbrowser-editor-macro-action-label)
+              (if (= SEQ.editor-mode "new-instrument")
+                "Finalize"
+                (if (= SEQ.editor-mode "new-effect")
+                  "Save & Add"
+                  "Save")))
+            :variant :primary
+            :width (if (sbrowser-editor-macro-action?) 14.5 10)
+            :height 1.2
+            :font-size 11
+            :on-click |x y r|
             (if (sbrowser-editor-macro-action?)
               (host-command "save-active-editor-macro" (dict))
               (if (= SEQ.editor-mode "new-instrument")
-              (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
-              (if (= SEQ.editor-mode "edit-instrument")
-                (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
-                (if (= SEQ.editor-mode "new-effect")
-                  (host-command "save-new-effect" (dict :name sbrowser-editor-name))
-                  (host-command "update-effect" (dict))))))
-          :color :white)))))
+                (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
+                (if (= SEQ.editor-mode "edit-instrument")
+                  (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
+                  (if (= SEQ.editor-mode "new-effect")
+                    (host-command "save-new-effect" (dict :name sbrowser-editor-name))
+                    (host-command "update-effect" (dict))))))
+            :color :white)
+          ;; Fork sits next to the clobbering path on purpose: in edit modes the
+          ;; primary button overwrites an instrument every project shares, and
+          ;; the safe alternative should not require leaving the buffer.
+          (if (sbrowser-editor-fork-available?)
+            (button "Fork"
+              :variant :secondary
+              :width 6
+              :height 1.2
+              :font-size 11
+              :on-click |x y r| (host-command "fork-editor-session" (dict))
+              :color :white)
+            (box))
+          (box :bg :dark-gray :width 6 :height 1.5 :align :center
+            :on-click |x y r|
+            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
+            (button "cancel"
+              :font-size 9
+              :height 1.2
+              :color (if SEQ.editor-canceling :white :white)
+              :background-color :gray)))            
+        )
+      )))
 
 (def sbrowser-editor-panel ()
   (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))

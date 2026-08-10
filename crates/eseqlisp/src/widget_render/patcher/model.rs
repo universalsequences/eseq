@@ -91,6 +91,9 @@ pub struct ArgSource {
 pub struct AttributeSource {
     pub key_item_index: usize,
     pub value_item_index: usize,
+    /// Items the value spans. Always 1 except for bracketed arrays (`@shape [3 3]`), which
+    /// lex as a run of tokens because `[`/`]` are not lexer delimiters.
+    pub value_item_count: usize,
     pub key: String,
     pub value: SourceExprId,
 }
@@ -197,6 +200,14 @@ pub struct PatchNode {
     pub inline_inputs: Vec<Option<InlineInput>>,
     pub diagnostic: Option<String>,
     pub source: Option<NodeSource>,
+    /// Projector-synthesized helper node (today: the hidden `(mod p)` accessor
+    /// behind the `p~` sugar) rather than something the user authored.
+    ///
+    /// When a patch is projected from source this is implied by the node's
+    /// `SourceOwner::NestedExpr` owner. A patch deserialized from a graph
+    /// payload has no source data at all (spec §4.1a/§4.1c), so the fact has to
+    /// be carried explicitly — it is semantic, not positional.
+    pub synthesized: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,12 +291,34 @@ pub struct MacroSignature {
     pub outputs: Vec<String>,
 }
 
+/// A host-modulator input def (`(def modN (in ch @name modN @modulator N))`)
+/// that the projector hides from the canvas. The generator re-emits these from
+/// the model so full regeneration does not drop them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostModulatorInput {
+    pub name: String,
+    pub channel: usize,
+    pub slot: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Patch {
     pub nodes: Vec<PatchNode>,
     pub connections: Vec<PatchConnection>,
     pub macros: Vec<MacroPatch>,
     pub diagnostics: Vec<String>,
+    pub host_modulators: Vec<HostModulatorInput>,
+    /// `(use-defmacro name)` headers the source declared, in source order.
+    ///
+    /// The generator normally rebuilds the import block from the `Library`
+    /// entries in `macros`, but those only exist when the patch was parsed with
+    /// a defmacro library in hand. Parsed without one (no library root on disk,
+    /// or one of the library-less parse paths), every imported macro call
+    /// degrades to an unknown-operator `Builtin` and regeneration would drop
+    /// the header — silently breaking the file for the compiler, which
+    /// materializes library defmacros from these headers alone. Keeping the
+    /// raw names in the model makes the round-trip lossless either way.
+    pub imports: Vec<String>,
 }
 
 pub fn refresh_patch_inline_inputs(patch: &mut Patch) {
@@ -358,17 +391,27 @@ fn inline_raw_param(patch: &Patch, connection: &PatchConnection) -> Option<Inlin
 }
 
 fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<InlineInput> {
-    let mod_node = patch
-        .nodes
-        .iter()
-        .find(|node| node.id == connection.from_node)?;
+    let param = inline_mod_accessor_param(patch, &connection.from_node)?;
+    Some(InlineInput::ModParam(param.name.clone()))
+}
+
+/// Is `node_id` a projector-synthesized `(mod param)` accessor — the nested
+/// expression behind the `param~` sugar? Such a node exists only to serve the
+/// expression of the node that consumes it; the user never authored it and
+/// never sees it on the canvas. Returns the modulatable param it reads.
+fn inline_mod_accessor_param<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a ParamNodeInfo> {
+    let mod_node = patch.nodes.iter().find(|node| node.id == node_id)?;
     if mod_node.op != "mod" {
         return None;
     }
-    if !matches!(
-        mod_node.source.as_ref().map(|source| &source.owner),
-        Some(SourceOwner::NestedExpr { .. })
-    ) {
+    // A user-authored `(def m (mod gain))` is a BindingValue, not a nested
+    // expression: it is a real node and must never be garbage-collected.
+    let is_synthesized = mod_node.synthesized
+        || matches!(
+            mod_node.source.as_ref().map(|source| &source.owner),
+            Some(SourceOwner::NestedExpr { .. })
+        );
+    if !is_synthesized {
         return None;
     }
     let inbound = patch
@@ -378,9 +421,27 @@ fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<Inlin
     let param = patch
         .nodes
         .iter()
-        .find(|node| node.id == inbound.from_node)?;
-    let param = param.param.as_ref()?;
-    param
-        .modulatable
-        .then(|| InlineInput::ModParam(param.name.clone()))
+        .find(|node| node.id == inbound.from_node)?
+        .param
+        .as_ref()?;
+    param.modulatable.then_some(param)
+}
+
+/// Synthesized `param~` accessors that no longer have any consumer — their
+/// only reason to exist died with the node whose expression contained them.
+/// See docs/patch-vs-code-editor-spec.md §4.2b: synthesized helper nodes are
+/// never persisted when orphaned.
+pub fn orphaned_inline_mod_node_ids(patch: &Patch) -> HashSet<String> {
+    patch
+        .nodes
+        .iter()
+        .filter(|node| {
+            !patch
+                .connections
+                .iter()
+                .any(|connection| connection.from_node == node.id)
+        })
+        .filter(|node| inline_mod_accessor_param(patch, &node.id).is_some())
+        .map(|node| node.id.clone())
+        .collect()
 }

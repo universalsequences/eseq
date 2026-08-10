@@ -1,10 +1,9 @@
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
-use super::super::text_input::{
-    cursor_x_from_char_cache, selection_range as text_selection_range, text_width_from_char_cache,
-    wrap_text_to_measured_lines,
-};
+use super::super::text_input::selection_range as text_selection_range;
 use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
@@ -13,12 +12,17 @@ use super::super::{
     WidgetViewport, ndc_bounds, z_layer,
 };
 #[cfg(target_os = "macos")]
+use crate::backend::{
+    AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+    AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
+};
+#[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
 use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
-use super::display::{node_display_label, preview};
+use super::display::{node_display_label, node_display_label_arg_spans, node_font_size, preview};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
     patch_content_size, patch_input_indices, patch_input_slot_counts, patch_node_rects,
@@ -26,9 +30,17 @@ use super::geometry::{
 };
 use super::load_patch_from_props;
 use super::metrics::{
-    CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
-    NODE_FONT_SIZE, NODE_RESIZE_HANDLE_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX,
-    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+    AGENTIC_ANSWER_RESIZE_SECS, AGENTIC_ANSWER_TEXT_AT, AGENTIC_APPEAR_SECS,
+    AGENTIC_APPEAR_START_RADIUS_PX, AGENTIC_APPEAR_START_SCALE, AGENTIC_APPEAR_TEXT_AT,
+    AGENTIC_BOX_GAP, AGENTIC_CARD_BORDER_WIDTH_PX, AGENTIC_CARD_PAD_BOTTOM, AGENTIC_CARD_PAD_TOP,
+    AGENTIC_CARD_PAD_X, AGENTIC_CARD_RADIUS_PX, AGENTIC_CLOSE_SECS, AGENTIC_INNER_BORDER_WIDTH_PX,
+    AGENTIC_HEADER_ROW_H, AGENTIC_HEADER_TEXT_ROWS, AGENTIC_INNER_PAD_X, AGENTIC_INNER_PAD_Y,
+    AGENTIC_INNER_RADIUS_PX, AGENTIC_INNER_TOP, AGENTIC_LINE_H, AGENTIC_MORPH_COLOR_SECS,
+    AGENTIC_MORPH_SHAPE_SECS, AGENTIC_SEND_DIAMETER_PX,
+    AGENTIC_SEND_ROW_H, AGENTIC_SPINNER_DIAMETER_PX, AGENTIC_SPINNER_GAP, CABLE_HANDLE_RADIUS_PX,
+    NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX, NODE_RESIZE_HANDLE_SIZE_CELLS,
+    NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
+    SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
     ArgValue, BindingTarget, ConnectionKind, InputPortRef, InputPresentation, NodeKind,
@@ -39,18 +51,24 @@ use super::model::{
 use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    AgenticBubbleState, AgenticBubbleTarget, AlignmentGuide, AlignmentGuideKind,
-    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState, PatcherPanState,
-    PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
+    AgenticBubblePose, AgenticBubbleState, AgenticBubbleTarget, AgenticMorph, AgenticBubbleButton,
+    AgenticButtonKind, AlignmentGuide,
+    AlignmentGuideKind, PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState,
+    PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
     get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
     set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
-
 #[cfg(target_os = "macos")]
-const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 9.0;
+use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
+
+/// Horizontal inset of the selected-row bar from the panel edge, in cells.
+#[cfg(target_os = "macos")]
+const AUTOCOMPLETE_ROW_INSET_CELLS: f32 = 0.22;
+#[cfg(target_os = "macos")]
+const PATCHER_TOOLTIP_CORNER_RADIUS_PX: f32 = 5.0;
 #[cfg(target_os = "macos")]
 const PATCHER_OVERLAY_Z: i32 = 1_000_000;
 
@@ -144,6 +162,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                 viewport,
                 &pan_state,
                 &interaction_state,
+                super::patcher_agent_model_from_props(&node.props).as_deref(),
             );
             push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 100, bubble_prims);
             let mut marquee_prims = Vec::new();
@@ -306,13 +325,19 @@ fn draw_agentic_bubbles(
     viewport: WidgetViewport,
     pan_state: &PatcherPanState,
     interaction_state: &PatcherInteractionState,
+    agent_model: Option<&str>,
 ) {
     let origin = super::geometry::patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    let mut poses = HashMap::new();
+    let mut send_buttons: Vec<AgenticBubbleButton> = Vec::new();
     for bubble in interaction_state.agentic_bubbles.values() {
         let (mut x, y) = match &bubble.target {
             AgenticBubbleTarget::EditMacro {
+                instance_node_id, ..
+            }
+            | AgenticBubbleTarget::ConnectNode {
                 instance_node_id, ..
             } => node_rects
                 .get(instance_node_id)
@@ -328,104 +353,211 @@ fn draw_agentic_bubbles(
                 origin.1 + bubble.position.1 * zoom,
             ),
         };
-        let width_cells = match &bubble.state {
-            AgenticBubbleState::Answer { .. } => 34.0,
-            _ => 18.0,
-        };
+        if bubble.close_finished() {
+            continue;
+        }
         let max_visible_width = (rect.width - 1.0).max(8.0);
-        let width = (width_cells * zoom).min(max_visible_width);
         let right_edge = rect.col + rect.width - 0.5;
-        x = x.min(right_edge - width).max(rect.col + 0.5);
-        let inner_width = (width - 1.3 * zoom).max(1.0);
-        let prompt = match &bubble.state {
-            AgenticBubbleState::Answer { text, .. } => text.clone(),
-            _ if bubble.prompt.trim().is_empty() => "cmd+k prompt".to_string(),
-            _ => bubble.prompt.clone(),
+        // A bubble bound to a macro carries that macro's name on its header row,
+        // so it is sized to hold the name outright where it can; only names past
+        // the answer-box width are truncated to what is left.
+        // A chip only shows on an editable bubble, so only that state pays for
+        // the width it needs.
+        let chip_model = matches!(bubble.state, AgenticBubbleState::Editing)
+            .then_some(agent_model)
+            .flatten();
+        let pending_width_cells = (AGENTIC_PENDING_WIDTH_CELLS
+            + bubble
+                .bound_macro_name()
+                .map(header_macro_name_reservation_cells)
+                .unwrap_or(0.0)
+            + chip_model
+                .map(header_model_chip_reservation_cells)
+                .unwrap_or(0.0))
+        .min(AGENTIC_ANSWER_WIDTH_CELLS);
+        // The inset box is sized to exactly the lines it holds, so a bubble
+        // opens one line tall and grows a line at a time as the prompt wraps.
+        // There is deliberately no minimum height: a floor would make the first
+        // few lines land in a box that does not move.
+        let composer_box_rows =
+            |line_count: usize, send: bool| -> f32 {
+                AGENTIC_INNER_PAD_Y * 2.0
+                    + line_count as f32 * AGENTIC_LINE_H
+                    + if send { AGENTIC_SEND_ROW_H } else { 0.0 }
+            };
+        // Card size for a given layout, in cells. Returns `None` only when the
+        // text has not been measured on this thread yet.
+        // `footer` is the composer box drawn under a settled answer; it takes
+        // part in the size so the card grows into it rather than clipping it.
+        let sized = |width_cells: f32,
+                     text: &str,
+                     send: bool,
+                     footer: Option<&str>|
+         -> Option<(f32, f32, Vec<_>, Vec<_>)> {
+            let width = (width_cells * zoom).min(max_visible_width);
+            let text_width =
+                (width - 2.0 * (AGENTIC_CARD_PAD_X + AGENTIC_INNER_PAD_X) * zoom).max(1.0);
+            let lines = wrap_agentic_prompt_lines(text, text_width / zoom)?;
+            // An unmeasured composer box is dropped rather than failing the
+            // whole layout: the answer itself still has to render.
+            let footer_lines = footer
+                .and_then(|footer| wrap_agentic_prompt_lines(footer, text_width / zoom))
+                .unwrap_or_default();
+            let footer_rows = if footer_lines.is_empty() {
+                0.0
+            } else {
+                AGENTIC_BOX_GAP + composer_box_rows(footer_lines.len(), true)
+            };
+            let height = (AGENTIC_INNER_TOP
+                + composer_box_rows(lines.len(), send)
+                + footer_rows
+                + AGENTIC_CARD_PAD_BOTTOM)
+                * zoom;
+            Some((width, height, lines, footer_lines))
         };
-        let prompt_lines = wrap_agentic_prompt_lines(&prompt, inner_width / zoom, viewport);
-        let height = ((4.0 + prompt_lines.len() as f32 * 1.18).max(5.8)) * zoom;
-        let pending_pulse = match &bubble.state {
-            AgenticBubbleState::Pending { .. } => {
-                Some(0.5 + 0.5 * (viewport.time_seconds * 4.4).sin())
+        let pending_text = bubble.prompt_text();
+        let follow_up_text = bubble.follow_up_text();
+        // Only a box you can type into carries a send chevron, and it needs the
+        // row reserved for it at sizing time.
+        let body_has_send = matches!(bubble.state, AgenticBubbleState::Editing);
+        // An arriving answer eases from the pending spinner's box into the
+        // wider answer box rather than snapping between the two layouts.
+        let answer_resize = match &bubble.state {
+            AgenticBubbleState::Answer { text, answered_at } => {
+                let progress = (answered_at.elapsed().as_secs_f32() / AGENTIC_ANSWER_RESIZE_SECS)
+                    .clamp(0.0, 1.0);
+                Some((text.clone(), progress))
             }
             _ => None,
         };
-        let (fill, border, status) = match &bubble.state {
-            AgenticBubbleState::Editing => (
-                crate::backend::Color::rgba(0.12, 0.09, 0.08, 0.94),
-                theme::PATCHER_NODE_SELECTED_BORDER(),
-                "prompt",
-            ),
-            AgenticBubbleState::Pending { .. } => {
-                let pulse = pending_pulse.unwrap_or(0.0);
-                (
-                    crate::backend::Color::rgba(
-                        0.08 + 0.03 * pulse,
-                        0.14 + 0.07 * pulse,
-                        0.18 + 0.10 * pulse,
-                        0.94,
+        let (width, height, prompt_lines, follow_up_lines) = match &answer_resize {
+            Some((answer, progress)) => {
+                // The answer text can reach us before the measure pass that
+                // caches its glyph widths. Hold the pending box for that frame
+                // rather than blinking the whole bubble out of existence.
+                match (
+                    sized(
+                        AGENTIC_ANSWER_WIDTH_CELLS,
+                        answer,
+                        false,
+                        Some(&follow_up_text),
                     ),
-                    crate::backend::Color::rgba(
-                        0.30 + 0.22 * pulse,
-                        0.74 + 0.18 * pulse,
-                        0.88 + 0.12 * pulse,
-                        1.0,
-                    ),
-                    "working",
-                )
+                    sized(pending_width_cells, &pending_text, false, None),
+                ) {
+                    (
+                        Some((to_w, to_h, to_lines, to_footer)),
+                        Some((from_w, from_h, from_lines, _)),
+                    ) => {
+                        let t = ease_out_cubic(*progress);
+                        // The prompt stays up while the box grows; the answer
+                        // and its follow-up box swap in once there is room.
+                        let settled = *progress >= AGENTIC_ANSWER_TEXT_AT;
+                        (
+                            lerp(from_w, to_w, t),
+                            lerp(from_h, to_h, t),
+                            if settled { to_lines } else { from_lines },
+                            if settled { to_footer } else { Vec::new() },
+                        )
+                    }
+                    (Some(answer_layout), None) => answer_layout,
+                    (None, Some(pending_layout)) => pending_layout,
+                    (None, None) => continue,
+                }
             }
+            None => match sized(pending_width_cells, &pending_text, body_has_send, None) {
+                Some(layout) => layout,
+                None => continue,
+            },
+        };
+        x = x.min(right_edge - width).max(rect.col + 0.5);
+        let text_width = (width - 2.0 * (AGENTIC_CARD_PAD_X + AGENTIC_INNER_PAD_X) * zoom).max(1.0);
+        let header_width = (width - 2.0 * AGENTIC_CARD_PAD_X * zoom).max(1.0);
+        // The card surface is the same in every state: nothing about a bubble
+        // working, or having answered, justifies restaining a box this large.
+        // What the state changes is the spinner, the status word, and how much
+        // the hairline is lifted out of the canvas.
+        let (fill, border, status) = match &bubble.state {
+            // An unbound cmd+k is a request for a new macro and says so; a bound
+            // one is a question about the macro already named on the right of
+            // the same row, where "prompt" is the honest label.
+            AgenticBubbleState::Editing => (
+                theme::PATCHER_AGENTIC_CARD_BG(),
+                theme::PATCHER_AGENTIC_CARD_BORDER_ACTIVE(),
+                match bubble.target {
+                    AgenticBubbleTarget::CreateMacro => "macro builder",
+                    _ => "prompt",
+                },
+            ),
+            AgenticBubbleState::Pending { .. } => (
+                theme::PATCHER_AGENTIC_CARD_BG(),
+                theme::PATCHER_AGENTIC_CARD_BORDER_ACTIVE(),
+                "working",
+            ),
             AgenticBubbleState::Error { .. } => (
-                crate::backend::Color::rgba(0.22, 0.07, 0.07, 0.94),
+                theme::PATCHER_AGENTIC_CARD_ERROR_BG(),
                 theme::PATCHER_ERROR(),
                 "error",
             ),
             AgenticBubbleState::Answer { .. } => (
-                crate::backend::Color::rgba(0.08, 0.12, 0.10, 0.96),
-                theme::PATCHER_NODE_TEXT(),
+                theme::PATCHER_AGENTIC_CARD_BG(),
+                theme::PATCHER_AGENTIC_CARD_BORDER(),
                 "answer",
             ),
         };
-        prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
-            rect: Rect {
-                col: x,
-                row: y,
-                width,
-                height,
+        let bubble_rect = Rect {
+            col: x,
+            row: y,
+            width,
+            height,
+        };
+        // Drawn through the node shader at a square corner radius (rather than
+        // as flat quads) so that a completing bubble and its node are the same
+        // primitive, and the morph only has to interpolate uniforms.
+        let scaled = match bubble.closing_at {
+            Some(closing_at) => {
+                match agentic_close_chrome(closing_at, bubble_rect, fill, border, viewport, zoom) {
+                    Some(closing) => closing,
+                    // Guarded by `close_finished` above; nothing left to draw.
+                    None => continue,
+                }
+            }
+            None => {
+                agentic_appear_chrome(bubble.created_at, bubble_rect, fill, border, viewport, zoom)
+                    .unwrap_or((
+                        bubble_rect,
+                        agentic_card_corner_radius(bubble_rect, viewport, zoom),
+                        fill,
+                        border,
+                        true,
+                    ))
+            }
+        };
+        let (appear_rect, appear_corner, appear_fill, appear_border, text_visible) = scaled;
+        push_node_chrome_with_corner(
+            prims,
+            appear_rect,
+            appear_fill,
+            appear_border,
+            viewport,
+            AGENTIC_CARD_BORDER_WIDTH_PX * zoom,
+            appear_corner,
+            AGENTIC_CARD_FLATNESS,
+        );
+        // Recorded at the settled rect, so a completion morph starting mid
+        // grow-in would still hand off from the bubble's real geometry.
+        poses.insert(
+            bubble.id.clone(),
+            AgenticBubblePose {
+                model_rect: (
+                    (x - origin.0) / zoom,
+                    (y - origin.1) / zoom,
+                    width / zoom,
+                    height / zoom,
+                ),
+                fill: fill.to_rgba(),
+                border: border.to_rgba(),
             },
-            color: fill,
-        }));
-        let border_w = 0.12 * zoom;
-        for border_rect in [
-            Rect {
-                col: x,
-                row: y,
-                width,
-                height: border_w,
-            },
-            Rect {
-                col: x,
-                row: y + height - border_w,
-                width,
-                height: border_w,
-            },
-            Rect {
-                col: x,
-                row: y,
-                width: border_w,
-                height,
-            },
-            Rect {
-                col: x + width - border_w,
-                row: y,
-                width: border_w,
-                height,
-            },
-        ] {
-            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
-                rect: border_rect,
-                color: border,
-            }));
-        }
+        );
         let detail = match &bubble.state {
             AgenticBubbleState::Pending { .. } => bubble
                 .elapsed()
@@ -435,55 +567,201 @@ fn draw_agentic_bubbles(
             AgenticBubbleState::Answer { .. } => status.to_string(),
             AgenticBubbleState::Editing => status.to_string(),
         };
+        if !text_visible {
+            continue;
+        }
+        // The header sits on the card itself, above the inset box — the status
+        // on the left behind its spinner slot, the bound macro name on the
+        // right. Both are muted: the header labels the box, it does not compete
+        // with it.
+        let header_row = y + AGENTIC_CARD_PAD_TOP * zoom;
+        // The row is sized to the spinner, so the text is centred in it rather
+        // than hung off its top edge.
+        let header_text_row =
+            header_row + (AGENTIC_HEADER_ROW_H - AGENTIC_HEADER_TEXT_ROWS) * 0.5 * zoom;
+        let header_middle = header_row + AGENTIC_HEADER_ROW_H * 0.5 * zoom;
+        let header_left = x + AGENTIC_CARD_PAD_X * zoom;
+        let pending = matches!(bubble.state, AgenticBubbleState::Pending { .. });
+        // The spinner's own width, in cells, plus the gap after it.
+        let spinner_slot = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_w.max(0.001)
+            + AGENTIC_SPINNER_GAP * zoom;
+        let (status_left, status_width) = if pending {
+            push_agentic_spinner(
+                prims,
+                header_left,
+                header_middle,
+                viewport,
+                zoom,
+                viewport.time_seconds,
+            );
+            (
+                header_left + spinner_slot,
+                (header_width - spinner_slot).max(1.0),
+            )
+        } else {
+            (header_left, header_width)
+        };
+        // The status and the bound macro name share one header row from opposite
+        // edges, so the name has to yield whatever the status leaves — including
+        // the elapsed counter, which widens as the run goes on, and the spinner
+        // slot ahead of it.
+        let detail_width = approx_text_width_cells(&detail, AGENTIC_HEADER_FONT_SIZE)
+            + if pending { spinner_slot / zoom } else { 0.0 };
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: y + 0.65 * zoom,
-                col: x + 0.65 * zoom,
-                align_width: inner_width,
+                row: header_text_row,
+                col: status_left,
+                align_width: status_width,
                 h_align: 0.0,
                 text: detail,
-                font_size: 11.5,
+                font_size: AGENTIC_HEADER_FONT_SIZE,
                 scale: zoom,
-                fg: theme::PATCHER_TEXT(),
+                fg: theme::PATCHER_AGENTIC_HEADER_TEXT(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
+        // The model chip sits immediately after the status, on the left: the
+        // right of the row already belongs to the bound macro name, and the two
+        // would collide on a bubble that has both. Only shown while the prompt
+        // is editable, which is when changing the model still changes anything.
+        if let Some(model) = chip_model {
+            // `detail_width` is the status' unscaled width, already measured
+            // for the macro-name budget below.
+            let chip_left = status_left
+                + (detail_width * AGENTIC_HEADER_WIDTH_SAFETY + AGENTIC_HEADER_GAP_CELLS) * zoom;
+            let chip_room = (header_left + header_width - chip_left) / zoom;
+            if let Some(chip) = push_agentic_model_chip(
+                prims,
+                model,
+                chip_left,
+                header_row,
+                chip_room,
+                viewport,
+                zoom,
+            ) {
+                send_buttons.push(AgenticBubbleButton {
+                    bubble_id: bubble.id.clone(),
+                    kind: AgenticButtonKind::ChooseModel,
+                    rect: rect_tuple(chip),
+                });
+            }
+        }
+        // A bubble opened on a selected macro is scoped to it. Name that macro
+        // on the header line so it is obvious the prompt is about that node and
+        // not the patch at large.
+        if let Some(macro_name) = bubble.bound_macro_name() {
+            // `header_width` is scaled; the width helpers work in unscaled cells.
+            let available = (header_width / zoom
+                - (detail_width
+                    + approx_text_width_cells(
+                        AGENTIC_HEADER_MACRO_PREFIX,
+                        AGENTIC_HEADER_FONT_SIZE,
+                    ))
+                    * AGENTIC_HEADER_WIDTH_SAFETY
+                - AGENTIC_HEADER_GAP_CELLS)
+                / AGENTIC_HEADER_WIDTH_SAFETY;
+            if let Some(fitted) =
+                truncated_to_width_cells(macro_name, AGENTIC_HEADER_FONT_SIZE, available)
+            {
+                prims.push(MetalPrimitive::ProportionalText(
+                    MetalProportionalTextPrimitive {
+                        row: header_text_row,
+                        col: header_left,
+                        align_width: header_width,
+                        h_align: 1.0,
+                        text: format!("{AGENTIC_HEADER_MACRO_PREFIX}{fitted}"),
+                        font_size: AGENTIC_HEADER_FONT_SIZE,
+                        scale: zoom,
+                        fg: theme::PATCHER_AGENTIC_HEADER_TEXT(),
+                        bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    },
+                ));
+            }
+        }
+        let body_line_count = prompt_lines.len();
+        let body_rect = Rect {
+            col: header_left,
+            row: y + AGENTIC_INNER_TOP * zoom,
+            width: header_width,
+            height: composer_box_rows(body_line_count, body_has_send) * zoom,
+        };
+        push_agentic_inner_box(prims, body_rect, viewport, zoom);
+        // A placeholder is not content — it is an instruction, and reads as one
+        // only if it is dimmer than what the user goes on to type.
+        let body_fg = if bubble.prompt.trim().is_empty() && !matches!(
+            bubble.state,
+            AgenticBubbleState::Answer { .. } | AgenticBubbleState::Error { .. }
+        ) {
+            theme::PATCHER_AGENTIC_PLACEHOLDER_TEXT()
+        } else {
+            theme::PATCHER_AGENTIC_BODY_TEXT()
+        };
+        let text_left = header_left + AGENTIC_INNER_PAD_X * zoom;
+        let body_top = body_rect.row + AGENTIC_INNER_PAD_Y * zoom;
         for (line_index, prompt_line) in prompt_lines.into_iter().enumerate() {
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
-                    row: y + (2.25 + line_index as f32 * 1.18) * zoom,
-                    col: x + 0.65 * zoom,
-                    align_width: inner_width,
+                    row: body_top + line_index as f32 * AGENTIC_LINE_H * zoom,
+                    col: text_left,
+                    align_width: text_width,
                     h_align: 0.0,
                     text: prompt_line.text,
                     font_size: 13.0,
                     scale: zoom,
-                    fg: theme::PATCHER_NODE_TEXT(),
+                    fg: body_fg,
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
             ));
         }
         if matches!(bubble.state, AgenticBubbleState::Editing) {
-            push_agentic_bubble_cursor(prims, bubble, x, y, inner_width, viewport, zoom);
+            push_agentic_bubble_cursor(prims, bubble, text_left, body_top, text_width, zoom);
+        }
+        if body_has_send {
+            send_buttons.push(AgenticBubbleButton {
+                bubble_id: bubble.id.clone(),
+                kind: AgenticButtonKind::SendPrompt,
+                rect: rect_tuple(push_agentic_send_chevron(prims, body_rect, viewport, zoom)),
+            });
+        }
+        if !follow_up_lines.is_empty() {
+            push_agentic_follow_up(
+                prims,
+                bubble,
+                &follow_up_lines,
+                body_rect,
+                text_width,
+                viewport,
+                zoom,
+                &mut send_buttons,
+            );
         }
     }
+    // Rebuilt wholesale each frame, which also prunes bubbles that have gone.
+    super::state::set_agentic_bubble_poses(poses);
+    super::state::set_agentic_bubble_buttons(send_buttons);
+}
+
+#[cfg(target_os = "macos")]
+fn rect_tuple(rect: Rect) -> (f32, f32, f32, f32) {
+    (rect.col, rect.row, rect.width, rect.height)
 }
 
 #[cfg(target_os = "macos")]
 fn push_agentic_bubble_cursor(
     prims: &mut Vec<MetalPrimitive>,
     bubble: &super::state::AgenticBubble,
-    x: f32,
-    y: f32,
-    inner_width: f32,
-    viewport: WidgetViewport,
+    text_left: f32,
+    body_top: f32,
+    text_width: f32,
     zoom: f32,
 ) {
     let cursor_pos = bubble
         .text_state
         .cursor_pos
         .min(bubble.prompt.chars().count());
-    let lines = wrap_agentic_prompt_lines(&bubble.prompt, inner_width / zoom, viewport);
+    let Some(lines) = wrap_agentic_prompt_lines(&bubble.prompt, text_width / zoom) else {
+        return;
+    };
     let cursor_line_index = lines
         .iter()
         .position(|line| cursor_pos >= line.start && cursor_pos <= line.end)
@@ -492,21 +770,320 @@ fn push_agentic_bubble_cursor(
         .get(cursor_line_index)
         .map(|line| line.start)
         .unwrap_or(0);
-    let cursor_before_line =
-        cursor_x_from_char_cache(&bubble.prompt, 13.0, line_start, viewport.cell_w);
-    let cursor_before_prompt =
-        cursor_x_from_char_cache(&bubble.prompt, 13.0, cursor_pos, viewport.cell_w);
-    let cursor_x = x + 0.65 * zoom + (cursor_before_prompt - cursor_before_line).max(0.0) * zoom;
+    let Some(cursor_before_line) = measured_cursor_offset(&bubble.prompt, 13.0, line_start) else {
+        return;
+    };
+    let Some(cursor_before_prompt) = measured_cursor_offset(&bubble.prompt, 13.0, cursor_pos)
+    else {
+        return;
+    };
+    let cursor_x = text_left + (cursor_before_prompt - cursor_before_line).max(0.0) * zoom;
     prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
         rect: Rect {
-            row: y + (2.1 + cursor_line_index as f32 * 1.18) * zoom,
+            row: body_top + (cursor_line_index as f32 * AGENTIC_LINE_H - 0.12) * zoom,
             col: cursor_x,
             width: 0.08 * zoom,
-            height: 1.1 * zoom,
+            height: 1.15 * zoom,
         },
         color: theme::PATCHER_EDIT_CURSOR(),
     }));
 }
+
+/// The follow-up composer under a settled answer: a second inset box carrying
+/// the typed text (or its placeholder), a caret and a send chevron, so the
+/// bubble reads as a conversation that is still open rather than a finished
+/// card. `body_rect` is the answer box it sits under.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn push_agentic_follow_up(
+    prims: &mut Vec<MetalPrimitive>,
+    bubble: &super::state::AgenticBubble,
+    lines: &[super::text_metrics::MeasuredLine],
+    body_rect: Rect,
+    text_width: f32,
+    viewport: WidgetViewport,
+    zoom: f32,
+    send_buttons: &mut Vec<AgenticBubbleButton>,
+) {
+    let composer_rect = Rect {
+        col: body_rect.col,
+        row: body_rect.row + body_rect.height + AGENTIC_BOX_GAP * zoom,
+        width: body_rect.width,
+        height: (AGENTIC_INNER_PAD_Y * 2.0
+            + lines.len() as f32 * AGENTIC_LINE_H
+            + AGENTIC_SEND_ROW_H)
+            * zoom,
+    };
+    push_agentic_inner_box(prims, composer_rect, viewport, zoom);
+    let placeholder = bubble.follow_up_is_placeholder();
+    let fg = if placeholder {
+        theme::PATCHER_AGENTIC_PLACEHOLDER_TEXT()
+    } else {
+        theme::PATCHER_AGENTIC_BODY_TEXT()
+    };
+    let text_left = composer_rect.col + AGENTIC_INNER_PAD_X * zoom;
+    let first_row = composer_rect.row + AGENTIC_INNER_PAD_Y * zoom;
+    for (line_index, line) in lines.iter().enumerate() {
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: first_row + line_index as f32 * AGENTIC_LINE_H * zoom,
+                col: text_left,
+                align_width: text_width,
+                h_align: 0.0,
+                text: line.text.clone(),
+                font_size: 13.0,
+                scale: zoom,
+                fg,
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            },
+        ));
+    }
+    send_buttons.push(AgenticBubbleButton {
+        bubble_id: bubble.id.clone(),
+        kind: AgenticButtonKind::SendFollowUp,
+        rect: rect_tuple(push_agentic_send_chevron(
+            prims,
+            composer_rect,
+            viewport,
+            zoom,
+        )),
+    });
+    // The caret sits at the composer's cursor, or at its left edge while the
+    // placeholder is showing, so the box is visibly ready for typing.
+    let cursor_pos = bubble
+        .follow_up_text_state
+        .cursor_pos
+        .min(bubble.follow_up.chars().count());
+    let (cursor_line_index, cursor_offset) = if placeholder {
+        (0, 0.0)
+    } else {
+        let line_index = lines
+            .iter()
+            .position(|line| cursor_pos >= line.start && cursor_pos <= line.end)
+            .unwrap_or_else(|| lines.len().saturating_sub(1));
+        let line_start = lines.get(line_index).map(|line| line.start).unwrap_or(0);
+        let Some(before_line) = measured_cursor_offset(&bubble.follow_up, 13.0, line_start) else {
+            return;
+        };
+        let Some(before_cursor) = measured_cursor_offset(&bubble.follow_up, 13.0, cursor_pos)
+        else {
+            return;
+        };
+        (line_index, (before_cursor - before_line).max(0.0))
+    };
+    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+        rect: Rect {
+            row: first_row + (cursor_line_index as f32 * AGENTIC_LINE_H - 0.12) * zoom,
+            col: text_left + cursor_offset * zoom,
+            width: 0.08 * zoom,
+            height: 1.15 * zoom,
+        },
+        color: theme::PATCHER_EDIT_CURSOR(),
+    }));
+}
+
+// Every bubble colour is a theme slot (`patcher_agentic_*` in ui/theme.rs), so
+// the card can be tuned from themes.lisp like the node colours are. Two things
+// to know when tuning the card's own border:
+//
+//   * The `patcher-node` shader lights what it is given, so the value that
+//     lands is brighter than the one authored — though far less so now that the
+//     card draws at `AGENTIC_CARD_FLATNESS`, which dials that lighting out.
+//   * That shader takes the card's alpha as `max(border.a, fill.a)`, so
+//     lowering only the border's alpha will not fade it. Dim it in RGB.
+
+/// One of the inset text boxes on a bubble card.
+#[cfg(target_os = "macos")]
+fn push_agentic_inner_box(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    push_flat_panel_chrome(
+        prims,
+        rect,
+        theme::PATCHER_AGENTIC_BOX_BG(),
+        theme::PATCHER_AGENTIC_BOX_BORDER(),
+        viewport,
+        zoom,
+        AGENTIC_INNER_RADIUS_PX,
+        AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
+    );
+}
+
+/// A ring of dots whose brightness rotates, drawn in the header's spinner slot.
+///
+/// This replaces pulsing the whole card: a large surface strobing at a few Hz
+/// competes with everything else on the canvas, where a small constant-area
+/// spinner is legible when looked at and ignorable when not.
+#[cfg(target_os = "macos")]
+fn push_agentic_spinner(
+    prims: &mut Vec<MetalPrimitive>,
+    left: f32,
+    center_y: f32,
+    viewport: WidgetViewport,
+    zoom: f32,
+    time_seconds: f32,
+) {
+    const DOTS: usize = 8;
+    let diameter_w = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_w.max(0.001);
+    let diameter_h = AGENTIC_SPINNER_DIAMETER_PX * zoom / viewport.cell_h.max(0.001);
+    let center_x = left + diameter_w * 0.5;
+    let dot_w = diameter_w * 0.24;
+    let dot_h = diameter_h * 0.24;
+    let phase = time_seconds * 1.6;
+    for dot in 0..DOTS {
+        let turn = dot as f32 / DOTS as f32;
+        let angle = turn * std::f32::consts::TAU;
+        // Trailing dots fade behind the leading one, which is what reads as
+        // rotation — the dots themselves never move.
+        let lead = (turn - phase).rem_euclid(1.0);
+        let alpha = 0.16 + 0.74 * (1.0 - lead).powf(2.2);
+        let color = with_alpha_scale(theme::PATCHER_AGENTIC_SPINNER(), alpha);
+        let dot_rect = Rect {
+            col: center_x + angle.cos() * diameter_w * 0.34 - dot_w * 0.5,
+            row: center_y + angle.sin() * diameter_h * 0.34 - dot_h * 0.5,
+            width: dot_w,
+            height: dot_h,
+        };
+        push_disc(prims, dot_rect, color, viewport);
+    }
+}
+
+/// The send affordance: a chevron in a soft disc, pinned to the bottom-right of
+/// a composer box. It gets its own reserved row (`AGENTIC_SEND_ROW_H`) rather
+/// than a horizontal inset, so the text wrap never has to dodge it.
+#[cfg(target_os = "macos")]
+fn push_agentic_send_chevron(
+    prims: &mut Vec<MetalPrimitive>,
+    box_rect: Rect,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> Rect {
+    let width = AGENTIC_SEND_DIAMETER_PX * zoom / viewport.cell_w.max(0.001);
+    let height = AGENTIC_SEND_DIAMETER_PX * zoom / viewport.cell_h.max(0.001);
+    let disc = Rect {
+        col: box_rect.col + box_rect.width - AGENTIC_INNER_PAD_X * zoom - width,
+        row: box_rect.row + box_rect.height - AGENTIC_INNER_PAD_Y * zoom - height,
+        width,
+        height,
+    };
+    push_disc(
+        prims,
+        disc,
+        theme::PATCHER_AGENTIC_SEND_BG(),
+        viewport,
+    );
+    prims.push(MetalPrimitive::ProportionalText(
+        MetalProportionalTextPrimitive {
+            row: disc.row + (disc.height - AGENTIC_SEND_GLYPH_ROWS * zoom) * 0.5,
+            col: disc.col,
+            align_width: disc.width,
+            h_align: 0.5,
+            text: AGENTIC_SEND_GLYPH.to_string(),
+            font_size: 12.0,
+            scale: zoom,
+            fg: theme::PATCHER_AGENTIC_SEND_GLYPH(),
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+        },
+    ));
+    disc
+}
+
+/// The header chip naming the model the bubble will run on, with a caret to say
+/// it opens a picker. Returns the chip's rect, or `None` when the header has no
+/// room left for it — a truncated model name is worse than none, since the
+/// point of the chip is to tell you which model you are about to spend.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn push_agentic_model_chip(
+    prims: &mut Vec<MetalPrimitive>,
+    model: &str,
+    left: f32,
+    header_row: f32,
+    room_cells: f32,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> Option<Rect> {
+    let label = model_chip_label(model);
+    let chip_cells = model_chip_width_cells(model);
+    if chip_cells > room_cells {
+        return None;
+    }
+    let height = AGENTIC_MODEL_CHIP_HEIGHT * zoom;
+    let chip = Rect {
+        col: left,
+        row: header_row + (AGENTIC_HEADER_ROW_H * zoom - height) * 0.5,
+        width: chip_cells * zoom,
+        height,
+    };
+    push_flat_panel_chrome(
+        prims,
+        chip,
+        theme::PATCHER_AGENTIC_CHIP_BG(),
+        theme::PATCHER_AGENTIC_CHIP_BORDER(),
+        viewport,
+        zoom,
+        AGENTIC_MODEL_CHIP_RADIUS_PX,
+        AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
+    );
+    prims.push(MetalPrimitive::ProportionalText(
+        MetalProportionalTextPrimitive {
+            row: chip.row + (chip.height - AGENTIC_MODEL_CHIP_TEXT_ROWS * zoom) * 0.5,
+            col: chip.col,
+            align_width: chip.width,
+            h_align: 0.5,
+            text: label,
+            font_size: AGENTIC_MODEL_CHIP_FONT_SIZE,
+            scale: zoom,
+            fg: theme::PATCHER_AGENTIC_CHIP_TEXT(),
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+        },
+    ));
+    Some(chip)
+}
+
+#[cfg(target_os = "macos")]
+fn model_chip_label(model: &str) -> String {
+    model.to_string()
+}
+
+/// Width the model chip wants, in unscaled cells. The bubble reserves this at
+/// sizing time — a header control that silently vanishes when the card happens
+/// to be narrow is worse than a slightly wider card.
+#[cfg(target_os = "macos")]
+pub(super) fn model_chip_width_cells(model: &str) -> f32 {
+    approx_text_width_cells(&model_chip_label(model), AGENTIC_MODEL_CHIP_FONT_SIZE)
+        * AGENTIC_HEADER_WIDTH_SAFETY
+        + AGENTIC_MODEL_CHIP_PAD_X * 2.0
+}
+
+/// Header width a model chip wants for itself, including the gap keeping it off
+/// the status word.
+#[cfg(target_os = "macos")]
+pub(super) fn header_model_chip_reservation_cells(model: &str) -> f32 {
+    model_chip_width_cells(model) + AGENTIC_HEADER_GAP_CELLS
+}
+
+#[cfg(target_os = "macos")]
+const AGENTIC_MODEL_CHIP_FONT_SIZE: f32 = 10.0;
+#[cfg(target_os = "macos")]
+const AGENTIC_MODEL_CHIP_PAD_X: f32 = 0.45;
+#[cfg(target_os = "macos")]
+const AGENTIC_MODEL_CHIP_HEIGHT: f32 = 1.16;
+#[cfg(target_os = "macos")]
+const AGENTIC_MODEL_CHIP_RADIUS_PX: f32 = 7.0;
+/// Rough line box of the chip label at its font size, in cells.
+#[cfg(target_os = "macos")]
+const AGENTIC_MODEL_CHIP_TEXT_ROWS: f32 = 0.86;
+
+#[cfg(target_os = "macos")]
+const AGENTIC_SEND_GLYPH: &str = "↑";
+/// Rough line box of `AGENTIC_SEND_GLYPH` at its font size, in cells, used only
+/// to centre it in its disc.
+#[cfg(target_os = "macos")]
+const AGENTIC_SEND_GLYPH_ROWS: f32 = 0.92;
 
 #[cfg(target_os = "macos")]
 fn push_z_layered(prims: &mut Vec<MetalPrimitive>, z_index: i32, layer: Vec<MetalPrimitive>) {
@@ -521,12 +1098,8 @@ fn push_z_layered(prims: &mut Vec<MetalPrimitive>, z_index: i32, layer: Vec<Meta
 fn wrap_agentic_prompt_lines(
     text: &str,
     max_width_cells: f32,
-    viewport: WidgetViewport,
-) -> Vec<super::super::text_input::WrappedLine> {
-    if text.trim().is_empty() {
-        return wrap_text_to_measured_lines("", max_width_cells, 13.0, viewport.cell_w);
-    }
-    wrap_text_to_measured_lines(text, max_width_cells, 13.0, viewport.cell_w)
+) -> Option<Vec<super::text_metrics::MeasuredLine>> {
+    wrap_measured_text(text, max_width_cells, 13.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -801,13 +1374,12 @@ fn draw_patch_with_view_key(
             viewport,
             interaction_state.selected_nodes.contains(&node.id),
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
-            interaction_state
-                .agentic_morph_nodes
-                .get(&node.id)
-                .is_some_and(|started| started.elapsed().as_secs_f32() < 1.2),
+            interaction_state.agentic_morph_nodes.get(&node.id),
             active_edit,
+            hovered_label_arg_index(interaction_state, &node.id),
             &highlighted_inputs,
             &highlighted_outputs,
+            origin,
             zoom,
             node_z_index(
                 interaction_state,
@@ -844,6 +1416,48 @@ fn draw_patch_with_view_key(
 }
 
 #[cfg(target_os = "macos")]
+enum TooltipAnchor {
+    InputPort(usize),
+    OutputPort(usize),
+    LabelArg(usize),
+}
+
+/// The argument index whose label token the pointer is on, for `node_id`.
+#[cfg(target_os = "macos")]
+fn hovered_label_arg_index(
+    interaction_state: &PatcherInteractionState,
+    node_id: &str,
+) -> Option<usize> {
+    interaction_state
+        .hovered_label_arg
+        .as_ref()
+        .filter(|arg| arg.node_id == node_id)
+        .map(|arg| arg.input_index)
+}
+
+/// Top-edge point of the label token for `arg_index`, so an inlined argument's
+/// tooltip sits over the text the pointer is actually on.
+#[cfg(target_os = "macos")]
+fn label_arg_tooltip_anchor(
+    patch: &Patch,
+    node_id: &str,
+    arg_index: usize,
+    node_rect: Rect,
+    zoom: f32,
+) -> Option<(f32, f32)> {
+    let node = patch.nodes.iter().find(|node| node.id == node_id)?;
+    let label = node_display_label(node);
+    let font_size = node_font_size(node);
+    let (_, span) = node_display_label_arg_spans(node)
+        .into_iter()
+        .find(|(idx, _)| *idx == arg_index)?;
+    let start = measured_cursor_offset(&label, font_size, span.start)?;
+    let end = measured_cursor_offset(&label, font_size, span.end)?;
+    let col = node_rect.col + NODE_TEXT_COL_OFFSET * zoom + (start + end) * 0.5 * zoom;
+    Some((col, node_rect.row))
+}
+
+#[cfg(target_os = "macos")]
 fn push_hovered_port_tooltip(
     prims: &mut Vec<MetalPrimitive>,
     patch: &Patch,
@@ -858,41 +1472,84 @@ fn push_hovered_port_tooltip(
         .hovered_input_port
         .as_ref()
         .and_then(|port| {
-            input_port_tooltip(patch, port)
-                .map(|text| (port.node_id.as_str(), true, port.input_index, text))
+            input_port_tooltip(patch, port).map(|text| {
+                (
+                    port.node_id.as_str(),
+                    TooltipAnchor::InputPort(port.input_index),
+                    text,
+                )
+            })
         })
         .or_else(|| {
             interaction_state
                 .hovered_output_port
                 .as_ref()
                 .and_then(|port| {
-                    output_port_tooltip(patch, port)
-                        .map(|text| (port.node_id.as_str(), false, port.output_index, text))
+                    output_port_tooltip(patch, port).map(|text| {
+                        (
+                            port.node_id.as_str(),
+                            TooltipAnchor::OutputPort(port.output_index),
+                            text,
+                        )
+                    })
+                })
+        })
+        .or_else(|| {
+            // An inlined argument has no port, so the same inlet tooltip is
+            // anchored to its token in the label instead.
+            interaction_state
+                .hovered_label_arg
+                .as_ref()
+                .and_then(|arg| {
+                    input_port_tooltip(patch, arg).map(|text| {
+                        (
+                            arg.node_id.as_str(),
+                            TooltipAnchor::LabelArg(arg.input_index),
+                            text,
+                        )
+                    })
                 })
         });
-    let Some((node_id, is_input, port_index, text)) = tooltip else {
+    let Some((node_id, anchor, text)) = tooltip else {
         return;
     };
     let Some(node_rect) = node_rects.get(node_id).copied() else {
         return;
     };
-    let port_count = if is_input {
-        input_slot_counts.get(node_id).copied().unwrap_or(1)
-    } else {
-        output_counts.get(node_id).copied().unwrap_or(1)
+    let is_input = !matches!(anchor, TooltipAnchor::OutputPort(_));
+    let center = match anchor {
+        TooltipAnchor::InputPort(port_index) => port_center(
+            node_rect,
+            port_index,
+            input_slot_counts.get(node_id).copied().unwrap_or(1),
+            true,
+        ),
+        TooltipAnchor::OutputPort(port_index) => port_center(
+            node_rect,
+            port_index,
+            output_counts.get(node_id).copied().unwrap_or(1),
+            false,
+        ),
+        TooltipAnchor::LabelArg(arg_index) => {
+            let Some(center) = label_arg_tooltip_anchor(patch, node_id, arg_index, node_rect, zoom)
+            else {
+                return;
+            };
+            center
+        }
     };
-    let center = port_center(node_rect, port_index, port_count, is_input);
     let font_size = 10.5;
     let text = preview(&text, 48);
-    let fallback_char_width = font_size * 0.6 / viewport.cell_w.max(1.0);
-    let text_width_cells = (text_width_from_char_cache(&text, font_size, fallback_char_width)
-        * zoom)
+    let Some(measured_text_width) = measured_text_width(&text, font_size) else {
+        return;
+    };
+    let text_width_cells = (measured_text_width * zoom)
         .max(4.0 * zoom)
         .min(32.0 * zoom);
     let padding_x = 0.55 * zoom;
-    let padding_y = 0.35 * zoom;
+    let padding_y = 0.12 * zoom;
     let width = text_width_cells + padding_x * 2.0;
-    let height = 1.15 * zoom + padding_y * 2.0;
+    let height = 1.0 * zoom + padding_y * 2.0;
     let row = if is_input {
         center.1 - height - 0.45 * zoom
     } else {
@@ -905,24 +1562,26 @@ fn push_hovered_port_tooltip(
         width,
         height,
     };
-    push_autocomplete_panel_chrome(
+    push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_BG(),
-        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        theme::PATCHER_TOOLTIP_BG(),
+        theme::PATCHER_TOOLTIP_BORDER(),
         viewport,
         zoom,
+        PATCHER_TOOLTIP_CORNER_RADIUS_PX,
+        AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     prims.push(MetalPrimitive::ProportionalText(
         MetalProportionalTextPrimitive {
-            row: panel.row + padding_y + 0.1 * zoom,
+            row: panel.row + padding_y + 0.04 * zoom,
             col: panel.col + padding_x,
             align_width: panel.width - padding_x * 2.0,
             h_align: 0.0,
             text,
             font_size,
             scale: zoom,
-            fg: theme::PATCHER_TEXT(),
+            fg: theme::PATCHER_TOOLTIP_TEXT(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
         },
     ));
@@ -1078,49 +1737,92 @@ fn push_autocomplete_panel(
     }
     let row_height = 1.35 * zoom;
     let padding = 0.45 * zoom;
-    let panel_width = (node_rect.width.max(18.0 * zoom)).min(28.0 * zoom);
+    let panel_width = (node_rect.width.max(36.0 * zoom)).min(56.0 * zoom);
     let panel = Rect {
         row: node_rect.row + node_rect.height + 0.35 * zoom,
         col: node_rect.col,
         width: panel_width,
         height: padding * 2.0 + row_height * suggestions.len() as f32,
     };
-    push_autocomplete_panel_chrome(
+    push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_BG(),
-        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        theme::COMP_UNSELECTED_BG(),
+        theme::COMP_BORDER(),
         viewport,
         zoom,
+        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
+    let name_font_size = 11.5;
+    let category_font_size = 9.5;
+    let text_col = panel.col + 1.4 * zoom;
+    let text_right = panel.col + panel.width - 1.4 * zoom;
+    let selected_index = edit.autocomplete_selected.min(suggestions.len() - 1);
     for (index, suggestion) in suggestions.iter().enumerate() {
         let row = panel.row + padding + index as f32 * row_height;
-        if index == edit.autocomplete_selected.min(suggestions.len() - 1) {
-            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
-                rect: Rect {
-                    row,
-                    col: panel.col + 0.25 * zoom,
-                    width: panel.width - 0.5 * zoom,
-                    height: row_height,
+        let selected = index == selected_index;
+        if selected {
+            push_rounded_rect(
+                prims,
+                Rect {
+                    row: row + 0.05 * zoom,
+                    col: panel.col + AUTOCOMPLETE_ROW_INSET_CELLS * zoom,
+                    width: panel.width - AUTOCOMPLETE_ROW_INSET_CELLS * 2.0 * zoom,
+                    height: (row_height - 0.1 * zoom).max(0.1),
                 },
-                color: theme::PATCHER_AUTOCOMPLETE_SELECTED_BG(),
-            }));
+                theme::COMP_SELECTED_BG(),
+                viewport,
+                AUTOCOMPLETE_ROW_CORNER_RADIUS_PX * zoom,
+                false,
+            );
         }
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: row + 0.18 * zoom,
-                col: panel.col + 0.8 * zoom,
-                align_width: panel.width - 1.6 * zoom,
+                col: text_col,
+                align_width: text_right - text_col,
                 h_align: 0.0,
                 text: suggestion.name.clone(),
-                font_size: 11.5,
+                font_size: name_font_size,
                 scale: zoom,
-                fg: theme::PATCHER_NODE_TAIL_TEXT(),
+                fg: if selected {
+                    theme::COMP_SELECTED_FG()
+                } else {
+                    theme::COMP_FG()
+                },
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            },
+        ));
+        let Some(category) = suggestion
+            .documentation
+            .as_ref()
+            .and_then(|documentation| documentation.category.clone())
+        else {
+            continue;
+        };
+        let name_width = approx_text_width_cells(&suggestion.name, name_font_size);
+        let category_width = approx_text_width_cells(&category, category_font_size);
+        // Right-align the category at the panel edge (Zed-style); skip it when
+        // the name could plausibly collide with it. Widths are estimates, so
+        // leave a generous gap rather than trusting them to the pixel.
+        if (name_width + category_width + 2.0) * zoom > text_right - text_col {
+            continue;
+        }
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: row + 0.24 * zoom,
+                col: text_col,
+                align_width: text_right - text_col,
+                h_align: 1.0,
+                text: category,
+                font_size: category_font_size,
+                scale: zoom,
+                fg: theme::COMP_CATEGORY_FG(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
     }
-    let selected_index = edit.autocomplete_selected.min(suggestions.len() - 1);
     push_autocomplete_documentation_panel(
         prims,
         panel,
@@ -1128,6 +1830,79 @@ fn push_autocomplete_panel(
         viewport,
         zoom,
     );
+}
+
+/// Width of `text` in layout cells. Falls back to an average-advance estimate
+/// when the glyph-advance cache has no entry: suggestion names and category
+/// labels are never measured during layout, so the cache is empty for them.
+#[cfg(target_os = "macos")]
+fn approx_text_width_cells(text: &str, font_size: f32) -> f32 {
+    measured_text_width(text, font_size)
+        .unwrap_or_else(|| super::display::estimated_label_width_cells(text, font_size))
+}
+
+/// Font size of the agentic bubble's header row (status plus bound macro name).
+#[cfg(target_os = "macos")]
+pub(super) const AGENTIC_HEADER_FONT_SIZE: f32 = 11.5;
+/// Minimum blank space kept between the two header labels, in layout cells.
+#[cfg(target_os = "macos")]
+pub(super) const AGENTIC_HEADER_GAP_CELLS: f32 = 1.2;
+#[cfg(target_os = "macos")]
+/// Empty: the header names the macro on its own. A leading glyph here has to
+/// exist in the UI font, and the arrows tried previously rendered as tofu.
+pub(super) const AGENTIC_HEADER_MACRO_PREFIX: &str = "";
+/// Width of the prompt/working box, in layout cells, before any bound macro
+/// name widens it.
+#[cfg(target_os = "macos")]
+pub(super) const AGENTIC_PENDING_WIDTH_CELLS: f32 = 20.0;
+/// Width of the settled answer box, and the ceiling every bubble grows to.
+#[cfg(target_os = "macos")]
+pub(super) const AGENTIC_ANSWER_WIDTH_CELLS: f32 = 34.0;
+/// Header widths come from the average-advance estimate, which runs a little
+/// under the truth for the header's heavier glyphs. Reserved space is padded by
+/// this factor so a status and a name never touch on the strength of a
+/// rounding error.
+#[cfg(target_os = "macos")]
+const AGENTIC_HEADER_WIDTH_SAFETY: f32 = 1.2;
+
+/// Header width, in layout cells, that a bound macro name wants for itself —
+/// its prefix, its own text, and the gap that keeps it off the status.
+#[cfg(target_os = "macos")]
+pub(super) fn header_macro_name_reservation_cells(macro_name: &str) -> f32 {
+    (approx_text_width_cells(AGENTIC_HEADER_MACRO_PREFIX, AGENTIC_HEADER_FONT_SIZE)
+        + approx_text_width_cells(macro_name, AGENTIC_HEADER_FONT_SIZE))
+        * AGENTIC_HEADER_WIDTH_SAFETY
+        + AGENTIC_HEADER_GAP_CELLS
+}
+
+/// `text` cut to the longest prefix that fits `max_width_cells`, with an
+/// ellipsis when anything was dropped. `None` when not even one character plus
+/// the ellipsis fits, in which case the label is better left out entirely.
+#[cfg(target_os = "macos")]
+pub(super) fn truncated_to_width_cells(
+    text: &str,
+    font_size: f32,
+    max_width_cells: f32,
+) -> Option<String> {
+    if approx_text_width_cells(text, font_size) <= max_width_cells {
+        return Some(text.to_string());
+    }
+    const ELLIPSIS: char = '…';
+    let mut width = approx_text_width_cells(&ELLIPSIS.to_string(), font_size);
+    let mut kept = String::new();
+    for ch in text.chars() {
+        let advance = approx_text_width_cells(&ch.to_string(), font_size);
+        if width + advance > max_width_cells {
+            break;
+        }
+        width += advance;
+        kept.push(ch);
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    kept.push(ELLIPSIS);
+    Some(kept)
 }
 
 #[cfg(target_os = "macos")]
@@ -1143,9 +1918,9 @@ fn push_autocomplete_documentation_panel(
         return;
     }
     let row_height = 1.08 * zoom;
-    let padding = 0.65 * zoom;
+    let padding = 0.8 * zoom;
     let panel_width = 46.0 * zoom;
-    let align_width = panel_width - 1.6 * zoom;
+    let align_width = panel_width - 1.8 * zoom;
     let visual_line_count =
         autocomplete_wrapped_doc_line_count(&lines, align_width, viewport, zoom);
     let panel = Rect {
@@ -1154,13 +1929,15 @@ fn push_autocomplete_documentation_panel(
         width: panel_width,
         height: padding * 2.0 + row_height * visual_line_count as f32,
     };
-    push_autocomplete_panel_chrome(
+    push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_BG(),
-        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        theme::COMP_DOC_BG(),
+        theme::COMP_DOC_BORDER(),
         viewport,
         zoom,
+        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     );
     let max_chars = autocomplete_doc_wrap_chars(align_width, viewport, zoom);
     let mut visual_index = 0;
@@ -1169,13 +1946,13 @@ fn push_autocomplete_documentation_panel(
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: panel.row + padding + visual_index as f32 * row_height,
-                    col: panel.col + 0.8 * zoom,
+                    col: panel.col + 0.9 * zoom,
                     align_width,
                     h_align: 0.0,
                     text: wrapped,
                     font_size: 10.0,
                     scale: zoom,
-                    fg: theme::PATCHER_TEXT_MUTED(),
+                    fg: theme::COMP_DOC_FG(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
             ));
@@ -1397,10 +2174,12 @@ fn push_node(
     viewport: WidgetViewport,
     selected: bool,
     hovered: bool,
-    morphing: bool,
+    morph: Option<&AgenticMorph>,
     edit: Option<&PatcherTextEdit>,
+    hovered_arg: Option<usize>,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
+    origin: (f32, f32),
     zoom: f32,
     node_chrome_z: i32,
 ) {
@@ -1436,12 +2215,27 @@ fn push_node(
     if selected {
         border = theme::PATCHER_NODE_SELECTED_BORDER();
     }
-    if morphing {
-        border = theme::PATCHER_CABLE();
-    }
     let node_base_z = node_chrome_z - PatcherZSlot::NodeChrome as i32;
     let mut chrome_prims = Vec::new();
-    push_node_chrome(&mut chrome_prims, rect, bg, border, viewport, zoom);
+    // The chrome — and only the chrome — eases out of the agentic bubble's
+    // square box; ports, label and handles stay put at their final positions.
+    match morph
+        .and_then(|morph| agentic_morph_chrome(morph, rect, bg, border, viewport, origin, zoom))
+    {
+        Some((chrome_rect, corner_radius, chrome_bg, chrome_border, flatness)) => {
+            push_node_chrome_with_corner(
+                &mut chrome_prims,
+                chrome_rect,
+                chrome_bg,
+                chrome_border,
+                viewport,
+                NODE_BORDER_WIDTH_PX * zoom,
+                corner_radius,
+                flatness,
+            );
+        }
+        None => push_node_chrome(&mut chrome_prims, rect, bg, border, viewport, zoom),
+    }
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::NodeChrome as i32,
@@ -1471,15 +2265,16 @@ fn push_node(
         );
     }
     push_z_layered(prims, node_base_z + PatcherZSlot::Ports as i32, port_prims);
+    let font_size = node_font_size(node);
     let mut selection_prims = Vec::new();
-    push_node_edit_selection(&mut selection_prims, rect, viewport, edit, zoom);
+    push_node_edit_selection(&mut selection_prims, rect, edit, font_size, zoom);
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::EditSelection as i32,
         selection_prims,
     );
     let mut text_prims = Vec::new();
-    push_node_label(&mut text_prims, node, rect, text, edit, viewport, zoom);
+    push_node_label(&mut text_prims, node, rect, text, edit, hovered_arg, zoom);
     if let Some(diagnostic) = &node.diagnostic {
         text_prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
@@ -1497,7 +2292,7 @@ fn push_node(
     }
     push_z_layered(prims, node_base_z + PatcherZSlot::Text as i32, text_prims);
     let mut cursor_prims = Vec::new();
-    push_node_edit_cursor(&mut cursor_prims, rect, viewport, edit, zoom);
+    push_node_edit_cursor(&mut cursor_prims, rect, edit, font_size, zoom);
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::EditCursor as i32,
@@ -1552,40 +2347,34 @@ fn push_node_chrome(
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
-    let px_w = rect.width * viewport.cell_w;
-    let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
-        widget_type: "patcher-node".to_string(),
-        instance: WidgetInstance {
-            ndc_min,
-            ndc_max,
-            value_t: 0.0,
-            orientation: 0.0,
-            itime: viewport.time_seconds,
-            uniform_a: [NODE_BORDER_WIDTH_PX * zoom, 0.0, 0.0, 0.0],
-            uniform_b: [0.0; 4],
-            uniform_c: [0.0; 4],
-            uniform_d: [0.0; 4],
-            color_a: border.to_rgba(),
-            color_b: bg.to_rgba(),
-            color_c: [0.0; 4],
-            color_d: [0.0; 4],
-            corner_radius: normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
-            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-        },
-        is_background: false,
-    });
+    let corner_radius = normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    push_node_chrome_with_corner(
+        prims,
+        rect,
+        bg,
+        border,
+        viewport,
+        NODE_BORDER_WIDTH_PX * zoom,
+        corner_radius,
+        NODE_CHROME_FLATNESS,
+    );
 }
 
+/// `push_node_chrome` with an explicit *normalized* corner radius. The agentic
+/// completion morph interpolates the normalized value rather than the pixel
+/// radius: a resting node's radius saturates `normalized_corner_radius`' 0.5
+/// clamp, so ramping the pixel radius would finish the visible rounding in the
+/// first third of the tween.
 #[cfg(target_os = "macos")]
-fn push_autocomplete_panel_chrome(
+fn push_node_chrome_with_corner(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
     bg: crate::backend::Color,
     border: crate::backend::Color,
     viewport: WidgetViewport,
-    zoom: f32,
+    border_px: f32,
+    corner_radius: f32,
+    flatness: f32,
 ) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
@@ -1598,7 +2387,7 @@ fn push_autocomplete_panel_chrome(
             value_t: 0.0,
             orientation: 0.0,
             itime: viewport.time_seconds,
-            uniform_a: [NODE_BORDER_WIDTH_PX * zoom, 0.0, 0.0, 0.0],
+            uniform_a: [border_px, flatness, 0.0, 0.0],
             uniform_b: [0.0; 4],
             uniform_c: [0.0; 4],
             uniform_d: [0.0; 4],
@@ -1606,11 +2395,44 @@ fn push_autocomplete_panel_chrome(
             color_b: bg.to_rgba(),
             color_c: [0.0; 4],
             color_d: [0.0; 4],
-            corner_radius: normalized_corner_radius(
-                rect,
-                viewport,
-                AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX * zoom,
-            ),
+            corner_radius,
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn push_flat_panel_chrome(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    bg: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+    radius_px: f32,
+    border_px: f32,
+) {
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "patcher-panel".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [border_px, 0.0, 0.0, 0.0],
+            uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
+            color_a: border.to_rgba(),
+            color_b: bg.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_corner_radius(rect, viewport, radius_px * zoom),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background: false,
@@ -1621,8 +2443,8 @@ fn push_autocomplete_panel_chrome(
 fn push_node_edit_selection(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
-    viewport: WidgetViewport,
     edit: Option<&PatcherTextEdit>,
+    font_size: f32,
     zoom: f32,
 ) {
     let Some(edit) = edit else {
@@ -1631,12 +2453,14 @@ fn push_node_edit_selection(
     let Some((start, end)) = text_selection_range(&edit.state) else {
         return;
     };
-    let x = rect.col
-        + NODE_TEXT_COL_OFFSET * zoom
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, start, viewport.cell_w) * zoom;
-    let end_x = rect.col
-        + NODE_TEXT_COL_OFFSET * zoom
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, end, viewport.cell_w) * zoom;
+    let Some(start_x) = measured_cursor_offset(&edit.text, font_size, start) else {
+        return;
+    };
+    let Some(selection_end_x) = measured_cursor_offset(&edit.text, font_size, end) else {
+        return;
+    };
+    let x = rect.col + NODE_TEXT_COL_OFFSET * zoom + start_x * zoom;
+    let end_x = rect.col + NODE_TEXT_COL_OFFSET * zoom + selection_end_x * zoom;
     let width = end_x - x;
     if width <= 0.0 {
         return;
@@ -1656,17 +2480,18 @@ fn push_node_edit_selection(
 fn push_node_edit_cursor(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
-    viewport: WidgetViewport,
     edit: Option<&PatcherTextEdit>,
+    font_size: f32,
     zoom: f32,
 ) {
     let Some(edit) = edit else {
         return;
     };
     let cursor_pos = edit.state.cursor_pos.min(edit.text.chars().count());
-    let x = rect.col
-        + NODE_TEXT_COL_OFFSET * zoom
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, cursor_pos, viewport.cell_w) * zoom;
+    let Some(cursor_x) = measured_cursor_offset(&edit.text, font_size, cursor_pos) else {
+        return;
+    };
+    let x = rect.col + NODE_TEXT_COL_OFFSET * zoom + cursor_x * zoom;
     prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
         rect: Rect {
             row: rect.row + 0.23 * zoom,
@@ -1685,14 +2510,10 @@ fn push_node_label(
     rect: Rect,
     head_color: crate::backend::Color,
     edit: Option<&PatcherTextEdit>,
-    viewport: WidgetViewport,
+    hovered_arg: Option<usize>,
     zoom: f32,
 ) {
-    let font_size = if node.kind == NodeKind::CodeIsland {
-        CODE_NODE_FONT_SIZE
-    } else {
-        NODE_FONT_SIZE
-    };
+    let font_size = node_font_size(node);
     let text_row = if node.kind == NodeKind::CodeIsland {
         rect.row + 0.55 * zoom
     } else {
@@ -1731,19 +2552,54 @@ fn push_node_label(
             bg,
         },
     ));
-    if !tail.is_empty() {
-        let tail_col = text_col
-            + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w) * zoom;
+    if tail.is_empty() {
+        return;
+    }
+    let tail_end = tail_start + tail.chars().count();
+    // The hovered inlet's token is tinted so the tooltip's subject is obvious;
+    // everything around it keeps the ordinary tail color.
+    let hovered_span = hovered_arg
+        .and_then(|arg_index| {
+            node_display_label_arg_spans(node)
+                .into_iter()
+                .find(|(idx, _)| *idx == arg_index)
+        })
+        .map(|(_, span)| span.start.max(tail_start)..span.end.min(tail_end))
+        .filter(|span| span.start < span.end);
+    let runs = match hovered_span {
+        Some(span) => vec![
+            (tail_start..span.start, theme::PATCHER_NODE_TAIL_TEXT()),
+            (
+                span.start..span.end,
+                theme::PATCHER_NODE_TAIL_TEXT_HOVER(),
+            ),
+            (span.end..tail_end, theme::PATCHER_NODE_TAIL_TEXT()),
+        ],
+        None => vec![(tail_start..tail_end, theme::PATCHER_NODE_TAIL_TEXT())],
+    };
+    for (range, color) in runs {
+        if range.start >= range.end {
+            continue;
+        }
+        let Some(run_offset) = measured_cursor_offset(&label, font_size, range.start) else {
+            return;
+        };
+        let run_col = text_col + run_offset * zoom;
+        let text: String = label
+            .chars()
+            .skip(range.start)
+            .take(range.end - range.start)
+            .collect();
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: text_row,
-                col: tail_col,
-                align_width: (rect.col + rect.width - tail_col - 0.92 * zoom).max(0.0),
+                col: run_col,
+                align_width: (rect.col + rect.width - run_col - 0.92 * zoom).max(0.0),
                 h_align: 0.0,
-                text: tail.to_string(),
+                text,
                 font_size,
                 scale: zoom,
-                fg: theme::PATCHER_NODE_TAIL_TEXT(),
+                fg: color,
                 bg,
             },
         ));
@@ -1853,6 +2709,289 @@ fn push_node_resize_handles(
     }
 }
 
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
+}
+
+/// Overshoots slightly past 1.0 before settling, so a materializing node reads
+/// as popping into place rather than merely arriving.
+fn ease_out_back(t: f32) -> f32 {
+    const C1: f32 = 1.70158;
+    const C3: f32 = C1 + 1.0;
+    let u = t.clamp(0.0, 1.0) - 1.0;
+    1.0 + C3 * u * u * u + C1 * u * u
+}
+
+fn lerp_rgba(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
+}
+
+fn rgba_color(rgba: [f32; 4]) -> crate::backend::Color {
+    crate::backend::Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3])
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    Rect {
+        col: lerp(a.col, b.col, t),
+        row: lerp(a.row, b.row, t),
+        width: lerp(a.width, b.width, t),
+        height: lerp(a.height, b.height, t),
+    }
+}
+
+fn scale_rect_about_center(rect: Rect, scale: f32) -> Rect {
+    let width = rect.width * scale;
+    let height = rect.height * scale;
+    Rect {
+        col: rect.col + (rect.width - width) * 0.5,
+        row: rect.row + (rect.height - height) * 0.5,
+        width,
+        height,
+    }
+}
+
+fn with_alpha_scale(color: crate::backend::Color, scale: f32) -> crate::backend::Color {
+    crate::backend::Color::rgba(color.r, color.g, color.b, color.a * scale)
+}
+
+/// Chrome rect, normalized corner radius, colours, and whether the prompt text
+/// is yet visible, for a bubble partway through its grow-in. Returns `None`
+/// once the bubble has settled.
+#[cfg(target_os = "macos")]
+pub(super) fn agentic_appear_chrome(
+    created_at: Instant,
+    rect: Rect,
+    fill: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> Option<(
+    Rect,
+    f32,
+    crate::backend::Color,
+    crate::backend::Color,
+    bool,
+)> {
+    let elapsed = created_at.elapsed().as_secs_f32();
+    if elapsed >= AGENTIC_APPEAR_SECS {
+        return None;
+    }
+    let progress = (elapsed / AGENTIC_APPEAR_SECS).clamp(0.0, 1.0);
+    // Fade completes early so the box is solid for most of the grow.
+    let (grown, corner_radius, fill, border) = agentic_scaled_chrome(
+        rect,
+        ease_out_back(progress).min(1.0),
+        ease_out_cubic((progress / 0.6).min(1.0)),
+        fill,
+        border,
+        viewport,
+        zoom,
+    );
+    Some((
+        grown,
+        corner_radius,
+        fill,
+        border,
+        progress >= AGENTIC_APPEAR_TEXT_AT,
+    ))
+}
+
+/// Chrome for a bubble that is partway in or out of existence. `expansion` runs
+/// 0 (smallest, most rounded) to 1 (the settled card); `alpha` scales the
+/// colours independently so a grow-in can fade faster than it scales.
+#[cfg(target_os = "macos")]
+fn agentic_scaled_chrome(
+    rect: Rect,
+    expansion: f32,
+    alpha: f32,
+    fill: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> (Rect, f32, crate::backend::Color, crate::backend::Color) {
+    let scaled = scale_rect_about_center(rect, lerp(AGENTIC_APPEAR_START_SCALE, 1.0, expansion));
+    let start_radius = normalized_corner_radius(
+        scaled,
+        viewport,
+        AGENTIC_APPEAR_START_RADIUS_PX / PATCHER_NODE_RADIUS_GAIN * zoom,
+    );
+    (
+        scaled,
+        lerp(
+            start_radius,
+            agentic_card_corner_radius(scaled, viewport, zoom),
+            expansion.clamp(0.0, 1.0),
+        ),
+        with_alpha_scale(fill, alpha),
+        with_alpha_scale(border, alpha),
+    )
+}
+
+/// The grow-in played backwards, for a bubble dismissed with Escape. Returns
+/// `None` once the shrink-out has played to the end — the caller stops drawing
+/// the bubble at that point.
+#[cfg(target_os = "macos")]
+pub(super) fn agentic_close_chrome(
+    closing_at: Instant,
+    rect: Rect,
+    fill: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> Option<(
+    Rect,
+    f32,
+    crate::backend::Color,
+    crate::backend::Color,
+    bool,
+)> {
+    let elapsed = closing_at.elapsed().as_secs_f32();
+    if elapsed >= AGENTIC_CLOSE_SECS {
+        return None;
+    }
+    let progress = (elapsed / AGENTIC_CLOSE_SECS).clamp(0.0, 1.0);
+    // No overshoot on the way out — a dismissal that bulges first reads as a
+    // glitch rather than a flourish.
+    let (shrunk, corner_radius, fill, border) = agentic_scaled_chrome(
+        rect,
+        1.0 - ease_out_cubic(progress),
+        1.0 - progress,
+        fill,
+        border,
+        viewport,
+        zoom,
+    );
+    // Text goes immediately, so it never renders wider than the shrinking box.
+    Some((shrunk, corner_radius, fill, border, false))
+}
+
+/// Chrome rect, normalized corner radius and colours for a node partway through
+/// its agentic completion morph. Returns `None` once the morph has finished, or
+/// when no start pose was recorded.
+#[cfg(target_os = "macos")]
+#[allow(clippy::type_complexity)]
+pub(super) fn agentic_morph_chrome(
+    morph: &AgenticMorph,
+    rect: Rect,
+    resting_bg: crate::backend::Color,
+    resting_border: crate::backend::Color,
+    viewport: WidgetViewport,
+    origin: (f32, f32),
+    zoom: f32,
+) -> Option<(
+    Rect,
+    f32,
+    crate::backend::Color,
+    crate::backend::Color,
+    f32,
+)> {
+    let elapsed = morph.started_at.elapsed().as_secs_f32();
+    if elapsed >= AGENTIC_MORPH_COLOR_SECS {
+        return None;
+    }
+    let flash = theme::PATCHER_CABLE();
+    // The border flashes to the cable colour as the shape lands, then settles
+    // back to the node's resting border over the remainder of the window.
+    let border = if elapsed <= AGENTIC_MORPH_SHAPE_SECS {
+        flash
+    } else {
+        let settle = ease_out_cubic(
+            (elapsed - AGENTIC_MORPH_SHAPE_SECS)
+                / (AGENTIC_MORPH_COLOR_SECS - AGENTIC_MORPH_SHAPE_SECS),
+        );
+        rgba_color(lerp_rgba(flash.to_rgba(), resting_border.to_rgba(), settle))
+    };
+    let Some(from) = morph.from else {
+        return Some((
+            rect,
+            normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
+            resting_bg,
+            border,
+            NODE_CHROME_FLATNESS,
+        ));
+    };
+    let progress = (elapsed / AGENTIC_MORPH_SHAPE_SECS).clamp(0.0, 1.0);
+    let (model_x, model_y, model_w, model_h) = from.model_rect;
+    let from_rect = Rect {
+        col: origin.0 + model_x * zoom,
+        row: origin.1 + model_y * zoom,
+        width: model_w * zoom,
+        height: model_h * zoom,
+    };
+    let chrome_rect = lerp_rect(from_rect, rect, ease_out_back(progress));
+    let shape_t = ease_out_cubic(progress);
+    // Normalize against the rect actually being drawn so the radius tracks the
+    // chrome as it resizes.
+    let target_corner =
+        normalized_corner_radius(chrome_rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    // The card starts at its own resting radius and opens up into the node's,
+    // so the morph still carries a shape beat now that the bubble is no longer
+    // drawn square.
+    let corner_radius = lerp(
+        agentic_card_corner_radius(chrome_rect, viewport, zoom),
+        target_corner,
+        shape_t,
+    );
+    let bg = rgba_color(lerp_rgba(from.fill, resting_bg.to_rgba(), shape_t));
+    let border = rgba_color(lerp_rgba(from.border, border.to_rgba(), shape_t));
+    // The card is flat and the node is lit, so the morph gains its bevel over
+    // the same window it gains its shape — the shading arrives with the form
+    // rather than snapping on at the end.
+    let flatness = lerp(AGENTIC_CARD_FLATNESS, NODE_CHROME_FLATNESS, shape_t);
+    Some((chrome_rect, corner_radius, bg, border, flatness))
+}
+
+/// A resting node keeps the full fake-3d treatment: at pill size the bevel is
+/// most of what gives it its physicality.
+#[cfg(target_os = "macos")]
+pub(super) const NODE_CHROME_FLATNESS: f32 = 0.0;
+/// The agentic bubble card takes none of it. It is a large flat surface, and
+/// the bevel's diffuse falloff reads as a smudge as it approaches the border.
+#[cfg(target_os = "macos")]
+pub(super) const AGENTIC_CARD_FLATNESS: f32 = 1.0;
+
+/// `normalized_corner_radius`' floor — the squarest corner the node shader will
+/// draw.
+#[cfg(target_os = "macos")]
+pub(super) const SQUARE_CORNER_RADIUS: f32 = 0.001;
+
+/// The `patcher-node` shader multiplies `corner_radius` by 1.5 before using it
+/// as an SDF radius; `patcher-panel` uses it as given. Both read the value
+/// normalized against half the rect's pixel height, so a radius quoted in true
+/// pixels has to have this divided back out for `patcher-node` — otherwise the
+/// bubble card and the box inset into it round by visibly different amounts
+/// despite being handed the same number.
+#[cfg(target_os = "macos")]
+const PATCHER_NODE_RADIUS_GAIN: f32 = 1.5;
+
+/// The bubble card's resting corner radius, normalized for `rect`.
+///
+/// Recomputed against whatever rect is actually being drawn, so the radius
+/// holds its pixel size as the card grows line by line; scaled by `zoom` so it
+/// also holds it across the canvas zoom.
+#[cfg(target_os = "macos")]
+pub(super) fn agentic_card_corner_radius(
+    rect: Rect,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> f32 {
+    normalized_corner_radius(
+        rect,
+        viewport,
+        AGENTIC_CARD_RADIUS_PX / PATCHER_NODE_RADIUS_GAIN * zoom,
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
@@ -1860,6 +2999,47 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
     ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+}
+
+/// A true circle, for the spinner dots and the send chevron's disc.
+///
+/// Not `push_rounded_rect` with a big radius: that goes through
+/// `normalized_corner_radius`, which clamps at 0.5 — half of the 1.0 the `box`
+/// shader needs to round a square all the way — so a "disc" asked for that way
+/// comes out a squircle no matter how large a radius it is handed.
+#[cfg(target_os = "macos")]
+fn push_disc(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: crate::backend::Color,
+    viewport: WidgetViewport,
+) {
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "box".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
+            color_a: color.to_rgba(),
+            color_b: [0.0; 4],
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            // The shader caps this at `min(aspect, 1.0)`, which is a full round
+            // on a rect that is square in pixels.
+            corner_radius: 1.0,
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    });
 }
 
 #[cfg(target_os = "macos")]

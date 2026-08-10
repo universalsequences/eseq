@@ -1,8 +1,6 @@
 use crate::layout::Rect;
 use std::collections::HashMap;
 
-#[cfg(target_os = "macos")]
-use super::super::text_input::closest_char_index_for_x;
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
@@ -12,8 +10,10 @@ use super::project::{
 };
 use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
-    node_edit_key,
+    node_edit_key, note_touched_node,
 };
+#[cfg(target_os = "macos")]
+use super::text_metrics::measured_closest_char_index;
 
 pub(super) const PATCHER_AUTOCOMPLETE_MAX_ITEMS: usize = 8;
 
@@ -23,42 +23,37 @@ pub(super) struct PatcherAutocompleteSuggestion {
     pub(super) documentation: Option<OperatorDocumentation>,
 }
 
-fn patcher_text_char_width_cells() -> f32 {
-    (NODE_FONT_SIZE * 0.55 / 10.0).max(0.25)
-}
-
-pub(super) fn patcher_text_cursor_at_col(rect: Rect, text: &str, local_col: f32) -> usize {
-    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0, 1.0)
+pub(super) fn patcher_text_cursor_at_col(rect: Rect, text: &str, local_col: f32) -> Option<usize> {
+    patcher_text_cursor_at_col_with_font_size(rect, text, local_col, NODE_FONT_SIZE, 1.0)
 }
 
 pub(super) fn patcher_text_cursor_at_col_with_zoom(
     rect: Rect,
     text: &str,
     local_col: f32,
+    font_size: f32,
     zoom: f32,
-) -> usize {
-    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0, zoom)
+) -> Option<usize> {
+    patcher_text_cursor_at_col_with_font_size(rect, text, local_col, font_size, zoom)
 }
 
-pub(super) fn patcher_text_cursor_at_col_with_cell_width(
+fn patcher_text_cursor_at_col_with_font_size(
     rect: Rect,
     text: &str,
     local_col: f32,
-    cell_w: f32,
+    font_size: f32,
     zoom: f32,
-) -> usize {
+) -> Option<usize> {
     let zoom = zoom.max(MIN_ZOOM);
     let target = ((local_col - rect.col - NODE_TEXT_COL_OFFSET * zoom) / zoom).max(0.0);
     #[cfg(target_os = "macos")]
     {
-        closest_char_index_for_x(text, NODE_FONT_SIZE, target, cell_w).min(text.chars().count())
+        measured_closest_char_index(text, font_size, target)
+            .map(|index| index.min(text.chars().count()))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ((target / (patcher_text_char_width_cells() * zoom))
-            .round()
-            .max(0.0) as usize)
-            .min(text.chars().count())
+        Some((target.round().max(0.0) as usize).min(text.chars().count()))
     }
 }
 
@@ -70,6 +65,7 @@ pub(super) fn begin_patcher_text_edit(
 ) {
     state.selected_nodes.clear();
     state.selected_nodes.insert(node_id.clone());
+    note_touched_node(state, &node_id);
     state.selected_cable = None;
     state.drag = None;
     state.text_edit = Some(PatcherTextEdit {
@@ -111,6 +107,9 @@ pub(super) fn patcher_autocomplete_suggestions(
         .filter(|name| name.to_lowercase().starts_with(&prefix))
         .map(|name| (name.clone(), docs.get(name).cloned()))
         .collect();
+    if "history".starts_with(&prefix) {
+        candidates.insert("history".to_string(), Some(patcher_history_documentation()));
+    }
     for macro_patch in local_macros {
         if macro_patch.name.to_lowercase().starts_with(&prefix) {
             candidates.insert(
@@ -136,8 +135,34 @@ pub(super) fn patcher_autocomplete_suggestions(
     matches
 }
 
+fn patcher_history_documentation() -> OperatorDocumentation {
+    OperatorDocumentation {
+        category: Some("patcher".to_string()),
+        summary: Some(
+            "One-sample feedback cell. The outlet reads the previous frame and the inlet writes the current frame."
+                .to_string(),
+        ),
+        signatures: vec!["(history)".to_string()],
+        inputs: vec![OperatorPortDocumentation {
+            name: Some("write".to_string()),
+            kind: Some("signal".to_string()),
+            required: Some(false),
+            index: Some(0),
+            summary: Some("Value stored for the next frame.".to_string()),
+        }],
+        outputs: vec![OperatorPortDocumentation {
+            name: Some("previous".to_string()),
+            kind: Some("signal".to_string()),
+            required: Some(true),
+            index: Some(0),
+            summary: Some("Value stored by the preceding frame.".to_string()),
+        }],
+    }
+}
+
 fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation {
     OperatorDocumentation {
+        category: Some("macro".to_string()),
         summary: None,
         signatures: vec![if macro_patch.params.is_empty() {
             format!("({})", macro_patch.name)
@@ -324,12 +349,16 @@ pub(super) fn update_patcher_text_edit_pointer(
     edit: &mut PatcherTextEdit,
     rect: Rect,
     local_col: f32,
+    font_size: f32,
     zoom: f32,
     selecting: bool,
     release: bool,
 ) {
-    let cursor_pos =
-        patcher_text_cursor_at_col_with_cell_width(rect, &edit.text, local_col, 10.0, zoom);
+    let Some(cursor_pos) =
+        patcher_text_cursor_at_col_with_font_size(rect, &edit.text, local_col, font_size, zoom)
+    else {
+        return;
+    };
     if selecting {
         if edit.state.selection_anchor.is_none() {
             edit.state.selection_anchor = Some(edit.state.cursor_pos);

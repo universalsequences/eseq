@@ -607,18 +607,20 @@
             :lighting (lighting :edge-min -0.32 :edge-max 1.293
               :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
             :color (* 0.9 (if (= duration 1)
-              (if (= muted 1)
-                (rgba 0 0 0 0)
-                (aqua-color
-                  (mix border (rgba (* track-r 0.85) (* track-g 0.85) (* track-b 0.85) 0.5) (if (= selected 1) 0.8 0.6))
-                  (if (= selected 1) border (rgba track-r track-g track-b 0.6))))
-              (rgba 0 0 0 0)))))
+                (if (= muted 1)
+                  (rgba 0 0 0 0)
+                  (aqua-color
+                    (mix border (rgba (* track-r 0.85) (* track-g 0.85) (* track-b 0.85) 0.5) (if (= selected 1) 0.8 0.6))
+                    (if (= selected 1) border (rgba track-r track-g track-b 0.6))))
+                (rgba 0 0 0 0)))))
         ;; border
         (sdf/fill (sdf/circle (* radius 0.8))
           (material
             :lighting (lighting :edge-min -0.12 :edge-max 0.9
-              :light (vec3 -0.3 1.0 0.8) :shininess 92.0)
-            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1)) (aqua-color border border))))
+              :light (vec3 -0.3 0.7 0.8) :shininess 92.0)
+            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (aqua-color border border)))
+          )
+        
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.15 :edge-max 1.0

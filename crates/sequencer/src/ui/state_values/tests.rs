@@ -37,6 +37,13 @@
             Ok(Value::String("gpt-5.5".to_string()))
         });
         runtime.register_native("agent/set-model", |_args, _ctx| Ok(Value::Nil));
+        // The `M-x choose-model` picker reads these while the *transport*
+        // buffer's widget tree is built, so they must exist even though the
+        // modal itself is closed.
+        runtime.register_native("agent/patch-model", |_args, _ctx| {
+            Ok(Value::String(String::new()))
+        });
+        runtime.register_native("agent/set-patch-model", |_args, _ctx| Ok(Value::Bool(true)));
         runtime.register_native("agent/models", |_args, _ctx| {
             Ok(agent_test_string_list(&["gpt-5.5", "gemini-2.5-pro"]))
         });
@@ -833,6 +840,8 @@
             "ui/effects/step-buffer.lisp",
             "ui/piano-roll.lisp",
             "ui/mixer.lisp",
+            "ui/patch-macros.lisp",
+            "ui/choose-model.lisp",
             "ui/transport.lisp",
             "ui/agent.lisp",
             "ui/step-grid.lisp",
@@ -2941,6 +2950,173 @@
                 node.rect
             );
         }
+    }
+
+    /// Fork belongs next to the finalize button exactly when the primary
+    /// button overwrites a shared definition (docs/instrument-fork-spec.md
+    /// §3.5), and nowhere else.
+    #[test]
+    fn metal_seq_browser_edit_modes_offer_fork_next_to_save() {
+        for mode in ["edit-instrument", "edit-effect"] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "editor-active", Value::Bool(true));
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "editor-mode", Value::String(mode.to_string()));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*samples*")
+                .expect("browser lisp should create the *samples* buffer")
+                .widget_tree
+                .as_ref()
+                .expect("browser widget tree")
+                .clone();
+            assert!(
+                value_contains_string(&tree, "Fork"),
+                "{mode} should offer Fork beside the clobbering Save button"
+            );
+            assert!(value_contains_string(&tree, "Save"));
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_new_instrument_editor_has_nothing_to_fork() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-instrument".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer")
+            .widget_tree
+            .as_ref()
+            .expect("browser widget tree")
+            .clone();
+        assert!(
+            !value_contains_string(&tree, "Fork"),
+            "a draft has no source to fork from"
+        );
+        assert!(value_contains_string(&tree, "Finalize"));
+    }
+
+    #[test]
+    fn metal_seq_browser_fork_selected_instrument_queues_host_command() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-instrument-name \"core/triton\")")
+            .expect("seed selected instrument");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-editor-name \"leftover\")")
+            .expect("seed stale editor name");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-fork-selected-instrument)")
+            .expect("invoke fork action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "enter-fork-instrument-editor");
+                match payload {
+                    Value::Map(map) => {
+                        let source = map.get("source").expect("source key");
+                        assert_eq!(
+                            &*source.borrow(),
+                            &Value::String("core/triton".to_string())
+                        );
+                    }
+                    other => panic!("expected a map payload, got {other:?}"),
+                }
+            }
+            other => panic!("expected enter-fork-instrument-editor, got {other:?}"),
+        }
+        // Spec §3.4: the name field starts empty; no `<source>-2` prefill.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-editor-name")
+                .expect("read editor name"),
+            Some(Value::String(String::new()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_fork_effect_requires_a_custom_effect_selection() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-fork-selected-audio-effect)")
+            .expect("invoke fork action with nothing selected");
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "forking with no selection must not enter an editor"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-audio-effect-name \"lexilush\")")
+            .expect("seed selected effect");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-fork-selected-audio-effect)")
+            .expect("invoke fork action");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, .. } => {
+                assert_eq!(name, "enter-fork-effect-editor");
+            }
+            other => panic!("expected enter-fork-effect-editor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_effect_selection_only_tracks_custom_effects() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(sbrowser-select-audio-effect (dict :kind \"custom-audio-effect\" :name \"lexilush\" :label \"lexilush\"))",
+            )
+            .expect("select a custom effect");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-audio-effect-name")
+                .expect("read selection"),
+            Some(Value::String("lexilush".to_string()))
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(sbrowser-select-audio-effect (dict :kind \"builtin-audio-effect\" :name \"reverb\" :label \"Reverb\"))",
+            )
+            .expect("select a builtin effect");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-audio-effect-name")
+                .expect("read selection"),
+            Some(Value::String(String::new())),
+            "builtins are Rust and have no dsp.lisp to fork"
+        );
     }
 
     #[test]
@@ -14782,6 +14958,90 @@
         assert_eq!(editor.active_buffer().cursor, (0, 0));
     }
 
+    /// `M-x choose-model` opens its picker inside the patch editor's own
+    /// buffer. Mounting it there rather than in a sibling tile is what makes
+    /// the dropdown clickable: overlay pointer events resolve against the
+    /// *active* tile's layout, and the patcher canvas is the active tile.
+    #[test]
+    fn metal_seq_choose_model_picker_renders_inside_the_patcher_buffer() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(&crate::edit_sessions::instrument_patcher_buffer_source(
+                "*instrument-patcher:test*",
+                std::path::Path::new("instruments/test/dsp.lisp"),
+            ))
+            .expect("build patcher buffer");
+        editor.refresh_runtime_side_effects();
+        let patcher_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*instrument-patcher:test*")
+            .expect("patcher buffer should exist")
+            .id;
+        editor.set_active_buffer(patcher_id);
+        editor.set_layout_viewport(140, 36);
+
+        // Closed: zero footprint, so the picker contributes no layout node.
+        let layout = editor.widget_layout().expect("patcher layout");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "choose-model-dropdown").is_none(),
+            "picker must not render while closed"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(choose-model)")
+            .expect("M-x choose-model");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(140, 36);
+
+        let layout = editor.widget_layout().expect("patcher layout with picker");
+        assert_finite_layout_tree(&layout);
+        let dropdown = find_layout_node_by_stable_key(&layout, "choose-model-dropdown")
+            .expect("model dropdown should render once the picker is open");
+        assert!(
+            dropdown.rect.width > 0.0 && dropdown.rect.height > 0.0,
+            "dropdown should occupy real space; got {:?}",
+            dropdown.rect
+        );
+    }
+
+    /// The picker writes through `agent/set-patch-model` and re-reads the
+    /// choice, so the selected row survives the round trip.
+    #[test]
+    fn metal_seq_choose_model_select_writes_through_and_closes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(choose-model)")
+            .expect("open picker");
+        assert_eq!(
+            editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+            Some(Value::Bool(true))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(choose-model-select "gpt-5.5")"#)
+            .expect("select a model");
+        assert_eq!(
+            editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+            Some(Value::Bool(false)),
+            "selecting a model should close the picker"
+        );
+
+        // The sentinel row maps to the empty string, i.e. "no explicit choice".
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(choose-model-current)")
+                .unwrap(),
+            Some(Value::String("Default (auto)".to_string())),
+            "the stubbed native reports no choice, so the sentinel row is current"
+        );
+    }
+
     #[test]
     fn metal_seq_default_step_panel_has_no_matrix_tab_or_buffer() {
         let editor = full_grid_editor_for_scroll_tests();
@@ -18877,8 +19137,9 @@
 
         let transport = tile("*transport*").rect;
         let patcher = tile("*instrument-patcher:test*").rect;
+        let macros = tile("*patch-macros*").rect;
         let samples = tile("*samples*").rect;
-        let mixer = tile("*mixer*").rect;
+        let mixer = tile("*patch-mixer*").rect;
         let fx = tile("*fx*").rect;
 
         assert!(
@@ -18886,22 +19147,29 @@
             "patcher mode should stack transport, patcher, then bottom bar; transport={transport:?} patcher={patcher:?} samples={samples:?}"
         );
         assert!(
+            (macros.row - patcher.row).abs() <= 0.1
+                && macros.col < patcher.col
+                && macros.width >= 21.0
+                && macros.width <= 27.0,
+            "macro sidebar should sit left of the patcher canvas at its fixed width; macros={macros:?} patcher={patcher:?}"
+        );
+        assert!(
             patcher.height > samples.height * 4.0,
             "patcher should dominate the viewport; patcher={patcher:?} bottom={samples:?}"
         );
         assert!(
-            (samples.height - 13.0).abs() < 0.75
-                && (mixer.height - 13.0).abs() < 0.75
-                && (fx.height - 13.0).abs() < 0.75,
-            "bottom bar should use the fixed mixer-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+            (samples.height - 11.5).abs() < 0.75
+                && (mixer.height - 11.5).abs() < 0.75
+                && (fx.height - 11.5).abs() < 0.75,
+            "bottom bar panels should all use the regular fx-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
         assert!(
             (samples.width - 28.0).abs() <= 1.0
-                && (mixer.width - 30.0).abs() <= 1.0
+                && (mixer.width - 10.0).abs() <= 1.0
                 && fx.width > mixer.width
                 && (samples.row - mixer.row).abs() <= 0.1
                 && (mixer.row - fx.row).abs() <= 0.1,
-            "samples and mixer should use their fixed widths while fx fills the remaining bottom bar; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+            "samples and patch-mixer should use their fixed widths while fx fills the remaining bottom bar; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
     }
 
@@ -18939,14 +19207,167 @@
                 .unwrap_or_else(|| panic!("expected tile for {name}"))
         };
 
-        let mixer = tile("*mixer*").rect;
+        let mixer = tile("*patch-mixer*").rect;
         let fx = tile("*fx*").rect;
         assert!(
             (mixer.row - fx.row).abs() <= 0.1
                 && (mixer.height - fx.height).abs() <= 0.75
                 && mixer.width > 0.0
                 && fx.width > 0.0,
-            "with samples hidden, mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
+            "with samples hidden, patch-mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_buffer_renders_widget_tree() {
+        let editor = full_grid_editor_for_scroll_tests();
+        let buffer = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-macros*")
+            .expect("*patch-macros* buffer should be created at UI load");
+        assert!(
+            buffer.widget_tree.is_some(),
+            "*patch-macros* effect-buffer should build a widget tree"
+        );
+    }
+
+    #[test]
+    fn scan_patch_macro_source_collects_calls_and_imports() {
+        let scan = crate::edit_sessions::scan_patch_macro_source(
+            "(use-defmacro dcblock)\n\
+             (defmacro comb (x) (dcblock (* x 0.5)))\n\
+             (defmacro reverb (in) (+ (comb in) (comb (* in 2))))\n\
+             (def input (in 1))\n\
+             (out (reverb input) 1)",
+        );
+        assert_eq!(scan.imports, vec!["dcblock".to_string()]);
+        let names: Vec<&str> = scan
+            .locals
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["comb", "reverb"]);
+        let comb_calls = &scan.locals[0].2;
+        assert!(
+            comb_calls.contains(&"dcblock".to_string()),
+            "comb should record its dcblock call: {comb_calls:?}"
+        );
+        let reverb_calls = &scan.locals[1].2;
+        assert!(
+            reverb_calls.contains(&"comb".to_string()),
+            "reverb should record its comb call (deduped): {reverb_calls:?}"
+        );
+        assert_eq!(
+            reverb_calls.iter().filter(|call| *call == "comb").count(),
+            1,
+            "calls should be deduped"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_sidebar_nests_call_structure() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-patch-macros"
+                     (list (dict :name "reverb" :params (list "in") :calls (list "comb"))
+                           (dict :name "comb" :params (list "x") :calls (list "dcblock"))))"#,
+            )
+            .expect("set patch macros");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-library-macros"
+                     (list (dict :name "dcblock" :params (list "x") :calls (list) :used true)))"#,
+            )
+            .expect("set library macros");
+
+        // In Patch shows only the root (reverb); comb is nested beneath it,
+        // and the library macro dcblock nests beneath comb.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (patch-macros-items) 1) :name)")
+                .unwrap(),
+            Some(Value::String("reverb".to_string())),
+            "reverb should be the only In Patch root"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (get (nth (patch-macros-items) 1) :children) 0) :name)")
+                .unwrap(),
+            Some(Value::String("comb".to_string())),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(get (nth (get (nth (get (nth (patch-macros-items) 1) :children) 0) :children) 0) :name)"
+                )
+                .unwrap(),
+            Some(Value::String("dcblock".to_string())),
+        );
+        // Used library macros get the distinct icon.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (patch-macros-items) 3) :icon)")
+                .unwrap(),
+            Some(Value::Keyword("sliders".to_string())),
+            "library section row for a used macro should use the :sliders icon"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_sidebar_items_and_filtering() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-patch-macros"
+                     (list (dict :name "wobble" :params (list "x"))))"#,
+            )
+            .expect("set patch macros");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-library-macros"
+                     (list (dict :name "gain2" :params (list "in" "amount"))
+                           (dict :name "simposc" :params (list "freq"))))"#,
+            )
+            .expect("set library macros");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (patch-macros-items))")
+                .unwrap(),
+            Some(Value::Number(5.0)),
+            "two section headers plus three macro rows"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! patch-macros-filter "GAIN")"#)
+            .expect("set filter");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (patch-macros-items))")
+                .unwrap(),
+            Some(Value::Number(2.0)),
+            "case-insensitive filter should keep only the Library header and gain2"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (patch-macros-items) 1) :name)")
+                .unwrap(),
+            Some(Value::String("gain2".to_string())),
+            "macro rows should carry the drag payload name"
         );
     }
 
@@ -46245,4 +46666,75 @@
         }
 
         assert_eq!(before, signature(&app));
+    }
+
+    /// A theme file that names a key with no matching `theme_slots!` entry is
+    /// ignored *silently* — the surface it was meant to colour quietly falls
+    /// back to the hardcoded Rust default. That is how the boot theme lost the
+    /// completion popup when `patcher-autocomplete-*` was folded into `comp-*`.
+    /// Walk every shipped theme and fail loudly on any key that no longer
+    /// resolves to a registered slot.
+    #[test]
+    fn every_shipped_theme_key_resolves_to_a_registered_theme_slot() {
+        let themes_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/themes");
+        let mut checked_files = 0;
+        let mut checked_keys = 0;
+        for entry in std::fs::read_dir(&themes_dir).expect("read ui/themes") {
+            let path = entry.expect("theme dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("lisp") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read theme file");
+            checked_files += 1;
+            for line in source.lines() {
+                // Theme entries are `:some-key '(r g b [a])` inside the dict;
+                // anything else on the line is a comment or plain code.
+                let trimmed = line.trim_start();
+                let Some(rest) = trimmed.strip_prefix(':') else {
+                    continue;
+                };
+                let key: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if key.is_empty() || !rest[key.len()..].trim_start().starts_with("'(") {
+                    continue;
+                }
+                checked_keys += 1;
+                assert!(
+                    eseqlisp::theme::named_color(&key).is_some(),
+                    "{}: `:{key}` is not a registered theme slot — it is silently ignored",
+                    path.display()
+                );
+            }
+        }
+        assert!(checked_files >= 2, "expected several shipped themes");
+        assert!(checked_keys > 100, "expected the themes to set many keys");
+    }
+
+    /// The boot theme (`ui/main.lisp` calls `seq-theme-mac-osx-dark`) has to
+    /// carry the shared completion palette, or the code editor and the patcher
+    /// node editor both come up on the Rust fallback colours.
+    #[test]
+    fn the_boot_theme_defines_the_shared_completion_palette() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ui/themes/mac-osx-dark.lisp");
+        let source = std::fs::read_to_string(&path).expect("read mac-osx-dark theme");
+        for key in [
+            "comp-unselected-bg",
+            "comp-selected-bg",
+            "comp-border",
+            "comp-fg",
+            "comp-selected-fg",
+            "comp-category-fg",
+            "comp-doc-bg",
+            "comp-doc-border",
+            "comp-doc-fg",
+            "comp-doc-title-fg",
+        ] {
+            assert!(
+                source.contains(&format!(":{key} ")),
+                "mac-osx-dark is the boot theme and must set `:{key}`"
+            );
+        }
     }

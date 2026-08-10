@@ -1,0 +1,49 @@
+{
+  "macros": {
+    "freq-to-delay": {
+      "cables": {
+        "freq:0->max-0:0": {
+          "segmented": true,
+          "y": 6.34
+        },
+        "max-0:0->return:1": {
+          "segmented": true,
+          "y": 9.75
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 13.16
+        },
+        "sample_rate:0->return:0": {
+          "segmented": true,
+          "y": 8.2
+        }
+      },
+      "nodes": {
+        "freq": {
+          "x": 28.45308,
+          "y": 4.0
+        },
+        "max-0": {
+          "x": 28.45308,
+          "y": 7.1
+        },
+        "out": {
+          "x": 4.0,
+          "y": 13.92
+        },
+        "return": {
+          "width": 28.753078,
+          "x": 4.0,
+          "y": 10.612001
+        },
+        "sample_rate": {
+          "x": 4.0,
+          "y": 4.0
+        }
+      }
+    }
+  },
+  "root": {},
+  "version": 1
+}

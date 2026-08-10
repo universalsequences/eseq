@@ -1,0 +1,461 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "analog-osc-2": {
+        "x": 48.098045,
+        "y": 27.233524
+      },
+      "analog-osc-3": {
+        "x": 17.175476,
+        "y": 30.169851
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 8.0
+      },
+      "audio": {
+        "x": 97.205666,
+        "y": 35.46
+      },
+      "clock": {
+        "x": 182.31639,
+        "y": 8.0
+      },
+      "cutoff": {
+        "x": 50.12382,
+        "y": 37.579998
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "env": {
+        "x": 117.7209,
+        "y": 27.4
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "gate": {
+        "x": 140.61992,
+        "y": 8.0
+      },
+      "mix-2": {
+        "x": 53.036995,
+        "y": 33.968227
+      },
+      "mul-0": {
+        "x": 97.205666,
+        "y": 31.74
+      },
+      "n0-2": {
+        "x": 173.1626,
+        "y": 8.0
+      },
+      "n0-2-2": {
+        "x": 141.59727,
+        "y": 39.16
+      },
+      "n0-5": {
+        "x": 164.3626,
+        "y": 8.0
+      },
+      "n0-5-2": {
+        "x": 132.79727,
+        "y": 39.16
+      },
+      "n4": {
+        "x": 155.56259,
+        "y": 8.0
+      },
+      "n4-2": {
+        "x": 128.93938,
+        "y": 36.652664
+      },
+      "phase": {
+        "x": 97.205666,
+        "y": 27.4
+      },
+      "pitch": {
+        "x": 97.205666,
+        "y": 8.0
+      },
+      "pitch-transpose-2": {
+        "x": 17.885357,
+        "y": 25.653524
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "trigger": {
+        "x": 160.3998,
+        "y": 8.0
+      },
+      "unison": {
+        "x": 28.453758,
+        "y": 22.438019
+      },
+      "velocity": {
+        "x": 117.7209,
+        "y": 8.0
+      },
+      "waveblend": {
+        "x": 50.12382,
+        "y": 39.16
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->mul-0:1": {
+        "segmented": true,
+        "y": 30.36
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 19.11
+      },
+      "mul-0:0->audio:0": {
+        "segmented": true,
+        "y": 34.39
+      },
+      "n0-2-2:0->analog-osc-3:4": {
+        "segmented": true,
+        "y": 42.120003
+      },
+      "n0-2:0->analog-osc-2:4": {
+        "segmented": true,
+        "y": 20.029999
+      },
+      "n0-5-2:0->analog-osc-3:2": {
+        "segmented": true,
+        "y": 41.09
+      },
+      "n0-5:0->analog-osc-2:2": {
+        "segmented": true,
+        "y": 26.01122
+      },
+      "n4-2:0->analog-osc-3:1": {
+        "segmented": true,
+        "y": 43.15
+      },
+      "n4:0->analog-osc-2:1": {
+        "segmented": true,
+        "y": 24.09152
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 17.25
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.63
+      },
+      "velocity:0->mul-0:2": {
+        "segmented": true,
+        "y": 19.815
+      }
+    },
+    "inputPresentation": {
+      "analog-osc-2:0": "cable",
+      "analog-osc-2:3": "inline-mod-param",
+      "analog-osc-2:5": "inline-mod-param",
+      "analog-osc-3:0": "cable",
+      "analog-osc-3:3": "inline-mod-param",
+      "analog-osc-3:5": "inline-mod-param",
+      "mix-2:0": "cable",
+      "mix-2:1": "cable",
+      "mul-0:0": "cable",
+      "pitch-transpose-2:0": "cable",
+      "pitch-transpose-2:1": "inline-mod-param"
+    }
+  },
+  "macros": {
+    "analog-osc": {
+      "nodes": {
+        "add-0": {
+          "x": 60.322414,
+          "y": 16.4,
+          "width": 7.1000023
+        },
+        "cutoff": {
+          "x": 63.122414,
+          "y": 4.0
+        },
+        "drift_amt": {
+          "x": 175.69855,
+          "y": 4.0
+        },
+        "drift_h": {
+          "x": 89.97466,
+          "y": 7.72
+        },
+        "drift_noise": {
+          "x": 147.93144,
+          "y": 4.0
+        },
+        "drift_val": {
+          "x": 63.122414,
+          "y": 7.72
+        },
+        "drifted_freq": {
+          "x": 43.749836,
+          "y": 21.36,
+          "width": 20.872578
+        },
+        "drive": {
+          "x": 127.64402,
+          "y": 4.0
+        },
+        "freq": {
+          "x": 43.749836,
+          "y": 4.0
+        },
+        "mixed_osc": {
+          "x": 43.749836,
+          "y": 42.44,
+          "width": 39.385807
+        },
+        "mul-0": {
+          "x": 69.12241,
+          "y": 12.059999,
+          "width": 9.900002
+        },
+        "mul-1": {
+          "x": 55.34124,
+          "y": 26.32
+        },
+        "mul-2": {
+          "x": 65.56543,
+          "y": 26.32
+        },
+        "mul-3": {
+          "x": 78.83564,
+          "y": 38.719997
+        },
+        "n0-008": {
+          "x": 79.75047,
+          "y": 7.72
+        },
+        "n0-5": {
+          "x": 90.42705,
+          "y": 30.66
+        },
+        "n1": {
+          "x": 60.322414,
+          "y": 12.059999
+        },
+        "osc_mix": {
+          "x": 43.749836,
+          "y": 35.62,
+          "width": 9.900002
+        },
+        "out": {
+          "x": 43.749836,
+          "y": 48.639996
+        },
+        "ph": {
+          "x": 43.749836,
+          "y": 26.32
+        },
+        "pulse_sig": {
+          "x": 60.3779,
+          "y": 30.66
+        },
+        "pw": {
+          "x": 158.15564,
+          "y": 4.0
+        },
+        "res": {
+          "x": 109.18628,
+          "y": 4.0
+        },
+        "return": {
+          "x": 43.749836,
+          "y": 45.539997,
+          "width": 12.700001
+        },
+        "saw_sig": {
+          "x": 43.749836,
+          "y": 30.66
+        },
+        "sub_gain": {
+          "x": 199.64532,
+          "y": 4.0
+        },
+        "sub_ph": {
+          "x": 78.83564,
+          "y": 30.66
+        },
+        "sub_sig": {
+          "x": 78.83564,
+          "y": 35.62
+        },
+        "wave_blend": {
+          "x": 84.32467,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "add-0:0->drifted_freq:1": {
+          "segmented": true,
+          "y": 18.33
+        },
+        "cutoff:0->return:1": {
+          "segmented": true,
+          "y": 24.630001
+        },
+        "drift_amt:0->mul-0:2": {
+          "segmented": true,
+          "y": 10.696045
+        },
+        "drift_h:0->drift_val:1": {
+          "segmented": true,
+          "y": 9.650001
+        },
+        "drift_noise:0->drift_val:0": {
+          "segmented": true,
+          "y": 6.6499996
+        },
+        "drift_val:0->drift_h:0": {
+          "segmented": true,
+          "y": 10.2
+        },
+        "drift_val:0->mul-0:0": {
+          "segmented": true,
+          "y": 11.3
+        },
+        "drifted_freq:0->mul-1:0": {
+          "segmented": true,
+          "y": 25.97
+        },
+        "drifted_freq:0->mul-2:0": {
+          "segmented": true,
+          "y": 25.97
+        },
+        "drifted_freq:0->ph:0": {
+          "segmented": true,
+          "y": 25.97
+        },
+        "drifted_freq:0->pulse_sig:2": {
+          "segmented": true,
+          "y": 25.97
+        },
+        "drifted_freq:0->saw_sig:1": {
+          "segmented": true,
+          "y": 25.97
+        },
+        "drive:0->return:3": {
+          "segmented": true,
+          "y": 25.250002
+        },
+        "freq:0->drifted_freq:0": {
+          "segmented": true,
+          "y": 13.47
+        },
+        "mixed_osc:0->return:0": {
+          "segmented": true,
+          "y": 44.78
+        },
+        "mul-0:0->add-0:1": {
+          "segmented": true,
+          "y": 15.0199995
+        },
+        "mul-1:0->sub_ph:0": {
+          "segmented": true,
+          "y": 29.279999
+        },
+        "mul-2:0->sub_sig:2": {
+          "segmented": true,
+          "y": 33.225002
+        },
+        "mul-3:0->mixed_osc:1": {
+          "segmented": true,
+          "y": 41.37
+        },
+        "n0-008:0->mul-0:1": {
+          "segmented": true,
+          "y": 11.3
+        },
+        "n0-5:0->sub_sig:1": {
+          "segmented": true,
+          "y": 33.93
+        },
+        "n1:0->add-0:0": {
+          "segmented": true,
+          "y": 16.05
+        },
+        "osc_mix:0->mixed_osc:0": {
+          "segmented": true,
+          "y": 39.82
+        },
+        "ph:0->pulse_sig:0": {
+          "segmented": true,
+          "y": 28.659998
+        },
+        "ph:0->saw_sig:0": {
+          "segmented": true,
+          "y": 28.659998
+        },
+        "pulse_sig:0->osc_mix:1": {
+          "segmented": true,
+          "y": 35.170002
+        },
+        "pw:0->pulse_sig:1": {
+          "segmented": true,
+          "y": 19.98
+        },
+        "res:0->return:2": {
+          "segmented": true,
+          "y": 24.01
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 47.879997
+        },
+        "saw_sig:0->osc_mix:0": {
+          "segmented": true,
+          "y": 32.59
+        },
+        "sub_gain:0->mul-3:1": {
+          "segmented": true,
+          "y": 20.6
+        },
+        "sub_ph:0->sub_sig:0": {
+          "segmented": true,
+          "y": 33.93
+        },
+        "sub_sig:0->mul-3:0": {
+          "segmented": true,
+          "y": 37.96
+        },
+        "wave_blend:0->osc_mix:2": {
+          "segmented": true,
+          "y": 19.05
+        }
+      }
+    }
+  }
+}

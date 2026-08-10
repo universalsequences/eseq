@@ -1611,6 +1611,7 @@ impl Runtime {
             ("not", "(not value)", "Return true when value is nil, false, or missing."),
             ("str", "(str value ...)", "Concatenate values as display strings."),
             ("substring", "(substring string start [end])", "Return a character-indexed substring."),
+            ("str-contains?", "(str-contains? haystack needle)", "Return whether haystack contains needle, case-insensitively."),
             ("source", "(source value ...)", "Concatenate values as Lisp source text."),
             ("fmt", "(fmt template value ...)", "Format values into {} placeholders in template."),
             ("abs", "(abs x)", "Return the absolute value."),
@@ -3131,7 +3132,8 @@ impl Runtime {
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
         freeze_widget_tree(&tree);
-        self.current_widget_tree = Some(probed_shallow_clone("w2:restore-widget-tree-store", &tree));
+        self.current_widget_tree =
+            Some(probed_shallow_clone("w2:restore-widget-tree-store", &tree));
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
             probed_shallow_clone("w2:restore-widget-tree-commit", &tree),

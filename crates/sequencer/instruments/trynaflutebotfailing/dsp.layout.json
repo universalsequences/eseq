@@ -1,0 +1,490 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "attack": {
+        "x": 4.0,
+        "y": 8.0
+      },
+      "audio": {
+        "x": 70.958595,
+        "y": 38.174103
+      },
+      "clock": {
+        "x": 182.31639,
+        "y": 8.0
+      },
+      "created-1": {
+        "x": 66.82007,
+        "y": 27.4
+      },
+      "created-11": {
+        "x": 68.25135,
+        "y": 33.40701
+      },
+      "created-3": {
+        "x": 69.970314,
+        "y": 21.663933
+      },
+      "created-4": {
+        "x": 90.4311,
+        "y": 18.946823
+      },
+      "created-5": {
+        "x": 73.12055,
+        "y": 23.563913
+      },
+      "created-6": {
+        "x": 80.86008,
+        "y": 23.243933
+      },
+      "created-7": {
+        "x": 87.67219,
+        "y": 23.243933
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "env": {
+        "x": 117.7209,
+        "y": 27.4
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "gate": {
+        "x": 140.61992,
+        "y": 8.0
+      },
+      "mul-0": {
+        "x": 97.205666,
+        "y": 31.74
+      },
+      "phase": {
+        "x": 97.205666,
+        "y": 27.4
+      },
+      "pitch": {
+        "x": 97.205666,
+        "y": 8.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "trigger": {
+        "x": 160.3998,
+        "y": 8.0
+      },
+      "velocity": {
+        "x": 117.7209,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->mul-0:1": {
+        "segmented": true,
+        "y": 30.36
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 19.11
+      },
+      "phase:0->mul-0:0": {
+        "segmented": true,
+        "y": 29.74
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 17.25
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.63
+      },
+      "velocity:0->mul-0:2": {
+        "segmented": true,
+        "y": 19.815
+      }
+    },
+    "inputPresentation": {
+      "audio:0": "cable",
+      "created-11:0": "cable",
+      "created-1:0": "cable",
+      "created-1:1": "cable",
+      "created-1:2": "cable",
+      "created-1:3": "cable",
+      "created-1:4": "cable",
+      "created-3:0": "cable",
+      "created-3:1": "cable"
+    }
+  },
+  "macros": {
+    "flute_waveguide": {
+      "nodes": {
+        "body": {
+          "x": 109.15548,
+          "y": 36.859997
+        },
+        "bore": {
+          "x": 4.0,
+          "y": 33.76
+        },
+        "bore_delay": {
+          "x": 136.44963,
+          "y": 4.0
+        },
+        "breath": {
+          "x": 27.221409,
+          "y": 4.0
+        },
+        "breath_noise": {
+          "x": 4.0,
+          "y": 21.98
+        },
+        "breath_p": {
+          "x": 27.221409,
+          "y": 9.58
+        },
+        "clip-0": {
+          "x": 119.149,
+          "y": 9.58
+        },
+        "cutoff": {
+          "x": 111.955475,
+          "y": 15.78
+        },
+        "delay_len": {
+          "x": 154.25534,
+          "y": 9.58
+        },
+        "emb": {
+          "x": 87.81079,
+          "y": 9.58
+        },
+        "embouchure": {
+          "x": 74.18938,
+          "y": 4.0
+        },
+        "excitation": {
+          "x": 4.0,
+          "y": 30.659998
+        },
+        "fb_gain": {
+          "x": 101.343285,
+          "y": 15.78
+        },
+        "fb_h": {
+          "x": 97.653915,
+          "y": 36.859997
+        },
+        "fb_tone": {
+          "x": 109.15548,
+          "y": 21.98
+        },
+        "feedback": {
+          "x": 101.343285,
+          "y": 4.0
+        },
+        "jet": {
+          "x": 4.0,
+          "y": 26.939999,
+          "width": 27.521408
+        },
+        "jet_amt": {
+          "x": 27.221409,
+          "y": 21.98,
+          "width": 58.567974
+        },
+        "mix-0": {
+          "x": 68.58938,
+          "y": 15.78,
+          "width": 9.900002
+        },
+        "mix-1": {
+          "x": 81.48938,
+          "y": 15.78
+        },
+        "mul-0": {
+          "x": 109.15548,
+          "y": 26.939999
+        },
+        "mul-1": {
+          "x": 109.15548,
+          "y": 40.579998
+        },
+        "n0-08": {
+          "x": 100.71079,
+          "y": 9.58
+        },
+        "n0-18": {
+          "x": 109.66892,
+          "y": 9.58
+        },
+        "n1200": {
+          "x": 134.72339,
+          "y": 9.58
+        },
+        "n1800": {
+          "x": 68.58938,
+          "y": 9.58
+        },
+        "n3000": {
+          "x": 143.68152,
+          "y": 9.58
+        },
+        "n3600": {
+          "x": 78.85266,
+          "y": 9.58
+        },
+        "noise-0": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "out": {
+          "x": 109.15548,
+          "y": 46.779995
+        },
+        "return": {
+          "x": 109.15548,
+          "y": 43.679996
+        },
+        "turb": {
+          "x": 48.756172,
+          "y": 9.58
+        },
+        "turbulence": {
+          "x": 48.756172,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "body:0->fb_h:0": {
+          "segmented": true,
+          "y": 39.34
+        },
+        "body:0->mul-1:0": {
+          "segmented": true,
+          "y": 39.51
+        },
+        "bore:0->body:0": {
+          "segmented": true,
+          "y": 36.1
+        },
+        "bore_delay:0->delay_len:0": {
+          "segmented": true,
+          "y": 6.34
+        },
+        "breath:0->breath_p:0": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "breath_noise:0->jet:0": {
+          "segmented": true,
+          "y": 24.63
+        },
+        "breath_p:0->jet_amt:0": {
+          "segmented": true,
+          "y": 16.57
+        },
+        "clip-0:0->fb_gain:0": {
+          "segmented": true,
+          "y": 13.469999
+        },
+        "cutoff:0->body:1": {
+          "segmented": true,
+          "y": 21.63
+        },
+        "cutoff:0->fb_tone:1": {
+          "segmented": true,
+          "y": 21.63
+        },
+        "delay_len:0->bore:1": {
+          "segmented": true,
+          "y": 19.67
+        },
+        "emb:0->cutoff:2": {
+          "segmented": true,
+          "y": 12.23
+        },
+        "emb:0->mix-0:2": {
+          "segmented": true,
+          "y": 12.23
+        },
+        "emb:0->mix-1:2": {
+          "segmented": true,
+          "y": 12.23
+        },
+        "embouchure:0->emb:0": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "excitation:0->bore:0": {
+          "segmented": true,
+          "y": 33.0
+        },
+        "fb_gain:0->mul-0:1": {
+          "segmented": true,
+          "y": 20.375002
+        },
+        "fb_h:0->fb_tone:0": {
+          "segmented": true,
+          "y": 38.789997
+        },
+        "fb_tone:0->mul-0:0": {
+          "segmented": true,
+          "y": 25.25
+        },
+        "feedback:0->clip-0:0": {
+          "segmented": true,
+          "y": 8.82
+        },
+        "jet:0->excitation:0": {
+          "segmented": true,
+          "y": 28.969997
+        },
+        "jet_amt:0->jet:1": {
+          "segmented": true,
+          "y": 25.87
+        },
+        "mix-0:0->breath_noise:1": {
+          "segmented": true,
+          "y": 17.81
+        },
+        "mix-1:0->jet_amt:2": {
+          "segmented": true,
+          "y": 19.05
+        },
+        "mul-0:0->excitation:1": {
+          "segmented": true,
+          "y": 29.589998
+        },
+        "mul-1:0->return:0": {
+          "segmented": true,
+          "y": 42.92
+        },
+        "n0-08:0->mix-1:0": {
+          "segmented": true,
+          "y": 14.709999
+        },
+        "n0-18:0->mix-1:1": {
+          "segmented": true,
+          "y": 11.51
+        },
+        "n1200:0->cutoff:0": {
+          "segmented": true,
+          "y": 15.429999
+        },
+        "n1800:0->mix-0:0": {
+          "segmented": true,
+          "y": 13.469999
+        },
+        "n3000:0->cutoff:1": {
+          "segmented": true,
+          "y": 12.23
+        },
+        "n3600:0->mix-0:1": {
+          "segmented": true,
+          "y": 14.709999
+        },
+        "noise-0:0->breath_noise:0": {
+          "segmented": true,
+          "y": 10.68
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 46.019997
+        },
+        "turb:0->jet_amt:1": {
+          "segmented": true,
+          "y": 16.57
+        },
+        "turbulence:0->turb:0": {
+          "segmented": true,
+          "y": 6.34
+        }
+      }
+    },
+    "hz_to_delay_samples": {
+      "nodes": {
+        "div-0": {
+          "x": 4.0,
+          "y": 7.72
+        },
+        "freq": {
+          "x": 20.39348,
+          "y": 4.0
+        },
+        "n1": {
+          "x": 10.0,
+          "y": 10.82
+        },
+        "out": {
+          "x": 10.0,
+          "y": 17.64
+        },
+        "return": {
+          "x": 10.0,
+          "y": 14.539999
+        },
+        "round-0": {
+          "x": 18.8,
+          "y": 10.82
+        },
+        "sr": {
+          "x": 4.0,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "div-0:0->round-0:0": {
+          "segmented": true,
+          "y": 10.059999
+        },
+        "freq:0->div-0:1": {
+          "segmented": true,
+          "y": 6.6499996
+        },
+        "n1:0->return:0": {
+          "segmented": true,
+          "y": 13.469999
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 16.88
+        },
+        "round-0:0->return:1": {
+          "segmented": true,
+          "y": 12.75
+        },
+        "sr:0->div-0:0": {
+          "segmented": true,
+          "y": 5.93
+        }
+      }
+    }
+  }
+}

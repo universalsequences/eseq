@@ -72,6 +72,13 @@ fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
         || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
 }
 
+/// A focused patcher owns Cmd+Z/Cmd+Shift+Z for its graph-level undo history,
+/// so the app-level sequencer history shortcut must let the key fall through
+/// to the widget key path.
+fn focused_widget_is_patcher(editor: &Editor) -> bool {
+    focused_widget_matches(editor, |node| node.widget_type == "patcher")
+}
+
 fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
     matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
 }
@@ -94,6 +101,7 @@ pub(crate) fn sequencer_history_shortcut(
         || editor.prompt_text().is_some()
         || !active_buffer_accepts_global_ui_shortcuts(editor)
         || focused_widget_captures_text_input(editor)
+        || focused_widget_is_patcher(editor)
     {
         return None;
     }
@@ -327,6 +335,20 @@ fn is_plain_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     matches!(
         (key.code, key.modifiers),
         (KeyCode::Tab, KeyModifiers::NONE)
+    )
+}
+
+/// Inside the patch editor Tab is autocomplete-only: letting it fall through
+/// to the session/arrangement toggle silently discards in-progress patch
+/// edits, so consume it instead.
+fn tab_locked_to_patch_editor(editor: &mut Editor) -> bool {
+    if focused_widget_matches(editor, |node| node.widget_type == "patcher") {
+        return true;
+    }
+    matches!(
+        editor.runtime_mut().eval_str("seq-layout-mode"),
+        Ok(Some(Value::Keyword(mode)))
+            if mode == "instrument-patcher" || mode == "instrument-patcher-source"
     )
 }
 
@@ -1229,6 +1251,9 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return true;
             }
             _ if is_plain_tab_shortcut(key) => {
+                if tab_locked_to_patch_editor(editor) {
+                    return true;
+                }
                 let _ = if let Some(callable) = editor
                     .runtime_mut()
                     .global_value("seq-toggle-arrangement")
@@ -2709,7 +2734,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn plain_tab_toggles_arrangement_even_with_focused_patcher() {
+    fn plain_tab_stays_in_patch_editor_with_focused_patcher() {
         let path = std::env::temp_dir().join(format!(
             "eseq-focused-patcher-tab-{}.lisp",
             std::time::SystemTime::now()
@@ -2776,11 +2801,12 @@ mod live_keyboard_tests {
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should remain an app-level view toggle while a patcher is focused"
+            "plain Tab should be consumed (not fall through) while a patcher is focused"
         );
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("arrangement".to_string()))
+            Some(eseqlisp::vm::Value::String("".to_string())),
+            "plain Tab must not leave the patch editor for the arrangement view"
         );
     }
 

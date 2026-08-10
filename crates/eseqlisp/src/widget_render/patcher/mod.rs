@@ -1,7 +1,11 @@
 mod alignment;
+mod connect;
 mod display;
 mod emit;
+mod encapsulate;
+mod generate;
 mod geometry;
+mod graph_payload;
 mod interaction;
 mod layout;
 mod lisp;
@@ -14,10 +18,11 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod text;
+mod text_metrics;
 mod writeback;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -25,6 +30,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 
+pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
@@ -35,7 +41,28 @@ pub use model::{
 
 pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Result<String, String> {
     let state = state::PatcherInteractionState::default();
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
+}
+
+/// Parse `source`, overlay the interaction state, and regenerate the full
+/// canonical dsp.lisp from the resulting model (docs/patch-vs-code-editor-spec.md §4.2).
+fn generate_source_for_state(
+    source: &str,
+    intent: PatcherIntent,
+    state: &state::PatcherInteractionState,
+) -> Result<generate::GeneratedPatchSource, String> {
+    let root_patch = parse_source_with_default_library(source, intent)?;
+    let visible = sidecar::root_patch_with_interaction(&root_patch, state);
+    generate::generate_patch_source(&visible, intent)
+}
+
+/// §4.5 error surface: an agentic result that the projector cannot fully
+/// represent is refused with a pointer at the eject path.
+fn agentic_unprojectable_error(detail: impl AsRef<str>) -> String {
+    format!(
+        "agent result contains code the patch editor can't represent ({}); use \"Eject to code\" to accept it as text",
+        detail.as_ref()
+    )
 }
 
 pub fn emitted_source_buffer_name(path: &str) -> String {
@@ -46,6 +73,90 @@ pub fn emitted_source_path_from_buffer_name(name: &str) -> Option<String> {
     name.strip_prefix("*patcher-emitted:")
         .and_then(|path| path.strip_suffix('*'))
         .map(str::to_string)
+}
+
+/// Editor-surface decision for an existing instrument/effect
+/// (docs/patch-vs-code-editor-spec.md §3.2): the patch editor opens only for
+/// patch-authored content — an `authored` layout sidecar AND source the
+/// projector can represent without code islands. Everything else (agent- or
+/// hand-written code, all pre-`authored` sidecars) gets the code editor.
+pub fn source_opens_in_patch_editor(
+    source_path: &Path,
+    source: &str,
+    intent: PatcherIntent,
+) -> bool {
+    if !sidecar::sidecar_is_authored(source_path) {
+        return false;
+    }
+    let parsed = match crate::defmacro_library::default_library_root() {
+        Some(root) => {
+            let (_, library) = cached_defmacro_library(&root);
+            parse_patch_source_with_library(source, intent, &library)
+        }
+        None => parse_patch_source(source, intent),
+    };
+    let Ok(patch) = parsed else {
+        return false;
+    };
+    patch_is_fully_projectable(&patch)
+}
+
+/// Promotion ("Open as patch", spec §3.3): verify the source is fully
+/// projectable and stamp an `authored: true` v2 layout sidecar next to it,
+/// materializing default layout (or reusing any pre-existing sidecar layout).
+/// Returns the projector diagnostics when the source contains code islands.
+pub fn promote_source_to_patch(
+    source_path: &Path,
+    source: &str,
+    intent: PatcherIntent,
+) -> Result<(), String> {
+    let mut patch = parse_source_with_default_library(source, intent)?;
+    if !patch_is_fully_projectable(&patch) {
+        let mut diagnostics = patch.diagnostics.clone();
+        for macro_patch in &patch.macros {
+            diagnostics.extend(macro_patch.patch.diagnostics.iter().cloned());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.push("source contains code the patch editor cannot represent".to_string());
+        }
+        return Err(format!("Cannot open as patch: {}", diagnostics.join("; ")));
+    }
+    sidecar::apply_or_materialize(source_path, &mut patch)?;
+    sidecar::write_authored_layout(source_path, &patch)
+}
+
+/// Eject ("Eject to code", spec §3.4): flip the sidecar's `authored` flag to
+/// false while keeping layout data for later re-promotion. The canonical
+/// generated source is already on disk for patch-authored items, so no source
+/// rewrite is needed.
+pub fn eject_patch_authored_sidecar(source_path: &Path) -> Result<(), String> {
+    sidecar::set_sidecar_authored(source_path, false)
+}
+
+fn parse_source_with_default_library(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
+    match crate::defmacro_library::default_library_root() {
+        Some(root) => {
+            let (_, library) = cached_defmacro_library(&root);
+            parse_patch_source_with_library(source, intent, &library)
+        }
+        None => parse_patch_source(source, intent),
+    }
+}
+
+fn patch_is_fully_projectable(patch: &Patch) -> bool {
+    patch.diagnostics.is_empty()
+        && !patch
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::CodeIsland)
+        && patch.macros.iter().all(|macro_patch| {
+            macro_patch.patch.diagnostics.is_empty()
+                && !macro_patch
+                    .patch
+                    .nodes
+                    .iter()
+                    .any(|node| node.kind == NodeKind::CodeIsland)
+        })
 }
 
 pub struct EmittedSourceBufferSnapshot {
@@ -127,6 +238,15 @@ pub(crate) fn patcher_has_selected_cable(node: &crate::layout::LayoutNode) -> bo
     interaction.text_edit.is_none() && interaction.selected_cable.is_some()
 }
 
+pub(crate) fn patcher_agentic_bubble_count(node: &crate::layout::LayoutNode) -> usize {
+    if node.widget_type != "patcher" {
+        return 0;
+    }
+    state::get_patcher_interaction_state(state::patcher_state_key(node))
+        .agentic_bubbles
+        .len()
+}
+
 #[cfg(test)]
 pub(crate) fn select_first_patcher_cable_for_test(
     node: &crate::layout::LayoutNode,
@@ -183,6 +303,31 @@ pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: P
     state::reset_patcher_widget_states_for_path(path, key);
 }
 
+/// The macro view currently open in the patcher for `path`, if any
+/// (None = root view). Drives the macro sidebar's selected row.
+pub fn active_macro_view_for_path(path: impl AsRef<std::path::Path>) -> Option<String> {
+    state::patcher_keys_for_path(path.as_ref())
+        .into_iter()
+        .find_map(|key| state::get_patcher_interaction_state(key).active_macro)
+}
+
+/// Navigate the patcher for `path` to a macro view (or the root with None),
+/// preserving staged edits — unlike `reload_patcher_macro_view_for_path`,
+/// which resets the whole interaction state after a save.
+pub fn navigate_patcher_view_for_path(path: impl AsRef<std::path::Path>, macro_name: Option<&str>) {
+    for key in state::patcher_keys_for_path(path.as_ref()) {
+        let mut state = state::get_patcher_interaction_state(key);
+        state.active_macro = macro_name.map(str::to_string);
+        state.selected_nodes.clear();
+        state.selected_cable = None;
+        state.hovered_node = None;
+        state.hover_back_button = false;
+        state.drag = None;
+        state.text_edit = None;
+        state::set_patcher_interaction_state(key, state);
+    }
+}
+
 pub fn reload_patcher_macro_view_for_path(
     path: impl AsRef<std::path::Path>,
     macro_name: impl Into<String>,
@@ -223,6 +368,18 @@ pub fn resolve_agentic_bubble(
     }
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    // Ids already present in the source model must not be reused for the
+    // created macro-instance node (older generated sources can contain
+    // `created-N` bindings).
+    let taken_node_ids = parse_source_with_default_library(&source, intent)
+        .map(|patch| {
+            patch
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     let mut wrote = false;
     for key in keys {
         let mut interaction = state::get_patcher_interaction_state(key);
@@ -237,18 +394,25 @@ pub fn resolve_agentic_bubble(
             bubble.position,
             macro_name,
             macro_source,
+            &taken_node_ids,
         );
         if !wrote {
-            let emitted =
-                writeback::emit_patch_writeback(&source, intent, &materialized.writeback_state)
-                    .map_err(|error| format!("{error:?}"))?;
-            std::fs::write(path, emitted)
+            // §4.5: the agent's code becomes the model and is regenerated
+            // canonically; it is only accepted if it projects cleanly.
+            let generated =
+                generate_source_for_state(&source, intent, &materialized.writeback_state)
+                    .map_err(agentic_unprojectable_error)?;
+            std::fs::write(path, generated.source)
                 .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
             wrote = true;
         }
-        interaction
-            .agentic_morph_nodes
-            .insert(materialized.instance_node_id.clone(), Instant::now());
+        interaction.agentic_morph_nodes.insert(
+            materialized.instance_node_id.clone(),
+            state::AgenticMorph {
+                started_at: Instant::now(),
+                from: state::agentic_bubble_pose(bubble_id),
+            },
+        );
         interaction.agentic_bubbles.remove(bubble_id);
         state::set_patcher_interaction_state(key, interaction);
     }
@@ -279,11 +443,53 @@ pub fn resolve_agentic_bubble_macro_edit(
     }
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let emitted = writeback::replace_macro_source(&source, macro_name, macro_source)
+    // §4.5: splice the agent's macro into a candidate source, accept it only
+    // if the whole file still projects with zero code islands, and write the
+    // canonical regeneration of the resulting model (never the raw splice).
+    let candidate = writeback::replace_macro_source(&source, macro_name, macro_source)
         .map_err(|error| format!("{error:?}"))?;
-    std::fs::write(path, emitted)
+    let candidate_patch = parse_source_with_default_library(&candidate, intent)?;
+    if !patch_is_fully_projectable(&candidate_patch) {
+        let mut diagnostics = candidate_patch.diagnostics.clone();
+        for macro_patch in &candidate_patch.macros {
+            diagnostics.extend(macro_patch.patch.diagnostics.iter().cloned());
+        }
+        return Err(agentic_unprojectable_error(diagnostics.join("; ")));
+    }
+    // The agent's text only defines the macro body; everything outside it must
+    // come from the authored model, not from reparsing the file (spec §4.1b).
+    // Regenerating the whole patch off the parse would re-materialize every
+    // inline literal in the root scope as a constant node.
+    let mut model = match authored_patch_for_path(path, intent) {
+        Some(mut base) => {
+            match candidate_patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == macro_name)
+            {
+                Some(edited) => {
+                    match base
+                        .macros
+                        .iter_mut()
+                        .find(|macro_patch| macro_patch.name == macro_name)
+                    {
+                        Some(existing) => *existing = edited.clone(),
+                        None => base.macros.push(edited.clone()),
+                    }
+                    base
+                }
+                // The splice did not yield the named macro; fall back rather
+                // than persist a model missing the thing that was edited.
+                None => candidate_patch,
+            }
+        }
+        None => candidate_patch,
+    };
+    let generated =
+        generate::generate_patch_source(&model, intent).map_err(agentic_unprojectable_error)?;
+    std::fs::write(path, generated.source)
         .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
-    rematerialize_edited_macro_layout(path, intent, macro_name)?;
+    rematerialize_edited_macro_layout(path, &mut model, macro_name)?;
     for key in keys {
         let mut interaction = state::get_patcher_interaction_state(key);
         let Some(bubble) = interaction.agentic_bubbles.get(bubble_id).cloned() else {
@@ -296,9 +502,13 @@ pub fn resolve_agentic_bubble_macro_edit(
             instance_node_id, ..
         } = bubble.target
         {
-            interaction
-                .agentic_morph_nodes
-                .insert(instance_node_id, Instant::now());
+            interaction.agentic_morph_nodes.insert(
+                instance_node_id,
+                state::AgenticMorph {
+                    started_at: Instant::now(),
+                    from: state::agentic_bubble_pose(bubble_id),
+                },
+            );
         }
         interaction.agentic_bubbles.remove(bubble_id);
         state::set_patcher_interaction_state(key, interaction);
@@ -306,16 +516,28 @@ pub fn resolve_agentic_bubble_macro_edit(
     Ok(())
 }
 
+/// The authored model for `path`, library macros and operator diagnostics
+/// resolved — `None` when the item is not patch-authored or predates v3.
+fn authored_patch_for_path(path: &std::path::Path, intent: PatcherIntent) -> Option<Patch> {
+    let mut patch = sidecar::load_authored_patch(path)?;
+    if let Some(root) = crate::defmacro_library::default_library_root() {
+        let (_, library) = cached_defmacro_library(&root);
+        lisp::resolve_library_macros(&mut patch, &library, intent);
+    }
+    lisp::resolve_node_operators(&mut patch);
+    Some(patch)
+}
+
+/// Persist layout for a model whose macro scope was just rewritten. Every
+/// scope but the edited one keeps its saved layout; the edited macro gets
+/// fresh placement because its node set changed wholesale.
 fn rematerialize_edited_macro_layout(
     path: &std::path::Path,
-    intent: PatcherIntent,
+    patch: &mut Patch,
     macro_name: &str,
 ) -> Result<(), String> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let mut patch = parse_patch_source(&source, intent)?;
     let excluded = std::iter::once(macro_name.to_string()).collect();
-    sidecar::apply_or_materialize_excluding_macro_scopes(path, &mut patch, &excluded)
+    sidecar::apply_or_materialize_excluding_macro_scopes(path, patch, &excluded)
 }
 
 pub fn resolve_agentic_bubble_answer(
@@ -339,6 +561,75 @@ pub fn resolve_agentic_bubble_answer(
     }
 }
 
+/// Apply an agent connection plan to the patcher for `path`
+/// (docs/patcher-agentic-connect-spec.md §7-§9).
+///
+/// Unlike the create and edit bubbles this writes no source: every op is an
+/// edit the canvas already makes, and the whole plan lands in a single
+/// interaction-state write so one Cmd+Z undoes the wiring.
+pub fn resolve_agentic_bubble_connections(
+    path: impl AsRef<std::path::Path>,
+    intent: PatcherIntent,
+    bubble_id: &str,
+    generation: u64,
+    ops: &[PatcherConnectOp],
+) -> Result<PatcherConnectReport, String> {
+    let path = path.as_ref();
+    let keys = state::patcher_keys_for_path(path);
+    if keys.is_empty() {
+        return Ok(PatcherConnectReport::default());
+    }
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let root_patch = parse_source_with_default_library(&source, intent)?;
+    let mut report = None;
+    let mut refusal = None;
+    for key in keys {
+        let mut interaction = state::get_patcher_interaction_state(key);
+        let Some(bubble) = interaction.agentic_bubbles.get(bubble_id).cloned() else {
+            continue;
+        };
+        if bubble.generation != generation
+            || !matches!(bubble.target, AgenticBubbleTarget::ConnectNode { .. })
+        {
+            continue;
+        }
+        let view_key = active_patcher_view_key(&interaction);
+        if view_key != bubble.view_key {
+            // Node ids are only unique per scope, so a plan composed against
+            // another view would wire the wrong nodes. Leave the bubble in
+            // place for Cmd+R once the canvas is back where it was.
+            refusal = Some(
+                "the patcher moved to a different view — press Cmd+R to retry from the view the \
+                 node lives in"
+                    .to_string(),
+            );
+            continue;
+        }
+        let patch = active_patcher_patch(&root_patch, &interaction);
+        let patch = patch_with_interaction_state(patch, &interaction, &view_key);
+        let applied = connect::apply_connect_plan(&mut interaction, &patch, &view_key, ops);
+        if applied.applied.is_empty() && !applied.skipped.is_empty() {
+            // Nothing survived validation: leave the bubble alone so the
+            // existing Cmd+R retry works against the reported reasons.
+            refusal = Some(applied.skipped.join("; "));
+            continue;
+        }
+        // An empty plan is the agent saying "nothing to wire": close the
+        // bubble as a success rather than reporting a reasonless failure.
+        interaction.agentic_bubbles.remove(bubble_id);
+        state::set_patcher_interaction_state(key, interaction);
+        report.get_or_insert(applied);
+    }
+    // A matched bubble always leaves either a report or a refusal behind, so
+    // the empty-empty case is only "no bubble here", which is not an error.
+    match (report, refusal) {
+        (Some(report), _) => Ok(report),
+        (None, Some(refusal)) => Err(refusal),
+        (None, None) => Ok(PatcherConnectReport::default()),
+    }
+}
+
 struct MaterializedAgenticMacro {
     instance_node_id: String,
     writeback_state: state::PatcherInteractionState,
@@ -349,8 +640,10 @@ fn materialize_agentic_macro_edit(
     position: (f32, f32),
     macro_name: &str,
     macro_source: &str,
+    taken_node_ids: &HashSet<String>,
 ) -> MaterializedAgenticMacro {
-    let node_id = state::allocate_created_node(interaction, "root", position);
+    let node_id =
+        state::allocate_created_node_avoiding(interaction, "root", position, taken_node_ids);
     let node_key = state::node_edit_key("root", &node_id);
     if let Some(edit) = interaction.edit_state.nodes.get_mut(&node_key) {
         edit.text = macro_name.to_string();
@@ -410,7 +703,73 @@ pub fn patcher_has_text_edit(node: &crate::layout::LayoutNode) -> bool {
         return false;
     }
     let state = state::get_patcher_interaction_state(state::patcher_state_key(node));
-    state.text_edit.is_some() || state::editing_agentic_bubble_id(&state).is_some()
+    // An answer bubble's follow-up composer takes typing too, so it has to count
+    // as text entry or the editor swallows the space bar as a transport key.
+    state.text_edit.is_some()
+        || state::editing_agentic_bubble_id(&state).is_some()
+        || state::answering_agentic_bubble_id(&state).is_some()
+}
+
+/// Drag type accepted by the patcher canvas: macro items dragged from the
+/// macro sidebar. Dropping one creates a node calling that macro.
+pub const PATCHER_MACRO_DRAG_TYPE: &str = "dgen-macro";
+
+pub fn patcher_accepts_drop(node: &LayoutNode, drag_type: &str) -> bool {
+    node.widget_type == "patcher" && drag_type == PATCHER_MACRO_DRAG_TYPE
+}
+
+fn macro_drop_payload_name(payload: &Value) -> Option<String> {
+    let Value::Map(map) = payload else {
+        return None;
+    };
+    let name = map.get("name").or_else(|| map.get("label"))?;
+    match &*name.borrow() {
+        Value::String(name) if !name.trim().is_empty() => Some(name.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// Drop a macro item onto the patcher canvas: allocate a created node whose
+/// text is the macro call at the drop point, then emit the standard writeback
+/// payload so the host persists and recompiles exactly as for a typed node.
+pub fn handle_patcher_drop(
+    node: &LayoutNode,
+    drag_type: &str,
+    payload: &Value,
+    local_col: f32,
+    local_row: f32,
+) -> Option<super::EventOutput> {
+    if !patcher_accepts_drop(node, drag_type) {
+        return None;
+    }
+    let macro_name = macro_drop_payload_name(payload)?;
+    let key = state::patcher_state_key(node);
+    let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let mut state = state::get_patcher_interaction_state(key);
+    // A macro view must not gain a node calling the macro it defines.
+    if state.active_macro.as_deref() == Some(macro_name.as_str()) {
+        return None;
+    }
+    let view_key = state::active_patcher_view_key(&state);
+    let patch = state::active_patcher_patch(&root_patch, &state);
+    let patch = state::patch_with_interaction_state(patch, &state, &view_key);
+    let mut pan_state = state::get_patcher_pan_state(key);
+    interaction::sync_patcher_pan_bounds_from_patch(node, &mut pan_state, &patch);
+    let position = geometry::screen_to_model(node.rect, &pan_state, (local_col, local_row));
+    let taken_node_ids = patch
+        .nodes
+        .iter()
+        .map(|patch_node| patch_node.id.clone())
+        .collect::<HashSet<_>>();
+    let created_id =
+        state::allocate_created_node_avoiding(&mut state, &view_key, position, &taken_node_ids);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key(&view_key, &created_id))?
+        .text = macro_name;
+    state::set_patcher_interaction_state(key, state);
+    patcher_change_output(node, patcher_writeback_payload(node))
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -471,7 +830,7 @@ pub fn emit_patch_writeback_with_inserted_node_before_first_output(
         },
     );
 
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -502,7 +861,7 @@ pub fn emit_patch_writeback_with_first_node_text_edit(
         .expect("source node edit should be present")
         .text = edited_text.to_string();
 
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -601,34 +960,36 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
         },
     );
 
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
 }
 
 use display::{node_display_label, preview};
 use emit::debug_log_patch_lisp;
+use encapsulate::encapsulate_patcher_selection;
 use interaction::{
-    PatcherChangeKind, handle_patcher_double_click, handle_patcher_pointer_down,
+    PatcherChangeKind, connect_last_touched_nodes, copy_selected_patcher_nodes,
+    create_patcher_node_below_anchor, handle_patcher_double_click, handle_patcher_pointer_down,
     handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
-    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel,
+    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel, paste_patcher_clipboard,
     promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
 };
-use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
+use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
-    AgenticBubbleState, AgenticBubbleTarget, active_patcher_patch, active_patcher_view_key,
-    allocate_agentic_bubble, allocate_agentic_bubble_with_target, debug_log_edit_event,
-    debug_log_writeback_event, delete_connection_edit_or_mark_deleted, delete_selected_nodes,
-    editing_agentic_bubble_id, get_patcher_interaction_state, patch_with_interaction_state,
-    patcher_state_key, patcher_state_key_from_parts, set_connection_segment_edit,
-    set_patcher_interaction_state,
+    AgenticBubbleState, AgenticBubbleTarget, ConnectSubject, active_patcher_patch,
+    active_patcher_view_key, allocate_agentic_bubble, allocate_agentic_bubble_with_target,
+    apply_patcher_history_step, debug_log_edit_event, debug_log_writeback_event,
+    delete_connection_edit_or_mark_deleted, delete_selected_nodes, editing_agentic_bubble_id,
+    get_patcher_interaction_state, patch_with_interaction_state, patcher_state_key,
+    patcher_state_key_from_parts, prune_unreferenced_created_macros, set_connection_segment_edit,
+    set_patcher_interaction_state, set_patcher_interaction_state_without_history,
 };
 use text::{
     apply_patcher_autocomplete, cancel_patcher_text_edit,
     clamp_patcher_autocomplete_selection_with_macros, commit_patcher_text_edit,
     move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
 };
-use writeback::emit_patch_writeback_result;
 
-use super::text_input::{TextEditOutcome, apply_text_entry_key, cache_char_widths};
+use super::text_input::{TextEditOutcome, apply_text_entry_key};
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
@@ -638,6 +999,7 @@ use crate::layout::{
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use crate::vm::Value;
 use std::time::Instant;
+use text_metrics::cache_text_widths;
 
 pub struct PatcherWidget;
 
@@ -700,6 +1062,12 @@ impl WidgetDefinition for PatcherWidget {
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // The chevron is drawn over a bubble, which is drawn over the
+                // canvas, so it has to claim the click before the patcher's own
+                // hit testing turns it into a selection or a marquee.
+                if let Some(event) = handle_agentic_send_click(node, local_col, local_row) {
+                    return MouseEventOutcome::Dispatch(event);
+                }
                 handle_patcher_pointer_down(node, local_col, local_row, modifiers, cell_w, cell_h);
                 MouseEventOutcome::Consume
             }
@@ -791,8 +1159,113 @@ impl WidgetDefinition for PatcherWidget {
         if let Some(bubble_id) = editing_agentic_bubble_id(&state) {
             return handle_agentic_bubble_edit_key(node, key, state, bubble_id, key_event);
         }
+        // A settled answer keeps a follow-up box open, so typing continues the
+        // conversation. Command-chords are left alone so Cmd+K, Cmd+Z and the
+        // rest still reach the patcher with an answer on screen.
+        if !key_event
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+            && let Some(bubble_id) = state::answering_agentic_bubble_id(&state)
+        {
+            return handle_agentic_bubble_follow_up_key(node, key, state, bubble_id, key_event);
+        }
+        if key_event.modifiers.contains(KeyModifiers::SUPER) {
+            match key_event.code {
+                KeyCode::Enter => {
+                    let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+                    if committed {
+                        // Flush the committed text edit as its own undo step
+                        // before the next created node opens a fresh gesture.
+                        set_patcher_interaction_state(key, state.clone());
+                    }
+                    create_patcher_node_below_anchor(node, &mut state, &view_key);
+                    set_patcher_interaction_state(key, state);
+                    return Some(patcher_semantic_event(committed));
+                }
+                KeyCode::Up => {
+                    let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+                    if committed {
+                        set_patcher_interaction_state(key, state.clone());
+                    }
+                    let connected = connect_last_touched_nodes(node, &mut state, &view_key);
+                    if (committed || connected)
+                        && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
+                    {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    set_patcher_interaction_state(key, state);
+                    return Some(patcher_semantic_event(committed || connected));
+                }
+                _ => {}
+            }
+        }
         if state.text_edit.is_none() {
             return match key_event.code {
+                // Cmd+Z / Cmd+Shift+Z: graph-level undo/redo. The app-level
+                // sequencer history shortcut yields to a focused patcher
+                // (input.rs sequencer_history_shortcut), so the key arrives
+                // here. Cmd+C/V arrive with SUPER rewritten to CONTROL by
+                // normalize_command_shortcuts, hence the intersects checks.
+                KeyCode::Char('z') | KeyCode::Char('Z')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+                        && !key_event.modifiers.contains(KeyModifiers::ALT)
+                        && state.drag.is_none() =>
+                {
+                    let redo = key_event.modifiers.contains(KeyModifiers::SHIFT);
+                    if apply_patcher_history_step(key, &mut state, redo) {
+                        if let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                            debug_log_patch_lisp(&view_key, &patch);
+                        }
+                        set_patcher_interaction_state_without_history(key, state);
+                        Some(patcher_semantic_event(true))
+                    } else {
+                        None
+                    }
+                }
+                KeyCode::Char('c') | KeyCode::Char('C')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+                        && !state.selected_nodes.is_empty() =>
+                {
+                    if copy_selected_patcher_nodes(node, &state, &view_key) {
+                        Some(WidgetEvent::Custom(Value::Nil))
+                    } else {
+                        None
+                    }
+                }
+                // Cmd+E: encapsulate the selection into a new local defmacro.
+                KeyCode::Char('e') | KeyCode::Char('E')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+                        && !key_event.modifiers.contains(KeyModifiers::ALT)
+                        && !state.selected_nodes.is_empty()
+                        && state.drag.is_none() =>
+                {
+                    let changed = encapsulate_patcher_selection(node, &mut state, &view_key);
+                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    if changed {
+                        set_patcher_interaction_state(key, state);
+                    }
+                    Some(patcher_semantic_event(changed))
+                }
+                KeyCode::Char('v') | KeyCode::Char('V')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
+                {
+                    let changed = paste_patcher_clipboard(node, &mut state, &view_key);
+                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    set_patcher_interaction_state(key, state);
+                    Some(patcher_semantic_event(changed))
+                }
                 KeyCode::Char('y') | KeyCode::Char('Y')
                     if state.selected_cable.is_some()
                         && key_event.modifiers.contains(KeyModifiers::SUPER) =>
@@ -811,54 +1284,70 @@ impl WidgetDefinition for PatcherWidget {
                     }
                 }
                 KeyCode::Char('r') | KeyCode::Char('R')
-                    if state
-                        .agentic_bubbles
-                        .values()
-                        .any(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. })) =>
+                    if state.agentic_bubbles.values().any(|bubble| {
+                        !bubble.is_dismissed()
+                            && matches!(bubble.state, AgenticBubbleState::Error { .. })
+                    }) =>
                 {
                     let bubble_id = state
                         .agentic_bubbles
                         .values()
-                        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. }))
+                        .find(|bubble| {
+                            !bubble.is_dismissed()
+                                && matches!(bubble.state, AgenticBubbleState::Error { .. })
+                        })
                         .map(|bubble| bubble.id.clone())?;
-                    let payload = {
+                    let view_key = active_patcher_view_key(&state);
+                    let retried = {
                         let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
                         bubble.generation = bubble.generation.wrapping_add(1);
+                        // The context is rebuilt from the view the retry is
+                        // fired in, so the recorded view moves with it.
+                        bubble.view_key = view_key;
                         bubble.state = AgenticBubbleState::Pending {
                             started_at: Instant::now(),
                         };
-                        agentic_submit_payload(node, bubble)
+                        bubble.clone()
                     };
+                    let payload = agentic_submit_payload(node, &retried, &state);
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(payload))
                 }
-                KeyCode::Esc
-                    if state.agentic_bubbles.values().any(|bubble| {
-                        matches!(
-                            bubble.state,
-                            AgenticBubbleState::Error { .. } | AgenticBubbleState::Answer { .. }
-                        )
-                    }) =>
-                {
-                    if let Some(bubble_id) = state
-                        .agentic_bubbles
-                        .values()
-                        .find(|bubble| {
-                            matches!(
-                                bubble.state,
-                                AgenticBubbleState::Error { .. }
-                                    | AgenticBubbleState::Answer { .. }
-                            )
-                        })
-                        .map(|bubble| bubble.id.clone())
+                KeyCode::Esc if dismissable_agentic_bubble_id(&state).is_some() => {
+                    // Kept in the map so it can shrink out; `is_dismissed`
+                    // makes it invisible to everything else from here.
+                    if let Some(bubble_id) = dismissable_agentic_bubble_id(&state)
+                        && let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id)
                     {
-                        state.agentic_bubbles.remove(&bubble_id);
+                        bubble.closing_at = Some(Instant::now());
                     }
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 }
+                // Cmd+Shift+K: ask the agent to wire the selected node into the
+                // surrounding patch (docs/patcher-agentic-connect-spec.md §2).
+                // A distinct binding rather than intent-detection on the prompt
+                // text: a modifier key is unambiguous.
                 KeyCode::Char('k') | KeyCode::Char('K')
-                    if key_event.modifiers.contains(KeyModifiers::SUPER) =>
+                    if key_event.modifiers.contains(KeyModifiers::SUPER)
+                        && key_event.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    let (instance_node_id, subject, position) =
+                        selected_connect_target(node, &state)?;
+                    allocate_agentic_bubble_with_target(
+                        &mut state,
+                        position,
+                        AgenticBubbleTarget::ConnectNode {
+                            instance_node_id,
+                            subject,
+                        },
+                    );
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+                KeyCode::Char('k') | KeyCode::Char('K')
+                    if key_event.modifiers.contains(KeyModifiers::SUPER)
+                        && !key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                 {
                     open_agentic_bubble_for_context(node, key, &mut state)?;
                     set_patcher_interaction_state(key, state);
@@ -888,6 +1377,9 @@ impl WidgetDefinition for PatcherWidget {
                 }
                 KeyCode::Backspace | KeyCode::Delete if !state.selected_nodes.is_empty() => {
                     let changed = delete_selected_nodes(&mut state, &view_key);
+                    if changed {
+                        prune_unreferenced_created_macros(&mut state);
+                    }
                     if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                         debug_log_patch_lisp(&view_key, &patch);
                     }
@@ -899,21 +1391,7 @@ impl WidgetDefinition for PatcherWidget {
         }
         match key_event.code {
             KeyCode::Enter if state.text_edit.is_some() => {
-                let committed_node_id = state.text_edit.as_ref().map(|edit| edit.node_id.clone());
-                let changed = commit_patcher_text_edit(&mut state, &view_key);
-                let promoted_macro = committed_node_id.as_deref().is_some_and(|node_id| {
-                    load_patch_from_props(&node.props)
-                        .ok()
-                        .is_some_and(|(_, root_patch)| {
-                            promote_created_macro_definition(
-                                &root_patch,
-                                &mut state,
-                                &view_key,
-                                node_id,
-                            )
-                        })
-                });
-                let changed = changed || promoted_macro;
+                let changed = commit_active_patcher_text_edit(node, &mut state, &view_key);
                 if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
@@ -972,6 +1450,9 @@ impl WidgetDefinition for PatcherWidget {
                 if state.text_edit.is_none() && !state.selected_nodes.is_empty() =>
             {
                 let changed = delete_selected_nodes(&mut state, &view_key);
+                if changed {
+                    prune_unreferenced_created_macros(&mut state);
+                }
                 if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
@@ -1024,14 +1505,29 @@ impl WidgetDefinition for PatcherWidget {
 
     fn wants_animation_frames(&self, node: &LayoutNode) -> bool {
         let state = get_patcher_interaction_state(patcher_state_key(node));
-        state
-            .agentic_bubbles
-            .values()
-            .any(|bubble| matches!(bubble.state, AgenticBubbleState::Pending { .. }))
-            || state
-                .agentic_morph_nodes
-                .values()
-                .any(|started| started.elapsed().as_secs_f32() < 1.2)
+        state.agentic_bubbles.values().any(|bubble| {
+            // Shrinking out wins: a dismissed bubble animates regardless of the
+            // state it was dismissed from. It keeps asking for frames past the
+            // end of its own animation so the frame that draws it *gone* gets
+            // rendered — see `AGENTIC_ANIMATION_SETTLE_SECS`.
+            if bubble.is_dismissed() {
+                return !bubble.close_settled();
+            }
+            let state_animating = match bubble.state {
+                AgenticBubbleState::Pending { .. } => true,
+                AgenticBubbleState::Answer { answered_at, .. } => {
+                    answered_at.elapsed().as_secs_f32() < metrics::AGENTIC_ANSWER_RESIZE_SECS
+                }
+                _ => false,
+            };
+            state_animating
+                || bubble.created_at.elapsed().as_secs_f32() < metrics::AGENTIC_APPEAR_SECS
+        }) || state.agentic_morph_nodes.values().any(|morph| {
+            // Same settle window: the node's chrome only reaches its resting
+            // look on the frame after the morph stops returning one.
+            morph.started_at.elapsed().as_secs_f32()
+                < metrics::AGENTIC_MORPH_COLOR_SECS + metrics::AGENTIC_ANIMATION_SETTLE_SECS
+        })
     }
 
     fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
@@ -1053,6 +1549,39 @@ impl WidgetDefinition for PatcherWidget {
     }
 }
 
+/// Commit the active node text edit (if any) including created-macro
+/// promotion; returns whether the patch semantically changed.
+fn commit_active_patcher_text_edit(
+    node: &LayoutNode,
+    state: &mut state::PatcherInteractionState,
+    view_key: &str,
+) -> bool {
+    let Some((committed_node_id, previous_text)) = state
+        .text_edit
+        .as_ref()
+        .map(|edit| (edit.node_id.clone(), edit.original_text.clone()))
+    else {
+        return false;
+    };
+    let changed = commit_patcher_text_edit(state, view_key);
+    let promoted_macro = load_patch_from_props(&node.props)
+        .ok()
+        .is_some_and(|(_, root_patch)| {
+            promote_created_macro_definition(&root_patch, state, view_key, &committed_node_id)
+        });
+    // Retyping the header of a created macro's instance renames the macro
+    // (that is how an encapsulated `sub1` gets a real name) rather than
+    // leaving a call to an operator that does not exist.
+    let renamed_macro = encapsulate::rename_created_macro_from_instance_text(
+        node,
+        state,
+        view_key,
+        &committed_node_id,
+        &previous_text,
+    );
+    changed || promoted_macro || renamed_macro
+}
+
 fn handle_agentic_bubble_edit_key(
     node: &LayoutNode,
     key: u64,
@@ -1061,25 +1590,13 @@ fn handle_agentic_bubble_edit_key(
     key_event: WidgetKeyEvent,
 ) -> Option<WidgetEvent> {
     match key_event.code {
-        KeyCode::Enter => {
-            let payload = {
-                let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
-                let prompt = bubble.prompt.trim().to_string();
-                if prompt.is_empty() {
-                    return Some(WidgetEvent::Custom(Value::Nil));
-                }
-                bubble.generation = bubble.generation.wrapping_add(1);
-                bubble.macro_name = slug_agentic_macro_name(&prompt);
-                bubble.state = AgenticBubbleState::Pending {
-                    started_at: Instant::now(),
-                };
-                agentic_submit_payload(node, bubble)
-            };
-            set_patcher_interaction_state(key, state);
-            Some(WidgetEvent::Custom(payload))
-        }
+        KeyCode::Enter => submit_agentic_bubble_prompt(node, key, state, &bubble_id),
         KeyCode::Esc => {
-            state.agentic_bubbles.remove(&bubble_id);
+            // Kept in the map so it can shrink out; `is_dismissed` makes it
+            // invisible to everything else from here.
+            if let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id) {
+                bubble.closing_at = Some(Instant::now());
+            }
             set_patcher_interaction_state(key, state);
             Some(WidgetEvent::Custom(Value::Nil))
         }
@@ -1106,7 +1623,197 @@ fn handle_agentic_bubble_edit_key(
     }
 }
 
-fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> Value {
+/// Keys typed at a bubble that is showing an answer. Enter sends the typed
+/// follow-up as the next turn of the same conversation: the answered exchange
+/// is retired into `turns`, which is what gets replayed to the agent, and the
+/// bubble goes back to `Pending` in place.
+fn handle_agentic_bubble_follow_up_key(
+    node: &LayoutNode,
+    key: u64,
+    mut state: state::PatcherInteractionState,
+    bubble_id: String,
+    key_event: WidgetKeyEvent,
+) -> Option<WidgetEvent> {
+    match key_event.code {
+        KeyCode::Enter => submit_agentic_bubble_follow_up(node, key, state, &bubble_id),
+        KeyCode::Esc => {
+            if let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id) {
+                bubble.closing_at = Some(Instant::now());
+            }
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        _ => {
+            let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
+            match apply_text_entry_key(
+                &bubble.follow_up,
+                &mut bubble.follow_up_text_state,
+                key_event,
+                false,
+                None,
+            )? {
+                TextEditOutcome::Changed(new_text) => {
+                    bubble.follow_up = new_text;
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+                TextEditOutcome::StateOnly => {
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+            }
+        }
+    }
+}
+
+/// Send a bubble's typed prompt. Shared by Enter and by a click on the prompt
+/// box's send chevron, so the two cannot drift.
+fn submit_agentic_bubble_prompt(
+    node: &LayoutNode,
+    key: u64,
+    mut state: state::PatcherInteractionState,
+    bubble_id: &str,
+) -> Option<WidgetEvent> {
+    let view_key = active_patcher_view_key(&state);
+    let submitted = {
+        let bubble = state.agentic_bubbles.get_mut(bubble_id)?;
+        let prompt = bubble.prompt.trim().to_string();
+        if prompt.is_empty() {
+            return Some(WidgetEvent::Custom(Value::Nil));
+        }
+        bubble.generation = bubble.generation.wrapping_add(1);
+        bubble.view_key = view_key;
+        if !matches!(bubble.target, AgenticBubbleTarget::ConnectNode { .. }) {
+            bubble.macro_name = slug_agentic_macro_name(&prompt);
+        }
+        bubble.state = AgenticBubbleState::Pending {
+            started_at: Instant::now(),
+        };
+        bubble.clone()
+    };
+    let payload = agentic_submit_payload(node, &submitted, &state);
+    set_patcher_interaction_state(key, state);
+    Some(WidgetEvent::Custom(payload))
+}
+
+/// Send the follow-up typed under a settled answer as the next turn of the same
+/// conversation. Shared by Enter and by a click on the composer's chevron.
+fn submit_agentic_bubble_follow_up(
+    node: &LayoutNode,
+    key: u64,
+    mut state: state::PatcherInteractionState,
+    bubble_id: &str,
+) -> Option<WidgetEvent> {
+    let view_key = active_patcher_view_key(&state);
+    let submitted = {
+        let bubble = state.agentic_bubbles.get_mut(bubble_id)?;
+        let follow_up = bubble.follow_up.trim().to_string();
+        if follow_up.is_empty() {
+            return Some(WidgetEvent::Custom(Value::Nil));
+        }
+        let answered = match &bubble.state {
+            AgenticBubbleState::Answer { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        if let Some(answer) = answered {
+            bubble.turns.push(state::AgenticTurn {
+                prompt: bubble.prompt.clone(),
+                answer,
+            });
+        }
+        bubble.prompt = follow_up;
+        bubble.text_state = Default::default();
+        bubble.follow_up.clear();
+        bubble.follow_up_text_state = Default::default();
+        bubble.generation = bubble.generation.wrapping_add(1);
+        bubble.view_key = view_key;
+        bubble.state = AgenticBubbleState::Pending {
+            started_at: Instant::now(),
+        };
+        bubble.clone()
+    };
+    let payload = agentic_submit_payload(node, &submitted, &state);
+    set_patcher_interaction_state(key, state);
+    Some(WidgetEvent::Custom(payload))
+}
+
+/// A left-click that landed on a bubble control drawn in the last frame.
+/// Returns the event it raises, or `None` when the click was somewhere else and
+/// the patcher's own pointer handling should have it.
+fn handle_agentic_send_click(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> Option<WidgetEvent> {
+    let button = state::agentic_button_at(local_col, local_row)?;
+    let key = patcher_state_key(node);
+    let state = get_patcher_interaction_state(key);
+    // A bubble that has gone away, or moved on to another state, since the
+    // frame that drew the chevron.
+    let bubble = state.agentic_bubbles.get(&button.bubble_id)?;
+    if bubble.is_dismissed() {
+        return None;
+    }
+    match button.kind {
+        state::AgenticButtonKind::SendPrompt => {
+            if !matches!(bubble.state, AgenticBubbleState::Editing) {
+                return None;
+            }
+            submit_agentic_bubble_prompt(node, key, state, &button.bubble_id)
+        }
+        state::AgenticButtonKind::SendFollowUp => {
+            if !matches!(bubble.state, AgenticBubbleState::Answer { .. }) {
+                return None;
+            }
+            submit_agentic_bubble_follow_up(node, key, state, &button.bubble_id)
+        }
+        // The picker itself is the host's: the model is a process-global
+        // setting owned well above the patcher, so the widget only asks for it
+        // to be opened.
+        state::AgenticButtonKind::ChooseModel => Some(WidgetEvent::Custom(map_value(vec![(
+            "status",
+            Value::Keyword(AGENTIC_CHOOSE_MODEL_STATUS.to_string()),
+        )]))),
+    }
+}
+
+/// `:status` on the event a click on the model chip raises. The host's
+/// `on-change` branches on this to open `M-x choose-model`.
+pub const AGENTIC_CHOOSE_MODEL_STATUS: &str = "agentic-choose-model";
+
+/// The model agentic bubbles will run on, as the host passed it in. Purely a
+/// label: the patcher neither resolves nor validates it.
+fn patcher_agent_model_from_props(props: &HashMap<String, Value>) -> Option<String> {
+    match props.get("agent-model") {
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if !value.trim().is_empty() => {
+            Some(value.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The settled bubble Escape would dismiss: one showing an answer or an error.
+/// A bubble already shrinking out is not a candidate, so a second Escape falls
+/// through to the patcher's other Escape handling instead of restarting it.
+fn dismissable_agentic_bubble_id(state: &state::PatcherInteractionState) -> Option<String> {
+    state
+        .agentic_bubbles
+        .values()
+        .find(|bubble| {
+            !bubble.is_dismissed()
+                && matches!(
+                    bubble.state,
+                    AgenticBubbleState::Error { .. } | AgenticBubbleState::Answer { .. }
+                )
+        })
+        .map(|bubble| bubble.id.clone())
+}
+
+fn agentic_submit_payload(
+    node: &LayoutNode,
+    bubble: &state::AgenticBubble,
+    state: &state::PatcherInteractionState,
+) -> Value {
     let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
     let intent = match patcher_intent_from_props(&node.props) {
         PatcherIntent::Effect => "effect",
@@ -1123,6 +1830,25 @@ fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> V
         ("x", Value::Number(bubble.position.0 as f64)),
         ("y", Value::Number(bubble.position.1 as f64)),
     ];
+    // Prior turns, flattened to alternating prompt/answer strings so the host
+    // can rebuild the conversation without a nested-map decoder.
+    if !bubble.turns.is_empty() {
+        entries.push((
+            "history",
+            Value::List(
+                bubble
+                    .turns
+                    .iter()
+                    .flat_map(|turn| {
+                        [
+                            Rc::new(RefCell::new(Value::String(turn.prompt.clone()))),
+                            Rc::new(RefCell::new(Value::String(turn.answer.clone()))),
+                        ]
+                    })
+                    .collect(),
+            ),
+        ));
+    }
     match &bubble.target {
         AgenticBubbleTarget::CreateMacro => {
             entries.push(("target", Value::Keyword("create-macro".to_string())));
@@ -1139,8 +1865,37 @@ fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> V
             entries.push(("existing-macro-params", Value::String(params.join(" "))));
             entries.push(("existing-macro-source", Value::String(source.clone())));
         }
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id,
+            subject,
+        } => {
+            entries.push(("target", Value::Keyword("connect-node".to_string())));
+            entries.push(("target-node-id", Value::String(instance_node_id.clone())));
+            entries.push((
+                "connect-context",
+                Value::String(
+                    connect_context_for_node(node, state, instance_node_id, subject)
+                        .unwrap_or_default(),
+                ),
+            ));
+        }
     }
     map_value(entries)
+}
+
+/// The §5 context payload for a connect bubble, assembled fresh at submit so a
+/// retry sees the patch as it is now.
+fn connect_context_for_node(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+    instance_node_id: &str,
+    subject: &ConnectSubject,
+) -> Option<String> {
+    let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let view_key = active_patcher_view_key(state);
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, &view_key);
+    Some(connect::connect_context(&patch, instance_node_id, subject))
 }
 
 fn open_agentic_bubble_for_context(
@@ -1184,6 +1939,42 @@ fn open_agentic_bubble_for_context(
     }
 }
 
+/// The single selected node a connect bubble would wire up, its subject
+/// (spec §5.2) and where the bubble opens. `None` unless exactly one node is
+/// selected, which leaves Cmd+Shift+K unconsumed.
+fn selected_connect_target(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+) -> Option<(String, ConnectSubject, (f32, f32))> {
+    let (path, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let view_key = active_patcher_view_key(state);
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, &view_key);
+    let selected = patch
+        .nodes
+        .iter()
+        .filter(|patch_node| state.selected_nodes.contains(&patch_node.id))
+        .collect::<Vec<_>>();
+    let [patch_node] = selected.as_slice() else {
+        return None;
+    };
+    let subject = if patch_node.kind == NodeKind::MacroInstance {
+        let macro_name = patch_node.op.clone();
+        let params = resolve_macro_params(&root_patch, state, &macro_name);
+        let source = resolve_macro_source(&path, state, &macro_name).unwrap_or_default();
+        ConnectSubject::Macro {
+            name: macro_name,
+            params,
+            source,
+        }
+    } else {
+        ConnectSubject::Operator {
+            op: patch_node.op.clone(),
+        }
+    };
+    Some((patch_node.id.clone(), subject, patch_node.position))
+}
+
 enum SelectedMacroTarget {
     None,
     Ambiguous,
@@ -1203,7 +1994,6 @@ fn selected_macro_target(
     let Ok((path, root_patch)) = load_patch_from_props(&node.props) else {
         return SelectedMacroTarget::None;
     };
-    let source = std::fs::read_to_string(&path).ok();
     let view_key = active_patcher_view_key(state);
     let patch = active_patcher_patch(&root_patch, state);
     let patch = patch_with_interaction_state(patch, state, &view_key);
@@ -1223,24 +2013,8 @@ fn selected_macro_target(
         };
     };
     let macro_name = patch_node.op.clone();
-    let root_patch = state::patch_with_created_macros(root_patch, state);
-    let params = root_patch
-        .macros
-        .iter()
-        .find(|macro_patch| macro_patch.name == macro_name)
-        .map(|macro_patch| macro_patch.params.clone())
-        .unwrap_or_default();
-    let source = state
-        .edit_state
-        .created_macros
-        .get(&macro_name)
-        .and_then(|edit| edit.source.clone())
-        .or_else(|| {
-            source
-                .as_deref()
-                .and_then(|source| macro_source(source, &macro_name))
-        });
-    let Some(source) = source else {
+    let params = resolve_macro_params(&root_patch, state, &macro_name);
+    let Some(source) = resolve_macro_source(&path, state, &macro_name) else {
         return SelectedMacroTarget::None;
     };
     SelectedMacroTarget::Edit {
@@ -1250,6 +2024,71 @@ fn selected_macro_target(
         source,
         position: patch_node.position,
     }
+}
+
+/// A macro's `defmacro` source: session-created first, then this file, then the
+/// shared library.
+///
+/// The library fallback is what makes a library macro addressable at all. Its
+/// definition is imported rather than written here, so scanning this file's text
+/// misses it — and a miss reads as "no macro is selected", which silently
+/// downgrades Cmd+K on a library macro into the create-a-new-macro flow.
+fn resolve_macro_source(
+    path: &Path,
+    state: &state::PatcherInteractionState,
+    macro_name: &str,
+) -> Option<String> {
+    state
+        .edit_state
+        .created_macros
+        .get(macro_name)
+        .and_then(|edit| edit.source.clone())
+        .or_else(|| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|source| macro_source(&source, macro_name))
+        })
+        .or_else(|| library_macro_package(macro_name).map(|package| package.source.clone()))
+}
+
+/// Parameter names for a macro, falling back to the library for the same reason
+/// `resolve_macro_source` does.
+fn resolve_macro_params(
+    root_patch: &Patch,
+    state: &state::PatcherInteractionState,
+    macro_name: &str,
+) -> Vec<String> {
+    state::patch_with_created_macros(root_patch.clone(), state)
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == macro_name)
+        .map(|macro_patch| macro_patch.params.clone())
+        .or_else(|| library_macro_package(macro_name).map(|package| package.params.clone()))
+        .unwrap_or_default()
+}
+
+fn library_macro_package(macro_name: &str) -> Option<crate::defmacro_library::DefmacroPackage> {
+    let root = crate::defmacro_library::default_library_root()?;
+    let (_, library) = cached_defmacro_library(&root);
+    library.packages().get(macro_name).cloned()
+}
+
+/// Whether `macro_name` is defined in the shared library rather than in `path`.
+/// A library macro is shared by every patch that imports it, so it cannot be
+/// edited in place from here.
+fn macro_is_library_only(
+    path: &Path,
+    state: &state::PatcherInteractionState,
+    macro_name: &str,
+) -> bool {
+    if state.edit_state.created_macros.contains_key(macro_name) {
+        return false;
+    }
+    let defined_here = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|source| macro_source(&source, macro_name))
+        .is_some();
+    !defined_here && library_macro_package(macro_name).is_some()
 }
 
 fn macro_source(source: &str, macro_name: &str) -> Option<String> {
@@ -1414,6 +2253,37 @@ fn defmacro_library_fingerprint(root: &Path) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// Library macro entries for the macro sidebar:
+/// (name, params, outputs, summary, imports). `imports` are the package's own
+/// `use-defmacro` dependencies, so the sidebar can nest library call chains.
+pub type MacroLibrarySidebarEntry = (
+    String,
+    Vec<String>,
+    Vec<String>,
+    Option<String>,
+    Vec<String>,
+);
+
+pub fn macro_library_sidebar_entries() -> Vec<MacroLibrarySidebarEntry> {
+    let Some(root) = crate::defmacro_library::default_library_root() else {
+        return Vec::new();
+    };
+    let (_, library) = cached_defmacro_library(&root);
+    library
+        .packages()
+        .values()
+        .map(|package| {
+            (
+                package.name.clone(),
+                package.params.clone(),
+                package.outputs.clone(),
+                package.manifest.summary.clone(),
+                package.imports.clone(),
+            )
+        })
+        .collect()
 }
 
 fn cached_defmacro_library(root: &Path) -> (u64, Rc<DefmacroLibrary>) {
@@ -1587,6 +2457,7 @@ fn clear_persisted_macro_view_edits(
         state.hovered_node = None;
         state.hovered_input_port = None;
         state.hovered_output_port = None;
+        state.hovered_label_arg = None;
         state.text_edit = None;
         state.drag = None;
     }
@@ -1641,11 +2512,50 @@ pub fn apply_active_macro_library_action_for_path(
     let action = active_macro_library_action_for_path(path, source, intent)?
         .ok_or_else(|| "No active macro is selected in the patch editor".to_string())?;
     let library = default_defmacro_library_for_write()?;
-    let mut root_patch = parse_patch_source_with_library(source, intent, &library)?;
-    if let Some(layout) = layout {
-        sidecar::apply_layout_json(layout, "active patcher layout", &mut root_patch)?;
-    }
     let state = active_interaction_state_for_path(path, &action.macro_name).unwrap_or_default();
+    apply_macro_library_action_for_emitted_source(
+        path, source, layout, intent, &library, &action, &state,
+    )
+}
+
+/// Run a macro-library action against the patcher's *emitted* revision.
+///
+/// `source` is what the patcher handed the editor as its last valid revision:
+/// a full regeneration of the model with every pending interaction edit
+/// already baked in (see `patcher_writeback_payload`). Replaying the edit
+/// writeback on top of it would apply the same created nodes, connections and
+/// macro instances a second time and duplicate that whole subgraph in the root
+/// patch, so the action reprojects the emitted source with an edit-free state
+/// and only carries the layout forward.
+fn apply_macro_library_action_for_emitted_source(
+    path: &Path,
+    source: &str,
+    layout: Option<&str>,
+    intent: PatcherIntent,
+    library: &DefmacroLibrary,
+    action: &ActiveMacroLibraryAction,
+    state: &state::PatcherInteractionState,
+) -> Result<MacroLibraryActionResult, String> {
+    // Prefer the layout's graph payload over parsing the emitted source: the
+    // payload is the model the patcher actually holds, while a reparse loses
+    // every distinction the generated lisp cannot express (spec §4.1b) — most
+    // visibly, each inline literal comes back as a standalone constant node
+    // with no saved position, so the patch appears to re-lay-itself-out the
+    // moment a macro is saved to the library.
+    let mut root_patch = match layout.and_then(sidecar::patch_from_layout_json) {
+        Some(mut patch) => {
+            lisp::resolve_library_macros(&mut patch, library, intent);
+            lisp::resolve_node_operators(&mut patch);
+            patch
+        }
+        None => {
+            let mut patch = parse_patch_source_with_library(source, intent, library)?;
+            if let Some(layout) = layout {
+                sidecar::apply_layout_json(layout, "active patcher layout", &mut patch)?;
+            }
+            patch
+        }
+    };
     let props = HashMap::from([
         (
             "path".to_string(),
@@ -1663,51 +2573,49 @@ pub fn apply_active_macro_library_action_for_path(
             Value::String(library.root().to_string_lossy().into_owned()),
         ),
     ]);
-    let writeback_state = match action.kind {
-        MacroLibraryActionKind::SaveToLibrary => state.clone(),
-        MacroLibraryActionKind::Fork => {
-            interaction_state_without_library_macro_views(&state, &root_patch)
+    // Edit-free: the pending edits are already part of `source`. Only the
+    // active macro view survives, so layout reprojection still scopes to it.
+    let projection_state = state::PatcherInteractionState {
+        active_macro: state.active_macro.clone(),
+        ..state::PatcherInteractionState::default()
+    };
+    let generated_node_ids = std::collections::HashMap::new();
+    let emitted_layout = match layout {
+        Some(layout) => layout.to_string(),
+        None => {
+            let emitted_layout = writeback_layout_for_source(
+                source,
+                intent,
+                &props,
+                &root_patch,
+                &projection_state,
+                &generated_node_ids,
+            )?;
+            sidecar::apply_layout_json(
+                &emitted_layout,
+                "active patcher emitted layout",
+                &mut root_patch,
+            )?;
+            emitted_layout
         }
     };
-    let writeback_result = writeback::emit_patch_writeback_result_with_library(
-        source,
-        intent,
-        &writeback_state,
-        &library,
-    )
-    .map_err(|error| format!("{error:?}"))?;
-    let emitted_layout = writeback_layout_for_source(
-        &writeback_result.source,
-        intent,
-        &props,
-        &root_patch,
-        &writeback_state,
-        &writeback_result.generated_node_ids,
-    )?;
-    let mut emitted_root_patch =
-        parse_patch_source_with_library(&writeback_result.source, intent, &library)?;
-    sidecar::apply_layout_json(
-        &emitted_layout,
-        "active patcher emitted layout",
-        &mut emitted_root_patch,
-    )?;
     let state_action = state::PatcherMacroLibraryAction {
         kind: state_macro_library_action_kind(action.kind),
         macro_name: action.macro_name.clone(),
     };
     let (source, layout) = apply_macro_library_action(
-        writeback_result.source,
+        source.to_string(),
         emitted_layout,
         &state_action,
-        &emitted_root_patch,
+        &root_patch,
         intent,
         &props,
-        &library,
-        &writeback_state,
-        &writeback_result.generated_node_ids,
+        library,
+        &projection_state,
+        &generated_node_ids,
     )?;
     Ok(MacroLibraryActionResult {
-        macro_name: action.macro_name,
+        macro_name: action.macro_name.clone(),
         kind: action.kind,
         source,
         layout,
@@ -2092,6 +3000,52 @@ fn apply_macro_library_action(
     }
 }
 
+/// Prefix `macro_source` with a `(use-defmacro …)` line for every library
+/// package it calls, so a saved package carries its own dependencies. Already
+/// present imports are kept as-is and the macro's own name is never imported.
+fn with_library_imports(macro_source: &str, macro_name: &str, library: &DefmacroLibrary) -> String {
+    let Ok(tokens) = Parser::new(macro_source.to_string()).parse() else {
+        return macro_source.to_string();
+    };
+    let Ok(exprs) = ASTParser::new(tokens).parse() else {
+        return macro_source.to_string();
+    };
+    let mut declared = exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            Expression::List(items) if lisp::symbol_at(items, 0) == Some("use-defmacro") => {
+                lisp::symbol_at(items, 1).map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    declared.insert(macro_name.to_string());
+
+    let mut missing = std::collections::BTreeSet::new();
+    let mut stack = exprs.iter().collect::<Vec<_>>();
+    while let Some(expr) = stack.pop() {
+        let (Expression::List(items) | Expression::QuoteList(items)) = expr else {
+            continue;
+        };
+        if let Some(op) = lisp::symbol_at(items, 0)
+            && !declared.contains(op)
+            && library.packages().contains_key(op)
+        {
+            missing.insert(op.to_string());
+        }
+        stack.extend(items.iter());
+    }
+    if missing.is_empty() {
+        return macro_source.to_string();
+    }
+    let imports = missing
+        .iter()
+        .map(|name| format!("(use-defmacro {name})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{imports}\n{macro_source}")
+}
+
 fn save_local_macro_to_library(
     source: String,
     layout: String,
@@ -2135,6 +3089,11 @@ fn save_local_macro_to_library(
     }
     let macro_source = writeback::extract_macro_source(&source, macro_name)
         .map_err(|error| format!("{error:?}"))?;
+    // The extracted form is the `defmacro` alone. Any library macro it calls
+    // must be re-declared as the package's own `use-defmacro` dependency, or
+    // materializing the package into another patch resolves the call against
+    // nothing and the compiler reports "Unknown operator".
+    let macro_source = with_library_imports(&macro_source, macro_name, library);
     let package = DefmacroPackage::from_source(&package_dir, macro_name, &macro_source)
         .map_err(|error| error.to_string())?;
     let package_layout = layout_json_for_single_macro_scope(&layout, macro_name)?;
@@ -2258,6 +3217,18 @@ fn remove_macro_scope_from_layout_json(layout: &str, macro_name: &str) -> Result
     {
         macros.remove(macro_name);
     }
+    // The graph payload must drop the local definition too, or reloading finds
+    // a `Local` macro whose `defmacro` is no longer in the source and the
+    // generator re-emits it — silently undoing the save. Removing it lets
+    // `resolve_library_macros` reattach the freshly written package with the
+    // right `Library` origin on the next load.
+    if let Some(macros) = value
+        .get_mut("graph")
+        .and_then(|graph| graph.get_mut("macros"))
+        .and_then(|macros| macros.as_array_mut())
+    {
+        macros.retain(|entry| entry.get("name").and_then(|name| name.as_str()) != Some(macro_name));
+    }
     serde_json::to_string_pretty(&value)
         .map(|json| format!("{json}\n"))
         .map_err(|error| format!("failed to serialize root layout: {error}"))
@@ -2327,21 +3298,6 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
             ),
         ]);
     };
-    let path_buf = PathBuf::from(&path_str);
-    let source = match std::fs::read_to_string(&path_buf) {
-        Ok(source) => source,
-        Err(error) => {
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(format!("failed to read '{}': {error}", path_buf.display())),
-                ),
-            ]);
-        }
-    };
-
     let root_patch = match load_patch_from_props(&node.props) {
         Ok((_, patch)) => patch,
         Err(error) => {
@@ -2368,107 +3324,121 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     } else {
         state.clone()
     };
-    let writeback_result = if let Some(library) = library.as_ref() {
-        writeback::emit_patch_writeback_result_with_library(&source, intent, &root_state, library)
-    } else {
-        emit_patch_writeback_result(&source, intent, &root_state)
+    // Full deterministic regeneration from the in-memory model
+    // (docs/patch-vs-code-editor-spec.md §4): no surgical source rewriting,
+    // no source-position reasoning.
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &root_state);
+    let generated = match generate::generate_patch_source(&visible, intent) {
+        Ok(generated) => generated,
+        Err(error) => {
+            debug_log_edit_event("generate-payload-invalid-state", &state);
+            debug_log_writeback_event(
+                "payload-invalid",
+                format!("path={path_str}\nintent={intent:?}\nerror={error}"),
+            );
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                ("diagnostic", Value::String(error)),
+            ]);
+        }
     };
-
-    match writeback_result {
-        Ok(result) => {
-            let source = result.source;
-            let layout = match writeback_layout_for_source(
-                &source,
-                intent,
-                &node.props,
-                &root_patch,
-                &root_state,
-                &result.generated_node_ids,
-            ) {
-                Ok(layout) => layout,
+    let source = generated.source;
+    let mut emitted_patch = match parse_patch_source_for_props(&source, intent, &node.props) {
+        Ok(patch) => patch,
+        Err(error) => {
+            eprintln!(
+                "[patcher generate invalid]\npath={path_str}\nintent={intent:?}\nstage=parse-generated-source\nerror={error}\ngenerated-source:\n{source}\n[/patcher generate invalid]"
+            );
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("generated source failed to parse: {error}")),
+                ),
+            ]);
+        }
+    };
+    if !patch_is_fully_projectable(&emitted_patch) {
+        eprintln!(
+            "[patcher generate invalid]\npath={path_str}\nintent={intent:?}\nstage=projectability\ndiagnostics={:?}\ngenerated-source:\n{source}\n[/patcher generate invalid]",
+            emitted_patch.diagnostics
+        );
+        return map_value(vec![
+            ("status", Value::Keyword("invalid".to_string())),
+            ("path", Value::String(path_str)),
+            (
+                "diagnostic",
+                Value::String(format!(
+                    "generated source is not fully projectable: {}",
+                    emitted_patch.diagnostics.join("; ")
+                )),
+            ),
+        ]);
+    }
+    let layout = match sidecar::emitted_layout_json_with_node_map(
+        &mut emitted_patch,
+        &root_patch,
+        &root_state,
+        &generated.renamed_node_ids,
+    ) {
+        Ok(layout) => layout,
+        Err(error) => {
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("failed to build emitted patcher layout: {error}")),
+                ),
+            ]);
+        }
+    };
+    debug_log_writeback_event(
+        "payload-valid",
+        format!("path={path_str}\nintent={intent:?}\nsource:\n{source}"),
+    );
+    let compile_source = if let Some(library) = library.as_ref() {
+        let staged_library =
+            match library_with_staged_macro_edits(&root_patch, intent, &state, library) {
+                Ok(library) => library,
                 Err(error) => {
-                    eprintln!(
-                        "[patcher writeback invalid]\npath={path_str}\nintent={intent:?}\nstage=parse-emitted-layout-source\nerror={error}\nemitted-source:\n{}\n[/patcher writeback invalid]",
-                        source
-                    );
                     return map_value(vec![
                         ("status", Value::Keyword("invalid".to_string())),
                         ("path", Value::String(path_str)),
                         (
                             "diagnostic",
-                            Value::String(format!(
-                                "failed to build emitted patcher layout: {error}"
-                            )),
+                            Value::String(format!("failed to stage library macro edits: {error}")),
                         ),
                     ]);
                 }
             };
-            debug_log_writeback_event(
-                "payload-valid",
-                format!("path={path_str}\nintent={intent:?}\nsource:\n{}", source),
-            );
-            let compile_source = if let Some(library) = library.as_ref() {
-                let staged_library =
-                    match library_with_staged_macro_edits(&root_patch, intent, &state, library) {
-                        Ok(library) => library,
-                        Err(error) => {
-                            return map_value(vec![
-                                ("status", Value::Keyword("invalid".to_string())),
-                                ("path", Value::String(path_str)),
-                                (
-                                    "diagnostic",
-                                    Value::String(format!(
-                                        "failed to stage library macro edits: {error}"
-                                    )),
-                                ),
-                            ]);
-                        }
-                    };
-                match staged_library.materialize_source(&source) {
-                    Ok(materialized) => materialized.source,
-                    Err(error) => {
-                        return map_value(vec![
-                            ("status", Value::Keyword("invalid".to_string())),
-                            ("path", Value::String(path_str)),
-                            (
-                                "diagnostic",
-                                Value::String(format!(
-                                    "failed to materialize staged defmacro imports: {error}"
-                                )),
-                            ),
-                        ]);
-                    }
-                }
-            } else {
-                source.clone()
-            };
-            let entries = vec![
-                ("status", Value::Keyword("valid".to_string())),
-                ("path", Value::String(path_str)),
-                ("source", Value::String(source)),
-                ("compile-source", Value::String(compile_source)),
-                ("layout", Value::String(layout)),
-            ];
-            map_value(entries)
+        match staged_library.materialize_source(&source) {
+            Ok(materialized) => materialized.source,
+            Err(error) => {
+                return map_value(vec![
+                    ("status", Value::Keyword("invalid".to_string())),
+                    ("path", Value::String(path_str)),
+                    (
+                        "diagnostic",
+                        Value::String(format!(
+                            "failed to materialize staged defmacro imports: {error}"
+                        )),
+                    ),
+                ]);
+            }
         }
-        Err(error) => {
-            eprintln!(
-                "[patcher writeback invalid]\npath={path_str}\nintent={intent:?}\nstage=emit-writeback\nerror={error:?}\nno emitted source was produced; writeback failed before source generation completed\npre-edit-source:\n{source}\ninteraction-state:\n{state:#?}\n[/patcher writeback invalid]"
-            );
-            debug_log_edit_event("writeback-payload-invalid-state", &state);
-            debug_log_writeback_event(
-                "payload-invalid",
-                format!(
-                    "path={path_str}\nintent={intent:?}\nerror={error:?}\npre-edit-source:\n{source}"
-                ),
-            );
-            map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                ("diagnostic", Value::String(format!("{error:?}"))),
-            ])
-        }
-    }
+    } else {
+        source.clone()
+    };
+    map_value(vec![
+        ("status", Value::Keyword("valid".to_string())),
+        ("path", Value::String(path_str)),
+        ("source", Value::String(source)),
+        ("compile-source", Value::String(compile_source)),
+        ("layout", Value::String(layout)),
+    ])
 }
 
 fn patcher_intent_from_props(props: &HashMap<String, Value>) -> PatcherIntent {
@@ -2587,8 +3557,8 @@ fn toggle_selected_cable_segmented(
             &input_slot_counts,
             &output_counts,
         ) {
-            let origin = geometry::patcher_origin(node.rect, &pan_state);
-            segment.segment_row = ((start.1 + end.1) * 0.5) - origin.1;
+            let midpoint = ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5);
+            segment.segment_row = geometry::screen_to_model(node.rect, &pan_state, midpoint).1;
         }
     }
     set_connection_segment_edit(state, view_key, &connection, Some(segment));
@@ -2648,10 +3618,26 @@ pub(super) fn load_patch_from_props(
     if let Some(patch) = cached {
         return Ok((path, patch));
     }
-    let source = std::fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let mut patch = parse_patch_source_for_props(&source, intent, props)?;
-    sidecar::apply_or_materialize(&path, &mut patch)?;
+    // The graph payload is authoritative for patch-authored items (spec
+    // §4.1b): distinct models print to identical lisp, so reconstructing the
+    // graph by parsing is a guess. Everything else — agent-authored code,
+    // ejected items, pre-v3 sidecars — still opens by projecting the source.
+    let patch = match sidecar::load_authored_patch(&path) {
+        Some(mut patch) => {
+            if let Some(library) = defmacro_library_for_props(props) {
+                lisp::resolve_library_macros(&mut patch, &library, intent);
+            }
+            lisp::resolve_node_operators(&mut patch);
+            patch
+        }
+        None => {
+            let source = std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+            let mut patch = parse_patch_source_for_props(&source, intent, props)?;
+            sidecar::apply_or_materialize(&path, &mut patch)?;
+            patch
+        }
+    };
     // apply_or_materialize may have just written the sidecar; stamp after it ran.
     let sidecar_mtime = file_mtime(&sidecar::sidecar_path_for_source(&path));
     PATCH_LOAD_CACHE.with(|cache| {
@@ -2676,6 +3662,24 @@ pub(in crate::widget_render::patcher) fn persist_patcher_layout(
     sidecar::save_current_layout(&path, &root_patch, state)
 }
 
+/// Measure every string a bubble might render, so the render pass can wrap them
+/// (it can only wrap text whose glyph widths are already cached on this thread).
+fn cache_agentic_bubble_text_widths(bubble: &state::AgenticBubble, ctx: &MeasureCtx<'_>) {
+    cache_text_widths(bubble.body_text(), 13.0, ctx);
+    // The prompt is measured even once an answer has replaced it: the answer's
+    // arrival eases the box out of the prompt's layout, so that layout has to
+    // stay wrappable for the length of the transition.
+    cache_text_widths(bubble.prompt_text(), 13.0, ctx);
+    if matches!(bubble.state, state::AgenticBubbleState::Editing) {
+        cache_text_widths(bubble.prompt.clone(), 13.0, ctx);
+    }
+    // The follow-up box only exists under a settled answer, but its strings are
+    // measured unconditionally so the box is wrappable on the very first frame
+    // the answer lands on.
+    cache_text_widths(bubble.follow_up_text(), 13.0, ctx);
+    cache_text_widths(bubble.follow_up.clone(), 13.0, ctx);
+}
+
 fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     if ctx.text_measurer.is_none() {
         return;
@@ -2692,7 +3696,8 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     let patch = active_patcher_patch(&root_patch, &interaction_state);
     let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
     for patch_node in &patch.nodes {
-        cache_char_widths(node_display_label(patch_node), NODE_FONT_SIZE, ctx);
+        let font_size = display::node_font_size(patch_node);
+        cache_text_widths(node_display_label(patch_node), font_size, ctx);
     }
     if let Some(tooltip) = interaction_state
         .hovered_input_port
@@ -2704,14 +3709,22 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
                 .as_ref()
                 .and_then(|port| render::output_port_tooltip(&patch, port))
         })
+        .or_else(|| {
+            interaction_state
+                .hovered_label_arg
+                .as_ref()
+                .and_then(|arg| render::input_port_tooltip(&patch, arg))
+        })
     {
-        cache_char_widths(preview(&tooltip, 48), 10.5, ctx);
+        cache_text_widths(preview(&tooltip, 48), 10.5, ctx);
     }
     if let Some(edit) = interaction_state.text_edit {
-        cache_char_widths(edit.text, NODE_FONT_SIZE, ctx);
+        if let Some(edit_node) = patch.nodes.iter().find(|node| node.id == edit.node_id) {
+            cache_text_widths(edit.text, display::node_font_size(edit_node), ctx);
+        }
     }
     for bubble in interaction_state.agentic_bubbles.values() {
-        cache_char_widths(bubble.prompt.clone(), 13.0, ctx);
+        cache_agentic_bubble_text_widths(bubble, ctx);
     }
 }
 

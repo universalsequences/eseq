@@ -738,7 +738,7 @@
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
       :border-width 2
-      :corner-radius 10
+      :corner-radius 16
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :muted-border-color :mixer-strip-border
@@ -995,7 +995,7 @@
       :width 10.3 :height 13.8
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
-      :corner-radius 10
+      :corner-radius 16
       :border-color (mixer-v2-strip-border selected)
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
@@ -1198,7 +1198,7 @@
       (c (mixer-v2-group-color gidx))
       (selected (mixer-v2-group-selected? gidx)))
     (box
-      :corner-radius 12
+      :corner-radius 16
       :padding 0.2
       :background-color (rgba (nth c 0) (nth c 1) (nth c 2) (if selected 1.0 0.78))
       :border-width (if selected 4 2)
@@ -1240,7 +1240,7 @@
     :border-width 2
     :border-color :mixer-strip-border
     :drop-hover-border-color :mixer-strip-selected-border
-    :corner-radius 10
+    :corner-radius 16
     :padding 0.5
     :align :center
     :drop-types (list "sample" "instrument" "sound" "track-badge")
@@ -1250,6 +1250,74 @@
       :font-size 9.5
       :color :gray
       :bg :transparent)))
+
+;; ── Patch-editor mixer slot ──
+;; One compact channel strip for the current track: volume/meter,
+;; mute/solo/arm, and the name badge. No clip grid, output routing,
+;; sends, or mod ports — those stay in the full *mixer* buffer.
+(def patch-mixer-strip (i)
+  (box :width 10.0 :height 10.7
+    :selected (mixer-v2-track-selected-binding i)
+    :muted (bind-seq-nth "track-muted-effective" i)
+    :background-color :mixer-strip-bg
+    :selected-background-color :mixer-strip-selected-bg
+    :muted-background-color :mixer-strip-muted-bg
+    :border-width 2
+    :corner-radius 16
+    :border-color :mixer-strip-border
+    :selected-border-color :mixer-strip-selected-border
+    :muted-border-color :mixer-strip-border
+    :padding 0.45
+    (v-stack :gap 0.35 :align :right
+      ;; poly/voices — the same track params the *track* buffer's parameter
+      ;; panel edits, surfaced here so a patch can be auditioned in mono
+      ;; without leaving the patch editor.
+      (subtree :key (str "patch-mixer-strip-poly-" i)
+        (box :width :fill :height 3
+          (h-stack :gap 0.7 :align :center
+            (v-stack :align :center :gap 0.34
+              (label "poly" :font-size 8 :color :dim :bg :transparent)
+              (button (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
+                :background-color (if SEQ.tp-poly (rgba 0.95 0.48 0.18 1.0) '(rgba 0.1 0.1 0.1 1))
+                :border-color :white
+                :font-size 11
+                :color (if SEQ.tp-poly :black :white)
+                ;; Rack tracks: playback polyphony is per-slot
+                ;; (RackSlotSnapshot::max_polyphony), never the track-level
+                ;; param — route there or this silently edits a dead value.
+                :on-click |x y r| (do (cool-off-follow)
+                  (if SEQ.tp-is-rack
+                    (host-command "set-rack-slot-max-polyphony"
+                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+                    (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))))
+            (v-stack :align :center :gap 0.5
+              (label "voices" :font-size 8 :color :dim :bg :transparent)
+              (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+                :noui false :font-size 8 :text-color :white
+                :background-color :mixer-strip-bg
+                :border-color :dim
+                :on-change (lambda (v) (do (cool-off-follow)
+                    (if SEQ.tp-is-rack
+                      (host-command "set-rack-slot-max-polyphony"
+                        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                      (seq-set-track-param :voices v))))
+                :width 3.4 :height 1.15)))))
+      (h-stack
+        (box :width 3.5)
+        (mixer-v2-track-meter-control i)
+        )
+      (subtree :key (str "patch-mixer-strip-buttons-" i)
+        (h-stack
+          (mixer-v2-strip-buttons i)
+          )
+        )
+      (subtree :key (str "patch-mixer-strip-label-" i)
+        (mixer-v2-strip-label i)))))
+
+(effect-buffer "*patch-mixer*"
+  (box :padding 0.2
+    (subtree :key (str "patch-mixer-track-" SEQ.current-track)
+      (patch-mixer-strip SEQ.current-track))))
 
 (effect-buffer "*mixer*"
   (h-stack :padding 0.2 :gap 0.3

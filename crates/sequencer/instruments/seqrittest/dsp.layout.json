@@ -1,0 +1,253 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "accum-2": {
+        "x": 185.29715,
+        "y": 19.761429
+      },
+      "add": {
+        "x": 147.07928,
+        "y": 45.69286
+      },
+      "add-2": {
+        "x": 110.40754,
+        "y": 41.01481
+      },
+      "add-3": {
+        "x": 100.92216,
+        "y": 36.907494
+      },
+      "audio": {
+        "x": 145.8724,
+        "y": 55.81157
+      },
+      "biquad-2": {
+        "x": 166.38695,
+        "y": 51.033913
+      },
+      "clock": {
+        "x": 182.31639,
+        "y": 8.0
+      },
+      "cos-2": {
+        "x": 100.92216,
+        "y": 39.906532
+      },
+      "cos-3": {
+        "x": 120.05309,
+        "y": 33.447342
+      },
+      "delay-2": {
+        "x": 147.07928,
+        "y": 50.239
+      },
+      "div": {
+        "x": 215.83092,
+        "y": 15.905906
+      },
+      "gate": {
+        "x": 140.61992,
+        "y": 8.0
+      },
+      "gswitch-2": {
+        "x": 215.17123,
+        "y": 32.35975
+      },
+      "history": {
+        "x": 157.88539,
+        "y": 45.034492
+      },
+      "log-2": {
+        "x": 206.78802,
+        "y": 13.790172
+      },
+      "log-3": {
+        "x": 216.27957,
+        "y": 12.762439
+      },
+      "lt-2": {
+        "x": 222.93092,
+        "y": 25.48223
+      },
+      "max-2": {
+        "x": 202.29701,
+        "y": 10.774351
+      },
+      "mul": {
+        "x": 162.98656,
+        "y": 13.836889
+      },
+      "mul-2": {
+        "x": 193.66277,
+        "y": 22.471945
+      },
+      "mul-3": {
+        "x": 159.83061,
+        "y": 47.9378
+      },
+      "mul-4": {
+        "x": 99.37801,
+        "y": 34.31813
+      },
+      "mul-5": {
+        "x": 122.65079,
+        "y": 31.173977
+      },
+      "mul-6": {
+        "x": 214.918,
+        "y": 20.644844
+      },
+      "mul-7": {
+        "x": 129.45534,
+        "y": 35.32749
+      },
+      "phasor-2": {
+        "x": 110.40754,
+        "y": 28.900023
+      },
+      "phasor-3": {
+        "x": 126.34767,
+        "y": 24.547516
+      },
+      "pitch": {
+        "x": 97.205666,
+        "y": 8.0
+      },
+      "pitch-transpose-2": {
+        "x": 183.05887,
+        "y": 26.51091
+      },
+      "pitch-transpose-3": {
+        "x": 102.26719,
+        "y": 26.623863
+      },
+      "pow-2": {
+        "x": 143.10216,
+        "y": 28.203863
+      },
+      "ramp2trig-2": {
+        "x": 170.08656,
+        "y": 19.446163
+      },
+      "ramp2trig-3": {
+        "x": 184.39792,
+        "y": 14.204442
+      },
+      "scale-2": {
+        "x": 173.46251,
+        "y": 33.08695
+      },
+      "scale-3": {
+        "x": 126.34767,
+        "y": 19.525255
+      },
+      "schroeder-allpass-2": {
+        "x": 136.55534,
+        "y": 35.32749
+      },
+      "schroeder-allpass-3": {
+        "x": 136.8081,
+        "y": 38.619614
+      },
+      "schroeder-allpass-4": {
+        "x": 136.8081,
+        "y": 41.799614
+      },
+      "triangle-2": {
+        "x": 162.65428,
+        "y": 23.824932
+      },
+      "triangle-3": {
+        "x": 99.120094,
+        "y": 31.456713
+      },
+      "triangle-4": {
+        "x": 133.05515,
+        "y": 13.836889
+      },
+      "triangle-5": {
+        "x": 126.34767,
+        "y": 27.513256
+      },
+      "trigger": {
+        "x": 160.3998,
+        "y": 8.0
+      },
+      "value": {
+        "x": 189.38133,
+        "y": 16.871012
+      },
+      "value-2": {
+        "x": 216.27957,
+        "y": 9.582438
+      },
+      "velocity": {
+        "x": 117.7209,
+        "y": 8.0
+      },
+      "wrap-2": {
+        "x": 163.54005,
+        "y": 17.10523
+      }
+    },
+    "cables": {},
+    "inputPresentation": {
+      "accum-2:0": "cable",
+      "accum-2:1": "cable",
+      "add-2:0": "cable",
+      "add-2:1": "cable",
+      "add-3:0": "cable",
+      "add-3:1": "cable",
+      "add:0": "cable",
+      "add:1": "cable",
+      "audio:0": "cable",
+      "biquad-2:0": "cable",
+      "cos-2:0": "cable",
+      "cos-3:0": "cable",
+      "delay-2:0": "cable",
+      "div:0": "cable",
+      "div:1": "cable",
+      "gswitch-2:0": "cable",
+      "history:0": "cable",
+      "log-2:0": "cable",
+      "log-3:0": "cable",
+      "lt-2:0": "cable",
+      "max-2:0": "cable",
+      "mul-2:0": "cable",
+      "mul-3:0": "cable",
+      "mul-4:0": "cable",
+      "mul-5:0": "cable",
+      "mul-6:0": "cable",
+      "mul-7:0": "cable",
+      "mul-7:1": "cable",
+      "mul:0": "cable",
+      "mul:1": "cable",
+      "phasor-2:0": "cable",
+      "phasor-2:1": "cable",
+      "phasor-3:0": "cable",
+      "pitch-transpose-2:0": "cable",
+      "pitch-transpose-2:1": "cable",
+      "pitch-transpose-3:0": "cable",
+      "pow-2:0": "cable",
+      "ramp2trig-2:0": "cable",
+      "ramp2trig-3:0": "cable",
+      "scale-2:0": "cable",
+      "scale-3:0": "cable",
+      "schroeder-allpass-2:0": "cable",
+      "schroeder-allpass-2:1": "cable",
+      "schroeder-allpass-3:0": "cable",
+      "schroeder-allpass-3:1": "cable",
+      "schroeder-allpass-4:0": "cable",
+      "schroeder-allpass-4:1": "cable",
+      "triangle-2:0": "cable",
+      "triangle-3:0": "cable",
+      "triangle-4:0": "cable",
+      "triangle-5:0": "cable",
+      "triangle-5:1": "cable",
+      "wrap-2:0": "cable"
+    }
+  },
+  "macros": {}
+}

@@ -11506,6 +11506,30 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn compile_instrument_hoists_macro_body_mod_params() {
+        // A `@mod true` param declared inside a defmacro body with a `(mod ...)`
+        // reference: DGenLisp's validator only sees top-level params, so the
+        // compile pipeline hoists it (hoist_defmacro_params).
+        let source = r#"
+            (def gate (in 1 @name gate))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (defmacro reverb123 (input)
+              (param xyz @min 0.3 @max 8 @mod true @mod-mode additive)
+              (def m (mod xyz))
+              (* input m))
+            (out (reverb123 gate) 1)
+        "#;
+
+        let json = compile_instrument(source, 44_100)
+            .expect("param+mod inside a macro body should compile via the hoist");
+        let manifest = parse_manifest(&json).expect("manifest parses");
+        assert!(
+            manifest.params.iter().any(|param| param.name == "xyz"),
+            "hoisted macro param should appear in the manifest"
+        );
+    }
+
+    #[test]
     fn patcher_writeback_for_real_instrument_compiles() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("instruments/bass/bad-subbass1/dsp.lisp");
@@ -11577,9 +11601,35 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("patcher writeback should insert created phasor multiply chain");
 
+        // Interaction-created ids never persist as bindings; the chain is
+        // emitted under deterministic op-derived names.
         assert!(
-            emitted.contains("5.0") && emitted.contains("(phasor ") && emitted.contains("(* "),
+            emitted.contains("(phasor ") && emitted.contains("(* "),
             "emitted source should contain the inserted phasor multiply chain:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("(def created-"),
+            "interaction-created ids must not leak into generated source:\n{emitted}"
+        );
+        // The frequency the interaction typed has to reach the emission. It
+        // lands as its own value binding (`(def value 5)`), so match on the
+        // binding rather than a bare "5.0" literal — but still require the
+        // created phasor to read *that* binding, or an emission of
+        // `(phasor 0)` would slip through.
+        let frequency_bindings = emitted
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("(def ")?;
+                let (name, value) = rest.split_once(' ')?;
+                (value.trim_end_matches(')').trim() == "5").then(|| name.to_string())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            frequency_bindings
+                .iter()
+                .any(|name| emitted.contains(&format!("(phasor {name})"))),
+            "the created phasor should read a binding holding the requested frequency 5, \
+             found bindings {frequency_bindings:?}:\n{emitted}"
         );
         compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
             |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),

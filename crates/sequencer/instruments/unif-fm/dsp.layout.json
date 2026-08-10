@@ -1,0 +1,250 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "add": {
+        "x": 57.631084,
+        "y": 41.27972
+      },
+      "add-2": {
+        "x": 61.964607,
+        "y": 44.80617
+      },
+      "attack": {
+        "x": 3.8797314,
+        "y": 3.4695253
+      },
+      "audio": {
+        "x": 101.046875,
+        "y": 47.06624
+      },
+      "clock": {
+        "x": 196.32,
+        "y": 8.0
+      },
+      "compressor-2": {
+        "x": 104.414055,
+        "y": 39.056618
+      },
+      "cos-2": {
+        "x": 33.720623,
+        "y": 51.456345
+      },
+      "cos-3": {
+        "x": 75.72988,
+        "y": 30.685219
+      },
+      "cos-4": {
+        "x": 47.044838,
+        "y": 51.456345
+      },
+      "decay": {
+        "x": 3.8797314,
+        "y": 6.1495256
+      },
+      "env": {
+        "x": 125.29,
+        "y": 21.4
+      },
+      "gain": {
+        "x": 3.8797314,
+        "y": 0.88816357
+      },
+      "gate": {
+        "x": 150.7,
+        "y": 8.0
+      },
+      "mul": {
+        "x": 75.72988,
+        "y": 27.505219
+      },
+      "mul-0": {
+        "x": 103.0,
+        "y": 30.685219
+      },
+      "mul-2": {
+        "x": 20.571615,
+        "y": 47.911575
+      },
+      "mul-3": {
+        "x": 42.83594,
+        "y": 47.348038
+      },
+      "out-2_out2_out3_out4_out5_out6_out7": {
+        "x": 25.94484,
+        "y": 37.17218
+      },
+      "phase": {
+        "x": 76.21035,
+        "y": 21.337435
+      },
+      "phasor-2": {
+        "x": 30.267162,
+        "y": 42.287716
+      },
+      "phasor-3": {
+        "x": 44.793583,
+        "y": 41.814762
+      },
+      "phasor-4": {
+        "x": 38.45343,
+        "y": 27.90076
+      },
+      "pitch": {
+        "x": 103.0,
+        "y": 8.0
+      },
+      "release": {
+        "x": 3.8797314,
+        "y": 11.509526
+      },
+      "scale-2": {
+        "x": 45.351254,
+        "y": 31.792332
+      },
+      "scale-3": {
+        "x": 59.35125,
+        "y": 29.48076
+      },
+      "scale-4": {
+        "x": 44.05246,
+        "y": 21.028233
+      },
+      "schroeder-allpass-2": {
+        "x": 50.951252,
+        "y": 35.85358
+      },
+      "sustain": {
+        "x": 3.8797314,
+        "y": 8.829526
+      },
+      "triangle-2": {
+        "x": 75.72988,
+        "y": 24.325218
+      },
+      "triangle-3": {
+        "x": 22.713942,
+        "y": 30.212332
+      },
+      "triangle-4": {
+        "x": 32.53152,
+        "y": 45.27675
+      },
+      "triangle-5": {
+        "x": 44.793583,
+        "y": 44.994762
+      },
+      "trigger": {
+        "x": 171.95,
+        "y": 8.0
+      },
+      "value": {
+        "x": 37.303394,
+        "y": 33.372334
+      },
+      "velocity": {
+        "x": 125.29,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->mul-0:1": {
+        "segmented": true,
+        "y": 25.53125
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 15.49
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 17.150002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 13.63
+      },
+      "velocity:0->mul-0:2": {
+        "segmented": true,
+        "y": 14.335
+      }
+    },
+    "inputPresentation": {
+      "add-2:0": "cable",
+      "add-2:1": "cable",
+      "add:0": "cable",
+      "add:1": "cable",
+      "audio:0": "cable",
+      "compressor-2:0": "cable",
+      "cos-2:0": "cable",
+      "cos-3:0": "cable",
+      "cos-4:0": "cable",
+      "mul-0:0": "cable",
+      "mul-0:3": "inline-mod-param",
+      "mul-2:0": "cable",
+      "mul-3:0": "cable",
+      "mul:0": "cable",
+      "out-2_out2_out3_out4_out5_out6_out7:0": "cable",
+      "out-2_out2_out3_out4_out5_out6_out7:1": "cable",
+      "phase:0": "cable",
+      "phasor-2:0": "cable",
+      "phasor-3:0": "cable",
+      "phasor-4:0": "cable",
+      "phasor-4:1": "cable",
+      "scale-2:0": "cable",
+      "scale-3:0": "cable",
+      "scale-4:0": "cable",
+      "schroeder-allpass-2:0": "cable",
+      "schroeder-allpass-2:1": "cable",
+      "schroeder-allpass-2:2": "cable",
+      "triangle-2:0": "cable",
+      "triangle-2:1": "cable",
+      "triangle-3:0": "cable",
+      "triangle-4:0": "cable",
+      "triangle-4:1": "cable",
+      "triangle-5:0": "cable",
+      "triangle-5:1": "cable"
+    }
+  },
+  "macros": {
+    "reverb123": {
+      "nodes": {
+        "input": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "out": {
+          "x": 4.0,
+          "y": 17.365
+        },
+        "return": {
+          "x": 4.0,
+          "y": 10.6825
+        }
+      },
+      "cables": {
+        "input:0->return:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 14.813749
+        }
+      }
+    }
+  }
+}

@@ -2476,7 +2476,8 @@ mod tests {
         chunk: usize,
         cell: &Rc<RefCell<Value>>,
     ) -> Value {
-        let Value::Map(mut map) = widget(widget_type, stable_widget_id, subtree_root_id, Vec::new())
+        let Value::Map(mut map) =
+            widget(widget_type, stable_widget_id, subtree_root_id, Vec::new())
         else {
             unreachable!("test widget helper returns a map");
         };

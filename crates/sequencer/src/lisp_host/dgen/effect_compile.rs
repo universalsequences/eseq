@@ -295,6 +295,117 @@ pub(crate) fn effective_dgen_source(
     Ok(format!("{preamble}\n\n{source}"))
 }
 
+/// DGenLisp's `mod` validator only sees top-level `(param ...)` declarations,
+/// so a param declared inside a `defmacro` body breaks any `(mod name)` that
+/// references it — even from the same body. Params are host-global either
+/// way, so standalone param forms are hoisted out of macro bodies (deduped by
+/// name) before invoking the compiler. This runs on the temp compile copy
+/// only; the persisted patch source keeps params inside their macros, so the
+/// patch editor's macro views are unchanged. The hoist is verbatim byte-range
+/// surgery on source spans — untouched text (comments, number formatting like
+/// `@modulator 1`) is preserved exactly.
+pub(crate) fn hoist_defmacro_params(source: &str) -> String {
+    use eseqlisp::parser::{Expr, ExprKind, Parser, SourceSpan, SpannedASTParser};
+
+    fn head_is(items: &[Expr], name: &str) -> bool {
+        matches!(items.first(), Some(Expr { kind: ExprKind::Symbol(head), .. }) if head == name)
+    }
+
+    fn standalone_param_name(expr: &Expr) -> Option<&str> {
+        let ExprKind::List(items) = &expr.kind else {
+            return None;
+        };
+        if !head_is(items, "param") {
+            return None;
+        }
+        match items.get(1) {
+            Some(Expr {
+                kind: ExprKind::Symbol(name),
+                ..
+            }) => Some(name),
+            _ => None,
+        }
+    }
+
+    let Ok(tokens) = Parser::new(source.to_string()).parse_spanned() else {
+        return source.to_string();
+    };
+    let Ok(exprs) = SpannedASTParser::new(tokens).parse() else {
+        return source.to_string();
+    };
+
+    let mut declared: std::collections::HashSet<String> = exprs
+        .iter()
+        .filter_map(|expr| standalone_param_name(expr).map(str::to_string))
+        .collect();
+    // Insertions keyed by the owning defmacro's start byte: hoisted params
+    // land immediately above their macro, after everything that precedes it
+    // (the preamble's @modulator inputs must stay ahead of @mod params).
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    let mut removals: Vec<SourceSpan> = Vec::new();
+    for expr in &exprs {
+        let ExprKind::List(items) = &expr.kind else {
+            continue;
+        };
+        if !head_is(items, "defmacro") || items.len() < 3 {
+            continue;
+        }
+        let macro_start = expr.origin.primary_span.start_byte;
+        let mut hoisted = String::new();
+        for form in &items[3..] {
+            let Some(name) = standalone_param_name(form) else {
+                continue;
+            };
+            let span = form.origin.primary_span.clone();
+            if span.end_byte > source.len() || span.start_byte >= span.end_byte {
+                continue;
+            }
+            if declared.insert(name.to_string()) {
+                hoisted.push_str(&source[span.start_byte..span.end_byte]);
+                hoisted.push('\n');
+            }
+            removals.push(span);
+        }
+        if !hoisted.is_empty() {
+            insertions.push((macro_start, hoisted));
+        }
+    }
+    if removals.is_empty() {
+        return source.to_string();
+    }
+
+    enum Splice {
+        Insert(String),
+        Remove(usize),
+    }
+    let mut events: Vec<(usize, Splice)> = insertions
+        .into_iter()
+        .map(|(pos, text)| (pos, Splice::Insert(text)))
+        .chain(
+            removals
+                .into_iter()
+                .map(|span| (span.start_byte, Splice::Remove(span.end_byte))),
+        )
+        .collect();
+    events.sort_by_key(|(pos, _)| *pos);
+    let mut out = String::new();
+    let mut cursor = 0;
+    for (pos, splice) in events {
+        out.push_str(&source[cursor..pos]);
+        match splice {
+            Splice::Insert(text) => {
+                out.push_str(&text);
+                cursor = pos;
+            }
+            Splice::Remove(end) => {
+                cursor = end;
+            }
+        }
+    }
+    out.push_str(&source[cursor..]);
+    out
+}
+
 pub(crate) fn compile_effective_dgen_source_to_dir(
     kind: DGenCompileKind,
     effective_source: &str,
@@ -303,6 +414,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     dir: &Path,
     dylib_name: &str,
 ) -> Result<String, String> {
+    let effective_source = &hoist_defmacro_params(effective_source);
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
     let source_name = match kind {
         DGenCompileKind::Effect => "effect",
@@ -363,4 +475,50 @@ pub(in crate::lisp_host) fn parse_dgen_param_span(param: &serde_json::Value) -> 
     .filter(|span| *span > 0)
     .unwrap_or(DEFAULT_DGEN_PARAM_SPAN)
     .min(MAX_DGEN_PARAM_SPAN)
+}
+
+#[cfg(test)]
+mod hoist_tests {
+    use super::hoist_defmacro_params;
+
+    #[test]
+    fn hoists_macro_body_params_to_top_level() {
+        let source = "(defmacro reverb123 (input)\n  (param xyz @min 0.3 @max 8 @mod true @mod-mode additive)\n  (def m (mod xyz))\n  (* input m))\n(def sig (in 1))\n(out (reverb123 sig) 1)";
+        let hoisted = hoist_defmacro_params(source);
+        let first_form = hoisted.lines().next().unwrap();
+        assert!(
+            first_form.starts_with("(param xyz"),
+            "param should hoist above the macro:\n{hoisted}"
+        );
+        assert!(
+            first_form.contains("@mod-mode additive"),
+            "param attrs must survive the hoist:\n{hoisted}"
+        );
+        let macro_form_start = hoisted.find("(defmacro").unwrap();
+        assert!(
+            !hoisted[macro_form_start..].contains("(param xyz"),
+            "macro body must no longer declare the param:\n{hoisted}"
+        );
+        assert!(
+            hoisted.contains("(mod xyz)"),
+            "the mod reference stays in the body:\n{hoisted}"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_hoist_once() {
+        let source = "(param xyz @min 0 @max 1)\n(defmacro a (x) (param xyz @min 0 @max 1) (* x (mod xyz)))\n(def sig (in 1))\n(out (a sig) 1)";
+        let hoisted = hoist_defmacro_params(source);
+        assert_eq!(
+            hoisted.matches("(param xyz").count(),
+            1,
+            "already-declared params drop from the body without re-hoisting:\n{hoisted}"
+        );
+    }
+
+    #[test]
+    fn sources_without_macro_params_pass_through_verbatim() {
+        let source = "; comment survives\n(param xyz @min 0 @max 1)\n(def sig (in 1))\n(out sig 1)\n";
+        assert_eq!(hoist_defmacro_params(source), source);
+    }
 }
