@@ -299,6 +299,10 @@ fn main() {
         eprintln!("failed to enter sequencer crate directory: {error}");
         std::process::exit(1);
     }
+    if let Err(error) = sequencer::app_paths::init_dev() {
+        eprintln!("failed to initialize app paths: {error}");
+        std::process::exit(1);
+    }
 
     let source = match std::fs::read_to_string(&input) {
         Ok(source) => source,

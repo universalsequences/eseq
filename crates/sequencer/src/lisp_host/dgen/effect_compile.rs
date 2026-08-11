@@ -176,9 +176,9 @@ pub fn list_saved_effects() -> Vec<String> {
         }
     }
 
-    let dir = Path::new(EFFECTS_DIR);
+    let dir = crate::app_paths::app_paths().effects_dir();
     let mut names = Vec::new();
-    collect(dir, dir, &mut names);
+    collect(&dir, &dir, &mut names);
     names.sort();
     names.dedup();
     names
@@ -194,7 +194,7 @@ pub fn load_effect_ui_source(name: &str) -> io::Result<String> {
 }
 
 pub fn effect_source_path(name: &str) -> PathBuf {
-    let root = Path::new(EFFECTS_DIR);
+    let root = crate::app_paths::app_paths().effects_dir();
     if name.ends_with('/') {
         return root.join(name.trim_end_matches('/')).join("dsp.lisp");
     }
@@ -207,7 +207,8 @@ pub fn effect_source_path(name: &str) -> PathBuf {
 }
 
 pub fn effect_ui_path(name: &str) -> PathBuf {
-    Path::new(EFFECTS_DIR)
+    crate::app_paths::app_paths()
+        .effects_dir()
         .join(name.trim_end_matches('/'))
         .join("ui.lisp")
 }
@@ -243,13 +244,11 @@ pub fn edit_text(initial: &str) -> io::Result<String> {
 // ── Compile ──
 
 pub(crate) fn output_dir() -> PathBuf {
-    std::env::temp_dir().join("sequencer_dgenlisp")
+    crate::app_paths::app_paths().dgen_scratch_dir()
 }
 
 pub(crate) fn dgenlisp_tool_path() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join("tools/DGenLisp")
+    crate::app_paths::app_paths().dgenlisp_tool()
 }
 
 pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {

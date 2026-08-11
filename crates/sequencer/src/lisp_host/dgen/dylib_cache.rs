@@ -135,11 +135,7 @@ impl DylibCacheManager {
     }
 
     pub fn workspace_default() -> Self {
-        Self::new(
-            crate::paths::workspace_root()
-                .join(".eseq")
-                .join("dgenlisp-cache"),
-        )
+        Self::new(crate::app_paths::app_paths().dgen_cache_root())
     }
 
     pub fn acquire(
@@ -525,7 +521,7 @@ fn fingerprint_source_assets(
     let references = asset_references(source)?;
     let base = match asset_base {
         Some(path) => path.to_path_buf(),
-        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        None => crate::app_paths::app_paths().dgen_asset_fallback_base(),
     };
     let mut by_path = BTreeMap::<PathBuf, String>::new();
     for reference in references {
@@ -672,8 +668,11 @@ fn canonical_or_absolute(path: &Path) -> PathBuf {
         if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
+            // Relative paths reaching here (e.g. a relative asset base from a
+            // caller) were historically anchored at the post-chdir cwd, i.e.
+            // the sequencer crate dir.
+            crate::app_paths::app_paths()
+                .dgen_asset_fallback_base()
                 .join(path)
         }
     })
@@ -867,6 +866,79 @@ mod tests {
         drop(second);
         drop(third);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Slice E1 exit criterion (embedded-dgen-connector-impl-spec.md): with
+    /// the working directory set to `/`, dgen compiles succeed using only
+    /// `AppPaths`-resolved locations. `set_current_dir` is process-wide, so
+    /// this must never run inside the threaded default suite; run it alone:
+    ///
+    /// ```text
+    /// cargo test -p sequencer dgen_compile_succeeds_with_foreign_cwd -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "chdirs the whole process; run alone with -- --ignored"]
+    fn dgen_compile_succeeds_with_foreign_cwd() {
+        if !dgenlisp_tool_path().exists() {
+            eprintln!(
+                "skipping: DGenLisp tool not found at {:?}",
+                dgenlisp_tool_path()
+            );
+            return;
+        }
+
+        // Mirror app startup: AppPaths captures its roots while the
+        // workspace is locatable, then cwd becomes irrelevant.
+        let _ = crate::app_paths::app_paths();
+        let original_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir("/").expect("chdir to /");
+
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-foreign-cwd-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let manager = DylibCacheManager::new(root.clone());
+
+        // Effect compile through the cache manager.
+        let effect_source = r#"
+            (def input_l (in 1 @name Left))
+            (out input_l 1 @name Left)
+        "#;
+        let effect = manager
+            .acquire(
+                DGenCompileKind::Effect,
+                DGenSourceOrigin::Custom,
+                effect_source,
+                44_100,
+                None,
+            )
+            .expect("effect compile with cwd=/");
+        assert!(Path::new(&effect.manifest.dylib_path).is_absolute());
+
+        // Instrument compile through the cache manager (the spec's exit
+        // criterion names an instrument compile).
+        let instrument = manager
+            .acquire(
+                DGenCompileKind::Instrument,
+                DGenSourceOrigin::Custom,
+                crate::lisp_host::INSTRUMENT_TEMPLATE,
+                44_100,
+                None,
+            )
+            .expect("instrument compile with cwd=/");
+        assert!(Path::new(&instrument.manifest.dylib_path).is_absolute());
+
+        // Uncached compile path (exercises the scratch dir + tool path).
+        crate::lisp_host::compile_lisp(effect_source, 44_100)
+            .expect("uncached effect compile with cwd=/");
+
+        drop(effect);
+        drop(instrument);
+        let _ = std::fs::remove_dir_all(root);
+        if let Some(cwd) = original_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
     }
 
     #[test]

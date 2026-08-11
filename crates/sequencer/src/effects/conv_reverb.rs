@@ -399,13 +399,11 @@ fn resample(input: &[f32], src_sr: f32, dst_sr: f32) -> Vec<f32> {
 // ── partition-ir via the DGenLisp tool ──
 
 fn ir_prep_dir() -> PathBuf {
-    std::env::temp_dir().join("sequencer_ir_prep")
+    crate::app_paths::app_paths().ir_prep_dir()
 }
 
 fn tool_path() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join("tools/DGenLisp")
+    crate::app_paths::app_paths().dgenlisp_tool()
 }
 
 /// Write `samples` (exactly IR_LEN) to a temp f32 WAV, run it through
