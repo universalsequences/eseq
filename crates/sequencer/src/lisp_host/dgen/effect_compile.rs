@@ -113,7 +113,7 @@ pub fn compile_and_load_uncached_with_asset_base(
 ) -> Result<CompileResult, String> {
     let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
-    let lib = load_dylib(&manifest.dylib_path)?;
+    let lib = load_dylib_prewarmed(&manifest)?;
     Ok(CompileResult {
         manifest,
         lib,

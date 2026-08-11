@@ -83,7 +83,7 @@ pub fn run_editor_flow(
             Ok(json) => {
                 match parse_manifest(&json) {
                     Ok(manifest) => {
-                        match load_dylib(&manifest.dylib_path) {
+                        match load_dylib_prewarmed(&manifest) {
                             Ok(lib) => {
                                 // Add to graph
                                 match unsafe {

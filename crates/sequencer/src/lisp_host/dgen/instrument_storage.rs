@@ -460,9 +460,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     let fn_ptr = DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].load(Ordering::Acquire);
     if fn_ptr != 0 {
         let process_fn: DGenProcessFn = std::mem::transmute(fn_ptr);
-        let total_memory_slots = *s.add(1) as usize;
-        let memory_read = dgen_read_buffer_ptr(s) as *mut c_void;
-        let memory_write = dgen_write_buffer_ptr(s, total_memory_slots) as *mut c_void;
+        let memory = dgen_memory_ptr(s) as *mut c_void;
         if inp.is_null() || out.is_null() {
             return;
         }
@@ -475,13 +473,14 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
                 DGEN_ENGINE_PROCESS_BLOCKS[engine_id].fetch_add(1, Ordering::Relaxed);
             }
         }
+        let context = dgen_process_context_v1(dgen_host_sample_rate(s));
         process_fn(
-            inp,
+            inp as *const *const f32,
             out,
-            nframes,
-            memory_read,
-            memory_write,
-            dgen_host_sample_rate(s),
+            nframes.max(0) as u32,
+            memory,
+            &context,
+            dgen_host_services_v1(),
         );
     } else {
         let nf = nframes as usize;

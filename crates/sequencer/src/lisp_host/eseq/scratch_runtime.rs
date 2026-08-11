@@ -459,7 +459,7 @@ pub fn run_instrument_editor_flow(
 
         match compile_instrument(&source, sample_rate) {
             Ok(json) => match parse_manifest(&json) {
-                Ok(manifest) => match load_dylib(&manifest.dylib_path) {
+                Ok(manifest) => match load_dylib_prewarmed(&manifest) {
                     Ok(lib) => {
                         println!(" OK!");
                         let n = manifest.params.len();

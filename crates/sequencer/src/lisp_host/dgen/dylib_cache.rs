@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::super::{
-    compile_effective_dgen_source_to_dir, dgenlisp_tool_path, effective_dgen_source, load_dylib,
-    parse_manifest_with_base, CompileResult,
+    compile_effective_dgen_source_to_dir, dgenlisp_tool_path, effective_dgen_source,
+    load_dylib_prewarmed, parse_manifest_with_base, CompileResult,
 };
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
@@ -308,7 +308,7 @@ impl DylibCacheManager {
         let manifest_json = std::fs::read_to_string(artifact_dir.join("manifest.json"))
             .map_err(|e| format!("read cached manifest: {e}"))?;
         let manifest = parse_manifest_with_base(&manifest_json, artifact_dir)?;
-        let lib = match load_dylib(&manifest.dylib_path) {
+        let lib = match load_dylib_prewarmed(&manifest) {
             Ok(lib) => lib,
             Err(error) => {
                 drop(lease);

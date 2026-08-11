@@ -315,7 +315,7 @@ pub fn compile_and_load_instrument_uncached_with_asset_base(
 ) -> Result<CompileResult, String> {
     let json = compile_instrument_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
-    let lib = load_dylib(&manifest.dylib_path)?;
+    let lib = load_dylib_prewarmed(&manifest)?;
     Ok(CompileResult {
         manifest,
         lib,
@@ -346,8 +346,7 @@ pub fn render_loaded_instrument_for_test(
     }
 
     let total_slots = manifest.total_memory_slots;
-    let mut memory_read = vec![0.0f32; total_slots];
-    let mut memory_write = vec![0.0f32; total_slots];
+    let mut memory = vec![0.0f32; total_slots + DGEN_STATE_REDZONE_SLOTS];
     let slot_id = options.voice_index;
     let init_msg = build_init_message_for_voice(slot_id, manifest, options.voice_index);
     let entry_count = init_msg.get(9).copied().unwrap_or(0.0) as usize;
@@ -355,16 +354,11 @@ pub fn render_loaded_instrument_for_test(
         let idx = init_msg[10 + i * 2] as usize;
         let value = init_msg[10 + i * 2 + 1];
         if idx < total_slots {
-            memory_read[idx] = value;
+            memory[idx] = value;
         }
     }
-    memory_write.copy_from_slice(&memory_read);
 
-    let apply_param = |memory_read: &mut [f32],
-                       memory_write: &mut [f32],
-                       name: &str,
-                       value: f32|
-     -> Result<(), String> {
+    let apply_param = |memory: &mut [f32], name: &str, value: f32| -> Result<(), String> {
         let param = manifest
             .params
             .iter()
@@ -379,15 +373,14 @@ pub fn render_loaded_instrument_for_test(
         for lane in 0..param.cell_span {
             let idx = param.cell_id + lane;
             if idx < total_slots {
-                memory_read[idx] = value;
-                memory_write[idx] = value;
+                memory[idx] = value;
             }
         }
         Ok(())
     };
 
     for (name, value) in &options.param_overrides {
-        apply_param(&mut memory_read, &mut memory_write, name, *value)?;
+        apply_param(&mut memory, name, *value)?;
     }
 
     let mut param_events = options.param_events.clone();
@@ -405,12 +398,7 @@ pub fn render_loaded_instrument_for_test(
             && param_events[next_param_event].frame <= frames_done
         {
             let event = &param_events[next_param_event];
-            apply_param(
-                &mut memory_read,
-                &mut memory_write,
-                &event.name,
-                event.value,
-            )?;
+            apply_param(&mut memory, &event.name, event.value)?;
             next_param_event += 1;
         }
 
@@ -438,9 +426,9 @@ pub fn render_loaded_instrument_for_test(
                 buffer.fill(value);
             }
         }
-        let input_ptrs: Vec<*mut f32> = input_buffers
-            .iter_mut()
-            .map(|buffer| buffer.as_mut_ptr())
+        let input_ptrs: Vec<*const f32> = input_buffers
+            .iter()
+            .map(|buffer| buffer.as_ptr())
             .collect();
 
         let mut output_buffers = vec![vec![0.0f32; block]; n_outputs];
@@ -449,14 +437,15 @@ pub fn render_loaded_instrument_for_test(
             .map(|buffer| buffer.as_mut_ptr())
             .collect();
 
+        let context = dgen_process_context_v1(options.sample_rate.max(1) as f32);
         unsafe {
             (lib.process_fn)(
                 input_ptrs.as_ptr(),
                 output_ptrs.as_ptr(),
-                block as c_int,
-                memory_read.as_mut_ptr() as *mut c_void,
-                memory_write.as_mut_ptr() as *mut c_void,
-                options.sample_rate.max(1) as c_float,
+                block as u32,
+                memory.as_mut_ptr() as *mut c_void,
+                &context,
+                dgen_host_services_v1(),
             );
         }
         rendered.extend_from_slice(&output_buffers[0]);
@@ -495,7 +484,7 @@ pub fn render_loaded_instrument_for_test(
     let mut non_finite_state_slots = 0usize;
     let mut first_non_finite_state_slot = None;
     for idx in 0..total_slots {
-        if !memory_read[idx].is_finite() || !memory_write[idx].is_finite() {
+        if !memory[idx].is_finite() {
             non_finite_state_slots += 1;
             if first_non_finite_state_slot.is_none() {
                 first_non_finite_state_slot = Some(idx);
@@ -545,18 +534,16 @@ pub fn render_loaded_effect_for_test(
     }
 
     let total_slots = manifest.total_memory_slots;
-    let mut memory_read = vec![0.0f32; total_slots];
-    let mut memory_write = vec![0.0f32; total_slots];
+    let mut memory = vec![0.0f32; total_slots + DGEN_STATE_REDZONE_SLOTS];
     let init_msg = build_init_message(0, manifest, None);
     let entry_count = init_msg.get(9).copied().unwrap_or(0.0) as usize;
     for i in 0..entry_count {
         let idx = init_msg[10 + i * 2] as usize;
         let value = init_msg[10 + i * 2 + 1];
         if idx < total_slots {
-            memory_read[idx] = value;
+            memory[idx] = value;
         }
     }
-    memory_write.copy_from_slice(&memory_read);
 
     for (name, value) in &options.param_overrides {
         if let Some(param) = manifest.params.iter().find(|param| param.name == *name) {
@@ -569,8 +556,7 @@ pub fn render_loaded_effect_for_test(
             for lane in 0..param.cell_span {
                 let idx = param.cell_id + lane;
                 if idx < total_slots {
-                    memory_read[idx] = *value;
-                    memory_write[idx] = *value;
+                    memory[idx] = *value;
                 }
             }
             continue;
@@ -584,8 +570,7 @@ pub fn render_loaded_effect_for_test(
                 "parameter '{name}' cell {cell_id} is outside memory size {total_slots}"
             ));
         }
-        memory_read[cell_id] = *value;
-        memory_write[cell_id] = *value;
+        memory[cell_id] = *value;
     }
 
     let n_inputs = manifest.n_inputs.max(2);
@@ -620,9 +605,9 @@ pub fn render_loaded_effect_for_test(
                 buffer.fill(value);
             }
         }
-        let input_ptrs: Vec<*mut f32> = input_buffers
-            .iter_mut()
-            .map(|buffer| buffer.as_mut_ptr())
+        let input_ptrs: Vec<*const f32> = input_buffers
+            .iter()
+            .map(|buffer| buffer.as_ptr())
             .collect();
 
         let mut output_buffers = vec![vec![0.0f32; block]; n_outputs];
@@ -631,14 +616,15 @@ pub fn render_loaded_effect_for_test(
             .map(|buffer| buffer.as_mut_ptr())
             .collect();
 
+        let context = dgen_process_context_v1(options.sample_rate.max(1) as f32);
         unsafe {
             (lib.process_fn)(
                 input_ptrs.as_ptr(),
                 output_ptrs.as_ptr(),
-                block as c_int,
-                memory_read.as_mut_ptr() as *mut c_void,
-                memory_write.as_mut_ptr() as *mut c_void,
-                options.sample_rate.max(1) as c_float,
+                block as u32,
+                memory.as_mut_ptr() as *mut c_void,
+                &context,
+                dgen_host_services_v1(),
             );
         }
         for frame in 0..block {

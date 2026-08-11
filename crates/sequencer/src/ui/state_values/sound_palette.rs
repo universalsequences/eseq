@@ -1507,7 +1507,7 @@ mod rack_glyph_tests {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
             version: 2,
-            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
+            process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots: 0,
             params,
             groups: Vec::new(),
