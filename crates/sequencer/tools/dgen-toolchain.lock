@@ -1,0 +1,7 @@
+# Vendored dgen toolchain (staged by rebuild_dgenlisp_tool.sh into
+# tools/dgen-toolchain/, which is gitignored). This lock file is committed
+# and is the reviewable record of which toolchain archive is vendored.
+archive dgen-toolchain-20.1.8-arm64.tar.gz
+archive_sha256 daeaf899289462e4132cd661802c115a1c5b223671bb73520844aad44b0a4dd0
+llvm_version 20.1.8
+dgen_abi_version 1

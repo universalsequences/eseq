@@ -423,13 +423,20 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     std::fs::write(&src_path, effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
+    // Hermetic toolchain hand-off (impl spec, decision 1 / slice E2): the
+    // staged root is passed unconditionally and preflight-checked here; a
+    // missing/incomplete stage is a hard compile error, never a fallback to
+    // the system compiler.
+    let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
     let tool_path = dgenlisp_tool_path();
     let mut command = std::process::Command::new(&tool_path);
     command
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", dylib_name])
-        .args(["--sample-rate", &sample_rate.to_string()]);
+        .args(["--sample-rate", &sample_rate.to_string()])
+        .arg("--toolchain-root")
+        .arg(&toolchain_root);
     if kind == DGenCompileKind::Instrument {
         command.args(["--voices", "12"]);
     }
@@ -517,7 +524,8 @@ mod hoist_tests {
 
     #[test]
     fn sources_without_macro_params_pass_through_verbatim() {
-        let source = "; comment survives\n(param xyz @min 0 @max 1)\n(def sig (in 1))\n(out sig 1)\n";
+        let source =
+            "; comment survives\n(param xyz @min 0 @max 1)\n(def sig (in 1))\n(out sig 1)\n";
         assert_eq!(hoist_defmacro_params(source), source);
     }
 }
