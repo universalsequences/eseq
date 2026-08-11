@@ -44,6 +44,7 @@
 #[allow(dead_code)]
 pub mod agent;
 pub mod analysis;
+pub mod app_paths;
 pub mod audio;
 pub use audio::{audiograph, engine};
 pub mod audio_tap;

@@ -61,6 +61,10 @@ fn main() {
         eprintln!("failed to enter sequencer crate directory: {e}");
         std::process::exit(1);
     }
+    if let Err(e) = sequencer::app_paths::init_dev() {
+        eprintln!("failed to initialize app paths: {e}");
+        std::process::exit(1);
+    }
 
     let mut args = std::env::args().skip(1);
     let Some(target) = args.next() else {
