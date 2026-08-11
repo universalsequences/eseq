@@ -4,60 +4,61 @@
   "root": {
     "nodes": {
       "adsr-2": {
-        "x": 46.743576,
-        "y": 59.705963
+        "x": 76.38435,
+        "y": 57.069073
       },
       "attack": {
-        "x": 4.0,
-        "y": 8.0
+        "x": 5.2808304,
+        "y": 19.91916
       },
       "audio": {
-        "x": 98.262375,
-        "y": 73.8
+        "x": 53.30823,
+        "y": 73.71101
       },
       "audio-2": {
-        "x": 119.73674,
-        "y": 73.8
+        "x": 185.78354,
+        "y": 73.275444
       },
       "clock": {
-        "x": 134.52657,
-        "y": 22.44891
+        "x": 134.99345,
+        "y": 38.821377
       },
       "dampening": {
-        "x": 4.0,
-        "y": 18.720001
+        "x": 5.2808304,
+        "y": 30.639162
       },
       "decay": {
-        "x": 4.0,
-        "y": 10.68
+        "x": 5.2808304,
+        "y": 22.425854
       },
       "div": {
-        "x": 198.87167,
-        "y": 52.365444
+        "x": 198.87988,
+        "y": 53.340004,
+        "width": 14.092886
       },
       "dursamples": {
-        "x": 201.67168,
-        "y": 46.58452
+        "x": 208.67278,
+        "y": 48.138092
       },
       "env": {
-        "x": 59.017635,
-        "y": 52.240562
+        "x": 53.30823,
+        "y": 67.120346
       },
       "fmox1-2": {
-        "x": 97.205666,
-        "y": 51.760002
+        "x": 64.188896,
+        "y": 51.96409
       },
       "fmox1-3": {
-        "x": 107.305664,
-        "y": 51.760002
+        "x": 72.06448,
+        "y": 51.96409
       },
       "fmrate": {
-        "x": 4.0,
-        "y": 10.68
+        "x": 30.775866,
+        "y": 34.7814
       },
       "gain": {
-        "x": 4.0,
-        "y": 13.360001
+        "x": 5.2808304,
+        "y": 25.279161
       },
       "gate": {
         "x": 45.52941,
@@ -68,18 +69,19 @@
         "y": 42.800003
       },
       "mix-2": {
-        "x": 97.205666,
+        "x": 97.40566,
         "y": 67.88,
         "width": 88.37788
       },
       "mix-3": {
         "x": 188.58354,
         "y": 67.88,
-        "width": 66.04681
+        "width": 69.66068
       },
       "mix-4": {
-        "x": 97.205666,
-        "y": 56.100002
+        "x": 64.188896,
+        "y": 57.069073,
+        "width": 11.187806
       },
       "mix-5": {
         "x": 174.88008,
@@ -90,20 +92,22 @@
         "y": 40.187794
       },
       "mul": {
-        "x": 77.61272,
-        "y": 71.29525
+        "x": 53.30823,
+        "y": 71.065575,
+        "width": 48.365616
       },
       "mul-0": {
-        "x": 86.097435,
-        "y": 60.160114
+        "x": 64.188896,
+        "y": 60.160114,
+        "width": 40.886383
       },
       "mul-2": {
-        "x": 211.51537,
-        "y": 49.852375
+        "x": 208.67278,
+        "y": 50.95856
       },
       "mul-3": {
-        "x": 133.34584,
-        "y": 71.67982
+        "x": 185.78354,
+        "y": 70.749016
       },
       "mul-4": {
         "x": 158.09601,
@@ -111,8 +115,8 @@
         "width": 21.08406
       },
       "octave": {
-        "x": 4.0,
-        "y": 16.04
+        "x": 5.2808304,
+        "y": 27.959162
       },
       "out-2_out2": {
         "x": 97.20567,
@@ -124,7 +128,8 @@
       },
       "out-4_out2-3_out3": {
         "x": 158.09601,
-        "y": 56.100002
+        "y": 56.100002,
+        "width": 45.08387
       },
       "out-5_out2-4": {
         "x": 126.83674,
@@ -147,24 +152,24 @@
         "y": 41.22
       },
       "release": {
-        "x": 4.0,
-        "y": 16.04
+        "x": 5.2808304,
+        "y": 27.959162
       },
       "sustain": {
-        "x": 4.0,
-        "y": 18.720001
+        "x": 5.2808304,
+        "y": 30.639162
       },
       "trigger": {
         "x": 0.7485504,
         "y": 40.975113
       },
       "unison": {
-        "x": 4.0,
-        "y": 13.360001
+        "x": 5.2808304,
+        "y": 25.279161
       },
       "value": {
-        "x": 197.3266,
-        "y": 49.167747
+        "x": 198.87988,
+        "y": 50.18
       },
       "value-2": {
         "x": 105.36237,
@@ -196,6 +201,14 @@
         "segmented": true,
         "y": 12.610001
       },
+      "env:0->mul-3:0": {
+        "segmented": true,
+        "y": 70.63875
+      },
+      "env:0->mul:0": {
+        "segmented": true,
+        "y": 70.46658
+      },
       "fmox1-2:0->mix-4:0": {
         "segmented": true,
         "y": 53.690002
@@ -206,7 +219,11 @@
       },
       "fmrate:0->mod-2:0": {
         "segmented": true,
-        "y": 12.610001
+        "y": 39.837795
+      },
+      "gate:0->adsr-2:0": {
+        "segmented": true,
+        "y": 49.812088
       },
       "gate:0->env:0": {
         "segmented": true,
@@ -307,6 +324,10 @@
       "sustain:0->env:4": {
         "segmented": true,
         "y": 20.650002
+      },
+      "trigger:0->adsr-2:1": {
+        "segmented": true,
+        "y": 50.307674
       },
       "trigger:0->env:1": {
         "segmented": true,
@@ -490,95 +511,31 @@
     },
     "choral-ahh": {
       "nodes": {
-        "*#0": {
-          "x": 134.55806,
+        "add-0": {
+          "x": 107.43067,
           "y": 8.96
         },
-        "*#1": {
-          "x": 94.77536,
-          "y": 8.96
-        },
-        "*#2": {
-          "x": 154.68433,
-          "y": 8.96
-        },
-        "*#3": {
-          "x": 174.53882,
-          "y": 8.96
-        },
-        "*#4": {
-          "x": 4.0,
-          "y": 59.8
-        },
-        "*#5": {
-          "x": 93.27536,
-          "y": 52.36
-        },
-        "*#6": {
-          "x": 108.97536,
-          "y": 52.36
-        },
-        "*#7": {
-          "x": 124.675354,
-          "y": 52.36
-        },
-        "+#0": {
-          "x": 105.55806,
-          "y": 8.96
-        },
-        "+#1": {
-          "x": 125.75804,
+        "add-1": {
+          "x": 127.63066,
           "y": 14.54
         },
-        "+#2": {
-          "x": 111.99075,
+        "add-2": {
+          "x": 114.25081,
           "y": 23.220001
         },
-        "+#3": {
-          "x": 122.77345,
+        "add-3": {
+          "x": 125.420944,
           "y": 26.94
         },
-        "+#4": {
-          "x": 102.34716,
-          "y": 41.2,
-          "width": 36.13079
+        "add-4": {
+          "x": 104.09063,
+          "y": 39.960003,
+          "width": 37.680542
         },
-        "+#5": {
-          "x": 93.27536,
-          "y": 56.7,
-          "width": 35.699997
-        },
-        "-#0": {
-          "x": 115.65806,
-          "y": 8.96
-        },
-        "0.32": {
-          "x": 93.27536,
-          "y": 41.2
-        },
-        "1": {
-          "x": 107.2571,
-          "y": 4.0
-        },
-        "1200": {
-          "x": 145.61253,
-          "y": 8.96
-        },
-        "1~1": {
-          "x": 116.057106,
-          "y": 4.0
-        },
-        "1~2": {
-          "x": 125.75806,
-          "y": 8.96
-        },
-        "2800": {
-          "x": 165.46703,
-          "y": 8.96
-        },
-        "800": {
-          "x": 85.97536,
-          "y": 8.96
+        "add-5": {
+          "x": 94.76054,
+          "y": 55.460003,
+          "width": 35.77024
         },
         "amp": {
           "x": 4.0,
@@ -631,6 +588,66 @@
           "x": 88.77535,
           "y": 4.0
         },
+        "mul-0": {
+          "x": 136.43066,
+          "y": 8.96
+        },
+        "mul-1": {
+          "x": 96.26054,
+          "y": 8.96
+        },
+        "mul-2": {
+          "x": 157.46098,
+          "y": 8.96
+        },
+        "mul-3": {
+          "x": 177.96121,
+          "y": 8.96
+        },
+        "mul-4": {
+          "x": 4.0,
+          "y": 58.56
+        },
+        "mul-5": {
+          "x": 94.76054,
+          "y": 51.120003
+        },
+        "mul-6": {
+          "x": 110.530785,
+          "y": 51.120003
+        },
+        "mul-7": {
+          "x": 126.23078,
+          "y": 51.120003
+        },
+        "n0-32": {
+          "x": 94.76054,
+          "y": 39.960003
+        },
+        "n1": {
+          "x": 109.71087,
+          "y": 4.0
+        },
+        "n1-1": {
+          "x": 118.51087,
+          "y": 4.0
+        },
+        "n1-2": {
+          "x": 127.63067,
+          "y": 8.96
+        },
+        "n1200": {
+          "x": 148.13089,
+          "y": 8.96
+        },
+        "n2800": {
+          "x": 168.63112,
+          "y": 8.96
+        },
+        "n800": {
+          "x": 87.46053,
+          "y": 8.96
+        },
         "out": {
           "x": 4.0,
           "y": 66.0
@@ -655,6 +672,10 @@
           "x": 93.27536,
           "y": 44.920002
         },
+        "sub-0": {
+          "x": 117.53067,
+          "y": 8.96
+        },
         "v1": {
           "x": 96.075356,
           "y": 23.220001
@@ -667,117 +688,53 @@
           "x": 127.90615,
           "y": 37.48
         },
-        "wrap#0": {
-          "x": 111.99075,
+        "wrap-0": {
+          "x": 114.25081,
           "y": 26.94
         },
-        "wrap#1": {
-          "x": 127.90616,
-          "y": 33.14
+        "wrap-1": {
+          "x": 130.94109,
+          "y": 32.52
         }
       },
       "cables": {
-        "*#0:0->+#1:1": {
-          "segmented": true,
-          "y": 13.78
-        },
-        "*#1:0->formant1_freq:1": {
+        "add-0:0->f1:1": {
           "segmented": true,
           "y": 11.3
         },
-        "*#2:0->formant2_freq:1": {
+        "add-1:0->f3:1": {
           "segmented": true,
-          "y": 12.54
+          "y": 17.5
         },
-        "*#3:0->formant3_freq:1": {
-          "segmented": true,
-          "y": 13.78
-        },
-        "*#4:0->return:0": {
-          "segmented": true,
-          "y": 62.14
-        },
-        "*#5:0->+#5:0": {
-          "segmented": true,
-          "y": 55.32
-        },
-        "*#6:0->+#5:1": {
-          "segmented": true,
-          "y": 54.29
-        },
-        "*#7:0->+#5:2": {
-          "segmented": true,
-          "y": 56.350002
-        },
-        "+#0:0->f1:1": {
-          "segmented": true,
-          "y": 12.54
-        },
-        "+#1:0->f3:1": {
-          "segmented": true,
-          "y": 16.88
-        },
-        "+#2:0->wrap#0:0": {
+        "add-2:0->wrap-0:0": {
           "segmented": true,
           "y": 25.25
         },
-        "+#3:0->wrap#1:0": {
+        "add-3:0->wrap-1:0": {
           "segmented": true,
-          "y": 30.21
+          "y": 31.140001
         },
-        "+#4:0->source:1": {
+        "add-4:0->source:1": {
           "segmented": true,
-          "y": 43.850002
+          "y": 41.890003
         },
-        "+#5:0->*#4:1": {
+        "add-5:0->mul-4:1": {
           "segmented": true,
-          "y": 59.04
+          "y": 57.800003
         },
-        "-#0:0->f2:1": {
+        "amp:0->mul-4:0": {
           "segmented": true,
-          "y": 11.3
+          "y": 32.07
         },
-        "0.32:0->source:0": {
-          "segmented": true,
-          "y": 43.13
-        },
-        "1200:0->formant2_freq:0": {
-          "segmented": true,
-          "y": 11.3
-        },
-        "1:0->+#0:0": {
-          "segmented": true,
-          "y": 6.0299997
-        },
-        "1~1:0->-#0:0": {
+        "detune:0->add-0:1": {
           "segmented": true,
           "y": 7.27
         },
-        "1~2:0->+#1:0": {
-          "segmented": true,
-          "y": 12.54
-        },
-        "2800:0->formant3_freq:0": {
-          "segmented": true,
-          "y": 12.54
-        },
-        "800:0->formant1_freq:0": {
-          "segmented": true,
-          "y": 13.78
-        },
-        "amp:0->*#4:0": {
-          "segmented": true,
-          "y": 32.69
-        },
-        "detune:0->*#0:0": {
+        "detune:0->mul-0:0": {
           "segmented": true,
           "y": 7.27
         },
-        "detune:0->+#0:1": {
-          "segmented": true,
-          "y": 7.27
-        },
-        "detune:0->-#0:1": {
+        "detune:0->sub-0:1": {
           "segmented": true,
           "y": 7.27
         },
@@ -805,41 +762,29 @@
           "segmented": true,
           "y": 22.87
         },
-        "formant1:0->*#5:0": {
+        "formant1:0->mul-5:0": {
           "segmented": true,
-          "y": 50.980003
+          "y": 49.740005
         },
         "formant1_freq:0->formant1:1": {
           "segmented": true,
           "y": 31.76
         },
-        "formant2:0->*#6:0": {
+        "formant2:0->mul-6:0": {
           "segmented": true,
-          "y": 52.010002
+          "y": 50.770004
         },
         "formant2_freq:0->formant2:1": {
           "segmented": true,
           "y": 28.97
         },
-        "formant3:0->*#7:0": {
+        "formant3:0->mul-7:0": {
           "segmented": true,
-          "y": 49.95
+          "y": 48.710003
         },
         "formant3_freq:0->formant3:1": {
           "segmented": true,
           "y": 27.73
-        },
-        "freq:0->*#1:0": {
-          "segmented": true,
-          "y": 8.61
-        },
-        "freq:0->*#2:0": {
-          "segmented": true,
-          "y": 8.61
-        },
-        "freq:0->*#3:0": {
-          "segmented": true,
-          "y": 8.61
         },
         "freq:0->f1:0": {
           "segmented": true,
@@ -853,15 +798,87 @@
           "segmented": true,
           "y": 8.61
         },
+        "freq:0->mul-1:0": {
+          "segmented": true,
+          "y": 8.61
+        },
+        "freq:0->mul-2:0": {
+          "segmented": true,
+          "y": 8.61
+        },
+        "freq:0->mul-3:0": {
+          "segmented": true,
+          "y": 8.61
+        },
+        "mul-0:0->add-1:1": {
+          "segmented": true,
+          "y": 12.54
+        },
+        "mul-1:0->formant1_freq:1": {
+          "segmented": true,
+          "y": 11.3
+        },
+        "mul-2:0->formant2_freq:1": {
+          "segmented": true,
+          "y": 13.78
+        },
+        "mul-3:0->formant3_freq:1": {
+          "segmented": true,
+          "y": 12.54
+        },
+        "mul-4:0->return:0": {
+          "segmented": true,
+          "y": 60.9
+        },
+        "mul-5:0->add-5:0": {
+          "segmented": true,
+          "y": 54.08
+        },
+        "mul-6:0->add-5:1": {
+          "segmented": true,
+          "y": 53.050003
+        },
+        "mul-7:0->add-5:2": {
+          "segmented": true,
+          "y": 55.110004
+        },
+        "n0-32:0->source:0": {
+          "segmented": true,
+          "y": 42.610004
+        },
+        "n1-1:0->sub-0:0": {
+          "segmented": true,
+          "y": 7.27
+        },
+        "n1-2:0->add-1:0": {
+          "segmented": true,
+          "y": 13.78
+        },
+        "n1200:0->formant2_freq:0": {
+          "segmented": true,
+          "y": 12.54
+        },
+        "n1:0->add-0:0": {
+          "segmented": true,
+          "y": 6.0299997
+        },
+        "n2800:0->formant3_freq:0": {
+          "segmented": true,
+          "y": 11.3
+        },
+        "n800:0->formant1_freq:0": {
+          "segmented": true,
+          "y": 13.78
+        },
         "p1:0->v1:0": {
           "segmented": true,
           "y": 21.84
         },
-        "p2:0->+#2:0": {
+        "p2:0->add-2:0": {
           "segmented": true,
           "y": 21.22
         },
-        "p3:0->+#3:0": {
+        "p3:0->add-3:0": {
           "segmented": true,
           "y": 25.87
         },
@@ -881,25 +898,29 @@
           "segmented": true,
           "y": 47.260002
         },
-        "v1:0->+#4:0": {
+        "sub-0:0->f2:1": {
           "segmented": true,
-          "y": 33.62
+          "y": 12.54
         },
-        "v2:0->+#4:1": {
+        "v1:0->add-4:0": {
           "segmented": true,
-          "y": 37.96
+          "y": 33.620003
         },
-        "v3:0->+#4:2": {
+        "v2:0->add-4:1": {
           "segmented": true,
-          "y": 40.13
+          "y": 37.030003
         },
-        "wrap#0:0->v2:0": {
+        "v3:0->add-4:2": {
           "segmented": true,
-          "y": 30.83
+          "y": 38.890003
         },
-        "wrap#1:0->v3:0": {
+        "wrap-0:0->v2:0": {
           "segmented": true,
-          "y": 36.1
+          "y": 28.87
+        },
+        "wrap-1:0->v3:0": {
+          "segmented": true,
+          "y": 35.170002
         }
       }
     },
@@ -1210,45 +1231,6 @@
         }
       },
       {
-        "id": "fmrate",
-        "op": "param",
-        "kind": "param",
-        "label": "param fmrate @min 0.1 @max 8 @mod true @mod-mode additive",
-        "outputs": [
-          "out"
-        ],
-        "param": {
-          "name": "fmrate",
-          "modulatable": true
-        }
-      },
-      {
-        "id": "unison",
-        "op": "param",
-        "kind": "param",
-        "label": "param unison @min 0 @max 1 @mod true @mod-mode additive",
-        "outputs": [
-          "out"
-        ],
-        "param": {
-          "name": "unison",
-          "modulatable": true
-        }
-      },
-      {
-        "id": "octave",
-        "op": "param",
-        "kind": "param",
-        "label": "param octave @min -2 @max 2",
-        "outputs": [
-          "out"
-        ],
-        "param": {
-          "name": "octave",
-          "modulatable": false
-        }
-      },
-      {
         "id": "dampening",
         "op": "param",
         "kind": "param",
@@ -1275,6 +1257,32 @@
         }
       },
       {
+        "id": "dursamples",
+        "op": "param",
+        "kind": "param",
+        "label": "param dursamples @min 0.1 @max 4 @default 0.5",
+        "outputs": [
+          "out"
+        ],
+        "param": {
+          "name": "dursamples",
+          "modulatable": false
+        }
+      },
+      {
+        "id": "fmrate",
+        "op": "param",
+        "kind": "param",
+        "label": "param fmrate @min 0.1 @max 8 @mod true @mod-mode additive",
+        "outputs": [
+          "out"
+        ],
+        "param": {
+          "name": "fmrate",
+          "modulatable": true
+        }
+      },
+      {
         "id": "gain",
         "op": "param",
         "kind": "param",
@@ -1285,6 +1293,19 @@
         "param": {
           "name": "gain",
           "modulatable": true
+        }
+      },
+      {
+        "id": "octave",
+        "op": "param",
+        "kind": "param",
+        "label": "param octave @min -2 @max 2",
+        "outputs": [
+          "out"
+        ],
+        "param": {
+          "name": "octave",
+          "modulatable": false
         }
       },
       {
@@ -1311,6 +1332,19 @@
         "param": {
           "name": "sustain",
           "modulatable": false
+        }
+      },
+      {
+        "id": "unison",
+        "op": "param",
+        "kind": "param",
+        "label": "param unison @min 0 @max 1 @mod true @mod-mode additive",
+        "outputs": [
+          "out"
+        ],
+        "param": {
+          "name": "unison",
+          "modulatable": true
         }
       },
       {
@@ -1389,32 +1423,78 @@
         ]
       },
       {
+        "id": "history",
+        "op": "make-history",
+        "kind": "history",
+        "label": "history",
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "adsr-2",
+        "op": "adsr",
+        "kind": "builtin",
+        "label": "adsr adsr-2",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "gate"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "trigger"
+          },
+          {
+            "kind": "literal",
+            "value": "19"
+          },
+          {
+            "kind": "literal",
+            "value": "320"
+          },
+          {
+            "kind": "literal",
+            "value": "0.01"
+          },
+          {
+            "kind": "literal",
+            "value": "300"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
         "id": "env",
         "op": "adsr",
         "kind": "builtin",
-        "label": "adsr ? attack decay sustain release",
+        "label": "adsr env",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "gate"
           },
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "trigger"
           },
           {
-            "kind": "literal",
-            "value": "attack"
+            "kind": "symbol-ref",
+            "name": "attack"
           },
           {
-            "kind": "literal",
-            "value": "decay"
+            "kind": "symbol-ref",
+            "name": "decay"
           },
           {
-            "kind": "literal",
-            "value": "sustain"
+            "kind": "symbol-ref",
+            "name": "sustain"
           },
           {
-            "kind": "literal",
-            "value": "release"
+            "kind": "symbol-ref",
+            "name": "release"
           }
         ],
         "outputs": [
@@ -1425,10 +1505,30 @@
         "id": "mod-2",
         "op": "mod",
         "kind": "builtin",
-        "label": "mod",
+        "label": "mod mod-2",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "fmrate"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "mul-2",
+        "op": "*",
+        "kind": "builtin",
+        "label": "* mul-2",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "dursamples"
+          },
+          {
+            "kind": "literal",
+            "value": "48000"
           }
         ],
         "outputs": [
@@ -1439,13 +1539,11 @@
         "id": "phasor-2",
         "op": "phasor",
         "kind": "builtin",
-        "label": "phasor",
+        "label": "phasor phasor-2",
         "args": [
           {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "mod-2"
           }
         ],
         "outputs": [
@@ -1491,14 +1589,14 @@
         "id": "pitch-transpose-2",
         "op": "pitch-transpose",
         "kind": "macro-instance",
-        "label": "pitch-transpose unison~",
+        "label": "pitch-transpose pitch-transpose-2",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "pitch"
           },
           {
-            "kind": "literal",
-            "value": "unison~"
+            "kind": "connected"
           }
         ],
         "outputs": [
@@ -1540,7 +1638,7 @@
           },
           {
             "kind": "literal",
-            "value": "0.5"
+            "value": "0.4"
           }
         ],
         "outputs": [
@@ -1567,20 +1665,50 @@
         "id": "mul-0",
         "op": "*",
         "kind": "builtin",
-        "label": "* ? ? gain~",
+        "label": "* mul-0",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "mix-4"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "adsr-2"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "velocity"
           },
           {
             "kind": "connected"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "value",
+        "op": "1",
+        "kind": "constant",
+        "label": "1",
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "div",
+        "op": "/",
+        "kind": "builtin",
+        "label": "/ div",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "value"
           },
           {
-            "kind": "connected"
-          },
-          {
-            "kind": "literal",
-            "value": "gain~"
+            "kind": "symbol-ref",
+            "name": "mul-2"
           }
         ],
         "outputs": [
@@ -1617,12 +1745,12 @@
           },
           {
             "kind": "symbol-ref",
-            "name": "value-2"
+            "name": "value-2-2"
           }
         ],
         "outputs": [
-          "out",
-          "out2"
+          "out-3",
+          "out2-2"
         ]
       },
       {
@@ -1663,20 +1791,6 @@
         ]
       },
       {
-        "id": "history",
-        "op": "history",
-        "kind": "history",
-        "label": "history",
-        "args": [
-          {
-            "kind": "connected"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
         "id": "mix-5",
         "op": "mix",
         "kind": "builtin",
@@ -1702,7 +1816,7 @@
         "id": "mul-4",
         "op": "*",
         "kind": "builtin",
-        "label": "* mul",
+        "label": "* mul-4",
         "args": [
           {
             "kind": "symbol-ref",
@@ -1721,18 +1835,20 @@
         "id": "out-4_out2-3_out3",
         "op": "pitchless_delay_control",
         "kind": "macro-instance",
-        "label": "pitchless_delay_control",
+        "label": "pitchless_delay_control -> out-4 out2-3 out3",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "mul-4"
           },
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "div"
           }
         ],
         "outputs": [
-          "out",
-          "out2",
+          "out-4",
+          "out2-3",
           "out3"
         ]
       },
@@ -1756,24 +1872,26 @@
         "id": "out-2_out2",
         "op": "basic-reverb1",
         "kind": "macro-instance",
-        "label": "basic-reverb1 ? ? dampening~",
+        "label": "basic-reverb1 -> out-2 out2",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "mul-0"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "value-2"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "out-4"
           },
           {
             "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "literal",
-            "value": "dampening~"
           }
         ],
         "outputs": [
-          "out",
+          "out-2",
           "out2"
         ]
       },
@@ -1816,8 +1934,8 @@
           }
         ],
         "outputs": [
-          "out",
-          "out2"
+          "out-5",
+          "out2-4"
         ]
       },
       {
@@ -1867,13 +1985,52 @@
         ]
       },
       {
+        "id": "mul",
+        "op": "*",
+        "kind": "builtin",
+        "label": "* mul",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "env"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "mix-2"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "mul-3",
+        "op": "*",
+        "kind": "builtin",
+        "label": "* mul-3",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "env"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "mix-3"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
         "id": "audio",
         "op": "out",
         "kind": "out",
-        "label": "out 1",
+        "label": "audio",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "mul"
           },
           {
             "kind": "literal",
@@ -1885,143 +2042,36 @@
         "id": "audio-2",
         "op": "out",
         "kind": "out",
-        "label": "out 2",
+        "label": "audio-2",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "mul-3"
           },
           {
             "kind": "literal",
             "value": "2"
           }
         ]
-      },
-      {
-        "id": "dursamples",
-        "op": "param",
-        "kind": "param",
-        "label": "param dursamples @min 0.1 @max 4 @default 0.5",
-        "outputs": [
-          "out"
-        ],
-        "param": {
-          "name": "dursamples",
-          "modulatable": false
-        }
-      },
-      {
-        "id": "value",
-        "op": "1",
-        "kind": "constant",
-        "label": "1",
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "div",
-        "op": "/",
-        "kind": "builtin",
-        "label": "/",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "mul-2",
-        "op": "*",
-        "kind": "builtin",
-        "label": "* 48000",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "literal",
-            "value": "48000"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "adsr-2",
-        "op": "adsr",
-        "kind": "builtin",
-        "label": "adsr ? 19 320 0.01 300",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "literal",
-            "value": "19"
-          },
-          {
-            "kind": "literal",
-            "value": "320"
-          },
-          {
-            "kind": "literal",
-            "value": "0.01"
-          },
-          {
-            "kind": "literal",
-            "value": "300"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "mul-3",
-        "op": "*",
-        "kind": "builtin",
-        "label": "*",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "mul",
-        "op": "*",
-        "kind": "builtin",
-        "label": "*",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
       }
     ],
     "connections": [
+      {
+        "fromNode": "gate",
+        "fromOutput": 0,
+        "toNode": "adsr-2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "trigger",
+        "fromOutput": 0,
+        "toNode": "adsr-2",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
       {
         "fromNode": "gate",
         "fromOutput": 0,
@@ -2074,6 +2124,14 @@
         "fromNode": "fmrate",
         "fromOutput": 0,
         "toNode": "mod-2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "dursamples",
+        "fromOutput": 0,
+        "toNode": "mul-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -2167,6 +2225,14 @@
         "presentation": "cable"
       },
       {
+        "fromNode": "adsr-2",
+        "fromOutput": 0,
+        "toNode": "mul-0",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
         "fromNode": "velocity",
         "fromOutput": 0,
         "toNode": "mul-0",
@@ -2189,6 +2255,22 @@
         "toInput": 3,
         "kind": "forward",
         "presentation": "inline-mod-param"
+      },
+      {
+        "fromNode": "value",
+        "fromOutput": 0,
+        "toNode": "div",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mul-2",
+        "fromOutput": 0,
+        "toNode": "div",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
       },
       {
         "fromNode": "pitch",
@@ -2259,6 +2341,14 @@
         "fromOutput": 0,
         "toNode": "out-4_out2-3_out3",
         "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "div",
+        "fromOutput": 0,
+        "toNode": "out-4_out2-3_out3",
+        "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
       },
@@ -2391,41 +2481,9 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "mix-5",
+        "fromNode": "env",
         "fromOutput": 0,
-        "toNode": "history",
-        "toInput": 0,
-        "kind": "feedback",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "dursamples",
-        "fromOutput": 0,
-        "toNode": "mul-2",
-        "toInput": 0,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "mul-2",
-        "fromOutput": 0,
-        "toNode": "div",
-        "toInput": 1,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "div",
-        "fromOutput": 0,
-        "toNode": "out-4_out2-3_out3",
-        "toInput": 1,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "value",
-        "fromOutput": 0,
-        "toNode": "div",
+        "toNode": "mul",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -2439,50 +2497,10 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "trigger",
-        "fromOutput": 0,
-        "toNode": "adsr-2",
-        "toInput": 1,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "mul-3",
-        "fromOutput": 0,
-        "toNode": "audio-2",
-        "toInput": 0,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "mul",
-        "fromOutput": 0,
-        "toNode": "audio",
-        "toInput": 0,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "env",
-        "fromOutput": 0,
-        "toNode": "mul",
-        "toInput": 0,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
         "fromNode": "env",
         "fromOutput": 0,
         "toNode": "mul-3",
         "toInput": 0,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "adsr-2",
-        "fromOutput": 0,
-        "toNode": "mul-0",
-        "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
       },
@@ -2495,9 +2513,25 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "gate",
+        "fromNode": "mix-5",
         "fromOutput": 0,
-        "toNode": "adsr-2",
+        "toNode": "history",
+        "toInput": 0,
+        "kind": "feedback",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mul",
+        "fromOutput": 0,
+        "toNode": "audio",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mul-3",
+        "fromOutput": 0,
+        "toNode": "audio-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -2678,7 +2712,7 @@
                 }
               ],
               "outputs": [
-                "out",
+                "out-2",
                 "out2"
               ]
             },
@@ -2738,8 +2772,8 @@
                 }
               ],
               "outputs": [
-                "out",
-                "out2"
+                "out-3",
+                "out2-2"
               ]
             },
             {
@@ -2970,6 +3004,1272 @@
               "fromNode": "mix-4",
               "fromOutput": 0,
               "toNode": "out2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "choral-ahh",
+        "params": [
+          "freq",
+          "amp",
+          "detune"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "local"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "freq",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name freq",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "freq"
+                }
+              ],
+              "outputs": [
+                "freq"
+              ]
+            },
+            {
+              "id": "amp",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name amp",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "amp"
+                }
+              ],
+              "outputs": [
+                "amp"
+              ]
+            },
+            {
+              "id": "detune",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name detune",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "detune"
+                }
+              ],
+              "outputs": [
+                "detune"
+              ]
+            },
+            {
+              "id": "mul-0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "detune"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.63"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.08"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.12"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.18"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n0-32",
+              "op": "0.32",
+              "kind": "constant",
+              "label": "0.32",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-0",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "detune"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "f1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-1",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-2",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-1",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-2"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "f3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1200",
+              "op": "1200",
+              "kind": "constant",
+              "label": "1200",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "formant2_freq",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ formant2_freq",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1200"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n2800",
+              "op": "2800",
+              "kind": "constant",
+              "label": "2800",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "formant3_freq",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ formant3_freq",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n2800"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n800",
+              "op": "800",
+              "kind": "constant",
+              "label": "800",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "formant1_freq",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ formant1_freq",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n800"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "p1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor p1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "f1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "p3",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor p3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "f3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-3",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "p3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.41"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-0",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "detune"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "f2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "p2",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor p2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "f2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-2",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "p2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.17"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "v1",
+              "op": "polyblep_saw",
+              "kind": "builtin",
+              "label": "polyblep_saw v1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "p1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "f1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "wrap-0",
+              "op": "wrap",
+              "kind": "builtin",
+              "label": "wrap wrap-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "v2",
+              "op": "polyblep_saw",
+              "kind": "builtin",
+              "label": "polyblep_saw v2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "wrap-0"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "f2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "wrap-1",
+              "op": "wrap",
+              "kind": "builtin",
+              "label": "wrap wrap-1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "v3",
+              "op": "polyblep_saw",
+              "kind": "builtin",
+              "label": "polyblep_saw v3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "wrap-1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "f3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-4",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-4",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "v1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "v2"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "v3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "source",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* source",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n0-32"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "formant1",
+              "op": "svf",
+              "kind": "builtin",
+              "label": "svf formant1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "source"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "formant1_freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "7.5"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "formant2",
+              "op": "svf",
+              "kind": "builtin",
+              "label": "svf formant2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "source"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "formant2_freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "9"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "formant3",
+              "op": "svf",
+              "kind": "builtin",
+              "label": "svf formant3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "source"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "formant3_freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "11"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-5",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-5",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "formant1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1.25"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-6",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-6",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "formant2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.82"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-7",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-7",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "formant3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.38"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-5",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-5",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-5"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-6"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-7"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-4",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-4",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "amp"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "return",
+              "op": "tanh",
+              "kind": "builtin",
+              "label": "tanh return",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "detune",
+              "fromOutput": 0,
+              "toNode": "mul-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "mul-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "mul-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "mul-3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1",
+              "fromOutput": 0,
+              "toNode": "add-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "detune",
+              "fromOutput": 0,
+              "toNode": "add-0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "f1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-0",
+              "fromOutput": 0,
+              "toNode": "f1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-2",
+              "fromOutput": 0,
+              "toNode": "add-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-0",
+              "fromOutput": 0,
+              "toNode": "add-1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "f3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-1",
+              "fromOutput": 0,
+              "toNode": "f3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1200",
+              "fromOutput": 0,
+              "toNode": "formant2_freq",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-2",
+              "fromOutput": 0,
+              "toNode": "formant2_freq",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n2800",
+              "fromOutput": 0,
+              "toNode": "formant3_freq",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-3",
+              "fromOutput": 0,
+              "toNode": "formant3_freq",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n800",
+              "fromOutput": 0,
+              "toNode": "formant1_freq",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-1",
+              "fromOutput": 0,
+              "toNode": "formant1_freq",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f1",
+              "fromOutput": 0,
+              "toNode": "p1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f3",
+              "fromOutput": 0,
+              "toNode": "p3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "p3",
+              "fromOutput": 0,
+              "toNode": "add-3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-1",
+              "fromOutput": 0,
+              "toNode": "sub-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "detune",
+              "fromOutput": 0,
+              "toNode": "sub-0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "f2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-0",
+              "fromOutput": 0,
+              "toNode": "f2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f2",
+              "fromOutput": 0,
+              "toNode": "p2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "p2",
+              "fromOutput": 0,
+              "toNode": "add-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "p1",
+              "fromOutput": 0,
+              "toNode": "v1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f1",
+              "fromOutput": 0,
+              "toNode": "v1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-2",
+              "fromOutput": 0,
+              "toNode": "wrap-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "wrap-0",
+              "fromOutput": 0,
+              "toNode": "v2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f2",
+              "fromOutput": 0,
+              "toNode": "v2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-3",
+              "fromOutput": 0,
+              "toNode": "wrap-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "wrap-1",
+              "fromOutput": 0,
+              "toNode": "v3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f3",
+              "fromOutput": 0,
+              "toNode": "v3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "v1",
+              "fromOutput": 0,
+              "toNode": "add-4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "v2",
+              "fromOutput": 0,
+              "toNode": "add-4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "v3",
+              "fromOutput": 0,
+              "toNode": "add-4",
+              "toInput": 2,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n0-32",
+              "fromOutput": 0,
+              "toNode": "source",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-4",
+              "fromOutput": 0,
+              "toNode": "source",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "source",
+              "fromOutput": 0,
+              "toNode": "formant1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "formant1_freq",
+              "fromOutput": 0,
+              "toNode": "formant1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "source",
+              "fromOutput": 0,
+              "toNode": "formant2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "formant2_freq",
+              "fromOutput": 0,
+              "toNode": "formant2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "source",
+              "fromOutput": 0,
+              "toNode": "formant3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "formant3_freq",
+              "fromOutput": 0,
+              "toNode": "formant3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "formant1",
+              "fromOutput": 0,
+              "toNode": "mul-5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "formant2",
+              "fromOutput": 0,
+              "toNode": "mul-6",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "formant3",
+              "fromOutput": 0,
+              "toNode": "mul-7",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-5",
+              "fromOutput": 0,
+              "toNode": "add-5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-6",
+              "fromOutput": 0,
+              "toNode": "add-5",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-7",
+              "fromOutput": 0,
+              "toNode": "add-5",
+              "toInput": 2,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "amp",
+              "fromOutput": 0,
+              "toNode": "mul-4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-5",
+              "fromOutput": 0,
+              "toNode": "mul-4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-4",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
@@ -6148,6 +7448,96 @@
         }
       },
       {
+        "name": "gain2",
+        "params": [
+          "x"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/gain2/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/gain2/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "x",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name x",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "x"
+                }
+              ],
+              "outputs": [
+                "x"
+              ]
+            },
+            {
+              "id": "return",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "x"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.45"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "x",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
         "name": "pitch-transpose",
         "params": [
           "hz",
@@ -6332,1068 +7722,6 @@
               "fromNode": "return",
               "fromOutput": 0,
               "toNode": "out",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            }
-          ]
-        }
-      },
-      {
-        "name": "schroeder-allpass",
-        "params": [
-          "input",
-          "delay_samples",
-          "g"
-        ],
-        "outputs": [
-          "out"
-        ],
-        "origin": {
-          "kind": "library",
-          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/schroeder-allpass/macro.lisp",
-          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/schroeder-allpass/macro.layout.json"
-        },
-        "graph": {
-          "nodes": [
-            {
-              "id": "input",
-              "op": "in",
-              "kind": "in",
-              "label": "in 1 @name input",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "1"
-                },
-                {
-                  "kind": "literal",
-                  "value": "@name"
-                },
-                {
-                  "kind": "literal",
-                  "value": "input"
-                }
-              ],
-              "outputs": [
-                "input"
-              ]
-            },
-            {
-              "id": "delay_samples",
-              "op": "in",
-              "kind": "in",
-              "label": "in 2 @name delay_samples",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "2"
-                },
-                {
-                  "kind": "literal",
-                  "value": "@name"
-                },
-                {
-                  "kind": "literal",
-                  "value": "delay_samples"
-                }
-              ],
-              "outputs": [
-                "delay_samples"
-              ]
-            },
-            {
-              "id": "g",
-              "op": "in",
-              "kind": "in",
-              "label": "in 3 @name g",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "3"
-                },
-                {
-                  "kind": "literal",
-                  "value": "@name"
-                },
-                {
-                  "kind": "literal",
-                  "value": "g"
-                }
-              ],
-              "outputs": [
-                "g"
-              ]
-            },
-            {
-              "id": "history1",
-              "op": "make-history",
-              "kind": "history",
-              "label": "history",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "feedback_hist",
-              "op": "make-history",
-              "kind": "history",
-              "label": "history",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#0",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "g"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "delayed_w"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "w",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+ w",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "input"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "delay1",
-              "op": "delay",
-              "kind": "builtin",
-              "label": "delay delay1",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "w"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "delay_samples"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#1",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "g"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "w"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "return",
-              "op": "-",
-              "kind": "builtin",
-              "label": "-",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "delayed_w"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "out",
-              "op": "out",
-              "kind": "out",
-              "label": "out 1",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "1"
-                }
-              ]
-            }
-          ],
-          "connections": [
-            {
-              "fromNode": "input",
-              "fromOutput": 0,
-              "toNode": "w",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "g",
-              "fromOutput": 0,
-              "toNode": "*#0",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "feedback_hist",
-              "fromOutput": 0,
-              "toNode": "*#0",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#0",
-              "fromOutput": 0,
-              "toNode": "w",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "w",
-              "fromOutput": 0,
-              "toNode": "delay1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "delay_samples",
-              "fromOutput": 0,
-              "toNode": "delay1",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "delay1",
-              "fromOutput": 0,
-              "toNode": "feedback_hist",
-              "toInput": 0,
-              "kind": "feedback",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "feedback_hist",
-              "fromOutput": 0,
-              "toNode": "return",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "g",
-              "fromOutput": 0,
-              "toNode": "*#1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "w",
-              "fromOutput": 0,
-              "toNode": "*#1",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#1",
-              "fromOutput": 0,
-              "toNode": "return",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "return",
-              "fromOutput": 0,
-              "toNode": "out",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            }
-          ]
-        }
-      },
-      {
-        "name": "unison-frequencies",
-        "params": [
-          "base_freq",
-          "detune_st"
-        ],
-        "outputs": [
-          "out",
-          "out2",
-          "out3",
-          "out4",
-          "out5",
-          "out6",
-          "out7"
-        ],
-        "origin": {
-          "kind": "library",
-          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/unison-frequencies/macro.lisp",
-          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/unison-frequencies/macro.layout.json"
-        },
-        "graph": {
-          "nodes": [
-            {
-              "id": "base_freq",
-              "op": "in",
-              "kind": "in",
-              "label": "in 1 @name base_freq",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "1"
-                },
-                {
-                  "kind": "literal",
-                  "value": "@name"
-                },
-                {
-                  "kind": "literal",
-                  "value": "base_freq"
-                }
-              ],
-              "outputs": [
-                "base_freq"
-              ]
-            },
-            {
-              "id": "detune_st",
-              "op": "in",
-              "kind": "in",
-              "label": "in 2 @name detune_st",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "2"
-                },
-                {
-                  "kind": "literal",
-                  "value": "@name"
-                },
-                {
-                  "kind": "literal",
-                  "value": "detune_st"
-                }
-              ],
-              "outputs": [
-                "detune_st"
-              ]
-            },
-            {
-              "id": "scale_val",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* scale_val",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "detune_st"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.057762265046662105"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#0",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "scale_val"
-                },
-                {
-                  "kind": "literal",
-                  "value": "-0.4"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "exp#0",
-              "op": "exp",
-              "kind": "builtin",
-              "label": "exp",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f_1",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f_1",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "base_freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#1",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "scale_val"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.4"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "exp#1",
-              "op": "exp",
-              "kind": "builtin",
-              "label": "exp",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f1",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f1",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "base_freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#2",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "scale_val"
-                },
-                {
-                  "kind": "literal",
-                  "value": "-0.8"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "exp#2",
-              "op": "exp",
-              "kind": "builtin",
-              "label": "exp",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f_2",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f_2",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "base_freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#3",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "scale_val"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.8"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "exp#3",
-              "op": "exp",
-              "kind": "builtin",
-              "label": "exp",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f2",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f2",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "base_freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#4",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "scale_val"
-                },
-                {
-                  "kind": "literal",
-                  "value": "-1.2"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "exp#4",
-              "op": "exp",
-              "kind": "builtin",
-              "label": "exp",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f_3",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f_3",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "base_freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#5",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "scale_val"
-                },
-                {
-                  "kind": "literal",
-                  "value": "1.2"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "exp#5",
-              "op": "exp",
-              "kind": "builtin",
-              "label": "exp",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f3",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f3",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "base_freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "out",
-              "op": "out",
-              "kind": "out",
-              "label": "out 1",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "1"
-                }
-              ]
-            },
-            {
-              "id": "out2",
-              "op": "out",
-              "kind": "out",
-              "label": "out 2",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "2"
-                }
-              ]
-            },
-            {
-              "id": "out3",
-              "op": "out",
-              "kind": "out",
-              "label": "out 3",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "3"
-                }
-              ]
-            },
-            {
-              "id": "out4",
-              "op": "out",
-              "kind": "out",
-              "label": "out 4",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "4"
-                }
-              ]
-            },
-            {
-              "id": "out5",
-              "op": "out",
-              "kind": "out",
-              "label": "out 5",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "5"
-                }
-              ]
-            },
-            {
-              "id": "out6",
-              "op": "out",
-              "kind": "out",
-              "label": "out 6",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "6"
-                }
-              ]
-            },
-            {
-              "id": "out7",
-              "op": "out",
-              "kind": "out",
-              "label": "out 7",
-              "args": [
-                {
-                  "kind": "literal",
-                  "value": "7"
-                }
-              ]
-            }
-          ],
-          "connections": [
-            {
-              "fromNode": "detune_st",
-              "fromOutput": 0,
-              "toNode": "scale_val",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "f_1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "scale_val",
-              "fromOutput": 0,
-              "toNode": "*#0",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#0",
-              "fromOutput": 0,
-              "toNode": "exp#0",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "exp#0",
-              "fromOutput": 0,
-              "toNode": "f_1",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "f1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "scale_val",
-              "fromOutput": 0,
-              "toNode": "*#1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#1",
-              "fromOutput": 0,
-              "toNode": "exp#1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "exp#1",
-              "fromOutput": 0,
-              "toNode": "f1",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "f_2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "scale_val",
-              "fromOutput": 0,
-              "toNode": "*#2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#2",
-              "fromOutput": 0,
-              "toNode": "exp#2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "exp#2",
-              "fromOutput": 0,
-              "toNode": "f_2",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "f2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "scale_val",
-              "fromOutput": 0,
-              "toNode": "*#3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#3",
-              "fromOutput": 0,
-              "toNode": "exp#3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "exp#3",
-              "fromOutput": 0,
-              "toNode": "f2",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "f_3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "scale_val",
-              "fromOutput": 0,
-              "toNode": "*#4",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#4",
-              "fromOutput": 0,
-              "toNode": "exp#4",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "exp#4",
-              "fromOutput": 0,
-              "toNode": "f_3",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "f3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "scale_val",
-              "fromOutput": 0,
-              "toNode": "*#5",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#5",
-              "fromOutput": 0,
-              "toNode": "exp#5",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "exp#5",
-              "fromOutput": 0,
-              "toNode": "f3",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "base_freq",
-              "fromOutput": 0,
-              "toNode": "out",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f_1",
-              "fromOutput": 0,
-              "toNode": "out2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f1",
-              "fromOutput": 0,
-              "toNode": "out3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f_2",
-              "fromOutput": 0,
-              "toNode": "out4",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f2",
-              "fromOutput": 0,
-              "toNode": "out5",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f_3",
-              "fromOutput": 0,
-              "toNode": "out6",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f3",
-              "fromOutput": 0,
-              "toNode": "out7",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
@@ -10096,25 +10424,27 @@
         }
       },
       {
-        "name": "choral-ahh",
+        "name": "schroeder-allpass",
         "params": [
-          "freq",
-          "amp",
-          "detune"
+          "input",
+          "delay_samples",
+          "g"
         ],
         "outputs": [
           "out"
         ],
         "origin": {
-          "kind": "local"
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/schroeder-allpass/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/schroeder-allpass/macro.layout.json"
         },
         "graph": {
           "nodes": [
             {
-              "id": "freq",
+              "id": "input",
               "op": "in",
               "kind": "in",
-              "label": "in 1 @name freq",
+              "label": "in 1 @name input",
               "args": [
                 {
                   "kind": "literal",
@@ -10126,18 +10456,18 @@
                 },
                 {
                   "kind": "literal",
-                  "value": "freq"
+                  "value": "input"
                 }
               ],
               "outputs": [
-                "freq"
+                "input"
               ]
             },
             {
-              "id": "amp",
+              "id": "delay_samples",
               "op": "in",
               "kind": "in",
-              "label": "in 2 @name amp",
+              "label": "in 2 @name delay_samples",
               "args": [
                 {
                   "kind": "literal",
@@ -10149,18 +10479,18 @@
                 },
                 {
                   "kind": "literal",
-                  "value": "amp"
+                  "value": "delay_samples"
                 }
               ],
               "outputs": [
-                "amp"
+                "delay_samples"
               ]
             },
             {
-              "id": "detune",
+              "id": "g",
               "op": "in",
               "kind": "in",
-              "label": "in 3 @name detune",
+              "label": "in 3 @name g",
               "args": [
                 {
                   "kind": "literal",
@@ -10172,101 +10502,27 @@
                 },
                 {
                   "kind": "literal",
-                  "value": "detune"
+                  "value": "g"
                 }
               ],
               "outputs": [
-                "detune"
+                "g"
               ]
             },
             {
-              "id": "1",
-              "op": "1",
-              "kind": "constant",
-              "label": "1",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "+#0",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "detune"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f1",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f1",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
+              "id": "history1",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
               "outputs": [
                 "out"
               ]
             },
             {
-              "id": "1~1",
-              "op": "1",
-              "kind": "constant",
-              "label": "1",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "-#0",
-              "op": "-",
-              "kind": "builtin",
-              "label": "-",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "detune"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f2",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f2",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "freq"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
+              "id": "feedback_hist",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
               "outputs": [
                 "out"
               ]
@@ -10279,11 +10535,11 @@
               "args": [
                 {
                   "kind": "symbol-ref",
-                  "name": "detune"
+                  "name": "g"
                 },
                 {
-                  "kind": "literal",
-                  "value": "0.63"
+                  "kind": "symbol-ref",
+                  "name": "delayed_w"
                 }
               ],
               "outputs": [
@@ -10292,41 +10548,14 @@
               "synthesized": true
             },
             {
-              "id": "1~2",
-              "op": "1",
-              "kind": "constant",
-              "label": "1",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "+#1",
+              "id": "w",
               "op": "+",
               "kind": "builtin",
-              "label": "+",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "f3",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* f3",
+              "label": "+ w",
               "args": [
                 {
                   "kind": "symbol-ref",
-                  "name": "freq"
+                  "name": "input"
                 },
                 {
                   "kind": "connected"
@@ -10337,219 +10566,18 @@
               ]
             },
             {
-              "id": "p1",
-              "op": "phasor",
+              "id": "delay1",
+              "op": "delay",
               "kind": "builtin",
-              "label": "phasor p1",
+              "label": "delay delay1",
               "args": [
                 {
                   "kind": "symbol-ref",
-                  "name": "f1"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "p2",
-              "op": "phasor",
-              "kind": "builtin",
-              "label": "phasor p2",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "f2"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "p3",
-              "op": "phasor",
-              "kind": "builtin",
-              "label": "phasor p3",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "f3"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "v1",
-              "op": "polyblep_saw",
-              "kind": "builtin",
-              "label": "polyblep_saw v1",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "p1"
+                  "name": "w"
                 },
                 {
                   "kind": "symbol-ref",
-                  "name": "f1"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "+#2",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "p2"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.17"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "wrap#0",
-              "op": "wrap",
-              "kind": "builtin",
-              "label": "wrap",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "v2",
-              "op": "polyblep_saw",
-              "kind": "builtin",
-              "label": "polyblep_saw v2",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "f2"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "+#3",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "p3"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.41"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "wrap#1",
-              "op": "wrap",
-              "kind": "builtin",
-              "label": "wrap",
-              "args": [
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "v3",
-              "op": "polyblep_saw",
-              "kind": "builtin",
-              "label": "polyblep_saw v3",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "f3"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "+#4",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "v1"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "v2"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "v3"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "0.32",
-              "op": "0.32",
-              "kind": "constant",
-              "label": "0.32",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "source",
-              "op": "*",
-              "kind": "builtin",
-              "label": "* source",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
+                  "name": "delay_samples"
                 }
               ],
               "outputs": [
@@ -10564,310 +10592,11 @@
               "args": [
                 {
                   "kind": "symbol-ref",
-                  "name": "freq"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.08"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "800",
-              "op": "800",
-              "kind": "constant",
-              "label": "800",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "formant1_freq",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+ formant1_freq",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#2",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "freq"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.12"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "1200",
-              "op": "1200",
-              "kind": "constant",
-              "label": "1200",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "formant2_freq",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+ formant2_freq",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#3",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "freq"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.18"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "2800",
-              "op": "2800",
-              "kind": "constant",
-              "label": "2800",
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "formant3_freq",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+ formant3_freq",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "formant1",
-              "op": "svf",
-              "kind": "builtin",
-              "label": "svf formant1",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "source"
+                  "name": "g"
                 },
                 {
                   "kind": "symbol-ref",
-                  "name": "formant1_freq"
-                },
-                {
-                  "kind": "literal",
-                  "value": "7.5"
-                },
-                {
-                  "kind": "literal",
-                  "value": "1"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "formant2",
-              "op": "svf",
-              "kind": "builtin",
-              "label": "svf formant2",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "source"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "formant2_freq"
-                },
-                {
-                  "kind": "literal",
-                  "value": "9"
-                },
-                {
-                  "kind": "literal",
-                  "value": "1"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "formant3",
-              "op": "svf",
-              "kind": "builtin",
-              "label": "svf formant3",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "source"
-                },
-                {
-                  "kind": "symbol-ref",
-                  "name": "formant3_freq"
-                },
-                {
-                  "kind": "literal",
-                  "value": "11"
-                },
-                {
-                  "kind": "literal",
-                  "value": "1"
-                }
-              ],
-              "outputs": [
-                "out"
-              ]
-            },
-            {
-              "id": "*#5",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "formant1"
-                },
-                {
-                  "kind": "literal",
-                  "value": "1.25"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "*#6",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "formant2"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.82"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "*#7",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "formant3"
-                },
-                {
-                  "kind": "literal",
-                  "value": "0.38"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "+#5",
-              "op": "+",
-              "kind": "builtin",
-              "label": "+",
-              "args": [
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
-                },
-                {
-                  "kind": "connected"
-                }
-              ],
-              "outputs": [
-                "out"
-              ],
-              "synthesized": true
-            },
-            {
-              "id": "*#4",
-              "op": "*",
-              "kind": "builtin",
-              "label": "*",
-              "args": [
-                {
-                  "kind": "symbol-ref",
-                  "name": "amp"
-                },
-                {
-                  "kind": "connected"
+                  "name": "w"
                 }
               ],
               "outputs": [
@@ -10877,10 +10606,14 @@
             },
             {
               "id": "return",
-              "op": "tanh",
+              "op": "-",
               "kind": "builtin",
-              "label": "tanh",
+              "label": "-",
               "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "delayed_w"
+                },
                 {
                   "kind": "connected"
                 }
@@ -10904,79 +10637,15 @@
           ],
           "connections": [
             {
-              "fromNode": "freq",
+              "fromNode": "input",
               "fromOutput": 0,
-              "toNode": "f1",
+              "toNode": "w",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "1",
-              "fromOutput": 0,
-              "toNode": "+#0",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "detune",
-              "fromOutput": 0,
-              "toNode": "+#0",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "+#0",
-              "fromOutput": 0,
-              "toNode": "f1",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "freq",
-              "fromOutput": 0,
-              "toNode": "f2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "1~1",
-              "fromOutput": 0,
-              "toNode": "-#0",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "detune",
-              "fromOutput": 0,
-              "toNode": "-#0",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "-#0",
-              "fromOutput": 0,
-              "toNode": "f2",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "freq",
-              "fromOutput": 0,
-              "toNode": "f3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "detune",
+              "fromNode": "g",
               "fromOutput": 0,
               "toNode": "*#0",
               "toInput": 0,
@@ -10984,175 +10653,55 @@
               "presentation": "cable"
             },
             {
-              "fromNode": "1~2",
+              "fromNode": "feedback_hist",
               "fromOutput": 0,
-              "toNode": "+#1",
-              "toInput": 0,
+              "toNode": "*#0",
+              "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
               "fromNode": "*#0",
               "fromOutput": 0,
-              "toNode": "+#1",
+              "toNode": "w",
               "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "+#1",
+              "fromNode": "w",
               "fromOutput": 0,
-              "toNode": "f3",
+              "toNode": "delay1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "delay_samples",
+              "fromOutput": 0,
+              "toNode": "delay1",
               "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "f1",
+              "fromNode": "delay1",
               "fromOutput": 0,
-              "toNode": "p1",
+              "toNode": "feedback_hist",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "feedback_hist",
+              "fromOutput": 0,
+              "toNode": "return",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "f2",
-              "fromOutput": 0,
-              "toNode": "p2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f3",
-              "fromOutput": 0,
-              "toNode": "p3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "p1",
-              "fromOutput": 0,
-              "toNode": "v1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f1",
-              "fromOutput": 0,
-              "toNode": "v1",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "p2",
-              "fromOutput": 0,
-              "toNode": "+#2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "+#2",
-              "fromOutput": 0,
-              "toNode": "wrap#0",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "wrap#0",
-              "fromOutput": 0,
-              "toNode": "v2",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f2",
-              "fromOutput": 0,
-              "toNode": "v2",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "p3",
-              "fromOutput": 0,
-              "toNode": "+#3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "+#3",
-              "fromOutput": 0,
-              "toNode": "wrap#1",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "wrap#1",
-              "fromOutput": 0,
-              "toNode": "v3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "f3",
-              "fromOutput": 0,
-              "toNode": "v3",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "v1",
-              "fromOutput": 0,
-              "toNode": "+#4",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "v2",
-              "fromOutput": 0,
-              "toNode": "+#4",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "v3",
-              "fromOutput": 0,
-              "toNode": "+#4",
-              "toInput": 2,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "0.32",
-              "fromOutput": 0,
-              "toNode": "source",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "+#4",
-              "fromOutput": 0,
-              "toNode": "source",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "freq",
+              "fromNode": "g",
               "fromOutput": 0,
               "toNode": "*#1",
               "toInput": 0,
@@ -11160,9 +10709,1360 @@
               "presentation": "cable"
             },
             {
-              "fromNode": "800",
+              "fromNode": "w",
               "fromOutput": 0,
-              "toNode": "formant1_freq",
+              "toNode": "*#1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#1",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "simp10",
+        "params": [
+          "input"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp10/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp10/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "phasor1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor phasor1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "triangle1",
+              "op": "triangle",
+              "kind": "builtin",
+              "label": "triangle triangle1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "phasor1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "triangle1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "twopi"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "cos1",
+              "op": "cos",
+              "kind": "builtin",
+              "label": "cos cos1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "phasor1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "phasor1",
+              "fromOutput": 0,
+              "toNode": "triangle1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "triangle1",
+              "fromOutput": 0,
+              "toNode": "mul1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul1",
+              "fromOutput": 0,
+              "toNode": "cos1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "cos1",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "simp11",
+        "params": [
+          "input",
+          "shape",
+          "depth"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp11/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp11/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "shape",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name shape",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "shape"
+                }
+              ],
+              "outputs": [
+                "shape"
+              ]
+            },
+            {
+              "id": "depth",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name depth",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "depth"
+                }
+              ],
+              "outputs": [
+                "depth"
+              ]
+            },
+            {
+              "id": "mul5",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul5",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "depth"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add1",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "shape"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "add1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "simp21",
+              "op": "simp2",
+              "kind": "macro-instance",
+              "label": "simp2 simp21",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "phasor1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor phasor1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "triangle1",
+              "op": "triangle",
+              "kind": "builtin",
+              "label": "triangle triangle1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "phasor1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "shape"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "triangle1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "twopi"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul4",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul4",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "cos1",
+              "op": "cos",
+              "kind": "builtin",
+              "label": "cos cos1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gain21",
+              "op": "gain2",
+              "kind": "macro-instance",
+              "label": "gain2 gain21",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "cos1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gain22",
+              "op": "gain2",
+              "kind": "macro-instance",
+              "label": "gain2 gain22",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "gain21"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mix1",
+              "op": "mix",
+              "kind": "builtin",
+              "label": "mix mix1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "gain22"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "simp21"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "shape"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mix1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "depth",
+              "fromOutput": 0,
+              "toNode": "mul5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "shape",
+              "fromOutput": 0,
+              "toNode": "add1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add1",
+              "fromOutput": 0,
+              "toNode": "mul3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul5",
+              "fromOutput": 0,
+              "toNode": "mul3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "simp21",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "phasor1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "phasor1",
+              "fromOutput": 0,
+              "toNode": "triangle1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "shape",
+              "fromOutput": 0,
+              "toNode": "triangle1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "triangle1",
+              "fromOutput": 0,
+              "toNode": "mul1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul1",
+              "fromOutput": 0,
+              "toNode": "mul4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul3",
+              "fromOutput": 0,
+              "toNode": "mul4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul4",
+              "fromOutput": 0,
+              "toNode": "cos1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "cos1",
+              "fromOutput": 0,
+              "toNode": "gain21",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gain21",
+              "fromOutput": 0,
+              "toNode": "gain22",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gain22",
+              "fromOutput": 0,
+              "toNode": "mix1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "simp21",
+              "fromOutput": 0,
+              "toNode": "mix1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "shape",
+              "fromOutput": 0,
+              "toNode": "mix1",
+              "toInput": 2,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mix1",
+              "fromOutput": 0,
+              "toNode": "mul2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul2",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "simp2",
+        "params": [
+          "input"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp2/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp2/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "phasor1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor phasor1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "phasor1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "twopi"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "cos1",
+              "op": "cos",
+              "kind": "builtin",
+              "label": "cos cos1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "phasor1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "phasor1",
+              "fromOutput": 0,
+              "toNode": "mul1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul1",
+              "fromOutput": 0,
+              "toNode": "cos1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "cos1",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "unison-frequencies",
+        "params": [
+          "base_freq",
+          "detune_st"
+        ],
+        "outputs": [
+          "out",
+          "out2",
+          "out3",
+          "out4",
+          "out5",
+          "out6",
+          "out7"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/unison-frequencies/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/unison-frequencies/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "base_freq",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name base_freq",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "base_freq"
+                }
+              ],
+              "outputs": [
+                "base_freq"
+              ]
+            },
+            {
+              "id": "detune_st",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name detune_st",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "detune_st"
+                }
+              ],
+              "outputs": [
+                "detune_st"
+              ]
+            },
+            {
+              "id": "scale_val",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* scale_val",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "detune_st"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.057762265046662105"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "scale_val"
+                },
+                {
+                  "kind": "literal",
+                  "value": "-0.4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#0",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "f_1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f_1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "base_freq"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "scale_val"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#1",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "f1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "base_freq"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "scale_val"
+                },
+                {
+                  "kind": "literal",
+                  "value": "-0.8"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#2",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "f_2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f_2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "base_freq"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "scale_val"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.8"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#3",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "f2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "base_freq"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#4",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "scale_val"
+                },
+                {
+                  "kind": "literal",
+                  "value": "-1.2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#4",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "f_3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f_3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "base_freq"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#5",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "scale_val"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1.2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#5",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "f3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* f3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "base_freq"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "out2",
+              "op": "out",
+              "kind": "out",
+              "label": "out 2",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                }
+              ]
+            },
+            {
+              "id": "out3",
+              "op": "out",
+              "kind": "out",
+              "label": "out 3",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "id": "out4",
+              "op": "out",
+              "kind": "out",
+              "label": "out 4",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "4"
+                }
+              ]
+            },
+            {
+              "id": "out5",
+              "op": "out",
+              "kind": "out",
+              "label": "out 5",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "5"
+                }
+              ]
+            },
+            {
+              "id": "out6",
+              "op": "out",
+              "kind": "out",
+              "label": "out 6",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "6"
+                }
+              ]
+            },
+            {
+              "id": "out7",
+              "op": "out",
+              "kind": "out",
+              "label": "out 7",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "7"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "detune_st",
+              "fromOutput": 0,
+              "toNode": "scale_val",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "base_freq",
+              "fromOutput": 0,
+              "toNode": "f_1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "scale_val",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#0",
+              "fromOutput": 0,
+              "toNode": "exp#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "exp#0",
+              "fromOutput": 0,
+              "toNode": "f_1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "base_freq",
+              "fromOutput": 0,
+              "toNode": "f1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "scale_val",
+              "fromOutput": 0,
+              "toNode": "*#1",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
@@ -11170,13 +12070,29 @@
             {
               "fromNode": "*#1",
               "fromOutput": 0,
-              "toNode": "formant1_freq",
+              "toNode": "exp#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "exp#1",
+              "fromOutput": 0,
+              "toNode": "f1",
               "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "freq",
+              "fromNode": "base_freq",
+              "fromOutput": 0,
+              "toNode": "f_2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "scale_val",
               "fromOutput": 0,
               "toNode": "*#2",
               "toInput": 0,
@@ -11184,23 +12100,31 @@
               "presentation": "cable"
             },
             {
-              "fromNode": "1200",
+              "fromNode": "*#2",
               "fromOutput": 0,
-              "toNode": "formant2_freq",
+              "toNode": "exp#2",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "*#2",
+              "fromNode": "exp#2",
               "fromOutput": 0,
-              "toNode": "formant2_freq",
+              "toNode": "f_2",
               "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "freq",
+              "fromNode": "base_freq",
+              "fromOutput": 0,
+              "toNode": "f2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "scale_val",
               "fromOutput": 0,
               "toNode": "*#3",
               "toInput": 0,
@@ -11208,71 +12132,31 @@
               "presentation": "cable"
             },
             {
-              "fromNode": "2800",
-              "fromOutput": 0,
-              "toNode": "formant3_freq",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
               "fromNode": "*#3",
               "fromOutput": 0,
-              "toNode": "formant3_freq",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "source",
-              "fromOutput": 0,
-              "toNode": "formant1",
+              "toNode": "exp#3",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "formant1_freq",
+              "fromNode": "exp#3",
               "fromOutput": 0,
-              "toNode": "formant1",
+              "toNode": "f2",
               "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "source",
+              "fromNode": "base_freq",
               "fromOutput": 0,
-              "toNode": "formant2",
+              "toNode": "f_3",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "formant2_freq",
-              "fromOutput": 0,
-              "toNode": "formant2",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "source",
-              "fromOutput": 0,
-              "toNode": "formant3",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "formant3_freq",
-              "fromOutput": 0,
-              "toNode": "formant3",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "amp",
+              "fromNode": "scale_val",
               "fromOutput": 0,
               "toNode": "*#4",
               "toInput": 0,
@@ -11280,7 +12164,31 @@
               "presentation": "cable"
             },
             {
-              "fromNode": "formant1",
+              "fromNode": "*#4",
+              "fromOutput": 0,
+              "toNode": "exp#4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "exp#4",
+              "fromOutput": 0,
+              "toNode": "f_3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "base_freq",
+              "fromOutput": 0,
+              "toNode": "f3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "scale_val",
               "fromOutput": 0,
               "toNode": "*#5",
               "toInput": 0,
@@ -11290,63 +12198,71 @@
             {
               "fromNode": "*#5",
               "fromOutput": 0,
-              "toNode": "+#5",
+              "toNode": "exp#5",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "formant2",
+              "fromNode": "exp#5",
               "fromOutput": 0,
-              "toNode": "*#6",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#6",
-              "fromOutput": 0,
-              "toNode": "+#5",
+              "toNode": "f3",
               "toInput": 1,
               "kind": "forward",
               "presentation": "cable"
             },
             {
-              "fromNode": "formant3",
-              "fromOutput": 0,
-              "toNode": "*#7",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#7",
-              "fromOutput": 0,
-              "toNode": "+#5",
-              "toInput": 2,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "+#5",
-              "fromOutput": 0,
-              "toNode": "*#4",
-              "toInput": 1,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "*#4",
-              "fromOutput": 0,
-              "toNode": "return",
-              "toInput": 0,
-              "kind": "forward",
-              "presentation": "cable"
-            },
-            {
-              "fromNode": "return",
+              "fromNode": "base_freq",
               "fromOutput": 0,
               "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f_1",
+              "fromOutput": 0,
+              "toNode": "out2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f1",
+              "fromOutput": 0,
+              "toNode": "out3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f_2",
+              "fromOutput": 0,
+              "toNode": "out4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f2",
+              "fromOutput": 0,
+              "toNode": "out5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f_3",
+              "fromOutput": 0,
+              "toNode": "out6",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "f3",
+              "fromOutput": 0,
+              "toNode": "out7",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
@@ -11379,7 +12295,8 @@
     ],
     "imports": [
       "allpass-diffuser",
-      "pitch-transpose"
+      "pitch-transpose",
+      "pitchless_delay_control"
     ]
   }
 }

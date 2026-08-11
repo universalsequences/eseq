@@ -7829,6 +7829,41 @@
         );
     }
 
+    fn playhead_row_active(runtime: &Runtime, track: usize, row: usize) -> Value {
+        reactive_field_value(runtime, "SEQ", &track_playhead_row_active_field(track, row))
+    }
+
+    /// The row-active field is what a label's float `active` prop binds to, so
+    /// it has to stay a clean 0/1 and follow the playhead across rows — the
+    /// column field it sits beside can't serve that role (column 0 is falsy).
+    #[test]
+    fn track_playhead_row_active_field_follows_the_playing_row() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_params[0].set_num_steps(64);
+        let app = test_app_for_track_visual_state(state.clone());
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+
+        sync_all_track_playhead_fields(&mut runtime, &state, &app);
+        assert_eq!(playhead_row_active(&runtime, 0, 0), Value::Bool(true));
+        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(false));
+
+        // Step 20 lives on row 1, so the delta path must hand the flag over.
+        let mut previous = vec![0u32];
+        state.transport.track_playheads[0].store(20, Ordering::Relaxed);
+        sync_track_playhead_field_delta(&mut runtime, &state, &app, &mut previous);
+        assert_eq!(playhead_row_active(&runtime, 0, 0), Value::Bool(false));
+        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(true));
+
+        // Moving within a row leaves the flag set.
+        state.transport.track_playheads[0].store(21, Ordering::Relaxed);
+        sync_track_playhead_field_delta(&mut runtime, &state, &app, &mut previous);
+        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(true));
+
+        clear_all_track_playhead_fields(&mut runtime, &app);
+        assert_eq!(playhead_row_active(&runtime, 0, 1), Value::Bool(false));
+    }
+
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
         match value {
             Value::List(items) => items

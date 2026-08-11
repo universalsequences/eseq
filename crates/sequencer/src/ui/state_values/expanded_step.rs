@@ -581,6 +581,14 @@ pub(super) fn track_playhead_row_field(track: usize, row: usize) -> String {
     format!("track-playhead-row-{track}-{row}")
 }
 
+/// Row-granular companion to [`track_playhead_row_field`]. That field carries the
+/// active column and uses -1 for "inactive", which a widget's float `active` prop
+/// can't read (column 0 is falsy, -1 is truthy). This publishes a plain 0/1 so
+/// labels can swap `color`/`active-color` straight off the reactive slot.
+pub(crate) fn track_playhead_row_active_field(track: usize, row: usize) -> String {
+    format!("track-playhead-row-active-{track}-{row}")
+}
+
 pub(crate) fn track_playhead_active_field(track: usize, step: usize) -> String {
     format!("track-playhead-active-{track}-{step}")
 }
@@ -636,14 +644,16 @@ pub(crate) fn sync_all_track_playhead_fields(
         let row_count = track_playhead_row_count(state, track);
         let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
         for row in 0..max_rows {
+            let active = row == active_row && row < row_count;
             rt.set_reactive(
                 "SEQ",
                 &track_playhead_row_field(track, row),
-                Value::Number(if row == active_row && row < row_count {
-                    active_col as f64
-                } else {
-                    -1.0
-                }),
+                Value::Number(if active { active_col as f64 } else { -1.0 }),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_row_active_field(track, row),
+                Value::Bool(active),
             );
         }
     }
@@ -657,6 +667,11 @@ pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &app::App) 
                 "SEQ",
                 &track_playhead_row_field(track, row),
                 Value::Number(-1.0),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_row_active_field(track, row),
+                Value::Bool(false),
             );
         }
     }

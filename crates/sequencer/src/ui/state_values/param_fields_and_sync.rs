@@ -960,6 +960,13 @@ pub(crate) fn sync_track_playhead_field_delta(
                             Value::Number(-1.0),
                         )
                         .effects_dirty;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_row_active_field(t, prev_active_row),
+                            Value::Bool(false),
+                        )
+                        .effects_dirty;
                 }
                 if prev_active_step != active_step {
                     effects_dirty |= rt
@@ -981,6 +988,13 @@ pub(crate) fn sync_track_playhead_field_delta(
                             "SEQ",
                             &track_playhead_row_field(t, active_row),
                             Value::Number(active_col as f64),
+                        )
+                        .effects_dirty;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_row_active_field(t, active_row),
+                            Value::Bool(true),
                         )
                         .effects_dirty;
                 }
@@ -1005,6 +1019,13 @@ pub(crate) fn sync_track_playhead_field_delta(
                     "SEQ",
                     &track_playhead_row_field(t, active_row),
                     Value::Number(active_col as f64),
+                )
+                .effects_dirty;
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_playhead_row_active_field(t, active_row),
+                    Value::Bool(true),
                 )
                 .effects_dirty;
         }

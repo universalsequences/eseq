@@ -606,7 +606,7 @@
           (material
             :lighting (lighting :edge-min -0.32 :edge-max 1.293
               :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
-            :color (* 0.9 (if (= duration 1)
+            :color (* 0.7 (if (= duration 1)
                 (if (= muted 1)
                   (rgba 0 0 0 0)
                   (aqua-color
@@ -1715,14 +1715,28 @@
           (box :width 0.1 :height 0.342 :bg :transparent)
           (each (range 0 rows) |row|
             (v-stack :gap -0.16
-              (h-stack :gap 0.0
-                (each (range 0 sequencer-row-width) |col|
-                  (let ((step (+ (* row sequencer-row-width) col)))
-                    (seqv-step-cell
-                      track-idx
-                      step
-                      (< step num-steps)))))
-              (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
+              (h-stack
+                
+                (box :v-align :center :height 1.1 :padding 0.5
+                  ;; `active` is a reactive float slot the label reads at paint
+                  ;; time, so the playing row brightens without re-evaluating or
+                  ;; re-laying out the grid.
+                  (label (+ row 1)
+                    :color (if (> rows 1) :dim :buffer-bg)
+                    :active (if (> rows 1) (bind-seq (str "track-playhead-row-active-" track-idx "-" row)) 0)
+                    :active-color :white
+                    :width 0.1 :bg :transparent :font-size 8)
+                  )
+                (h-stack :gap 0.0
+                  (each (range 0 sequencer-row-width) |col|
+                    (let ((step (+ (* row sequencer-row-width) col)))
+                      (seqv-step-cell
+                        track-idx
+                        step
+                        (< step num-steps))))))
+              (h-stack (box :width 1)
+                (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
+    )
   )
 
 (def seqv-drum-slot-name-max-chars 14)

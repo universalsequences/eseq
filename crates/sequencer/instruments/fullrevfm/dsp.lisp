@@ -122,7 +122,7 @@
 (def fmox1-2 (fmox1 pitch phasor-2))
 (def pitch-transpose-2 (pitch-transpose pitch (mod unison)))
 (def fmox1-3 (fmox1 pitch-transpose-2 phasor-2))
-(def mix-4 (mix fmox1-2 fmox1-3 0.5))
+(def mix-4 (mix fmox1-2 fmox1-3 0.4))
 (def mul-0 (* mix-4 adsr-2 velocity (mod gain)))
 (def value 1)
 (def div (/ value mul-2))
