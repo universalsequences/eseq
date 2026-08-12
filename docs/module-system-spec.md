@@ -90,8 +90,14 @@ Locked decisions:
 Bare reference inside a module resolves in order: lexical scope (locals,
 upvalues — unchanged) → current module → `:refer`red symbols → core prelude.
 Qualified reference `X/name`: `X` resolves as an import alias first, then as
-a full module name. Unknown alias/namespace is a **compile error** at load
-time, not a runtime surprise.
+a full module name. Severity of an unknown `X` splits by shape (decided
+during S1, ratified 2026-08-12): an **undotted** namespace is alias-shaped
+(`tc/foo` with no import binding `tc`) — almost certainly a typo or missing
+import — and is a **hard compile error** at load time, not a runtime
+surprise. A **dotted** namespace reads as a full module name and only
+**warns once** when unknown: the cross-module escape hatch below must stay
+load-order-independent (defining into a module that has not been evaluated
+yet is legal during migration).
 
 Implementation is name mangling at the existing choke points, nothing more:
 `resolve_symbol` (`compiler.rs:1095`) and `ensure_global` (`vm.rs:3506`)
