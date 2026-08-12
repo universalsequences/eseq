@@ -2628,12 +2628,20 @@ impl Runtime {
             return symbols.clone();
         }
 
-        let mut symbols = self.vm.global_names().to_vec();
+        // Completions show bare names: `eseq.vanilla/foo` inserts and
+        // resolves as `foo` (module-system spec slice 0).
+        let mut symbols = self
+            .vm
+            .global_names()
+            .iter()
+            .map(|name| crate::modules::strip_implicit(name).to_string())
+            .collect::<Vec<_>>();
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
+                let display = crate::modules::strip_implicit(global);
                 let mut keys = map.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
-                symbols.extend(keys.into_iter().map(|key| format!("{global}.{key}")));
+                symbols.extend(keys.into_iter().map(|key| format!("{display}.{key}")));
             }
         }
         symbols.sort();
@@ -2650,13 +2658,14 @@ impl Runtime {
         let mut metadata = self.symbol_metadata.clone();
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
+                let display = crate::modules::strip_implicit(global);
                 let mut keys = map.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
                 for key in keys {
-                    let label = format!("{global}.{key}");
+                    let label = format!("{display}.{key}");
                     metadata.entry(label).or_insert_with(|| SymbolMetadata {
-                        signature: format!("{global}.{key}"),
-                        docs: format!("Field '{key}' on runtime map '{global}'."),
+                        signature: format!("{display}.{key}"),
+                        docs: format!("Field '{key}' on runtime map '{display}'."),
                     });
                 }
             }

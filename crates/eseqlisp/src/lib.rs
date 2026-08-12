@@ -51,6 +51,7 @@ pub mod ui;
 // Re-export submodules at crate root for backward-compatible paths
 // (e.g. crate::vm, crate::layout still work).
 pub use lang::compiler;
+pub use lang::modules;
 pub use lang::parser;
 pub use lang::vm;
 

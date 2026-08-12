@@ -108,6 +108,9 @@ pub struct Compiler {
     next_node_id: u32,
     next_temp_id: u32,
     source_file: Option<PathBuf>,
+    /// The module bare global names qualify under (spec slice 0: always
+    /// the implicit `eseq.vanilla` until `(module …)` headers land).
+    current_module: String,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -242,6 +245,7 @@ impl Compiler {
             next_node_id: 0,
             next_temp_id: 0,
             source_file: None,
+            current_module: super::modules::IMPLICIT_MODULE.to_string(),
             macros: HashMap::new(),
         }
     }
@@ -271,6 +275,7 @@ impl Compiler {
             next_node_id,
             next_temp_id: 0,
             source_file,
+            current_module: super::modules::IMPLICIT_MODULE.to_string(),
             macros,
         }
     }
@@ -1122,12 +1127,33 @@ impl Compiler {
     }
 
     fn use_global(&mut self, name: &str) -> usize {
-        if let Some(index) = self.global_symbols.iter().position(|r| *r == name) {
+        let resolved = self.resolve_global_name(name);
+        if let Some(index) = self.global_symbols.iter().position(|r| *r == resolved) {
             return index;
         }
         let idx = self.global_symbols.len();
-        self.global_symbols.push(name.to_string());
+        self.global_symbols.push(resolved);
         idx
+    }
+
+    /// Resolution ladder for bare global names (module-system spec §3,
+    /// slice 0): a qualified name (or reactive namespace) resolves as-is;
+    /// otherwise prefer the current module's qualified entry, fall back to
+    /// the flat entry (Rust natives and host-registered globals stay
+    /// unqualified), and intern new names qualified. Mirrored at runtime by
+    /// `VM::resolve_global_read_index` — keep the two in sync.
+    fn resolve_global_name(&self, name: &str) -> String {
+        if super::modules::is_qualified(name) || self.reactive_namespaces.contains(name) {
+            return name.to_string();
+        }
+        let qualified = super::modules::qualify(&self.current_module, name);
+        if self.global_symbols.iter().any(|s| *s == qualified) {
+            return qualified;
+        }
+        if self.global_symbols.iter().any(|s| *s == name) {
+            return name.to_string();
+        }
+        qualified
     }
 
     pub fn new_chunk(&mut self, chunk: Chunk) -> (usize, usize) {

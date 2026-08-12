@@ -3291,7 +3291,17 @@ impl VM {
         name: &str,
         f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static,
     ) {
-        let idx = self.ensure_global(name);
+        // Natives registered at startup (empty table) intern flat; natives
+        // registered mid-run by name (defhook, defwidget) must land in the
+        // qualified slot if the compiler already interned one for that name
+        // — same resolve-existing rule as `set_global_value`.
+        let idx = match self.resolve_global_read_index(name) {
+            Some(idx) => idx,
+            None => self.ensure_global(name),
+        };
+        if idx >= self.globals.len() {
+            self.globals.resize(idx + 1, None);
+        }
         self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
     }
 
@@ -3404,11 +3414,23 @@ impl VM {
         source: &str,
         revision: u64,
     ) -> Result<Option<Value>, VMError> {
-        let defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
+        let mut defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
             self.source_load_errors
                 .push(format!("{}: {error}", path.display()));
             VMError::ParseError
         })?;
+        // Textual extraction yields bare names, but the compiler interns
+        // most defs qualified (`eseq.vanilla/name`) and effect reads record
+        // interned names. Track both forms so hot-reload invalidation
+        // matches regardless of which slot a def resolved to (a def
+        // shadowing a flat native stays flat). Superset only means
+        // conservative over-invalidation.
+        let qualified: Vec<String> = defined_symbols
+            .iter()
+            .filter(|name| !crate::modules::is_qualified(name))
+            .map(|name| crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name))
+            .collect();
+        defined_symbols.extend(qualified);
         self.clear_effects_for_module(&path);
         self.source_manager
             .remember_evaluated_source(path.clone(), revision, source);
@@ -3617,12 +3639,33 @@ impl VM {
         idx
     }
 
+    /// Runtime by-name resolution ladder (module-system spec §3, slice 0),
+    /// mirroring `Compiler::resolve_global_name`: a qualified name resolves
+    /// as-is; a bare name prefers the current module's qualified entry
+    /// (`eseq.vanilla/name`) and falls back to the flat entry (natives,
+    /// host-registered globals). Keep the two in sync.
+    fn resolve_global_read_index(&self, name: &str) -> Option<usize> {
+        if crate::modules::is_qualified(name) {
+            return self.global_names.iter().position(|n| n == name);
+        }
+        let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
+        self.global_names
+            .iter()
+            .position(|n| *n == qualified)
+            .or_else(|| self.global_names.iter().position(|n| n == name))
+    }
+
     pub fn has_global(&self, name: &str) -> bool {
-        self.global_names.iter().any(|n| n == name)
+        self.resolve_global_read_index(name).is_some()
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
-        let idx = self.ensure_global(name);
+        // Write into the slot a lisp reference would resolve to; only
+        // create a new (flat, host-owned) slot when neither form exists.
+        let idx = match self.resolve_global_read_index(name) {
+            Some(idx) => idx,
+            None => self.ensure_global(name),
+        };
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, None);
         }
@@ -3634,7 +3677,7 @@ impl VM {
     }
 
     pub fn global_value(&self, name: &str) -> Option<Value> {
-        let idx = self.global_names.iter().position(|global| global == name)?;
+        let idx = self.resolve_global_read_index(name)?;
         self.globals
             .get(idx)
             .and_then(|value| value.as_ref())
@@ -4849,10 +4892,12 @@ impl VM {
     }
 
     fn unknown_global(&self, idx: usize) -> VMError {
+        // Report the bare name: the implicit-module prefix is an interning
+        // detail users never typed (module-system spec slice 0).
         let name = self
             .global_names
             .get(idx)
-            .cloned()
+            .map(|name| crate::modules::strip_implicit(name).to_string())
             .unwrap_or_else(|| format!("<global:{idx}>"));
         VMError::UnknownVariable(name)
     }
@@ -5179,9 +5224,14 @@ impl VM {
                         if let (Some(name), Some(value)) =
                             (self.global_names.get(idx), stored.as_ref())
                         {
+                            // Hooks see the bare name: consumers (process/
+                            // channel naming) treat it as a user-visible
+                            // identifier. Revisit when registries qualify
+                            // per-module (spec §5, slice 3).
                             let value = value.borrow().clone();
+                            let hook_name = crate::modules::strip_implicit(name);
                             for hook in &self.global_store_hooks {
-                                hook(name, &value);
+                                hook(hook_name, &value);
                             }
                         }
                         frame.pc += 1;
