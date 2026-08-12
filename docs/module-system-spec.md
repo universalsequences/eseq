@@ -605,7 +605,17 @@ stays as-is; real macro hygiene is out of scope for this spec.
      converting.
   e. **Flat keyspaces that do NOT qualify**: hook names (`defhook`/`add-hook`
      strings), `defchan`, subtree keys, `defwidget` names. Leave those
-     strings alone. Corollary discovered in batch 1: `defhook` registers its
+     strings alone. **Subtree keys, precisely (batch 4):** `(subtree :key …)`
+     compiles to a `subtree-owner` call (`compiler.rs:compile_subtree_form`)
+     whose key goes straight to `explicit_subtree_root_hash` and never passes
+     through `VM::qualify_widget_stable_key`. So a converted file's `:key`
+     props split into two keyspaces that must be treated oppositely: **widget**
+     `:key`s qualify and should drop the file's hand-rolled prefix (the
+     qualifier supplies the provenance), while **subtree** `:key`s stay
+     byte-identical — stripping them would put a bare `track-0` into a flat
+     *global* keyspace shared with every other file. The same split governs the
+     test assertions: widget-key sites move to the `/`-suffix matcher, subtree-key
+     sites keep their exact flat spelling. Corollary discovered in batch 1: `defhook` registers its
      caller-facing native *at runtime* under the flat name, so a converted
      module cannot call `(the-hook-name)` bare — its own call site compiles
      before that global exists and interns a dead qualified slot. Inside a
@@ -657,6 +667,24 @@ stays as-is; real macro hygiene is out of scope for this spec.
      fold in only when the Rust codegen is taught to emit qualified names.
      Rule of thumb: a name that Rust writes by bare spelling is not yours to
      move; a name Rust only *reads* by bare spelling is (aliases cover reads).
+
+  j. **A module's bare *outbound write* needs its vanilla owner already
+     defined** (found converting `ui/mixer.lisp`, batch 4 — the mirror image of
+     (i)). `(set! some-vanilla-global v)` inside a module resolves through the
+     usual ladder, so it finds the flat entry *if one exists at that point*.
+     If none does, the write does not error and does not create the vanilla
+     global: it lands in the module's own namespace, and the vanilla reader
+     that appears later sees nothing. In a vanilla file the same `set!` creates
+     the flat global on first write, which is why this only surfaces on
+     conversion. Production is usually fine by load order — `ui/mixer.lisp`
+     writes `sbrowser-loading-instrument-name`, and `ui/browser.lisp` loads at
+     `main.lisp:17` against mixer's `:18`. Stub **test harnesses** are where it
+     bites: they eval one file's source with none of its peers, and used to get
+     the global for free from the converted file's own `set!`. Check the
+     converted file's outbound `set!`s, confirm the owning file loads first in
+     production, and declare the owner in any harness that does not load it.
+     `ui/sequencer.lisp` makes the same write at `:381` and will need the same
+     check.
 
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
@@ -836,6 +864,41 @@ stays as-is; real macro hygiene is out of scope for this spec.
      from other lisp files, which is fine precisely *because* they stay flat.
      44 literal widget keys (the most of the four) but only ~14 assertion
      sites.
+
+  ### Batch 4 tally — `mixer.lisp` (2026-08-12)
+
+  `ui/mixer.lisp` → `eseq.mixer`. 120 defs: 98 `%`-private, 18 renamed public,
+  4 `defwidget` names left flat (hazard e). 19 compat aliases — 18 renames plus
+  an identity alias for `seq-ctrl-g`, whose spelling is unchanged but which
+  `src/ui/input.rs:1307` evals by name.
+
+  **The mode-alias rung (stage 4) is accepted, unexercised.** `seq-mixer-mode`
+  is genuinely self-contained — it appears nowhere outside `mixer.lisp` in lisp,
+  Rust, or a `(current-buffer-mode)` comparison — so it qualifies consistently
+  on both sides and needed **no** alias. The three handler strings
+  (`:on-key`, two `mode-bind-key`) follow the renames and dispatch through the
+  module. `seq-grid-mode.lisp` remains the file that will actually exercise the
+  flat→qualified rung.
+
+  **Preflight-table corrections.** Column 4 over-counted mixer's lisp-side
+  callers at 7; the real number is 5. `patch-mixer-strip`'s only mention outside
+  the file is a *comment* in `seq-layout.lisp`, and `track-peak`'s only other
+  definition is `ui/legacy/mixer.lisp`, which nothing loads — it is now
+  `%track-peak` and deliberately unaliased, per stage 2's rule about names other
+  files define on purpose. Both corrections came from grepping the names rather
+  than trusting the table, which is the standing instruction. In the other
+  direction the table's "~10 stable-key assertion sites" is badly low: mixer has
+  **37**, 26 on auto-qualifying widget keys and 11 on non-qualifying subtree
+  keys (see hazard (e) above for why the two halves are handled oppositely).
+  Assume the same undercount for the remaining three files — the number to
+  budget for is the count of *all* `:key` sites, split by keyspace, not the
+  count of `find_layout_node_by_stable_key` calls that happen to mention the
+  file's prefix.
+
+  Hazard (j) is new and was found here. Hazards (b), (c), (h) and (i) had no
+  exposure in this file, as predicted.
+
+  Running conversion count: 10 files.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
