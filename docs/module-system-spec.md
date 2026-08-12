@@ -705,6 +705,138 @@ stays as-is; real macro hygiene is out of scope for this spec.
   any of them that defines a mode until the mode keyspace gets its alias
   rung.
 
+  ### Batch 4 — infrastructure stage (BUILT 2026-08-12)
+
+  Two pieces of infra, no conversions:
+
+  1. **Mode keyspace alias rung** — hazard (d) stage 4 above. This lifts the
+     batch-3 veto: `ui/mixer.lisp` defines `seq-mixer-mode` and is now
+     convertible, and `ui/seq-grid-mode.lisp` is unblocked as a separate
+     candidate.
+  2. **`find_layout_node_by_stable_key_suffix` in
+     `crates/sequencer/src/ui/state_values/tests.rs`** — ported from
+     `ui/tests.rs`, byte-identical semantics. Hazard (a) re-keys every widget
+     in a converted file; a conversion rewrites its own assertions as
+     `_suffix(&layout, "/entry-0")`, which pins the key without naming the
+     owning module. Deliberately duplicated rather than hoisted: that is the
+     existing pattern (`find_layout_node_by_stable_key` already lives in both
+     files), both `mod tests` blocks are private, and the crate has no
+     test-support module. Only the 11 already-requalified choose-model /
+     sound-palette sites were migrated, as worked examples — a bulk rewrite
+     would bury each conversion's own diff.
+
+  ### Batch 4 preflight table
+
+  Derived by sweeping `crates/sequencer/src` (and `crates/eseqlisp/src`) with
+  whole-file — **not line-based** — regexes for every one of the 591 names the
+  four files define. Line-based grep misses the multi-line raw-string lisp in
+  `ui/host_commands/scripts.rs` and `ui/input.rs`; that is how the first pass
+  under-reported `sbrowser-tab`. Patterns: writes `(set!|def|defstate|defwidget) <name>`
+  and `set_global_value("<name>")`; reads `global_value`/`invoke_global`/`has_global`;
+  calls `(<name>` inside Rust string literals.
+
+  **Column 1 — pinned to `eseq.vanilla` via the §3 escape hatch, no alias.**
+  Production Rust writes the name by bare spelling. Per hazard (i)'s rule of
+  thumb these are a host→script protocol, not the module's API. Write them
+  `(def eseq.vanilla/<name> …)` / `(defstate eseq.vanilla/<name> …)` inside
+  the module and mint **no** `module-compat-alias` for them.
+
+  | file | pinned names | production writers |
+  |---|---|---|
+  | `browser.lisp` | `sbrowser-tab` (defstate) | `host_commands/scripts.rs:115,232,260`; `host_commands/tracks.rs:335` |
+  | | `sbrowser-editor-name` | `host_commands/instrument_authoring.rs:158,369,2317,2533,3339,3486` |
+  | | `sbrowser-loading-instrument-name` (defstate) | `ui/event_loop.rs:1387`; `host_commands/tracks.rs:506,517,527,538,553,561,575,591` |
+  | | `sbrowser-script-name` (defstate) | `host_commands/scripts.rs:114,231,259` |
+  | | `sbrowser-script-save-mode` (defstate) | `host_commands/scripts.rs:113,230,258` |
+  | | `sbrowser-auditioned-sample` (defstate) | `ui/edit_sessions.rs:1091` |
+  | `sequencer.lisp` | — none — | |
+  | `arrangement.lisp` | — none — | |
+  | `mixer.lisp` | — none — | |
+
+  All six pinned names are in `browser.lisp`, and all six are also written
+  from `ui/state_values/tests.rs`. **`browser.lisp` is the only one of the
+  four carrying hazard (i) at all.**
+
+  **Column 2 — alias-safe, but a test fixture *defines* the name.** These are
+  `#[cfg(test)]` stubs (everything in `ui/input.rs` from line 1687 —
+  `mod live_keyboard_tests` — and the lisp preludes in
+  `ui/state_values/tests.rs`). They are alias-safe in principle: writes follow
+  the alias, and a redefinition keeps last-writer-wins exactly as it does
+  today against a flat name. But they are the *stub-shadows-the-real-thing*
+  pattern, and stage 2's macro finding — "an alias should not be minted for a
+  name that unconverted files redefine on purpose" — applies in spirit.
+  **Re-run the owning tests after minting each of these aliases.**
+
+  | file | stub-defined names |
+  |---|---|
+  | `sequencer.lisp` | `seqv-collapse-all-tracks`, `seqv-current-number-picker-key`, `seqv-current-param-mode`, `seqv-current-selected-step`, `seqv-expanded-track-ids` (defstate), `seqv-select-all-current-track-steps`, `seqv-select-track-for-edit` — all `ui/input.rs` 2296–3682 |
+  | `browser.lisp` | `sample-browser-here`, `sbrowser-active-tree-key`, `sbrowser-next-tab`, `sbrowser-filter` (`ui/input.rs` 1925–1945); `sbrowser-add-selected-rack-layer`, `sbrowser-sample-selected-path`, `sbrowser-preset-filter`, `sbrowser-selected-instrument-name`, `sbrowser-selected-audio-effect-name`, `sbrowser-selected-tags` (`state_values/tests.rs`) |
+  | `arrangement.lisp` | `arrangement-cursor-time`, `arrangement-cursor-track`, `arrangement-view-start`, `arrangement-view-duration` — all `state_values/tests.rs` + `ui/tests.rs:9701`, `set!` only (no stub `def`), so plain alias-covered |
+  | `mixer.lisp` | — none — |
+
+  **Column 3 — alias-safe reads/calls.** Rust names these globals only to read
+  or invoke them; every such path goes through `resolve_global_read_index`,
+  which has the alias rung. Mint a normal alias and move on.
+
+  | file | production read/call | test-only read/call |
+  |---|---|---|
+  | `sequencer.lisp` | `seqv-select-track-for-edit` (`ui/input.rs:153` `global_value`+`invoke`, with an `eval_str` fallback at `:160`); `seqv-collapse-all-tracks`, `seqv-current-param-mode`, `seqv-current-selected-step`, `seqv-current-number-picker-key`, `seqv-select-all-current-track-steps` (`ui/input.rs` 476–1277, inside the `#[cfg(test)] pub(crate) fn handle_metal_command_shortcut` at :1033 — real dispatch logic, test-gated) | 16 `seqv-*` entry points driven from `state_values/tests.rs` / `ui/tests.rs` |
+  | `browser.lisp` | `sbrowser-refresh-buffer` (`ui/edit_sessions.rs:1100`, `host_commands/instrument_authoring.rs:2346,2558`, `host_commands/project.rs:50`); `sample-browser-here` (`ui/input.rs:228` `global_value`+`invoke`, fallback `(switch-to-buffer "*samples*")`); `sbrowser-active-tree-key` (`ui/input.rs:245`) | 29 `sbrowser-*` entry points |
+  | `arrangement.lisp` | — none — | 24, incl. `arrangement-track-clips`, `arrangement-lane-selection`, `arrangement-scene-action`, `set-arrangement-view-start` |
+  | `mixer.lisp` | `seq-ctrl-g` (`ui/input.rs:1307`, test-gated dispatch) | 13 `mixer-v2-*` entry points |
+
+  **Column 4 — lisp-side external callers (the aliases you must mint).**
+  Fan-out is small; this is the complete list.
+
+  | file | names referenced from other lisp files |
+  |---|---|
+  | `sequencer.lisp` (196 defs) | `sequencer-cursor-step-changed`, `seqv-collapse-all-tracks`, `seqv-handle-key`, `seqv-open-piano-roll-for-track`, `seqv-select-track-for-edit`, `seqv-set-param-mode`, `seqv-toggle-current-track-expanded`, `seqv-track-header`, `seqv-track-menu-click`, `seqv-track-selected-binding` — plus `metal-track-tick`, which is a **`defwidget`** and therefore needs **no** alias (hazard e: widget names do not qualify) |
+  | `browser.lisp` (147) | `sbrowser-drop-instrument-on-track`, `sbrowser-drop-sample-on-track`, `sbrowser-drop-sound-on-track`, `sbrowser-enter-preset-save`, `sbrowser-open-project-save`, `sbrowser-project-save-mode?`, `sbrowser-tab` (pinned — no alias), `sbrowser-loading-instrument-name` (pinned — no alias) |
+  | `arrangement.lisp` (128) | `set-arrangement-cursor`, `arrangement-ghost`, `arrangement-view-start`, `arrangement-view-duration` (three of the four are reached only from `ui/capture-fixtures/*.lisp`) |
+  | `mixer.lisp` (120) | `mixer-v2-muted?`, `mixer-v2-track-collapsed-label`, `mixer-v2-track-color-r/-g/-b`, `patch-mixer-strip`, `track-peak` |
+
+  **Not covered by this table, and out of scope for the four:** the dynamic
+  bare-name globals in `lisp_host/native_arg_parsing.rs:52/91/109` (per-effect
+  param descriptors, `sanitize_symbol_name`-derived, and nil'd out by bare
+  name) and the `__scratch_hook_{N}` family (`app/effects.rs:270`). None
+  collide with a name any of the four defines, but they are the reason a
+  module system needs a permanent escape hatch, not just a migration one.
+
+  ### Batch 4 per-file risk and recommended order
+
+  1. **`mixer.lisp`** — lowest risk, convert first. **Zero** Rust writers,
+     zero pinned names, 7 lisp-side aliases, ~10 stable-key assertion sites.
+     Its `define-mode "seq-mixer-mode"` is fully self-contained (it defines
+     the mode, binds only handlers it defines itself, and calls
+     `set-buffer-mode-for "*mixer*"` itself), so every mode reference
+     qualifies consistently and it needs **no mode alias at all**. It is the
+     acceptance test for the stage-4 rung with the least else going on.
+  2. **`arrangement.lisp`** — no Rust writers, no modes, no `:shader` /
+     `:material`, 4 lisp aliases (3 reached only from capture fixtures),
+     ~12 assertion sites. The only wrinkle is `set!`-only test writers, which
+     the alias covers.
+  3. **`sequencer.lisp`** — hazard (a) is concentrated here: ~95 of the ~235
+     stable-key assertion sites come from its 39 dynamic key prefixes
+     (`seqv-*`, `sequencer-track-*`). Also the only one with hazard (h): its
+     single `defmacro seqv-aqua-slider-track-material` is used from two
+     `:material` bodies **in the same file**, which expand in the throwaway
+     implicit-module compiler — so those two call sites must be rewritten
+     **qualified** (`eseq.sequencer/seqv-aqua-slider-track-material`) or they
+     will not resolve. No external macro caller, so no step-0 gate. It
+     references `seq-grid-mode` (`sequencer.lisp:1957`) but does not define
+     it: that reference qualifies to `eseq.sequencer/seq-grid-mode` and lands
+     on vanilla through rung 3, pinned by
+     `module_mode_reference_falls_back_to_a_vanilla_mode`.
+  4. **`browser.lisp`** — highest risk, convert last. It is the **only** one
+     of the four with hazard (i), and it has six pinned names — five of them
+     `defstate`, so hazard (b) compounds: a pinned `defstate` must keep both
+     its global slot and its `state_bindings` key flat, and pinning is the
+     §3 escape hatch on the `defstate` form itself. Two of the pinned names
+     (`sbrowser-tab`, `sbrowser-loading-instrument-name`) are also referenced
+     from other lisp files, which is fine precisely *because* they stay flat.
+     44 literal widget keys (the most of the four) but only ~14 assertion
+     sites.
+
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
   add `~/.eseq.d/init.lisp` loaded last. `override` (§6.1) lands here — it
