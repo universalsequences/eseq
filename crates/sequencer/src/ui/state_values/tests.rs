@@ -996,7 +996,10 @@
     }
 
     fn load_step_gesture_source(runtime: &mut Runtime) {
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
+        // S2 moved the step gesture defs from ui/main.lisp into the
+        // step-grid-interactions section file.
+        let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
+            .expect("read ui/step-grid-interactions.lisp");
         let start = src
             .find("(def selection-click?")
             .expect("step gesture source should define selection-click?");
@@ -1009,7 +1012,10 @@
     }
 
     fn load_keyboard_step_selection_source(runtime: &mut Runtime) {
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
+        // S2 moved the keyboard step selection defs from ui/main.lisp into
+        // the step-grid-interactions section file.
+        let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
+            .expect("read ui/step-grid-interactions.lisp");
         let start = src
             .find("(def step-key-select-anchor")
             .expect("keyboard step selection source should define anchor");
@@ -37496,7 +37502,10 @@
             .runtime_mut()
             .eval_str("(defstate lower-panel-buffer \"*fx*\")")
             .expect("install lower panel state for mods toggle action");
-        let grid_src = std::fs::read_to_string("ui/main.lisp").expect("read grid lisp");
+        // S2 moved the fx lower-panel defs from ui/main.lisp into the
+        // seq-panels section file.
+        let grid_src =
+            std::fs::read_to_string("ui/seq-panels.lisp").expect("read seq panels lisp");
         let effect_panels_src = std::fs::read_to_string("ui/effects/effect-panels.lisp")
             .expect("read effect panels lisp");
         let toggle_action_src = lisp_def_slice(
