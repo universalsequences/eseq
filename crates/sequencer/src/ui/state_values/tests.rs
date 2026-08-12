@@ -14979,7 +14979,7 @@
             .widget_layout()
             .expect("mixer perf fixture layout should build");
         assert_eq!(
-            count_stable_key_prefix(&layout, "mixer-v2-track-pattern-cell-"),
+            count_stable_key_prefix(&layout, "eseq.mixer/track-pattern-cell-"),
             track_count * cell_count,
             "mixer perf fixture should render every track pattern cell"
         );
@@ -26386,16 +26386,16 @@
             .expect("collapsed mixer layout should build");
 
         let compact_badge =
-            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-label-1")
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-label-1")
                 .expect("collapsed track badge should render");
         assert_finite_nonzero_rect(compact_badge, "collapsed mixer track badge");
         assert!(
             compact_badge.props.contains_key("on-double-click"),
             "collapsed mixer badge should keep the piano-roll double-click gesture"
         );
-        let compact_badge_content = find_layout_node_by_stable_key(
+        let compact_badge_content = find_layout_node_by_stable_key_suffix(
             &mixer_layout,
-            "mixer-v2-track-collapsed-label-content-1",
+            "/track-collapsed-label-content-1",
         )
         .expect("collapsed track badge content should render");
         assert_finite_nonzero_rect(compact_badge_content, "collapsed mixer badge content");
@@ -26406,7 +26406,7 @@
             "collapsed instrument badges should reuse the sidebar piano icon"
         );
         let sampler_badge_content =
-            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-label-content-0")
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-0")
                 .expect("expanded sampler badge content should render");
         assert_finite_nonzero_rect(sampler_badge_content, "expanded sampler badge content");
         assert_eq!(
@@ -26415,14 +26415,14 @@
             "sampler mixer badges should reuse the sidebar waveform icon"
         );
         let compact_mute =
-            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-mute-1")
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-mute-1")
                 .expect("collapsed track mute should render");
         assert_finite_nonzero_rect(compact_mute, "collapsed mixer mute");
         let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-1")
             .expect("collapsed track meter should render");
         assert_finite_nonzero_rect(compact_meter, "collapsed mixer meter");
         assert!(
-            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-label-1").is_none(),
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-1").is_none(),
             "collapsed mixer track should not render the full-width label"
         );
 
@@ -30859,7 +30859,7 @@
         for track in 0..track_count {
             for cell in 0..cell_count {
                 let pattern_id = track * 100 + cell + 1;
-                let key = format!("mixer-v2-track-pattern-cell-{track}-{pattern_id}");
+                let key = format!("eseq.mixer/track-pattern-cell-{track}-{pattern_id}");
                 pattern_widget_ids.insert(
                     find_layout_node_by_stable_key(&initial_layout, &key)
                         .unwrap_or_else(|| panic!("missing mixer pattern cell {key}"))
@@ -30868,7 +30868,7 @@
             }
         }
         let initial_cell =
-            find_layout_node_by_stable_key(&initial_layout, "mixer-v2-track-pattern-cell-0-1")
+            find_layout_node_by_stable_key_suffix(&initial_layout, "/track-pattern-cell-0-1")
                 .expect("initial active pattern cell");
         assert_eq!(
             layout_prop_bool(initial_cell, "active"),
@@ -30922,10 +30922,10 @@
             .widget_layout()
             .expect("switched mixer layout should still build");
         let switched_old_cell =
-            find_layout_node_by_stable_key(&switched_layout, "mixer-v2-track-pattern-cell-0-1")
+            find_layout_node_by_stable_key_suffix(&switched_layout, "/track-pattern-cell-0-1")
                 .expect("old active pattern cell");
         let switched_new_cell =
-            find_layout_node_by_stable_key(&switched_layout, "mixer-v2-track-pattern-cell-0-2")
+            find_layout_node_by_stable_key_suffix(&switched_layout, "/track-pattern-cell-0-2")
                 .expect("new active pattern cell");
         assert_eq!(
             layout_prop_bool(switched_old_cell, "active"),
@@ -31014,7 +31014,7 @@
             .and_then(|tile| tile.frame.widget_layout.as_ref())
             .expect("initial mixer layout should render");
         assert_eq!(
-            count_stable_key_prefix(mixer_layout, "mixer-v2-track-pattern-cell-"),
+            count_stable_key_prefix(mixer_layout, "eseq.mixer/track-pattern-cell-"),
             track_count,
             "10-track fixture should render one mixer pattern cell per track"
         );
@@ -31121,7 +31121,7 @@
             .and_then(|tile| tile.frame.widget_layout.as_ref())
             .expect("initial full grid should render mixer layout");
         assert_eq!(
-            count_stable_key_prefix(mixer_layout, "mixer-v2-track-pattern-cell-"),
+            count_stable_key_prefix(mixer_layout, "eseq.mixer/track-pattern-cell-"),
             track_count,
             "10-track fixture should render one mixer pattern cell per track"
         );
@@ -31169,7 +31169,7 @@
                 .and_then(|tile| tile.frame.widget_layout.as_ref())
                 .expect("show toggle should render mixer layout");
             assert_eq!(
-                count_stable_key_prefix(shown_mixer_layout, "mixer-v2-track-pattern-cell-"),
+                count_stable_key_prefix(shown_mixer_layout, "eseq.mixer/track-pattern-cell-"),
                 track_count,
                 "show toggle should keep every mixer track rendered"
             );
@@ -31417,7 +31417,7 @@
                 .as_ref()
                 .expect("mixer pattern grid switch layout should build");
             assert_eq!(
-                count_stable_key_prefix(layout, "mixer-v2-track-pattern-cell-"),
+                count_stable_key_prefix(layout, "eseq.mixer/track-pattern-cell-"),
                 track_count * cell_count,
                 "pattern switch should keep every mixer pattern cell rendered"
             );
@@ -31558,7 +31558,7 @@
                 .as_ref()
                 .expect("mixer scene switch layout should build");
             assert_eq!(
-                count_stable_key_prefix(layout, "mixer-v2-track-pattern-cell-"),
+                count_stable_key_prefix(layout, "eseq.mixer/track-pattern-cell-"),
                 track_count * cell_count,
                 "scene switch should keep every mixer pattern cell rendered"
             );
@@ -43653,6 +43653,28 @@
                 .find_map(|child| find_node_by_stable_key(child, key))
         }
 
+        /// Suffix variant for keys that auto-qualify (module-system spec §10
+        /// hazard a). `ui/mixer.lisp` is `(module eseq.mixer)`, so its widget
+        /// `:key`s hash as `eseq.mixer/<key>`; matching on the `/`-prefixed
+        /// suffix pins the key without naming the owning module. Subtree
+        /// `:key`s do NOT qualify (hazard e), so those assertions keep using
+        /// the exact matcher above with their flat `mixer-v2-*` spelling.
+        fn find_node_by_stable_key_suffix<'a>(
+            node: &'a LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_node_by_stable_key_suffix(child, suffix))
+        }
+
         fn find_bus_mod_input<'a>(
             node: &'a LayoutNode,
             bus_id: f64,
@@ -43970,6 +43992,19 @@
             .runtime_mut()
             .eval_str("(defstate selected-bus -1)")
             .expect("install shared mixer selection state");
+        // browser.lisp owns this one and is not loaded in this stub harness.
+        // Before ui/mixer.lisp became `(module eseq.mixer)` its `(set!
+        // sbrowser-loading-instrument-name …)` compiled in eseq.vanilla and
+        // *created* the flat global on first write, which is what the
+        // assertion below used to read. A module's bare outbound write
+        // resolves against whatever exists at its compile time and otherwise
+        // lands in the module's own namespace, so the vanilla owner has to be
+        // declared first — exactly as it is in production, where
+        // ui/browser.lisp loads at main.lisp:17 and ui/mixer.lisp at :18.
+        editor
+            .runtime_mut()
+            .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
+            .expect("install browser-owned loading-instrument state");
         register_test_delete_target_natives(&mut editor, 2);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 1, true, true, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 2, false, false, false, false);
@@ -44474,7 +44509,7 @@
             .current_layout
             .clone()
             .expect("mixer layout should be available");
-        let send_knob = find_node_by_stable_key(&layout, "mixer-v2-track-0-send-1")
+        let send_knob = find_node_by_stable_key_suffix(&layout, "/track-0-send-1")
             .expect("track 1 Bus A send knob");
         assert!(matches!(
             send_knob.props.get("value"),
@@ -44499,7 +44534,7 @@
             vec![send_knob_widget_id],
             "send amount binding should dirty only the send knob widget"
         );
-        let drop_zone = find_node_by_stable_key(&layout, "mixer-v2-sample-drop-zone")
+        let drop_zone = find_node_by_stable_key_suffix(&layout, "/sample-drop-zone")
             .expect("sample drop zone");
         assert!(
             drop_zone.rect.width > 0.0 && drop_zone.rect.height > 0.0,
@@ -44541,7 +44576,7 @@
             "group bus drop zone should have a finite visible rect: {:?}",
             group_bus_strip.rect
         );
-        let group_badge = find_node_by_stable_key(&layout, "mixer-v2-group-badge-7")
+        let group_badge = find_node_by_stable_key_suffix(&layout, "/group-badge-7")
             .expect("group badge click target");
         let group_badge_click = group_badge
             .props
@@ -44562,19 +44597,19 @@
             "clicking the group badge should select its backing bus"
         );
         let mod_out =
-            find_node_by_stable_key(&layout, "mixer-v2-mod-out-0").expect("track mod out port");
-        let custom_mod_out = find_node_by_stable_key(&layout, "mixer-v2-mod-out-1")
+            find_node_by_stable_key_suffix(&layout, "/mod-out-0").expect("track mod out port");
+        let custom_mod_out = find_node_by_stable_key_suffix(&layout, "/mod-out-1")
             .expect("custom track mod out port");
         let mod_in =
-            find_node_by_stable_key(&layout, "mixer-v2-mod-in-1-0").expect("track mod in port");
+            find_node_by_stable_key_suffix(&layout, "/mod-in-1-0").expect("track mod in port");
         assert_eq!(
             custom_mod_out.props.get("active"),
             Some(&Value::Bool(true)),
             "custom track with a declared mod output should expose the mixer source port"
         );
         for input in 1..4 {
-            let key = format!("mixer-v2-mod-in-1-{input}");
-            let node = find_node_by_stable_key(&layout, &key)
+            let key = format!("/mod-in-1-{input}");
+            let node = find_node_by_stable_key_suffix(&layout, &key)
                 .unwrap_or_else(|| panic!("track mod in port {input}"));
             assert!(
                 node.rect.width > 0.0 && node.rect.height > 0.0,
@@ -44584,7 +44619,7 @@
             );
         }
         let ext3_in =
-            find_node_by_stable_key(&layout, "mixer-v2-mod-in-1-2").expect("Ext3 mod in port");
+            find_node_by_stable_key_suffix(&layout, "/mod-in-1-2").expect("Ext3 mod in port");
         let Value::List(sources) = ext3_in
             .props
             .get("connected-sources")
@@ -44648,7 +44683,7 @@
             mod_out.rect,
             mod_in.rect
         );
-        let pattern_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-cell-1-4")
+        let pattern_cell = find_node_by_stable_key_suffix(&layout, "/track-pattern-cell-1-4")
             .expect("track 2 active override pattern cell");
         assert!(
             pattern_cell.rect.width > 0.0 && pattern_cell.rect.height > 0.0,
@@ -44742,7 +44777,7 @@
             .current_layout
             .clone()
             .expect("layout after queued clip publish");
-        let queued_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-cell-1-4")
+        let queued_cell = find_node_by_stable_key_suffix(&layout, "/track-pattern-cell-1-4")
             .expect("queued track pattern cell");
         assert_eq!(
             queued_cell.props.get("background"),
@@ -44764,7 +44799,7 @@
             .current_layout
             .clone()
             .expect("layout after queued clip clear");
-        let settled_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-cell-1-4")
+        let settled_cell = find_node_by_stable_key_suffix(&layout, "/track-pattern-cell-1-4")
             .expect("settled track pattern cell");
         assert_eq!(
             settled_cell.props.get("background"),
@@ -44782,9 +44817,9 @@
             .current_layout
             .clone()
             .expect("mixer layout should refresh after selecting a track pattern");
-        let focused_pattern_cell = find_node_by_stable_key(
+        let focused_pattern_cell = find_node_by_stable_key_suffix(
             &layout_with_focused_pattern,
-            "mixer-v2-track-pattern-cell-1-4",
+            "/track-pattern-cell-1-4",
         )
         .expect("focused track pattern cell");
         assert_eq!(
@@ -44793,7 +44828,7 @@
             "clicked track pattern should show keyboard focus immediately"
         );
         assert!(
-            find_node_by_stable_key(&layout, "mixer-v2-track-pattern-clone-1").is_none(),
+            find_node_by_stable_key_suffix(&layout, "/track-pattern-clone-1").is_none(),
             "the mixer grid should not render a dedicated track-pattern clone cell"
         );
         editor
@@ -44862,9 +44897,9 @@
             .current_layout
             .clone()
             .expect("mixer layout should refresh after selecting another track");
-        let unfocused_pattern_cell = find_node_by_stable_key(
+        let unfocused_pattern_cell = find_node_by_stable_key_suffix(
             &layout_after_track_select,
-            "mixer-v2-track-pattern-cell-1-4",
+            "/track-pattern-cell-1-4",
         )
         .expect("previously focused track pattern cell");
         assert_eq!(
@@ -44921,7 +44956,7 @@
             find_node_by_stable_key(&layout_for_control_click, "mixer-v2-strip-label-0")
                 .expect("track label box");
         let track_label_content =
-            find_node_by_stable_key(&layout_for_control_click, "mixer-v2-track-label-content-0")
+            find_node_by_stable_key_suffix(&layout_for_control_click, "/track-label-content-0")
                 .expect("track label badge content");
         assert_finite_nonzero_rect(track_label_content, "mixer track label badge content");
         assert_eq!(track_label_content.widget_type, "badge");

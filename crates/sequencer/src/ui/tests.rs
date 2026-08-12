@@ -1965,9 +1965,9 @@
         editor.switch_active_tile(mixer_tile_id);
         let mixer_layout = editor.widget_layout().expect("mixer active layout");
         let target_track = 1usize;
-        let target_badge = find_layout_node_by_stable_key(
+        let target_badge = find_layout_node_by_stable_key_suffix(
             &mixer_layout,
-            &format!("mixer-v2-track-label-{target_track}"),
+            &format!("/track-label-{target_track}"),
         )
         .expect("target mixer track badge");
         let click_col = target_badge.rect.col + target_badge.rect.width * 0.5;
@@ -2351,7 +2351,7 @@
         ///
         /// Both gestures are the real ones — a mouse Down on a
         /// `transport-scene-pill-*` (-> `switch-pattern`) and on a
-        /// `mixer-v2-track-pattern-cell-*` (-> `set-scene-cell`, the live
+        /// `eseq.mixer/track-pattern-cell-*` (-> `set-scene-cell`, the live
         /// clip-launch path; `launch-track-pattern` is dead) — and both host
         /// commands run through the REAL `dispatch_custom_host_command`
         /// seam. The visible update replays the reactive tick INCLUDING its
@@ -5734,7 +5734,7 @@
         // Scene launch + track-clip launch at large-project clip scale.
         //
         // Clip launch is the real gesture: a mouse Down on a mixer
-        // `mixer-v2-track-pattern-cell-*` (its on-click fires on Down),
+        // `eseq.mixer/track-pattern-cell-*` (its on-click fires on Down),
         // which lowers to `set-scene-cell` — the live clip-launch path.
         // Scene launch is a mouse Down on a `transport-scene-pill-*`,
         // which lowers to `switch-pattern`. Both commands run through the
@@ -6640,10 +6640,10 @@
                 let mut targets = Vec::new();
                 for cell in &cells {
                     let key = format!(
-                        "mixer-v2-track-pattern-cell-{TRACK}-{}",
+                        "/track-pattern-cell-{TRACK}-{}",
                         cell.pattern_id.0
                     );
-                    let Some(node) = find_layout_node_by_stable_key(layout, &key) else {
+                    let Some(node) = find_layout_node_by_stable_key_suffix(layout, &key) else {
                         continue;
                     };
                     let center_col =
