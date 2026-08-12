@@ -2371,6 +2371,42 @@
             .find_map(|child| find_layout_node_by_stable_key(child, key))
     }
 
+    /// Module-system migration helper (module-system spec §10 hazard a).
+    ///
+    /// Widget `:key`s auto-qualify inside a declared module, so converting
+    /// `ui/sequencer.lisp` re-keys `"track-row-0"` to
+    /// `"eseq.sequencer/track-row-0"` and every exact-match assertion in this
+    /// file breaks at once. A converted file's assertions rewrite to the
+    /// `/`-prefixed suffix (`"/track-row-0"`), which pins the key without
+    /// naming the owning module — so a later module rename, or moving the
+    /// widget between modules, does not churn hundreds of assertions again.
+    /// Keep the leading `/`: a bare suffix would also match an unrelated key
+    /// that merely ends with the same characters.
+    ///
+    /// Note the suffix form matches the **qualified** key only, so an
+    /// assertion migrates *with* its file's conversion, not before it. This
+    /// is not a mass migration: each of the four remaining big files rewrites
+    /// its own assertions as it converts (a bulk rewrite would bury the
+    /// conversion diffs). Deliberately duplicated from `ui/tests.rs` rather
+    /// than hoisted into a shared module — that is the existing pattern for
+    /// these layout probes (`find_layout_node_by_stable_key` itself lives in
+    /// both files), and both `mod tests` blocks are private.
+    fn find_layout_node_by_stable_key_suffix<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        suffix: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node
+            .stable_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(suffix))
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_stable_key_suffix(child, suffix))
+    }
+
     fn collect_layout_nodes_by_stable_key<'a>(
         node: &'a eseqlisp::layout::LayoutNode,
         key: &str,
@@ -15046,7 +15082,7 @@
             // `:key`s auto-qualify inside a declared module (module-system
             // spec §5): ui/choose-model.lisp is `(module eseq.choose-model)`,
             // so its bare `:key "dropdown"` hashes qualified.
-            find_layout_node_by_stable_key(&layout, "eseq.choose-model/dropdown").is_none(),
+            find_layout_node_by_stable_key_suffix(&layout, "/dropdown").is_none(),
             "picker must not render while closed"
         );
 
@@ -15059,7 +15095,7 @@
 
         let layout = editor.widget_layout().expect("patcher layout with picker");
         assert_finite_layout_tree(&layout);
-        let dropdown = find_layout_node_by_stable_key(&layout, "eseq.choose-model/dropdown")
+        let dropdown = find_layout_node_by_stable_key_suffix(&layout, "/dropdown")
             .expect("model dropdown should render once the picker is open");
         assert!(
             dropdown.rect.width > 0.0 && dropdown.rect.height > 0.0,
@@ -20682,15 +20718,15 @@
         let layout = editor.widget_layout().expect("sound palette layout");
         let panel = find_layout_node_by_debug_name(&layout, "sound-palette-panel")
             .expect("palette panel should render");
-        let header = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/header-label")
+        let header = find_layout_node_by_stable_key_suffix(&layout, "/header-label")
             .expect("palette header should render");
-        let base_row = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/entry-0")
+        let base_row = find_layout_node_by_stable_key_suffix(&layout, "/entry-0")
             .expect("gray base entry should render");
-        let current_row = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/entry-3")
+        let current_row = find_layout_node_by_stable_key_suffix(&layout, "/entry-3")
             .expect("current entry should render");
-        let source = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/source-3")
+        let source = find_layout_node_by_stable_key_suffix(&layout, "/source-3")
             .expect("preset/sample source label should render");
-        let diff_up = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/diff-up-0")
+        let diff_up = find_layout_node_by_stable_key_suffix(&layout, "/diff-up-0")
             .expect("diff badge should render");
         assert_finite_nonzero_rect(panel, "sound palette panel");
         assert_finite_nonzero_rect(base_row, "gray base entry");
@@ -20702,12 +20738,12 @@
         // :track-sound renders the TRK chip inside its card; unflagged
         // entries render none. (Asserted before the source-label containment
         // check below, which is a known pre-existing card-height overflow.)
-        let trk_chip = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/trk-3")
+        let trk_chip = find_layout_node_by_stable_key_suffix(&layout, "/trk-3")
             .expect("the track-sound entry renders its TRK chip");
         assert_finite_nonzero_rect(trk_chip, "TRK chip");
         assert_layout_inside(trk_chip, current_row, "TRK chip");
         assert!(
-            find_layout_node_by_stable_key(&layout, "eseq.sound-palette/trk-0").is_none(),
+            find_layout_node_by_stable_key_suffix(&layout, "/trk-0").is_none(),
             "an entry that is not the track sound renders no TRK chip"
         );
         assert_layout_inside(source, current_row, "preset/sample source label");
@@ -20715,7 +20751,7 @@
 
         // Sound-glyph spec P2: each box carries the plant glyph as its
         // center region, fed by the host-published frame key.
-        let glyph = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/glyph-3")
+        let glyph = find_layout_node_by_stable_key_suffix(&layout, "/glyph-3")
             .expect("sound glyph widget should render");
         assert_eq!(glyph.widget_type, "sound-glyph");
         assert_finite_nonzero_rect(glyph, "sound glyph");
@@ -20735,7 +20771,7 @@
         editor.refresh_visible_layouts_for_buffer_named("*sound-palette-test*");
         let layout = editor.widget_layout().expect("closed palette layout");
         assert!(
-            find_layout_node_by_stable_key(&layout, "eseq.sound-palette/entry-3").is_none(),
+            find_layout_node_by_stable_key_suffix(&layout, "/entry-3").is_none(),
             "a closed palette renders no entries"
         );
     }
