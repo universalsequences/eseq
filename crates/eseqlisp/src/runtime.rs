@@ -1723,6 +1723,14 @@ impl Runtime {
         &self.vm.macros
     }
 
+    /// Modules declared via `(module NAME)` → declaring file, if any
+    /// (module-system spec §2/§4).
+    pub fn declared_modules(
+        &self,
+    ) -> &std::collections::HashMap<String, Option<std::path::PathBuf>> {
+        &self.vm.declared_modules
+    }
+
     fn snapshot_state(&self) -> RuntimeStateSnapshot {
         RuntimeStateSnapshot {
             vm: self.vm.snapshot_state(),

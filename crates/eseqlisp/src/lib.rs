@@ -2212,6 +2212,34 @@ mod tests {
     }
 
     #[test]
+    fn sdf_stdlib_is_the_module_pilot() {
+        // Acceptance test for module-system spec §9: sdf-stdlib carries a
+        // (module sdf) header and bare defmacro names, and consumers keep
+        // calling (sdf/circle …) verbatim as qualified references.
+        let mut runtime = Runtime::new();
+        assert!(
+            runtime.declared_modules().contains_key("sdf"),
+            "sdf-stdlib should declare (module sdf)"
+        );
+        for key in ["sdf/circle", "sdf/rounded-rect", "sdf/lit", "sdf/%hslider-fill"] {
+            assert!(
+                runtime.macros().contains_key(key),
+                "expected macro key {key}"
+            );
+        }
+        let shader = runtime
+            .eval_str("(sdf->metal '(sdf/layer (sdf/fill (sdf/circle 0.5) (rgba 1 0 0 1))))")
+            .expect("sdf->metal eval");
+        let Some(Value::String(shader)) = shader else {
+            panic!("sdf->metal should return a shader string");
+        };
+        assert!(
+            !shader.starts_with("error:"),
+            "shader compile failed: {shader}"
+        );
+    }
+
+    #[test]
     fn layout_recomputes_when_viewport_changes() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 8);
