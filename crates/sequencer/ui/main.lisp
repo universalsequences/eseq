@@ -7,6 +7,13 @@
 
 (load "@/ui/seq-core-state.lisp")
 
+;; Must precede browser/mixer/sequencer: they call its helpers bare, and a
+;; converted module's compat aliases only reach callers that compile after
+;; it is evaluated. Those three still (load …) it themselves at their own
+;; top — harmless re-evals that keep the standalone test harnesses working,
+;; but too late to be the load that counts (spec §10 step 0).
+(load "@/ui/track-collapse.lisp")
+
 (load "@/ui/browser.lisp")
 (load "@/ui/mixer.lisp")
 (load "@/ui/patch-macros.lisp")

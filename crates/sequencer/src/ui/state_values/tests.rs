@@ -2220,6 +2220,14 @@
             .runtime_mut()
             .eval_str("(def seq-has-selected-bus? () (>= selected-bus 0))")
             .expect("define browser test selected bus predicate");
+        // ui/track-collapse.lisp is a module now, and its compat aliases only
+        // reach callers compiled after it is evaluated — this harness evals
+        // the consumer's source directly, so the dep has to be a separate,
+        // earlier eval (the consumer's own top-of-file `load` runs too late).
+        editor
+            .runtime_mut()
+            .eval_str("(load \"ui/track-collapse.lisp\")")
+            .expect("load track-collapse module");
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -14642,6 +14650,7 @@
                   (load "ui/themes.lisp")
                   (seq-theme-mac-osx-dark)
                   (load "ui/materials.lisp")
+                  (load "ui/track-collapse.lisp")
                   (load "ui/sequencer.lisp")
                 "#,
             )
@@ -14907,6 +14916,14 @@
             .expect("install shared mixer selection state");
         register_test_delete_target_natives(&mut editor, track_count);
         let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        // ui/track-collapse.lisp is a module now, and its compat aliases only
+        // reach callers compiled after it is evaluated — this harness evals
+        // the consumer's source directly, so the dep has to be a separate,
+        // earlier eval (the consumer's own top-of-file `load` runs too late).
+        editor
+            .runtime_mut()
+            .eval_str("(load \"ui/track-collapse.lisp\")")
+            .expect("load track-collapse module");
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -26305,6 +26322,7 @@
                   (load "ui/themes.lisp")
                   (seq-theme-mac-osx-dark)
                   (load "ui/materials.lisp")
+                  (load "ui/track-collapse.lisp")
                   (defstate selected-bus -1)
                   (load "ui/mixer.lisp")
                   (load "ui/sequencer.lisp")
@@ -31817,6 +31835,14 @@
             .eval_str("(defstate selected-bus -1)")
             .expect("install shared mixer selection state");
         register_test_delete_target_natives(&mut editor, 1);
+        // ui/track-collapse.lisp is a module now, and its compat aliases only
+        // reach callers compiled after it is evaluated — this harness evals
+        // the consumer's source directly, so the dep has to be a separate,
+        // earlier eval (the consumer's own top-of-file `load` runs too late).
+        editor
+            .runtime_mut()
+            .eval_str("(load \"ui/track-collapse.lisp\")")
+            .expect("load track-collapse module");
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -43936,6 +43962,14 @@
                 });
         }
 
+        // ui/track-collapse.lisp is a module now, and its compat aliases only
+        // reach callers compiled after it is evaluated — this harness evals
+        // the consumer's source directly, so the dep has to be a separate,
+        // earlier eval (the consumer's own top-of-file `load` runs too late).
+        editor
+            .runtime_mut()
+            .eval_str("(load \"ui/track-collapse.lisp\")")
+            .expect("load track-collapse module");
         editor
             .runtime_mut()
             .eval_str(&src)
