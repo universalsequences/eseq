@@ -6435,6 +6435,25 @@ counter
     }
 
     #[test]
+    fn namespaced_keywords_are_legal_keyword_syntax() {
+        // Spec §5: `:eseq.mixer/mode` is one keyword with the first-slash
+        // split — extension data in serialized projects can use it so two
+        // extensions stashing `:mode` never collide. (The `::mode`
+        // current-module sugar is deferred until extensions write
+        // serialized data.)
+        let mut vm = module_test_vm();
+        let result = vm.eval_str(":eseq.mixer/mode").expect("keyword eval");
+        assert_eq!(
+            result,
+            Some(Value::Keyword("eseq.mixer/mode".to_string()))
+        );
+        let stored = vm
+            .eval_str(r#"(get (dict :eseq.mixer/mode 5) :eseq.mixer/mode)"#)
+            .expect("dict roundtrip");
+        assert_eq!(stored, Some(Value::Number(5.0)));
+    }
+
+    #[test]
     fn module_def_process_name_qualifies_and_constructor_resolves() {
         let mut vm = module_test_vm();
         let captured = Rc::new(RefCell::new(Vec::<String>::new()));
