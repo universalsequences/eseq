@@ -32,3 +32,10 @@ sequencer-profile
 sequencer-crash.log
 rebuild_dgenlisp_tool.sh
 spring_reverb_impulse.wav
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
