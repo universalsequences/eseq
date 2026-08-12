@@ -11,6 +11,11 @@ pub struct Chunk {
     pub upvalues: Vec<String>,
     pub source_symbol: Option<String>,
     pub source_file: Option<PathBuf>,
+    /// The module the chunk's code was compiled under (spec §5): `None`
+    /// for the implicit `eseq.vanilla`. Lets runtime registration forms
+    /// (widget `:key`, `bind-key`, `define-mode`, …) know the module
+    /// current at the executing call site.
+    pub source_module: Option<String>,
 }
 
 #[derive(Debug)]
@@ -647,6 +652,7 @@ impl Compiler {
             upvalues: vec![],
             source_symbol: None,
             source_file: self.source_file.clone(),
+            source_module: None,
         });
 
         if is_effect {
@@ -688,12 +694,17 @@ impl Compiler {
         name: &str,
         initial: &Expression,
     ) -> Result<(), CompilerError> {
+        // Registry auto-qualification (spec §5): a defstate inside a
+        // declared module keys `state_bindings` qualified
+        // (`eseq.mixer/panel-visible`); vanilla files keep flat keys so
+        // serialized identity does not shift.
+        let key = self.qualify_registration_name(name);
         let node_id = self
             .state_bindings
-            .get(name)
+            .get(&key)
             .copied()
             .unwrap_or_else(|| self.alloc_node_id());
-        self.state_bindings.insert(name.to_string(), node_id);
+        self.state_bindings.insert(key, node_id);
         self.compile_expression(initial)?;
         self.emit(OpCode::InitState(node_id));
         let global_idx = self.use_global(name);
@@ -1299,13 +1310,65 @@ impl Compiler {
             || self.macros.keys().any(|k| has_prefix(k))
     }
 
+    /// The declared (non-implicit) module of this compile unit, if any.
+    fn declared_module(&self) -> Option<String> {
+        (self.current_module != super::modules::IMPLICIT_MODULE)
+            .then(|| self.current_module.clone())
+    }
+
+    /// Registry auto-qualification (spec §5): registration-form names
+    /// (`defstate`, `def-process`, …) prefix the current module unless
+    /// already qualified. Headerless (eseq.vanilla) files keep flat keys —
+    /// that is what keeps serialized identity stable until a file converts.
+    fn qualify_registration_name(&self, name: &str) -> String {
+        if super::modules::is_qualified(name) || self.declared_module().is_none() {
+            return name.to_string();
+        }
+        super::modules::qualify(&self.current_module, name)
+    }
+
+    /// State-binding lookup mirroring the §3 resolution ladder over the
+    /// (possibly qualified) `state_bindings` keyspace: exact key → alias
+    /// rewrite for qualified names → current-module key → `:refer` target.
+    fn state_binding_for(&self, name: &str) -> Option<u32> {
+        if let Some(id) = self.state_bindings.get(name) {
+            return Some(*id);
+        }
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .map(String::as_str)
+                .unwrap_or(ns);
+            return self
+                .state_bindings
+                .get(&super::modules::qualify(full_ns, base))
+                .copied();
+        }
+        if self.declared_module().is_some()
+            && let Some(id) = self
+                .state_bindings
+                .get(&super::modules::qualify(&self.current_module, name))
+        {
+            return Some(*id);
+        }
+        self.refers
+            .get(name)
+            .and_then(|qualified| self.state_bindings.get(qualified))
+            .copied()
+    }
+
     fn warn_once(&mut self, message: String) {
         if !self.warnings.contains(&message) {
             self.warnings.push(message);
         }
     }
 
-    pub fn new_chunk(&mut self, chunk: Chunk) -> (usize, usize) {
+    pub fn new_chunk(&mut self, mut chunk: Chunk) -> (usize, usize) {
+        // Stamp every chunk with the module current at its creation
+        // (None = implicit eseq.vanilla). The entry chunk of a unit whose
+        // (module …) form appears mid-file is re-stamped by that form.
+        chunk.source_module = self.declared_module();
         let symbols = chunk.symbols.clone();
         let prev_chunk_idx = self.current_chunk;
         let new_chunk_idx = self.chunks.len();
@@ -1327,22 +1390,22 @@ impl Compiler {
 
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(_) if self.state_bindings.contains_key(name) => {
-                self.emit(OpCode::LoadState(self.state_bindings[name]))
-            }
+            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
+                Some(node_id) => self.emit(OpCode::LoadState(node_id)),
+                None => self.emit(OpCode::LoadGlobal(idx)),
+            },
             SymbolResolution::Local(idx) => self.emit(OpCode::LoadLocal(idx)),
-            SymbolResolution::Global(idx) => self.emit(OpCode::LoadGlobal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::LoadUpvalue(idx)),
         }
     }
 
     fn emit_symbol_store(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(_) if self.state_bindings.contains_key(name) => {
-                self.emit(OpCode::StoreState(self.state_bindings[name]))
-            }
+            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
+                Some(node_id) => self.emit(OpCode::StoreState(node_id)),
+                None => self.emit(OpCode::StoreGlobal(idx)),
+            },
             SymbolResolution::Local(idx) => self.emit(OpCode::StoreLocal(idx)),
-            SymbolResolution::Global(idx) => self.emit(OpCode::StoreGlobal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::StoreUpvalue(idx)),
         }
     }
@@ -1390,6 +1453,7 @@ impl Compiler {
             upvalues: vec![],
             source_symbol: name.clone(),
             source_file: self.source_file.clone(),
+            source_module: None,
         });
         self.compile_expression(&wrapped_body)?;
 
@@ -1674,6 +1738,14 @@ impl Compiler {
                     } else {
                         self.module_declared = true;
                         self.current_module = name.clone();
+                        // The unit's entry chunk was created before this
+                        // form was seen; everything after it in the file
+                        // belongs to the module, so re-stamp it (top-level
+                        // registration calls run in the entry chunk).
+                        let entry_idx = self.current_chunk;
+                        if let Some(chunk) = self.chunks.get_mut(entry_idx) {
+                            chunk.source_module = Some(name.clone());
+                        }
                         // Register the declaration at runtime so `import`
                         // can treat the module as loaded (load-once).
                         let declare = Expression::List(vec![
@@ -2113,6 +2185,7 @@ impl Compiler {
             upvalues: vec![],
             source_symbol: None,
             source_file: self.source_file.clone(),
+            source_module: None,
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {

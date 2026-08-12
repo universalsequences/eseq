@@ -3412,6 +3412,17 @@ impl VM {
             .and_then(|chunk| chunk.source_symbol.clone())
     }
 
+    /// The module of the currently executing chunk (spec §5): registration
+    /// natives (widget constructors, `bind-key`, `define-mode`, …) call
+    /// this to learn the module current at their call site. Outside a
+    /// declared module this is the implicit `eseq.vanilla`.
+    pub fn current_module_name(&self) -> &str {
+        self.chunks
+            .get(self.current_chunk)
+            .and_then(|chunk| chunk.source_module.as_deref())
+            .unwrap_or(crate::modules::IMPLICIT_MODULE)
+    }
+
     pub fn current_source_file(&self) -> Option<std::path::PathBuf> {
         self.chunks
             .get(self.current_chunk)
@@ -3794,8 +3805,26 @@ impl VM {
             .map(|value| value.borrow().clone())
     }
 
+    /// Runtime state-binding lookup: exact key first (flat, or an already
+    /// qualified name), then the executing chunk's module key (spec §5 —
+    /// a declared module's `defstate` interns qualified, but its own code
+    /// and defwidget shader uniforms read it by bare name).
+    fn state_binding_node(&self, name: &str) -> Option<NodeId> {
+        if let Some(node_id) = self.state_bindings.get(name) {
+            return Some(*node_id);
+        }
+        let module = self.current_module_name();
+        if module != crate::modules::IMPLICIT_MODULE && !crate::modules::is_qualified(name) {
+            return self
+                .state_bindings
+                .get(&crate::modules::qualify(module, name))
+                .copied();
+        }
+        None
+    }
+
     pub fn read_tracked_state_value(&mut self, name: &str) -> Option<Value> {
-        let node_id = self.state_bindings.get(name).copied()?;
+        let node_id = self.state_binding_node(name)?;
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
             self.dag.add_edge(node_id, ctx_id);
         }
@@ -4674,9 +4703,16 @@ impl VM {
     }
 
     fn mark_owner_path_dirty(&mut self, owner_path: &str) {
-        let parts = owner_path.splitn(2, '.').collect::<Vec<_>>();
+        // Module-qualified names (`test.mod/panel`) are state keys, never
+        // reactive namespace.field paths — the first `/` wins over `.`
+        // (mirrors compile_set_statement).
+        let parts = if crate::modules::is_qualified(owner_path) {
+            vec![owner_path]
+        } else {
+            owner_path.splitn(2, '.').collect::<Vec<_>>()
+        };
         if parts.len() == 1 {
-            if let Some(node_id) = self.state_bindings.get(parts[0]).copied() {
+            if let Some(node_id) = self.state_binding_node(parts[0]) {
                 let current = self
                     .dag
                     .nodes
@@ -6138,6 +6174,86 @@ mod tests {
             .eval_str("(eseq.core/flat-answer)")
             .expect("core-qualified native");
         assert_eq!(core, Some(Value::Number(40.0)));
+    }
+
+    #[test]
+    fn module_defstate_interns_qualified_and_reads_bare() {
+        let mut vm = module_test_vm();
+        let source = r#"
+(module test.statemod)
+(defstate counter 1)
+(def bump () (set! counter (+ counter 1)))
+(bump)
+counter
+"#;
+        let result = vm
+            .eval_module_source(temp_lisp_path("state-qual"), source, 1)
+            .expect("module eval");
+        assert_eq!(result, Some(Value::Number(2.0)));
+        assert!(
+            vm.state_bindings.contains_key("test.statemod/counter"),
+            "declared-module defstate should key state_bindings qualified, got {:?}",
+            vm.state_bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !vm.state_bindings.contains_key("counter"),
+            "no flat key should be created for a declared-module defstate"
+        );
+        // A later unit reaches the state through its qualified name.
+        let qualified = vm
+            .eval_str("test.statemod/counter")
+            .expect("qualified state read");
+        assert_eq!(qualified, Some(Value::Number(2.0)));
+    }
+
+    #[test]
+    fn vanilla_defstate_stays_flat_keyed() {
+        let mut vm = module_test_vm();
+        vm.eval_str("(defstate plain-state 7)").expect("defstate");
+        assert!(
+            vm.state_bindings.contains_key("plain-state"),
+            "headerless defstate must keep today's flat key"
+        );
+        assert!(
+            !vm.state_bindings.keys().any(|k| k.contains('/')),
+            "no qualified state keys for vanilla code, got {:?}",
+            vm.state_bindings.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vm.eval_str("plain-state").expect("state read"),
+            Some(Value::Number(7.0))
+        );
+    }
+
+    #[test]
+    fn chunk_module_provenance_reaches_natives() {
+        let mut vm = module_test_vm();
+        let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        vm.register_native_with_vm("capture-module", move |_args, vm| {
+            sink.borrow_mut().push(vm.current_module_name().to_string());
+            Value::Nil
+        });
+        let source = r#"
+(module test.chunkmod)
+(capture-module)
+(def late-capture () (capture-module))
+"#;
+        vm.eval_module_source(temp_lisp_path("chunk-module"), source, 1)
+            .expect("module eval");
+        // Late-bound: calling the module's function from a headerless unit
+        // still reports the defining module (chunk provenance, not caller).
+        vm.eval_str("(test.chunkmod/late-capture)")
+            .expect("late call");
+        vm.eval_str("(capture-module)").expect("vanilla call");
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "test.chunkmod".to_string(),
+                "test.chunkmod".to_string(),
+                "eseq.vanilla".to_string()
+            ]
+        );
     }
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
