@@ -564,10 +564,45 @@ stays as-is; real macro hygiene is out of scope for this spec.
      `select-all-steps`, `delete-selected-steps`, `cursor-toggle`,
      `seqv-collapse-all-tracks`), so the handler ladder's qualified → flat
      fallback needs its own test before any mode-defining file converts.
-     Infra shape, when it lands: give `resolve_mode_name` the same alias
-     rung the global, `defstate` and macro ladders already have — the alias
-     table is name → name and keyspace-agnostic, exactly as stage 2 reused
-     it for macros.
+
+     **Stage 4 (BUILT 2026-08-12, batch 4 infra) — the mode keyspace has its
+     alias rung.** `Editor::resolve_mode_name` now ladders exactly like the
+     global / `defstate` / macro ladders, on the same keyspace-agnostic
+     `VM::compat_aliases` table (reached from the editor through the new
+     `Runtime::compat_alias_target`, since the mode registry lives outside
+     the VM):
+
+     1. **exact** — the referencing module's own mode, or a vanilla flat one;
+     2. **compat alias on the bare base name.** Alias keys are validated flat
+        at record time, so a flat reference and a caller-module-qualified one
+        reduce to the same key. This *is* the flat → qualified direction:
+        `(module-compat-alias seq-grid-mode seq-grid-mode)` in the converted
+        file is what keeps the unconverted
+        `(set-buffer-mode-for "*sequencer*" "seq-grid-mode")` working. Ahead
+        of the flat rung, as in every other ladder;
+     3. **flat base** — qualified → flat, the pre-existing rung: a module
+        referencing a *vanilla* mode.
+
+     There is deliberately **no** "scan the registry for any key whose base
+     segment matches" rung — ambiguous across modules, and it would resolve
+     by hash order. Minting the alias (recipe step 2) is the declared route.
+
+     The second thread is closed too: `mode_bind_key`'s unconditional handler
+     qualification is safe because dispatch runs the stored string through
+     `Runtime::resolve_handler_name` (qualified → flat when the module never
+     defined it), verified end-to-end by
+     `module_mode_binding_dispatches_a_vanilla_handler` — a module defines a
+     mode, binds a key to a handler defined in vanilla, and the key press
+     dispatches. Tests (editor/tests.rs):
+     `compat_alias_reaches_a_module_defined_mode_from_a_flat_caller`,
+     `module_mode_reference_falls_back_to_a_vanilla_mode`,
+     `module_mode_binding_dispatches_a_vanilla_handler`.
+
+     Still un-covered by any rung, and still a per-file check: lisp that
+     **compares** `(current-buffer-mode)` against a flat string literal. The
+     alias table maps names in the *resolution* direction only; a converted
+     mode reports its qualified spelling to lisp. Grep the mode name before
+     converting.
   e. **Flat keyspaces that do NOT qualify**: hook names (`defhook`/`add-hook`
      strings), `defchan`, subtree keys, `defwidget` names. Leave those
      strings alone. Corollary discovered in batch 1: `defhook` registers its

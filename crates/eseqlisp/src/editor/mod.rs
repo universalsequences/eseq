@@ -7905,17 +7905,47 @@ impl Editor {
         }
     }
 
-    /// Resolve a (possibly module-qualified) mode-name reference against
-    /// the registry (spec §5): the qualified form — the referencing
-    /// module's own mode — wins when registered; otherwise fall back to
-    /// the flat base name (a module referencing a vanilla mode).
+    /// Resolve a (possibly module-qualified) mode-name reference against the
+    /// registry (spec §5, §10 hazard d). The mode registry is a fourth flat
+    /// keyspace, so its ladder mirrors the global / `defstate` / macro ones:
+    ///
+    /// 1. **exact** — the referencing module's own mode (`mode_bind_key` /
+    ///    `set_buffer_mode_for` already qualified the reference against the
+    ///    caller's module), or a plain vanilla flat mode;
+    /// 2. **compat alias on the bare base name.** `module-compat-alias`
+    ///    validates its old name flat, so alias keys are never qualified and
+    ///    a flat reference and a caller-module-qualified one reduce to the
+    ///    same lookup key. This is the missing **flat → qualified**
+    ///    direction: once `(define-mode "seq-grid-mode" …)` moves into a
+    ///    module the registry key becomes
+    ///    `eseq.seq-grid-mode/seq-grid-mode`, and the unconverted
+    ///    `(set-buffer-mode-for "*sequencer*" "seq-grid-mode")` in
+    ///    `sequencer.lisp` reaches it through the alias the converted file
+    ///    mints. It sits ahead of the flat rung for the same reason it does
+    ///    in every other ladder — a stale pre-conversion flat entry must not
+    ///    shadow the new home;
+    /// 3. **flat base** — the qualified → flat fallback: a declared module
+    ///    referencing a *vanilla* mode, whose reference was qualified
+    ///    against the caller that never defined it.
+    ///
+    /// There is deliberately no "scan the registry for any key whose base
+    /// segment matches" rung: that is ambiguous across modules (two modules
+    /// may each define `grid-mode`) and would resolve by accident of hash
+    /// order. The alias is the explicit, declared route, and minting one is
+    /// step 2 of the conversion recipe.
     fn resolve_mode_name(&self, name: String) -> String {
         if self.mode_registry.contains_key(&name) {
             return name;
         }
-        if let Some((_, base)) = crate::modules::split_qualified(&name)
-            && self.mode_registry.contains_key(base)
+        let base = crate::modules::split_qualified(&name)
+            .map(|(_, base)| base)
+            .unwrap_or(name.as_str());
+        if let Some(target) = self.runtime.compat_alias_target(base)
+            && self.mode_registry.contains_key(target)
         {
+            return target.to_string();
+        }
+        if base != name.as_str() && self.mode_registry.contains_key(base) {
             return base.to_string();
         }
         name

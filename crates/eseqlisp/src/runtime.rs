@@ -2256,6 +2256,15 @@ impl Runtime {
         handler
     }
 
+    /// Migration compat-alias lookup (spec §10 slice 3) for keyspaces that
+    /// live *outside* the VM's own tables — currently the editor's mode
+    /// registry (hazard d). The alias table is name → name and
+    /// keyspace-agnostic, exactly as stage 2 reused it for macros; keys are
+    /// validated flat at record time, so callers pass a bare base name.
+    pub fn compat_alias_target(&self, name: &str) -> Option<&str> {
+        self.vm.compat_aliases.get(name).map(String::as_str)
+    }
+
     /// Borrows one field of a reactive namespace without cloning the whole
     /// namespace map. `global_value("SEQ")` clones every key/value pair in the
     /// namespace, so its cost grows with total UI state; prefer this whenever

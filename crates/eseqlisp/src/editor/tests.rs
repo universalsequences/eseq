@@ -12900,6 +12900,132 @@ fn module_define_mode_qualifies_name_and_on_key_handler() {
     );
 }
 
+/// Hazard (d), flat → qualified: the moment a mode-defining file converts,
+/// its registry key qualifies, and every unconverted
+/// `(set-buffer-mode-for "*buf*" "the-mode")` caller has to reach it through
+/// the compat alias — otherwise the buffer silently loses its keymap.
+#[test]
+fn compat_alias_reaches_a_module_defined_mode_from_a_flat_caller() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*other*", "");
+    eval_module(
+        &mut editor,
+        "mode-alias",
+        r#"
+(module test.gridmode)
+(module-compat-alias grid-mode grid-mode)
+(def grid-key (k txt) (host-command "grid-key" k) true)
+(define-mode "grid-mode" :on-key "grid-key")
+"#,
+    );
+    assert!(
+        editor.mode_registry.contains_key("test.gridmode/grid-mode"),
+        "mode registered qualified, got {:?}",
+        editor.mode_registry.keys().collect::<Vec<_>>()
+    );
+    // Unconverted vanilla caller, bare flat mode name.
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-buffer-mode-for "*grid*" "grid-mode")"#)
+        .expect("flat set-buffer-mode-for");
+    editor.refresh_runtime_side_effects();
+    let buffer = editor
+        .buffers
+        .iter()
+        .find(|b| b.name == "*grid*")
+        .expect("*grid* buffer");
+    assert_eq!(
+        buffer.mode,
+        BufferMode::Named("test.gridmode/grid-mode".to_string()),
+        "flat caller must reach the module's mode through the compat alias"
+    );
+}
+
+/// The other direction (already present before the alias rung, pinned here
+/// so the new rung ordering cannot regress it): a declared module's mode
+/// reference is qualified against the *caller*, and must still fall back to
+/// a vanilla mode the module never defined.
+#[test]
+fn module_mode_reference_falls_back_to_a_vanilla_mode() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*plain*", "");
+    editor
+        .runtime_mut()
+        .eval_str(r#"(define-mode "plain-mode" :read-only true)"#)
+        .expect("vanilla mode");
+    editor.refresh_runtime_side_effects();
+    eval_module(
+        &mut editor,
+        "mode-fallback",
+        r#"
+(module test.modeconsumer)
+(set-buffer-mode-for "*plain*" "plain-mode")
+"#,
+    );
+    let buffer = editor
+        .buffers
+        .iter()
+        .find(|b| b.name == "*plain*")
+        .expect("*plain* buffer");
+    assert_eq!(
+        buffer.mode,
+        BufferMode::Named("plain-mode".to_string()),
+        "module caller must still reach a vanilla mode by its flat name"
+    );
+    assert!(buffer.read_only, "the vanilla mode's read-only must apply");
+}
+
+/// Hazard (d), second thread: `mode_bind_key` qualifies its *handler* string
+/// unconditionally, and `ui/seq-grid-mode.lisp` binds seven handlers defined
+/// outside itself. End-to-end proof that the dispatch-side ladder
+/// (`Runtime::resolve_handler_name`) covers it.
+#[test]
+fn module_mode_binding_dispatches_a_vanilla_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*bound*", "");
+    editor
+        .runtime_mut()
+        .eval_str(r#"(def cursor-left () (host-command "cursor-left-ran" true))"#)
+        .expect("vanilla handler");
+    editor.refresh_runtime_side_effects();
+    eval_module(
+        &mut editor,
+        "mode-bind-foreign",
+        r#"
+(module test.boundmode)
+(define-mode "bound-mode")
+(mode-bind-key "bound-mode" "C-b" "cursor-left")
+(set-buffer-mode-for "*bound*" "bound-mode")
+"#,
+    );
+    // The binding is stored under the caller's module, which never defined
+    // the handler.
+    assert_eq!(
+        editor
+            .mode_registry
+            .get("test.boundmode/bound-mode")
+            .and_then(|m| m.keybindings.get("C-b"))
+            .map(String::as_str),
+        Some("test.boundmode/cursor-left"),
+        "mode-bind-key qualifies the handler against the caller's module"
+    );
+    // *bound* is the active buffer (last scratch opened), so the mode keymap
+    // is the one consulted on key input.
+    assert_eq!(
+        editor.active_buffer().mode,
+        BufferMode::Named("test.boundmode/bound-mode".to_string())
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "cursor-left-ran")),
+        "qualified→flat handler fallback should dispatch, got {commands:?}"
+    );
+}
+
 #[test]
 fn vanilla_bind_key_records_stay_flat() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
