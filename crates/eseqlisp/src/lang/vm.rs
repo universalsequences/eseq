@@ -3958,33 +3958,61 @@ impl VM {
     }
 
     /// Late-binding heal for a compile-time forward reference (module-system
-    /// spec §3, migration pragmatics): a qualified slot interned before its
-    /// symbol existed anywhere stays empty if the definition later landed in
-    /// a DIFFERENT slot — a declared module's bare forward reference to a
-    /// vanilla symbol defined in a later-loaded file, or a flat native
-    /// registered after a reference compiled. On the first read of an empty
-    /// qualified slot, retry the implicit-module and flat spellings of the
-    /// base name and alias this slot to the found cell (a later StoreGlobal
-    /// to this index replaces the slot Option, unlinking the alias).
+    /// spec §3, migration pragmatics): a slot interned before its symbol
+    /// existed anywhere stays empty if the definition later landed in a
+    /// DIFFERENT slot — a declared module's bare forward reference to a
+    /// vanilla symbol defined in a later-loaded file, a flat native
+    /// registered after a reference compiled, or (spec §10 slice 3) a caller
+    /// compiled BEFORE the file it calls was converted to a module, which
+    /// interned `eseq.vanilla/old-name` (or flat `old-name`) for a symbol
+    /// that now lives at `eseq.<mod>/new-name` behind a compat alias.
+    ///
+    /// Ladder, deliberately ordered and mirroring `resolve_global_read_index`
+    /// (exact → alias → implicit-module → flat):
+    ///
+    /// 1. exact — already known empty, that is why we are here;
+    /// 2. **compat alias on the bare base name.** Alias keys are validated
+    ///    flat at record time (`module-compat-alias` rejects a qualified
+    ///    old name), so the base of `eseq.vanilla/old-name` and a flat
+    ///    `old-name` slot are the only two spellings that can be stale, and
+    ///    both reduce to the same lookup key. The alias rung sits ahead of
+    ///    the implicit/flat rungs for the same reason the resolution ladders
+    ///    do: a stale pre-conversion vanilla slot must not shadow the new
+    ///    home;
+    /// 3. the implicit-module spelling `eseq.vanilla/<base>`;
+    /// 4. the flat spelling `<base>`.
+    ///
+    /// Rungs 3 and 4 only apply to a qualified stale slot; a flat empty slot
+    /// heals through the alias alone (healing flat → `eseq.vanilla/…` would
+    /// cross the reactive-namespace flat exemption).
+    ///
+    /// The healed slot is *aliased* to the found cell, so a later StoreGlobal
+    /// to this index replaces the slot `Option` and unlinks the alias —
+    /// write-then-read keeps last-writer-wins.
     fn late_bind_empty_global(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
         let name = self.global_names.get(idx)?.clone();
-        let (ns, base) = crate::modules::split_qualified(&name)?;
+        let split = crate::modules::split_qualified(&name);
+        let base = split.map(|(_, base)| base).unwrap_or(name.as_str());
         let mut candidates: Vec<String> = Vec::new();
-        if ns != crate::modules::IMPLICIT_MODULE {
-            candidates.push(crate::modules::qualify(crate::modules::IMPLICIT_MODULE, base));
+        if let Some(target) = self.compat_aliases.get(base) {
+            candidates.push(target.clone());
         }
-        candidates.push(base.to_string());
+        if let Some((ns, base)) = split {
+            if ns != crate::modules::IMPLICIT_MODULE {
+                candidates.push(crate::modules::qualify(crate::modules::IMPLICIT_MODULE, base));
+            }
+            candidates.push(base.to_string());
+        }
         for candidate in candidates {
-            if let Some(candidate_idx) =
-                self.global_names.iter().position(|n| *n == candidate)
+            if let Some(candidate_idx) = self.global_names.iter().position(|n| *n == candidate)
+                && candidate_idx != idx
+                && let Some(Some(cell)) = self.globals.get(candidate_idx).cloned()
             {
-                if let Some(Some(cell)) = self.globals.get(candidate_idx).cloned() {
-                    if idx >= self.globals.len() {
-                        self.globals.resize(idx + 1, None);
-                    }
-                    self.globals[idx] = Some(cell.clone());
-                    return Some(cell);
+                if idx >= self.globals.len() {
+                    self.globals.resize(idx + 1, None);
                 }
+                self.globals[idx] = Some(cell.clone());
+                return Some(cell);
             }
         }
         None
@@ -6563,17 +6591,14 @@ counter
         assert_eq!(result, Some(Value::Number(2.0)));
     }
 
-    /// Aliases are forward-looking only: a caller compiled BEFORE the alias
-    /// exists has already interned (and emitted an index for) the flat
-    /// `eseq.vanilla/…` slot, and nothing retrofits that slot afterwards.
-    /// This is the ordering constraint slice-3 conversions live under — a
-    /// module must be evaluated before its consumers compile (see the
-    /// conversion recipe in docs/module-system-spec.md §10). Because
-    /// `(load …)` runs at the *runtime* of the loading file, "consumer.lisp
-    /// loads dep.lisp at its top" is NOT early enough; the manifest above it
-    /// has to load the dep first.
+    /// Globals: a caller compiled BEFORE the alias existed interned (and
+    /// emitted an index for) the stale `eseq.vanilla/…` slot, which stays
+    /// empty. The runtime late-binding heal now retries that slot through the
+    /// compat alias on its first read, so a converted file retrofits its
+    /// earlier-compiled callers (module-system spec §10). This is what
+    /// retires the step-0 load-order gate for def-only conversions.
     #[test]
-    fn compat_alias_does_not_retrofit_an_earlier_compiled_caller() {
+    fn late_binding_heals_earlier_compiled_caller_through_alias() {
         let mut vm = module_test_vm();
         // Caller compiled first, while `pending-name` is undefined: the
         // reference interns as eseq.vanilla/pending-name.
@@ -6588,10 +6613,81 @@ counter
         // By-name resolution (host reads, string handlers, fresh compiles)
         // follows the alias …
         assert_eq!(vm.eval_str("(pending-name)"), Ok(Some(Value::Number(5.0))));
-        // … but the already-compiled caller still points at the empty slot.
+        // … and so does the already-compiled caller, via the heal.
+        assert_eq!(vm.eval_str("(caller)"), Ok(Some(Value::Number(5.0))));
+    }
+
+    /// The same heal for a caller whose reference compiled to a *flat* slot
+    /// (the name was already interned flat — a native-era reference or a
+    /// host-interned name — so the compiler emitted `old-name`, not
+    /// `eseq.vanilla/old-name`). Alias keys are flat, so the base-name lookup
+    /// covers both spellings.
+    #[test]
+    fn late_binding_heals_a_stale_flat_slot_through_alias() {
+        let mut vm = module_test_vm();
+        // Intern `flat-pending` flat without ever giving it a value, then
+        // compile a caller against it: the reference emits the flat index.
+        vm.ensure_global("flat-pending");
+        vm.eval_str("(def flat-caller () (flat-pending))")
+            .expect("caller def");
+        vm.eval_module_source(
+            temp_lisp_path("compat-flat-late"),
+            "(module test.flatlate)\n(def home () 7)\n(module-compat-alias flat-pending home)",
+            1,
+        )
+        .expect("module eval");
+        assert_eq!(vm.eval_str("(flat-caller)"), Ok(Some(Value::Number(7.0))));
+    }
+
+    /// Without an alias the heal falls back to its pre-existing behavior:
+    /// the implicit-module and flat spellings only, so an unrelated empty
+    /// slot still errors rather than silently binding to something.
+    #[test]
+    fn late_binding_without_an_alias_keeps_the_old_behavior() {
+        let mut vm = module_test_vm();
+        vm.eval_str("(def orphan-caller () (never-defined))")
+            .expect("caller def");
+        vm.eval_module_source(
+            temp_lisp_path("compat-none"),
+            "(module test.noalias)\n(def home () 9)",
+            1,
+        )
+        .expect("module eval");
         assert!(
-            vm.eval_str("(caller)").is_err(),
-            "pre-alias compiled reference must not silently resolve"
+            vm.eval_str("(orphan-caller)").is_err(),
+            "an unaliased empty slot must stay unresolved"
+        );
+    }
+
+    /// A write emitted against the *stale* slot (a setter compiled before the
+    /// conversion, same index as the reader) replaces that slot's `Option`
+    /// rather than mutating the shared cell, so it unlinks the heal: the
+    /// pre-conversion pair keeps last-writer-wins among themselves and stops
+    /// tracking the module's own value. Documented caveat, not a bug — the
+    /// heal is a read-side rescue, not two-way aliasing.
+    #[test]
+    fn a_store_through_the_stale_slot_unlinks_the_heal() {
+        let mut vm = module_test_vm();
+        vm.eval_str("(def read-it () healed-var)")
+            .expect("reader def");
+        vm.eval_str("(def set-it (v) (set! healed-var v))")
+            .expect("setter def");
+        vm.eval_module_source(
+            temp_lisp_path("compat-store"),
+            "(module test.storemod)\n(def home 1)\n(module-compat-alias healed-var home)\n\
+             (def read-home () home)",
+            1,
+        )
+        .expect("module eval");
+        // First read heals to the module's cell …
+        assert_eq!(vm.eval_str("(read-it)"), Ok(Some(Value::Number(1.0))));
+        // … a store through the stale slot replaces it, unlinking the alias.
+        vm.eval_str("(set-it 2)").expect("stale store");
+        assert_eq!(vm.eval_str("(read-it)"), Ok(Some(Value::Number(2.0))));
+        assert_eq!(
+            vm.eval_str("(test.storemod/read-home)"),
+            Ok(Some(Value::Number(1.0))),
+            "the module's own value is unaffected by the stale-slot store"
         );
     }
 

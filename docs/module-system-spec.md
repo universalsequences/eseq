@@ -434,6 +434,50 @@ stays as-is; real macro hygiene is out of scope for this spec.
   implicit-module compiler (`runtime::expand_sdf_expression`), which is now
   seeded with the alias table too.
 
+  **Stage 3 (BUILT 2026-08-12, batch 3): the late-binding heal reaches
+  through compat aliases**, which retires the load-order gate for globals.
+  `VM::late_bind_empty_global` heals an empty global slot on its first read;
+  it now consults `VM::compat_aliases` as its first fallback rung, so a
+  caller compiled *before* a file's conversion — which interned
+  `eseq.vanilla/old-name`, or flat `old-name` if the name happened to be
+  interned flat already — resolves to the converted module's cell instead of
+  erroring. The ladder is deliberately ordered and mirrors
+  `resolve_global_read_index`:
+
+  1. exact (already known empty — that is why the heal ran),
+  2. **compat alias on the bare base name.** `module-compat-alias` validates
+     its old name flat, so alias keys are never qualified: the base of a
+     stale `eseq.vanilla/old-name` slot and a stale flat `old-name` slot
+     reduce to the same lookup key, and there is no spelling for which
+     looking the *full* name up as an alias key could hit. The alias rung
+     sits ahead of the implicit/flat rungs for the same reason it does in
+     both resolution ladders — a stale pre-conversion vanilla slot must not
+     shadow the new home,
+  3. the implicit-module spelling `eseq.vanilla/<base>`,
+  4. the flat spelling `<base>`.
+
+  Rungs 3–4 apply only to a qualified stale slot; a flat empty slot heals
+  through the alias alone, because healing flat → `eseq.vanilla/…` would
+  cross the reactive-namespace flat exemption in
+  `resolve_global_read_index`.
+
+  The heal *aliases the slot to the found cell*, so a `StoreGlobal` to the
+  stale index replaces the slot `Option` and unlinks it — write-then-read
+  keeps last-writer-wins. Caveat, tested: a pre-conversion reader and a
+  pre-conversion writer share one stale index, so once the writer fires the
+  pair stops tracking the module's own value. The heal is a read-side
+  rescue, not two-way aliasing.
+
+  **Asymmetry with macros.** The heal is a *runtime* mechanism keyed on an
+  empty global slot; macros expand at compile time, so nothing analogous can
+  exist for them. `compat_alias_macro_does_not_retrofit_an_earlier_compiled_caller`
+  stays as-is and pins that: **a converted file's macros still need the
+  step-0 load-order gate**, its globals no longer do. Tests:
+  `late_binding_heals_earlier_compiled_caller_through_alias`,
+  `late_binding_heals_a_stale_flat_slot_through_alias`,
+  `late_binding_without_an_alias_keeps_the_old_behavior`,
+  `a_store_through_the_stale_slot_unlinks_the_heal` (vm.rs).
+
   ### Slice 3 conversion recipe (validated by batch 1, 2026-08-12)
 
   Batch 1 converted `ui/macro-state.lisp` → `eseq.macro-state`,
@@ -441,23 +485,34 @@ stays as-is; real macro hygiene is out of scope for this spec.
   `ui/choose-model.lisp` → `eseq.choose-model`. The steps below are what
   that batch had to do; later batches follow them mechanically.
 
-  **Step 0 — the load-order gate (the one that vetoes files).** A compat
-  alias only helps callers that compile *after* it is evaluated. `(load …)`
-  runs at the *runtime* of the loading file, and a file compiles in full
-  before it runs — so "consumer.lisp `(load "dep.lisp")` on line 5" is NOT
-  early enough: the consumer already interned `eseq.vanilla/dep-fn` and
-  emitted an index for it, and nothing retrofits that slot afterwards
-  (regression test `compat_alias_does_not_retrofit_an_earlier_compiled_caller`,
-  vm.rs). Before converting, list every path that evaluates the file —
-  production manifests, other lisp files, Rust test harnesses that
-  `eval_str`/`load` a subset — and confirm the file is evaluated before each
-  consumer compiles. A file whose consumers `load` it themselves (e.g.
-  `ui/track-collapse.lisp`, loaded from the top of `browser.lisp`,
-  `mixer.lisp`, and `sequencer.lisp`) is **not convertible** until the load
-  moves up into the manifest above those consumers, or `import` (§4) lands.
-  The same gate applies in the other direction: a converted module's own
-  bare references *out* to unconverted globals resolve to the flat/vanilla
-  entry only if that entry already exists when the module compiles.
+  **Step 0 — the load-order gate. RETIRED FOR GLOBALS (stage 3, batch 3);
+  still live for macros.** Historically a compat alias only helped callers
+  that compiled *after* it was evaluated: `(load …)` runs at the *runtime*
+  of the loading file and a file compiles in full before it runs, so
+  "consumer.lisp `(load "dep.lisp")` on line 5" was NOT early enough — the
+  consumer had already interned `eseq.vanilla/dep-fn` and emitted an index
+  for it. The stage-3 late-binding heal now retrofits exactly that slot on
+  its first read, so **a def-only file converts regardless of load order**,
+  and the track-collapse-style hoist (moving a self-loaded dep up into the
+  manifest, `964a4d40`) is no longer required. The hoists already landed
+  stay — they are independently correct — but new conversions do not need
+  them.
+
+  What still needs the gate: **macros**. The heal is a runtime mechanism
+  keyed on an empty global slot, and macro expansion happens at compile
+  time, so a caller that compiled before an aliased macro existed is
+  permanently stranded (`compat_alias_macro_does_not_retrofit_an_earlier_compiled_caller`).
+  If the file defines macros with external callers, list every path that
+  evaluates it — production manifests, other lisp files, Rust test harnesses
+  that `eval_str`/`load` a subset — and confirm it is evaluated before each
+  consumer compiles. Macros reached only through auto-quoted
+  `:shader`/`:material` values are exempt (hazard h — they expand at render
+  time).
+
+  The reverse direction is also healed now: a converted module's own bare
+  references *out* to unconverted globals intern a qualified slot that stays
+  empty until the vanilla def lands, and the first read heals it
+  (`module_forward_reference_to_later_vanilla_def_late_binds`).
 
   **Step 1 — header and renames.** Add `(module eseq.<basename>)` after the
   file header comment; the module name must match the filename so §7
@@ -547,14 +602,15 @@ stays as-is; real macro hygiene is out of scope for this spec.
   metal_seq` per conversion** — 585 passed / 2 pre-existing failures is the
   baseline, and it is the gate that actually catches conversion regressions.
 
-  **Step 0 addendum (batch 2).** The load-order gate applies to Rust test
-  harnesses that evaluate a consumer's *source* directly
-  (`eval_str(&read_to_string("ui/mixer.lisp"))`), not just to production
-  manifests: the consumer's own top-of-file `(load "@/ui/dep.lisp")` is as
-  late there as it is in production, so each such harness needs a separate,
-  earlier eval of the dep. Six of them needed one for `track-collapse`.
-  Exception: macros reached only through auto-quoted `:shader`/`:material`
-  values are late-bound (hazard h) and exempt from the gate entirely.
+  **Step 0 addendum (batch 2, superseded for globals by stage 3).** The
+  load-order gate applied to Rust test harnesses that evaluate a consumer's
+  *source* directly (`eval_str(&read_to_string("ui/mixer.lisp"))`), not just
+  to production manifests: the consumer's own top-of-file
+  `(load "@/ui/dep.lisp")` is as late there as it is in production, so each
+  such harness needed a separate, earlier eval of the dep. Six of them
+  needed one for `track-collapse`. Those edits stay, but with the stage-3
+  heal a def-only conversion no longer requires them — only a harness whose
+  consumer expands the converted file's *macros* still does.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
