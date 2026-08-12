@@ -417,6 +417,99 @@ stays as-is; real macro hygiene is out of scope for this spec.
   behind a declared module's own entry and `:refer`s — and apply to reads
   and writes (an unconverted redefiner keeps last-writer-wins against the
   new home). Deleting the table and the form ends the migration.
+
+  ### Slice 3 conversion recipe (validated by batch 1, 2026-08-12)
+
+  Batch 1 converted `ui/macro-state.lisp` → `eseq.macro-state`,
+  `ui/seq-macro-mapping-hooks.lisp` → `eseq.seq-macro-mapping-hooks`, and
+  `ui/choose-model.lisp` → `eseq.choose-model`. The steps below are what
+  that batch had to do; later batches follow them mechanically.
+
+  **Step 0 — the load-order gate (the one that vetoes files).** A compat
+  alias only helps callers that compile *after* it is evaluated. `(load …)`
+  runs at the *runtime* of the loading file, and a file compiles in full
+  before it runs — so "consumer.lisp `(load "dep.lisp")` on line 5" is NOT
+  early enough: the consumer already interned `eseq.vanilla/dep-fn` and
+  emitted an index for it, and nothing retrofits that slot afterwards
+  (regression test `compat_alias_does_not_retrofit_an_earlier_compiled_caller`,
+  vm.rs). Before converting, list every path that evaluates the file —
+  production manifests, other lisp files, Rust test harnesses that
+  `eval_str`/`load` a subset — and confirm the file is evaluated before each
+  consumer compiles. A file whose consumers `load` it themselves (e.g.
+  `ui/track-collapse.lisp`, loaded from the top of `browser.lisp`,
+  `mixer.lisp`, and `sequencer.lisp`) is **not convertible** until the load
+  moves up into the manifest above those consumers, or `import` (§4) lands.
+  The same gate applies in the other direction: a converted module's own
+  bare references *out* to unconverted globals resolve to the flat/vanilla
+  entry only if that entry already exists when the module compiles.
+
+  **Step 1 — header and renames.** Add `(module eseq.<basename>)` after the
+  file header comment; the module name must match the filename so §7
+  resolution works later. Drop the hand-rolled prefix where it duplicates
+  the module concept (`macro-mapping-selected` → `mapping-selected` in
+  `eseq.macro-state`), keep internal callers bare, and `%`-prefix helpers
+  with no callers outside the file (`%body`, `%options`).
+
+  **Step 2 — one `module-compat-alias` per renamed name with an external
+  caller**, immediately after the module form. "External caller" includes
+  Rust-generated lisp source (e.g. the patcher buffer templates in
+  `src/ui/edit_sessions.rs`) and tests that drive the file by name. A name
+  that does *not* change spelling still needs an alias if unconverted
+  callers reference it bare — `(module-compat-alias choose-model choose-model)`
+  — because bare `choose-model` does not find `eseq.choose-model/choose-model`.
+
+  **Step 3 — hazard checklist** (each item below fired at least once, or was
+  the reason a candidate was dropped):
+
+  a. **Widget `:key` re-keys.** Keys auto-qualify, so `:key "dropdown"` in
+     `eseq.choose-model` hashes as `eseq.choose-model/dropdown`. Layout,
+     focus, and `find_layout_node_by_stable_key` assertions must be
+     requalified. Do not convert a file whose keys reach serialized state
+     (p-locks, saved layout) without a migration.
+  b. **`defstate` is a second keyspace.** Auto-qualifying a `defstate`
+     shifts `state_bindings`, and the alias must be honoured there too or an
+     unconverted `(set! old-name v)` resolves the *global* through the alias
+     while missing the binding — it then stores over the slot holding the
+     `NodeRef` and fails with `IncorrectType`. Batch 1 hit this immediately;
+     the alias ladders in `Compiler::state_binding_for` and
+     `VM::state_binding_node` now cover it (`compat_alias_covers_the_defstate_keyspace`).
+  c. **`defwidget :state` sets** are bare-keyed at shader compile time even
+     though runtime reads ladder — keep widget state names inside one file.
+  d. **`(current-buffer-mode)` and mode names** qualify: lisp comparing
+     against flat mode strings breaks. None in batch 1.
+  e. **Flat keyspaces that do NOT qualify**: hook names (`defhook`/`add-hook`
+     strings), `defchan`, subtree keys, `defwidget` names. Leave those
+     strings alone. Corollary discovered in batch 1: `defhook` registers its
+     caller-facing native *at runtime* under the flat name, so a converted
+     module cannot call `(the-hook-name)` bare — its own call site compiles
+     before that global exists and interns a dead qualified slot. Inside a
+     module, invoke hooks as data: `(run-hook "the-hook-name")`.
+  f. **Name surfaces show the qualified spelling.** M-x candidates and
+     completions come from `global_names`, so a converted command lists as
+     `eseq.choose-model/choose-model` (still filtered by typing
+     `choose-model`, and still callable bare through its alias).
+
+  **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
+  `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
+  tests that load the converted file's family. Consumers stay untouched;
+  the only edits outside the converted file should be requalified test
+  expectations (hazard a).
+
+  **Open blocker found while validating batch 1.** On this branch the whole
+  "load `ui/main.lisp`" test family (`full_grid_editor_for_scroll_tests` and
+  everything built on it, ~170 tests in the `metal_seq` bin) fails with
+  `ui/piano-roll.lisp: eval error: IncorrectType`. Bisected to **S0**
+  (`1f02c2e8`, implicit-`eseq.vanilla` interning) — it passes at `3e85f3a4`
+  and fails at `1f02c2e8` — so it predates every slice-3 change. It stayed
+  invisible because those tests overflow the default 8 MB test stack and
+  abort the binary before reporting; they only reach the failure under
+  `RUST_MIN_STACK=16777216`. The failing ops are comparisons with a `nil`
+  left operand, i.e. a global/state that resolved to an empty-or-Nil slot —
+  the same resolve-ladder mismatch class as hazard (b). Until it is fixed,
+  end-to-end proof of a converted file is limited to test harnesses that
+  load a subset of the UI rather than the full manifest; fix it first in
+  batch 2.
+
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
   add `~/.eseq.d/init.lisp` loaded last. `override` (§6.1) lands here — it
