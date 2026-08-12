@@ -711,6 +711,90 @@ stays as-is; real macro hygiene is out of scope for this spec.
      (the arrangement fix renames the local to `event-start`) or a merged
      reference to audit. One hit in 128 defs, and no test caught it.
 
+     **Widened by `ui/sequencer.lisp` (batch 4): also intersect against every
+     global the rest of the app owns**, not just this file's locals and not
+     just the vanilla names this file happens to reference. The strip can land
+     on a name another file `def`s, and that is the worse case — it compiles,
+     no test necessarily fails, and the collision silently redirects a call.
+     Three shapes, all found in the same file:
+
+     - the wrapper/delegate shape, 7 hits and the nastiest.
+       `seqv-step-pointer-up` wraps the vanilla `step-pointer-up` and *calls*
+       it; the mechanical strip merges the two into unbounded recursion. Any
+       `<prefix>-<vanilla-name>` def is a candidate — the prefix was carrying
+       the distinction.
+     - a global this file reads (`cursor-step` vs `seqv-cursor-step`) — caught
+       by the free-symbol intersection.
+     - a global this file never mentions (`param-mode`, `current-step`,
+       `current-page` in `seq-core-state.lisp`) — caught only by the app-wide
+       sweep. `param-mode` is a vanilla **`defstate`**, so the module's `def`
+       of the same base name was read back through `state_bindings` and every
+       call died with `ExpectedFunction`: a module `def` must never collide
+       with a vanilla `defstate` name.
+
+     The practical recipe is one script: collect every `def`/`defstate`/
+     `defwidget`/`defmacro` name in the headerless files plus every
+     `module-compat-alias` key the converted modules publish, and intersect
+     with the post-rename set. `%`-private names do not collide (`%` is part
+     of the interned spelling), so the check only has to cover the public
+     half plus any bare name the strip produces.
+
+  l. **A lisp helper that returns a widget key for Rust to look up must emit
+     the qualified spelling itself** (found converting `ui/sequencer.lisp`).
+     Hazard (a) covers keys the *tests* assert on, but a key can also travel
+     the other way: `seqv-current-number-picker-key` returns a stable key that
+     `current_step_param_number_picker_key` (`src/ui/input.rs:762`) feeds
+     straight into `layout_node_by_stable_key`, an exact match. Auto-
+     qualification happens on the widget, not on the string the helper builds,
+     so the helper now returns
+     `"eseq.sequencer/expanded-param-number-picker-<id>"` with the module name
+     written into the value. Grep a converting file for lisp that *constructs*
+     a key rather than attaching one.
+
+  m. **A module's bare reference to a mutable vanilla `def` global is frozen
+     at its first read — and its bare write never lands at all** (found
+     converting `ui/sequencer.lisp`; this is stage 3's documented "read-side
+     rescue, not two-way aliasing" caveat firing forward for the first time,
+     and it is the strongest remaining argument for finishing the migration).
+
+     The bare reference interns `<module>/<name>`. The late-binding heal
+     aliases that slot to the owner's cell on first read — correct at that
+     instant. The owner's next `(set! …)` is a `StoreGlobal` that replaces the
+     owner's slot `Option` and unlinks the alias, and the module's slot keeps
+     the *old* cell forever. `cursor-step` hit exactly this: `eseq.sequencer/
+     cursor-step` read 0 while flat `cursor-step` held 8, so selecting a track
+     stopped repainting its cursor. Two tests failed; nothing errored.
+
+     The mirror case is worse because it is silent in both directions: a
+     module's bare `(set! step-click-pending nil)` interns and writes the
+     module's own slot, so the vanilla owner never sees the reset. (Hazard (j)
+     is the special case of this where the owner does not exist yet; this is
+     the case where it does.)
+
+     Exposure is precisely **plain `def` + somebody `set!`s it**:
+
+     - `defstate` is immune — it resolves through `state_bindings` on the flat
+       key at compile time and never touches the global ladder. This is why
+       `selected-bus`, `lower-panel-buffer` and `drum-step-cursor-*` were fine
+       in the same file, and why `ui/mixer.lisp` got away with reading and
+       writing `selected-bus` bare.
+     - write-once globals (`page-size`, `page-button-width`) are harmless: the
+       heal never gets unlinked.
+
+     Requalifying the reference does **not** fix it — every spelling compiles
+     to one fixed global index, and `eseq.vanilla/<name>` interns its own slot
+     the same way. The fix is to go through a **function** the owner supplies,
+     because function slots are written once by their `def` and so the heal
+     survives: `cursor-step-value` in `ui/seq-core-state.lisp` and
+     `step-clear-drag-state` in `ui/step-grid-interactions.lisp`. That is the
+     right ownership boundary anyway — a module reaching into another file's
+     mutable variable was always the smell — but it means **converting a file
+     can require adding accessors to the vanilla files it depends on**, which
+     no earlier batch needed. Per-file check: list the converted file's bare
+     outbound references, keep only the ones whose owner declares them with
+     `def` (not `defstate`), and drop the ones nothing ever `set!`s. What is
+     left needs an accessor.
+
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
   tests that load the converted file's family. Consumers stay untouched;
@@ -973,6 +1057,80 @@ stays as-is; real macro hygiene is out of scope for this spec.
   intersection described in (k) is now a required conversion step.
 
   Running conversion count: 11 files.
+
+  ### Batch 4 tally — `sequencer.lisp` (2026-08-12)
+
+  `ui/sequencer.lisp` → `eseq.sequencer`, the largest file of the four. 196
+  defs: 10 `defwidget` names left flat (hazard e — four are also `:background`
+  string values Rust asserts on), 155 `%`-private, 29 public, and
+  `sequencer-cursor-step-changed` pinned to `eseq.vanilla`. **27 compat
+  aliases** against the preflight's 10 lisp-side names; the nine non-widget
+  entries in column 4 are all correct, and `metal-track-tick` is correctly
+  flagged as a `defwidget` needing none. Four names appear outside the file and
+  still get **no** alias: `seqv-track-color-r` (a Rust comment),
+  `seqv-track-volume-control` and `seqv-playhead-row` (widget `:key` strings
+  rather than calls — the arrangement `scene-lane` precedent), and
+  `seqv-step-cell`, whose only other mention is `editor/tests.rs` defining its
+  own in a standalone harness (the mixer `track-peak` precedent).
+
+  **The stub-then-override is resolved by pinning, not by aliasing.**
+  `step-grid-interactions.lisp` defines a nil `sequencer-cursor-step-changed`
+  and calls it from `set-track-cursor-step`; sequencer.lisp's later def is what
+  moves the cursor. No alias can reach that caller — it compiled at
+  `main.lisp:46`, before the aliases existed at `:57`, and the heal only
+  repairs an *empty* slot, which the stub had already filled. So the flat name
+  keeps its flat spelling through the §3 escape hatch
+  (`(def eseq.vanilla/sequencer-cursor-step-changed …)`) and forwards into
+  `eseq.sequencer/cursor-step-changed`. **Generalizes: an alias rescues a
+  caller of a name nobody defined; a stub-then-override pair needs the flat def
+  to stay flat.** This pair is the S4 `defhook` candidate.
+
+  **The mode ladder needs nothing.** The file references `seq-grid-mode`
+  without defining it, and that reference lands on vanilla through stage-4
+  rung 3 as predicted. The reverse edge — vanilla's
+  `(mode-bind-key "seq-grid-mode" "C-h" "seqv-collapse-all-tracks")` naming a
+  handler that now lives in a module — also needs no mode alias, because
+  handler dispatch runs `invoke_global` → `resolve_global_read_index`, which
+  already has the alias rung. Worth recording for `seq-grid-mode.lisp`'s own
+  conversion: the handler keyspace is covered by the ordinary global alias.
+
+  **Hazard (h), the only exposure in the big four**, went as the preflight
+  said, plus a trap it did not anticipate: the macro could not simply be
+  stripped to `aqua-slider-track-material`, because that is `ui/materials.lisp`'s
+  compat alias for `eseq.materials/slider-track-material` — and in the very
+  implicit-module expansion that forces the call sites to be qualified, the
+  alias rung would have won and expanded the wrong macro. Renamed
+  `step-slider-track-material`. **A converted file's macro renames must be
+  checked against the compat-alias table, not just the macro table.**
+
+  **Hazard (j) is live, as the mixer tally predicted for `:381`.** Two
+  harnesses eval this file without `ui/browser.lisp`, and both now declare
+  `sbrowser-loading-instrument-name`.
+
+  **Hazard (a): 40 `:key` sites, three keyspaces** — 37 widget keys that
+  qualify and drop their prefix, 3 subtree keys byte-identical, and the SEQV
+  channel strings untouched. 100 assertion rewrites outside the file, against
+  the preflight's "~95": the count that mattered was the `:key` split, not the
+  lookup count. Two loops needed a mixed treatment, keeping the subtree key
+  exact next to `/`-suffixes.
+
+  **Three new hazards, all found here.** (l) — a lisp helper that hands a
+  widget key *out* to Rust must emit the qualified spelling. (m) — a module's
+  bare reference to a mutable vanilla `def` global freezes on first read, and
+  its bare write never reaches the owner; fixed with owner-side accessors,
+  which is the first time a conversion had to modify the vanilla files it
+  depends on. And hazard (k) is widened: the strip must be swept against every
+  global in the app, which turned up 11 collisions here against arrangement's
+  1 — including 7 wrapper/delegate pairs that would have become unbounded
+  recursion, and `param-mode`, a vanilla `defstate` whose collision made every
+  call to the module's own `param-mode` fail with `ExpectedFunction`.
+
+  Running conversion count: 12 files. **`browser.lisp` is the last of the
+  four**, and it now inherits three checks the earlier three did not run: the
+  app-wide collision sweep (k), the key-returning-helper grep (l), and the
+  mutable-vanilla-global audit (m) — the last is likely to bite, since
+  `browser.lisp` is also the only file carrying hazard (i), i.e. it already has
+  six names Rust writes by bare spelling.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
