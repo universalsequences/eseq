@@ -20,8 +20,8 @@
 (def out-gain (param gain @min 0 @max 8 @default 1.0))
 
 ; ---- Left ----
-(def irL-re (wavetable-param @shape [128 1024] @name irL_re))
-(def irL-im (wavetable-param @shape [128 1024] @name irL_im))
+(def irL-re (tensor-param @shape [128 1024] @name irL_re))
+(def irL-im (tensor-param @shape [128 1024] @name irL_im))
 (def blockL (reshape (buffer inL 512 512) @shape [512]))
 (def fftBlockL (pad blockL @padding [0:512]))
 (def (xLre xLim) (fft fftBlockL @N 1024 @backend accelerated))
@@ -30,8 +30,8 @@
 (def wetL (overlap-add (* tdL out-gain 0.25) 512))
 
 ; ---- Right ----
-(def irR-re (wavetable-param @shape [128 1024] @name irR_re))
-(def irR-im (wavetable-param @shape [128 1024] @name irR_im))
+(def irR-re (tensor-param @shape [128 1024] @name irR_re))
+(def irR-im (tensor-param @shape [128 1024] @name irR_im))
 (def blockR (reshape (buffer inR 512 512) @shape [512]))
 (def fftBlockR (pad blockR @padding [0:512]))
 (def (xRre xRim) (fft fftBlockR @N 1024 @backend accelerated))

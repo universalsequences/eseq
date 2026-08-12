@@ -11524,7 +11524,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             (def pitch (in 2 @name pitch))
             (def velocity (in 3 @name velocity))
             (def trigger (in 4 @name trigger))
-            (def waves (wavetable @shape [4 2] @file "waves/tiny.json"))
+            (def waves (tensor @shape [4 2] @file "waves/tiny.json"))
             (out (* (peek waves 1 0) gate velocity) 1 @name audio)
         "#;
 

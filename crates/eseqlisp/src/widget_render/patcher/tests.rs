@@ -5096,8 +5096,10 @@ fn instrument_preamble_helpers_project_as_documented_operators() {
         (def width (apply_pw_mod_safe base mod1 0.2))
         (def blep (polyblep phase freq))
         (def typo (polypleb phase freq))
-        (def wave (wavetable-read-512 table slot phase))
-        (def morph (wavetable-morph-512 table a b phase mix))
+        (def wave (wavetable-read table slot phase))
+        (def morph (wavetable-morph table a b phase mix))
+        (def legacy_wave (wavetable-read-512 table slot phase))
+        (def legacy_morph (wavetable-morph-512 table a b phase mix))
         (def filtered (svf sig cutoff q 0))
         "#,
     );
@@ -5110,6 +5112,8 @@ fn instrument_preamble_helpers_project_as_documented_operators() {
         "apply_pw_mod_safe",
         "polyblep",
         "polypleb",
+        "wavetable-read",
+        "wavetable-morph",
         "wavetable-read-512",
         "wavetable-morph-512",
         "svf",
@@ -21932,6 +21936,126 @@ fn tensor_data_attribute_survives_writeback_round_trip() {
     assert!(
         generated.contains("@shape [3 3]") && generated.contains("@data [0 1 0 1 -4 1 0 1 0]"),
         "generated source lost the attribute arrays:\n{generated}"
+    );
+}
+
+const LEGACY_TENSOR_SOURCE: &str = concat!(
+    "(def t (tensor 2 2 @data [1 2 3 4]))\n",
+    "(def w (wavetable @shape [4 2] @file \"x.json\"))\n",
+    "(def p (wavetable-param @shape [4 2] @name waves))\n",
+);
+
+fn generated_source(patch: &Patch) -> String {
+    super::generate::generate_patch_source(patch, PatcherIntent::Instrument)
+        .expect("generate")
+        .source
+}
+
+#[test]
+fn legacy_tensor_spellings_normalize_at_parse_time() {
+    let patch = parse(LEGACY_TENSOR_SOURCE);
+    let ops = patch
+        .nodes
+        .iter()
+        .map(|node| node.op.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ops.contains(&"wavetable") && !ops.contains(&"wavetable-param"),
+        "legacy op survived projection: {ops:?}"
+    );
+    assert_eq!(
+        ops.iter().filter(|op| **op == "tensor").count(),
+        2,
+        "expected the positional tensor and the renamed wavetable: {ops:?}"
+    );
+    assert_eq!(ops.iter().filter(|op| **op == "tensor-param").count(), 1);
+
+    // Positional dims fold into @shape, and nothing is left in the input slots.
+    let folded = patch
+        .nodes
+        .iter()
+        .find(|node| node.label.starts_with("tensor t"))
+        .expect("tensor t node");
+    assert!(
+        folded.label.contains("@shape [2 2]") && folded.label.contains("@data [1 2 3 4]"),
+        "unexpected label: {}",
+        folded.label
+    );
+    assert!(folded.args.is_empty(), "unexpected args: {:?}", folded.args);
+
+    // A zero-input source node renders with no inlets at all.
+    let input_indices = patch_input_indices(&patch);
+    let slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    assert_eq!(slot_counts.get(&folded.id), None);
+}
+
+#[test]
+fn legacy_tensor_spellings_regenerate_in_the_new_form_and_stay_stable() {
+    let generated = generated_source(&parse(LEGACY_TENSOR_SOURCE));
+    assert!(
+        generated.contains("(tensor @shape [2 2] @data [1 2 3 4])"),
+        "positional dims were not folded:\n{generated}"
+    );
+    assert!(
+        !generated.contains("wavetable"),
+        "legacy spelling survived regeneration:\n{generated}"
+    );
+    assert!(
+        generated.contains("@file \"x.json\"") && generated.contains("@name waves"),
+        "attributes were dropped:\n{generated}"
+    );
+
+    // Normalizing is a one-time fold: reparsing the cleaned source regenerates it byte
+    // for byte.
+    let round_tripped = generated_source(&parse(&generated));
+    assert_eq!(generated, round_tripped);
+}
+
+#[test]
+fn legacy_tensor_normalization_leaves_wired_dimensions_alone() {
+    // A dimension that is a cable, not a literal, must keep its input slot — dropping it
+    // would silently delete the connection.
+    let patch = parse("(param rows @default 2)\n(def t (tensor rows 2))\n");
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "tensor")
+        .expect("tensor node");
+    assert_eq!(node.args.len(), 2, "unexpected args: {:?}", node.args);
+    assert!(
+        patch
+            .connections
+            .iter()
+            .any(|connection| connection.to_node == node.id && connection.to_input == 0),
+        "the wired dimension lost its cable"
+    );
+}
+
+#[test]
+fn stale_cable_into_a_suppressed_tensor_inlet_still_renders() {
+    // An old saved patch can hold a cable into an inlet the current manifest no longer
+    // documents. That has to degrade to a wider node, never a panic.
+    let patch = parse("(param rows @default 2)\n(def t (tensor rows 2))\n");
+    let input_indices = patch_input_indices(&patch);
+    let slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "tensor")
+        .expect("tensor node");
+    assert_eq!(slot_counts.get(&node.id).copied(), Some(2));
+}
+
+#[test]
+fn tensor_operator_documents_zero_inlets() {
+    let shape = super::project::dgenlisp_operator_port_shapes()
+        .get("tensor")
+        .expect("tensor port shape");
+    assert_eq!(shape.input_count, 0);
+    assert!(
+        !dgenlisp_operator_names().contains("wavetable")
+            && !dgenlisp_operator_names().contains("wavetable-param"),
+        "hidden legacy aliases must not be offered by the patcher"
     );
 }
 

@@ -52,7 +52,8 @@
           (macro-mapping-sidebar-open-hook)
           (set! macro-mapping-open true)
           (set! macro-mapping-selected id)
-          (macro-mapping-sidebar-refresh-hook))))))
+          (macro-mapping-sidebar-refresh-hook)
+          true)))))
 
 (def macro-set-mapping-display-range (macro mapping endpoint value)
   (let ((scale (get mapping :display-scale))

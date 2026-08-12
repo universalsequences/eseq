@@ -404,6 +404,102 @@ pub(super) fn attribute_item_mask(items: &[Expression]) -> Vec<bool> {
     mask
 }
 
+/// Rewrites a legacy tensor call into the current spelling, or `None` when the call is
+/// already current (or is not a tensor constructor at all).
+///
+/// Two legacy forms still compile in DGenLisp but are undocumented, so the patcher folds
+/// them away at parse time. The model, the display label, and any regenerated source then
+/// all show the new form, which means an old saved patch self-cleans on its next save:
+///
+/// - `(wavetable ...)` / `(wavetable-param ...)` are aliases of `tensor` / `tensor-param`.
+/// - `(tensor 2 2 @data [...])` carried its dimensions positionally; `tensor` is now a
+///   zero-inlet source node whose shape lives in `@shape`.
+///
+/// Only literal integer dimensions fold. A dimension that is a symbol or a nested
+/// expression is a cable in the patch editor, so the node is left alone (it still compiles
+/// through the legacy positional path) rather than silently losing an input.
+pub(super) fn normalize_legacy_tensor_call(items: &[Expression]) -> Option<Vec<Expression>> {
+    let op = symbol_at(items, 0)?;
+    let normalized_op = match op {
+        "wavetable" => "tensor",
+        "wavetable-param" => "tensor-param",
+        "tensor" | "tensor-param" => op,
+        _ => return None,
+    };
+    let renamed = normalized_op != op;
+    let rename_only = || {
+        renamed.then(|| {
+            let mut rebuilt = items.to_vec();
+            rebuilt[0] = Expression::Symbol(normalized_op.to_string());
+            rebuilt
+        })
+    };
+
+    let mask = attribute_item_mask(items);
+    let mut dims = Vec::new();
+    let mut positional = Vec::new();
+    for (idx, item) in items.iter().enumerate().skip(1) {
+        if mask[idx] {
+            continue;
+        }
+        let Some(dim) = literal_dimension(item) else {
+            return rename_only();
+        };
+        dims.push(dim);
+        positional.push(idx);
+    }
+    if dims.is_empty() {
+        return rename_only();
+    }
+    // A call that already carries `@shape` alongside positional dims is contradictory;
+    // don't guess which one wins.
+    if items
+        .iter()
+        .skip(1)
+        .any(|item| matches!(item, Expression::Symbol(symbol) if symbol == "@shape"))
+    {
+        return rename_only();
+    }
+
+    let shape_items = parse_shape_attribute_items(&dims)?;
+    let mut rebuilt = Vec::with_capacity(items.len() + shape_items.len());
+    rebuilt.push(Expression::Symbol(normalized_op.to_string()));
+    rebuilt.extend(shape_items);
+    for (idx, item) in items.iter().enumerate().skip(1) {
+        if positional.contains(&idx) {
+            continue;
+        }
+        rebuilt.push(item.clone());
+    }
+    Some(rebuilt)
+}
+
+/// A positional tensor dimension, when it is a plain literal integer.
+fn literal_dimension(item: &Expression) -> Option<u64> {
+    let literal = format_patch_literal(item);
+    if !is_numeric_literal(&literal) {
+        return None;
+    }
+    literal.parse::<u64>().ok()
+}
+
+/// Builds the `@shape [d1 d2]` item run by parsing it, so the bracketed array is
+/// tokenized exactly the way real source is (`[` and `]` are not lexer delimiters).
+fn parse_shape_attribute_items(dims: &[u64]) -> Option<Vec<Expression>> {
+    let dims = dims
+        .iter()
+        .map(|dim| dim.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source = format!("(tensor @shape [{dims}])");
+    let tokens = Parser::new(source).parse().ok()?;
+    let exprs = ASTParser::new(tokens).parse().ok()?;
+    match exprs.first() {
+        Some(Expression::List(items)) => Some(items[1..].to_vec()),
+        _ => None,
+    }
+}
+
 /// Rewrites `[1,4,5,6]` to `[1 4 5 6]`. A comma is the unquote token, so a comma-separated
 /// array lexes into `Unquote` nodes instead of the bracketed run the compiler expects.
 pub(super) fn normalize_editor_node_text(text: &str) -> String {

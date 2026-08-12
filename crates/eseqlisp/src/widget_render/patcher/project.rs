@@ -8,7 +8,8 @@ use super::layout;
 use super::lisp::{
     attribute_span_len, attribute_symbol_value, attribute_value, connection_kind_for_op,
     default_outputs, format_patch_literal, is_attribute_key, is_numeric_literal,
-    is_unsupported_call_head, node_kind_for_op, node_label, symbol_at,
+    is_unsupported_call_head, node_kind_for_op, node_label, normalize_legacy_tensor_call,
+    symbol_at,
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
@@ -746,6 +747,12 @@ impl Projector {
         source_expr: SourceExprId,
         owner: SourceOwner,
     ) -> Option<String> {
+        // Legacy tensor spellings are folded away before anything reads the call, so the
+        // node, its label, and any regenerated source only ever show the current form.
+        // The rewrite only ever drops literal positional dims, which have no arg sources
+        // of their own, so the surviving source ids stay meaningful.
+        let normalized_items = normalize_legacy_tensor_call(items);
+        let items = normalized_items.as_deref().unwrap_or(items);
         let op = symbol_at(items, 0)?.to_string();
         if is_unsupported_call_head(&op) {
             let expr = Expression::List(items.to_vec());

@@ -11,6 +11,6 @@ Source:
 - https://www.adventurekid.se/akrt/waveforms/adventure-kid-waveforms/
 - https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE
 
-The JSON stores data wave-major, matching the current DGen `peek` convention used by `wavetable-read-512`: `wave * 512 + sample`.
+The JSON stores data wave-major, matching the current DGen `peek` convention used by `wavetable-read`: `wave * 512 + sample`.
 
 `user-bank-manifest.txt` records the AKWF source path for each of the 64 slots.

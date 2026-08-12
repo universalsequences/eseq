@@ -1051,7 +1051,7 @@ mod tests {
             ; (tensor @file "ignored.json")
             (def s "not @file \"also-ignored.json\"")
             (def t (tensor @shape [4] @file "a.json"))
-            (def w (wavetable @default-file "waves/b.json"))
+            (def w (tensor-param @default-file "waves/b.json"))
             "#,
         )
         .expect("scan references");

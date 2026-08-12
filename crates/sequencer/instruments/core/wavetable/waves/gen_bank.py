@@ -3,7 +3,7 @@
 
 Output: bank.json, wave-major (`wave * 512 + sample`), shape
 `[512, len(SETS) * 16]`,
-matching the DGenLisp `wavetable-read-512` peek convention.
+matching the DGenLisp `wavetable-read` peek convention.
 All waves are DC-removed and peak-normalized to 0.85.
 """
 import json

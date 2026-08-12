@@ -44,12 +44,13 @@
       (set! process-map-target-kind ""))
     false))
 
-(def macro-mapping-arm-enter-hook ()
-  (do
-    (process-map-clear)
-    (rack-macro-clear-mapping-arm)
-    (set! instrument-mods-open false)
-    (set! effect-mods-open false)))
+(add-hook "macro-mapping-arm-enter-hook" "param-controls"
+  (lambda ()
+    (do
+      (process-map-clear)
+      (rack-macro-clear-mapping-arm)
+      (set! instrument-mods-open false)
+      (set! effect-mods-open false))))
 
 (def process-map-target-map (fx p)
   (if (not (fx-param-has-idx? p))

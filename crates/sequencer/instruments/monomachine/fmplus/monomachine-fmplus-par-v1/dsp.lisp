@@ -10,7 +10,7 @@
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
 
-(def waves (wavetable @shape [512 64] @file "waves/user-bank.json"))
+(def waves (tensor @shape [512 64] @file "waves/user-bank.json"))
 
 (defmacro semi_ratio (semi)
   (exp (/ (* (log 2) semi) 12)))
@@ -28,12 +28,12 @@
 
 (defmacro fm_op (mod_phase wave_idx wave_mix)
   (mix (sin (* twopi mod_phase))
-       (wavetable-read-512 waves (clip (- wave_idx 1) 0 63) mod_phase)
+       (wavetable-read waves (clip (- wave_idx 1) 0 63) mod_phase)
        (clip wave_mix 0 1)))
 
 (defmacro fm_car (phase wave_idx wave_mix)
   (mix (sin (* twopi phase))
-       (wavetable-read-512 waves (clip (- wave_idx 1) 0 63) phase)
+       (wavetable-read waves (clip (- wave_idx 1) 0 63) phase)
        (clip wave_mix 0 1)))
 
 (defmacro fm_block (car_phase mod_phase env amount tone prev_fb fb_scale phase_offset wave_idx wave_mix car_wave_idx car_wave_mix)

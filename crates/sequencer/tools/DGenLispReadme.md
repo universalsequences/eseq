@@ -195,6 +195,8 @@ Return 1.0 for true, 0.0 for false:
 ```
 
 `phasor` with a tensor frequency returns a signalTensor (one phasor per element).
+Tensor phasors are **stateful**: each element gets its own persistent accumulator,
+so they stay continuous across process-block boundaries.
 
 ### Stateful Operations
 
@@ -275,38 +277,68 @@ Supported modulation modes are `additive`, `multiplicative`, and `semitone`.
 
 ### Tensor Creation
 
+`tensor` is the single constructor for buffer-shaped data. It takes `@shape` plus
+one source of contents (inline data, a JSON asset, or nothing = zeros):
+
 ```lisp
-(tensor rows cols)           ; alias for zeros
+(tensor @shape [4 2] @data [0 0 0.5 0.5 1 1 0.5 0.5])   ; inline data
+(tensor @shape [512 32] @file "waves/factory.json")     ; JSON asset
+(tensor @shape [48000 2])                               ; zero-filled buffer
+(tensor-param @shape [512 32] @name wave @default-file "waves/init.json")
+```
+
+- **`@data`** — inline float list; its length must equal the product of `@shape`.
+- **`@file`** — JSON loaded relative to the compiled source file, or relative to
+  `--asset-base` when that flag is provided. JSON may be a flat numeric array,
+  nested numeric arrays, or an object with `shape` and `data`.
+- **neither** — a zero-filled buffer. Record into it at runtime with `poke`.
+- **`tensor-param`** — same surface, but host-writable (the host can push new
+  contents by `@name`); `@default-file` seeds the initial contents.
+
+The other constructors build tensors from a fill rather than from assets:
+
+```lisp
 (zeros [d1,d2,...])          ; zero-filled tensor
 (zeros d1 d2)                ; same, with individual dims
 (ones [d1,d2,...])           ; all-ones tensor
 (full [d1,d2,...] value)     ; filled with constant
 (randn [d1,d2,...])          ; random normal
-(tensor-param [d1,d2,...])   ; learnable parameter tensor
-(wavetable @shape [512 32] @file "waves/factory.json")
-(wavetable-param @shape [512 32] @default-file "waves/init.json")
 ```
 
-`wavetable` and `wavetable-param` load JSON data relative to the compiled source
-file, or relative to `--asset-base` when that flag is provided. JSON may be a
-flat numeric array, nested numeric arrays, or an object with `shape` and `data`.
-The DGenLisp `peek` convention is `(peek tensor index channel)`, so wavetable
-banks should usually use shape `[samples waves]`. Flat wavetable data should
-store each channel/wave contiguously. Fractional `index` and fractional
-`channel` values are interpolated, so 2D wavetable reads are bilinear across
-sample position and wave position.
+The DGenLisp read convention is `(peek tensor index channel)`, so 2D buffers use
+shape `[samples channels]` (a wavetable bank is `[samples waves]`). Flat data
+should store each channel/wave contiguously. Fractional `index` and fractional
+`channel` values are interpolated, so 2D reads are bilinear across sample
+position and wave position.
 
 ### Tensor Operations
 
 ```lisp
 (matmul a b)                           ; matrix multiply
-(peek tensor index)                    ; interpolated scalar at index
+(peek tensor index)                    ; interpolated scalar at raw index
 (peek tensor index channel)            ; bilinear scalar at (index, channel)
-(peek-row tensor rowIndex)             ; read row → signalTensor
-(sample tensor index)                  ; interpolated row read → signalTensor
+(sample tensor phase channel)          ; scalar at normalized phase 0..1 (wrapped)
+(peek-row tensor rowIndex)             ; read row at index → signalTensor
 (to-signal tensor)                     ; 1D tensor → signal via playback
 (to-signal tensor @max-frames 4096)    ; with explicit frame limit
 ```
+
+The read family:
+
+| Op | Reads | Index space |
+| --- | --- | --- |
+| `peek` | scalar | raw index in `[0, shape[0])`, interpolated |
+| `sample` | scalar | normalized phase `0..1`, wrapped, scaled by `shape[0]` |
+| `peek-row` | whole row → signalTensor | row index |
+
+`sample` is the gen-style, shape-aware read: `(sample t phase ch)` is exactly
+`(peek t (* (wrap phase 0 1) N) ch)` where `N` is the tensor's compile-time
+`shape[0]`. `channel` may be omitted (defaults to 0), but the 2D convention is
+`[samples channels]` so it is normally supplied. There is deliberately no lisp
+binding for the whole-row `sampleRow` read — it is a Swift/training-path API.
+
+**Naming rule:** nouns are tensor-driven (`tensor`, `tensor-param`, `@shape`);
+verbs follow Max/MSP gen (`peek`, `poke`, `sample`).
 
 ### Tensor Shape Operations
 

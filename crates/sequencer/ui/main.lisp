@@ -710,18 +710,20 @@
 
 (defstate macro-mapping-sidebar-was-visible true)
 
-(def macro-mapping-sidebar-open-hook ()
-  (do
-    (set! macro-mapping-sidebar-was-visible samples-sidebar-visible)
-    (set! samples-sidebar-visible true)))
+(add-hook "macro-mapping-sidebar-open-hook" "seq-shell"
+  (lambda ()
+    (do
+      (set! macro-mapping-sidebar-was-visible samples-sidebar-visible)
+      (set! samples-sidebar-visible true))))
 
-(def macro-mapping-sidebar-refresh-hook ()
-  (seq-refresh-current-layout))
+(add-hook "macro-mapping-sidebar-refresh-hook" "seq-shell"
+  (lambda () (seq-refresh-current-layout)))
 
-(def macro-mapping-sidebar-close-hook ()
-  (do
-    (set! samples-sidebar-visible macro-mapping-sidebar-was-visible)
-    (seq-refresh-current-layout)))
+(add-hook "macro-mapping-sidebar-close-hook" "seq-shell"
+  (lambda ()
+    (do
+      (set! samples-sidebar-visible macro-mapping-sidebar-was-visible)
+      (seq-refresh-current-layout))))
 
 (def seq-hide-samples-sidebar ()
   (if samples-sidebar-visible

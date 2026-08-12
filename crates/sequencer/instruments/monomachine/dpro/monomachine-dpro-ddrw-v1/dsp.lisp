@@ -10,7 +10,7 @@
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
 
-(def waves (wavetable @shape [512 64] @file "waves/user-bank.json"))
+(def waves (tensor @shape [512 64] @file "waves/user-bank.json"))
 
 (defmacro semi_ratio (semi)
   (exp (/ (* (log 2) semi) 12)))
@@ -69,8 +69,8 @@
 (def width_semi (* (/ (clip (mod wid) 0 127) 127) 24))
 (def phase2 (phasor (* tuned_pitch (semi_ratio width_semi))))
 
-(def wave1_raw (wavetable-read-512 waves (clip wav1_pos 0 63) phase1))
-(def wave2_raw (wavetable-read-512 waves (clip wav2_pos 0 63) phase2))
+(def wave1_raw (wavetable-read waves (clip wav1_pos 0 63) phase1))
+(def wave2_raw (wavetable-read waves (clip wav2_pos 0 63) phase2))
 (def wave1 (bitreduce_12 wave1_raw (clip (mod br1) 0 11)))
 (def wave2 (bitreduce_12 wave2_raw (clip (mod br2) 0 11)))
 (def ddrw_mix (clip (mod mix) 0 1))

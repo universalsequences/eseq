@@ -54,13 +54,20 @@ pub(in crate::lisp_host) const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrumen
      (polyblep phase freq)
      (* -1.0 (polyblep falling_phase freq))))
 
-; Wavetable helpers assume tensor shape [samples, waves], matching DGenLisp
-; peek's (index, channel) convention.
+; Wavetable helpers assume tensor shape [samples, waves]. sample is shape-aware
+; (normalized phase scaled by the table's row count at compile time).
+(defmacro wavetable-read (table wave phase)
+  (sample table phase wave))
+
+(defmacro wavetable-morph (table wave_a wave_b phase morph)
+  (wavetable-read table (+ wave_a (* (clip morph 0 1) (- wave_b wave_a))) phase))
+
+; Deprecated aliases (baked 512-row assumption no longer needed):
 (defmacro wavetable-read-512 (table wave phase)
-  (peek table (* (wrap phase 0 1) 512) wave))
+  (wavetable-read table wave phase))
 
 (defmacro wavetable-morph-512 (table wave_a wave_b phase morph)
-  (wavetable-read-512 table (+ wave_a (* (clip morph 0 1) (- wave_b wave_a))) phase))
+  (wavetable-morph table wave_a wave_b phase morph))
 
 ; Cytomic-style ZDF state variable filter.
 ; cutoff in Hz, q is resonance (0.5 = no resonance, higher = more).

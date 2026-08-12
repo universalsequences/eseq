@@ -16,7 +16,7 @@
 (def mod3 (in 8 @name mod3 @modulator 3))
 (def mod4 (in 9 @name mod4 @modulator 4))
 
-(def bank (wavetable @shape [512 512] @file "waves/bank.json"))
+(def bank (tensor @shape [512 512] @file "waves/bank.json"))
 
 (defmacro semi_ratio (semi)
   (exp (/ (* (log 2) semi) 12)))
@@ -250,7 +250,7 @@
 (write-history o1_scan_hist o1_scan)
 (def ph1 (phasor f1 trigger))
 (def o1_idx (+ (* (clip (floor osc1_set) 0 31) 16) (clip o1_scan 0 15)))
-(def osc1 (wavetable-read-512 bank o1_idx ph1))
+(def osc1 (wavetable-read bank o1_idx ph1))
 
 ; ---- oscillator 2 ----
 (def o2_pos_target (clip (+ (mod osc2_wave) (* velocity osc2_vel_wave) (* ams_wav2 15)) 0 15))
@@ -262,7 +262,7 @@
 (write-history o2_scan_hist o2_scan)
 (def ph2 (phasor f2 trigger))
 (def o2_idx (+ (* (clip (floor osc2_set) 0 31) 16) (clip o2_scan 0 15)))
-(def osc2 (wavetable-read-512 bank o2_idx ph2))
+(def osc2 (wavetable-read bank o2_idx ph2))
 
 ; ---- mix + drive ----
 (def o1_gain (dbamp (clip (mod osc1_gain_db) -36 12)))

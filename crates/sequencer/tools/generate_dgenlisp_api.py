@@ -100,12 +100,30 @@ CURATED_OPERATORS = {
     },
     "in": {"category": "io", "summary": "Audio input channel.", "signatures": ["(in channel @name string)", "(in channel @name mod1 @modulator 1)"], "arity": {"minimum": 1, "maximum": None}},
     "out": {"category": "io", "summary": "Audio output channel.", "signatures": ["(out expr channel @name string)"], "arity": {"minimum": 2, "maximum": None}},
-    "tensor": {"category": "tensor_creation", "summary": "Zero-filled tensor alias, or inline data tensor with @shape/@data.", "signatures": ["(tensor rows cols)", "(tensor [d1,d2,...])", "(tensor @shape [4] @data [1 0.5 0.25 0])"], "arity": {"minimum": 0, "maximum": None}},
+    "tensor": {
+        "category": "tensor_creation",
+        "summary": "Buffer-shaped data. @shape plus one source of contents: @data (inline), @file (JSON asset), or neither (zero-filled).",
+        "signatures": [
+            "(tensor @shape [2 2] @data [60 90 155 290])",
+            "(tensor @shape [512 32] @file \"waves/bank.json\")",
+            "(tensor @shape [48000 2])",
+        ],
+        "arity": {"minimum": 0, "maximum": 0},
+    },
     "zeros": {"category": "tensor_creation", "summary": "Zero-filled tensor.", "signatures": ["(zeros [d1,d2,...])", "(zeros d1 d2 ...)"], "arity": {"minimum": 1, "maximum": None}},
     "ones": {"category": "tensor_creation", "summary": "All-ones tensor.", "signatures": ["(ones [d1,d2,...])", "(ones d1 d2 ...)"], "arity": {"minimum": 1, "maximum": None}},
     "full": {"category": "tensor_creation", "summary": "Constant-filled tensor.", "signatures": ["(full [d1,d2,...] value)", "(full d1 d2 ... value)"], "arity": {"minimum": 2, "maximum": None}},
     "randn": {"category": "tensor_creation", "summary": "Random normal tensor.", "signatures": ["(randn [d1,d2,...])", "(randn d1 d2 ...)"], "arity": {"minimum": 1, "maximum": None}},
-    "tensor-param": {"category": "tensor_creation", "summary": "Host-visible tensor parameter.", "signatures": ["(tensor-param [d1,d2,...])"], "arity": {"minimum": 1, "maximum": None}},
+    "tensor-param": {
+        "category": "tensor_creation",
+        "summary": "Host-writable tensor. Same surface as tensor, plus @name for host pushes; seed initial contents with @data or @default-file.",
+        "signatures": [
+            "(tensor-param @shape [512 32] @name wave)",
+            "(tensor-param @shape [512 32] @name wave @default-file \"waves/init.json\")",
+            "(tensor-param @shape [4] @name coeffs @data [1 0 0 0])",
+        ],
+        "arity": {"minimum": 0, "maximum": 0},
+    },
     "audio-tensor": {"category": "tensor_creation", "summary": "Load a WAV file into static tensor manifest data.", "signatures": ["(audio-tensor @file \"irs/hall.wav\")", "(audio-tensor @file \"stereo.wav\" @channel 0)", "(audio-tensor @file \"x.wav\" @mono true @normalize peak)"], "arity": {"minimum": 0, "maximum": None}},
     "ir": {"category": "tensor_creation", "summary": "Load a WAV file as an impulse-response tensor.", "signatures": ["(ir @file \"irs/room.wav\")"], "arity": {"minimum": 0, "maximum": None}},
     "matmul": {"category": "tensor_op", "summary": "Matrix multiplication.", "signatures": ["(matmul a b)"], "arity": {"minimum": 2, "maximum": 2}},
@@ -118,7 +136,12 @@ CURATED_OPERATORS = {
         "signatures": ["(gather source indices)"],
         "arity": {"minimum": 2, "maximum": 2},
     },
-    "sample": {"category": "tensor_op", "summary": "Interpolated row read from a tensor.", "signatures": ["(sample tensor index)"], "arity": {"minimum": 2, "maximum": 2}},
+    "sample": {
+        "category": "tensor_op",
+        "summary": "Interpolated scalar read at normalized phase 0..1 (gen-style). The phase is wrapped and scaled by the tensor's compile-time shape[0]; equivalent to (peek tensor (* (wrap phase 0 1) N) channel).",
+        "signatures": ["(sample tensor phase)", "(sample tensor phase channel)"],
+        "arity": {"minimum": 2, "maximum": 3},
+    },
     "to-signal": {"category": "tensor_op", "summary": "Convert a 1D tensor into a signal playback source.", "signatures": ["(to-signal tensor)", "(to-signal tensor @max-frames 4096)"], "arity": {"minimum": 1, "maximum": None}},
     "reshape": {"category": "tensor_shape", "summary": "Reshape tensor dimensions.", "signatures": ["(reshape tensor @shape [d1,d2,...])"], "arity": {"minimum": 1, "maximum": None}},
     "transpose": {"category": "tensor_shape", "summary": "Transpose / permute tensor axes.", "signatures": ["(transpose tensor)", "(transpose tensor @axes [1,0])"], "arity": {"minimum": 1, "maximum": None}},
@@ -157,8 +180,6 @@ CURATED_OPERATORS = {
     "gswitch": {"category": "conditional", "summary": "Conditional branch.", "signatures": ["(gswitch condition true_value false_value)"], "arity": {"minimum": 3, "maximum": 3}},
     "selector": {"category": "conditional", "summary": "1-based selector over options; mode <= 0 yields 0.", "signatures": ["(selector mode option1 option2 ...)"], "arity": {"minimum": 2, "maximum": None}},
     "atan": {"category": "math", "summary": "Arctangent.", "signatures": ["(atan x)"], "arity": {"minimum": 1, "maximum": 1}},
-    "wavetable": {"category": "tensor_creation", "summary": "Load a static wavetable tensor from JSON data, or create zero-filled wavetable data from a shape.", "signatures": ["(wavetable @shape [512 32] @file \"waves/factory.json\")", "(wavetable [512 32])"], "arity": {"minimum": 0, "maximum": None}},
-    "wavetable-param": {"category": "tensor_creation", "summary": "Host-editable wavetable tensor initialized from JSON data or zeros.", "signatures": ["(wavetable-param @shape [512 32] @default-file \"waves/init.json\")", "(wavetable-param [512 32])"], "arity": {"minimum": 0, "maximum": None}},
     "__modulated-param": {"category": "internal", "summary": "Internal lowered modulation combiner. User code should use `(mod paramName)` instead.", "signatures": ["(__modulated-param base active modulator depth ... @mode additive @min 0 @max 1)"], "arity": {"minimum": 2, "maximum": None}},
 }
 
@@ -293,14 +314,18 @@ CURATED_OPERATOR_ATTRIBUTES = {
     "spectrum-delay": ["@N", "@n", "@hops", "@hop", "@hopSize"],
     "spectrum-delay-mod": ["@N", "@n", "@max-hops", "@maxHops", "@hop", "@hopSize"],
     "tensor": ["@shape", "@data", "@file", "@name"],
-    "tensor-param": ["@shape", "@file", "@default-file", "@name"],
+    "tensor-param": ["@shape", "@data", "@file", "@default-file", "@name"],
     "to-signal": ["@max-frames"],
     "transpose": ["@axes"],
-    "wavetable": ["@shape", "@file", "@name"],
-    "wavetable-param": ["@shape", "@file", "@default-file", "@name"],
     "window": ["@type", "@N", "@n"],
     "windows": ["@shape"],
 }
+
+
+# Legacy spellings that still compile in DGenLisp but are deliberately undocumented:
+# `wavetable`/`wavetable-param` are aliases of `tensor`/`tensor-param`. Keeping them
+# out of the manifest keeps them out of the patch editor and the browser.
+HIDDEN_OPERATORS = {"wavetable", "wavetable-param"}
 
 
 CURATED_OPERATOR_INPUTS = {
@@ -319,7 +344,13 @@ CURATED_OPERATOR_INPUTS = {
         {"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True},
         {"name": "value", "kind": "float", "summary": "Fill value.", "required": True},
     ],
-    "tensor-param": [{"name": "shape", "kind": "int[]", "summary": "Tensor parameter shape, either as a bracket list, individual dimension arguments, or @shape.", "required": False, "variadic": True}],
+    "tensor": [],
+    "tensor-param": [],
+    "sample": [
+        {"name": "tensor", "kind": "value", "summary": "Tensor to read from.", "required": True},
+        {"name": "phase", "kind": "signal|float", "summary": "Normalized phase in 0..1. Wrapped, then scaled by the tensor's compile-time shape[0].", "required": True},
+        {"name": "channel", "kind": "signal|float", "summary": "Optional channel / wave position. Defaults to 0; fractional values interpolate across channels.", "required": False},
+    ],
     "gather": [
         {"name": "source", "kind": "tensor|signalTensor", "summary": "Tensor or signalTensor to read from.", "required": True},
         {"name": "indices", "kind": "tensor|signalTensor", "summary": "Index tensor. SignalTensor indices produce a frame-aware gather.", "required": True},
@@ -328,11 +359,69 @@ CURATED_OPERATOR_INPUTS = {
         {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
         {"name": "duty", "kind": "signal|float", "summary": "Optional duty cycle width in 0..1. Defaults to 0.5; 0 follows the phase ramp.", "required": False},
     ],
-    "wavetable": [{"name": "shape", "kind": "int[]", "summary": "Wavetable shape when not supplied with @shape.", "required": False, "variadic": True}],
-    "wavetable-param": [{"name": "shape", "kind": "int[]", "summary": "Wavetable parameter shape when not supplied with @shape.", "required": False, "variadic": True}],
+    "wavetable-read": [
+        {"name": "table", "kind": "value", "summary": "Wavetable buffer, shape [samples waves].", "required": True},
+        {"name": "wave", "kind": "signal|float", "summary": "Wave index (fractional values interpolate between waves).", "required": True},
+        {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
+    ],
+    "wavetable-read-512": [
+        {"name": "table", "kind": "value", "summary": "Wavetable buffer, shape [samples waves].", "required": True},
+        {"name": "wave", "kind": "signal|float", "summary": "Wave index (fractional values interpolate between waves).", "required": True},
+        {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
+    ],
+    "wavetable-morph": [
+        {"name": "table", "kind": "value", "summary": "Wavetable buffer, shape [samples waves].", "required": True},
+        {"name": "wave_a", "kind": "signal|float", "summary": "First wave index.", "required": True},
+        {"name": "wave_b", "kind": "signal|float", "summary": "Second wave index.", "required": True},
+        {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
+        {"name": "morph", "kind": "signal|float", "summary": "Crossfade amount, usually 0..1.", "required": True},
+    ],
+    "wavetable-morph-512": [
+        {"name": "table", "kind": "value", "summary": "Wavetable buffer, shape [samples waves].", "required": True},
+        {"name": "wave_a", "kind": "signal|float", "summary": "First wave index.", "required": True},
+        {"name": "wave_b", "kind": "signal|float", "summary": "Second wave index.", "required": True},
+        {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
+        {"name": "morph", "kind": "signal|float", "summary": "Crossfade amount, usually 0..1.", "required": True},
+    ],
 }
 
 PREAMBLE_OPERATORS = [
+    {
+        "name": "wavetable-read",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Instrument preamble helper that reads one wave of a wavetable buffer at a normalized phase. Shape-aware: built on `sample`, so any row count works.",
+        "signatures": ["(wavetable-read table wave phase)"],
+        "arity": {"minimum": 3, "maximum": 3},
+        "attributes": [],
+    },
+    {
+        "name": "wavetable-morph",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Instrument preamble helper that reads and crossfades two waves of a wavetable buffer. Shape-aware: built on `sample`, so any row count works.",
+        "signatures": ["(wavetable-morph table wave_a wave_b phase morph)"],
+        "arity": {"minimum": 5, "maximum": 5},
+        "attributes": [],
+    },
+    {
+        "name": "wavetable-read-512",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Deprecated alias for wavetable-read. The baked 512-row assumption is gone; use wavetable-read.",
+        "signatures": ["(wavetable-read-512 table wave phase)"],
+        "arity": {"minimum": 3, "maximum": 3},
+        "attributes": [],
+    },
+    {
+        "name": "wavetable-morph-512",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Deprecated alias for wavetable-morph. The baked 512-row assumption is gone; use wavetable-morph.",
+        "signatures": ["(wavetable-morph-512 table wave_a wave_b phase morph)"],
+        "arity": {"minimum": 5, "maximum": 5},
+        "attributes": [],
+    },
     {
         "name": "polyblep_saw",
         "aliases": [],
@@ -707,7 +796,7 @@ def infer_inputs_from_signatures(name: str, signatures):
                 "summary": describe_token(token),
             }
         )
-    if name in {"noise", "window", "audio-tensor", "ir", "wavetable", "wavetable-param"}:
+    if name in {"noise", "window", "audio-tensor", "ir", "tensor", "tensor-param"}:
         return []
     return inputs
 
@@ -725,11 +814,11 @@ def apply_required_flags(inputs, arity):
 
 
 def result_kind_for_operator(name: str, category: str) -> str:
-    if name in {"param", "in", "phasor", "stateful-phasor", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "delay", "peek", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
+    if name in {"param", "in", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "delay", "peek", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
         return "signal"
-    if name in {"tensor", "wavetable", "wavetable-param", "zeros", "ones", "full", "randn", "tensor-param", "audio-tensor", "ir", "matmul", "conv1d", "conv2d", "reshape", "transpose", "shrink", "pad", "expand", "repeat", "windows", "hann", "window", "softmax"}:
+    if name in {"tensor", "zeros", "ones", "full", "randn", "tensor-param", "audio-tensor", "ir", "matmul", "conv1d", "conv2d", "reshape", "transpose", "shrink", "pad", "expand", "repeat", "windows", "hann", "window", "softmax"}:
         return "tensor"
-    if name in {"peek-row", "sample", "buffer", "spectrum-delay", "spectrum-delay-mod"}:
+    if name in {"peek-row", "buffer", "spectrum-delay", "spectrum-delay-mod"}:
         return "signalTensor"
     if category in {"arithmetic", "math", "comparison", "conditional", "reduction"}:
         return "same-as-inputs"
@@ -775,6 +864,8 @@ def attribute_docs(names):
 def build_attributes_index(operator_map, attrs_by_fn):
     usage = defaultdict(set)
     for name, meta in operator_map.items():
+        if name in HIDDEN_OPERATORS:
+            continue
         fn_name = meta["implementation"]
         curated = CURATED_OPERATORS.get(name, {})
         discovered_attrs = (
@@ -821,6 +912,8 @@ def build_operators(operator_map, attrs_by_fn, preserved_preamble_operators=None
     preserved_preamble_operators = preserved_preamble_operators or []
     operators = []
     for name in sorted(operator_map):
+        if name in HIDDEN_OPERATORS:
+            continue
         base = operator_map[name]
         curated = CURATED_OPERATORS.get(name, {})
         category = curated.get("category", "uncategorized")

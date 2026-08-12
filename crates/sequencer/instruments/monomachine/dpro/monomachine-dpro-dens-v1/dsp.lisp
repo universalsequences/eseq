@@ -10,7 +10,7 @@
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
 
-(def waves (wavetable @shape [512 64] @file "waves/user-bank.json"))
+(def waves (tensor @shape [512 64] @file "waves/user-bank.json"))
 
 (defmacro semi_ratio (semi)
   (exp (/ (* (log 2) semi) 12)))
@@ -32,7 +32,7 @@
   (gt pch -64))
 
 (defmacro dens_voice (freq wave_pos phase_offset detune)
-  (wavetable-read-512 waves wave_pos (wrap (+ (phasor (* freq detune)) phase_offset) 0 1)))
+  (wavetable-read waves wave_pos (wrap (+ (phasor (* freq detune)) phase_offset) 0 1)))
 
 (param amp_attack_ms     @default 4    @min 1     @max 5000 @unit ms)
 (param amp_decay_ms      @default 180  @min 1     @max 5000 @unit ms)

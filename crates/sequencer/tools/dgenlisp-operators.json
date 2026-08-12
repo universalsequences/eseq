@@ -78,7 +78,8 @@
       "summary": "Inline tensor or tensor-history data.",
       "type": "float[]",
       "used_by": [
-        "tensor"
+        "tensor",
+        "tensor-param"
       ]
     },
     {
@@ -94,9 +95,7 @@
       "summary": "JSON file used to initialize a mutable tensor or wavetable parameter.",
       "type": "path",
       "used_by": [
-        "tensor-param",
-        "wavetable",
-        "wavetable-param"
+        "tensor-param"
       ]
     },
     {
@@ -124,9 +123,7 @@
         "audio-tensor",
         "ir",
         "tensor",
-        "tensor-param",
-        "wavetable",
-        "wavetable-param"
+        "tensor-param"
       ]
     },
     {
@@ -363,9 +360,7 @@
         "ir",
         "out",
         "tensor",
-        "tensor-param",
-        "wavetable",
-        "wavetable-param"
+        "tensor-param"
       ]
     },
     {
@@ -382,6 +377,7 @@
       "summary": "Per-axis padding for pad, e.g. [1:1,0:0].",
       "type": "range[]",
       "used_by": [
+        "conv2d",
         "pad"
       ]
     },
@@ -442,8 +438,6 @@
         "reshape",
         "tensor",
         "tensor-param",
-        "wavetable",
-        "wavetable-param",
         "windows"
       ]
     },
@@ -2044,8 +2038,16 @@
         "maximum": 2,
         "minimum": 2
       },
-      "attribute_docs": [],
-      "attributes": [],
+      "attribute_docs": [
+        {
+          "name": "@padding",
+          "summary": "Per-axis padding for pad, e.g. [1:1,0:0].",
+          "type": "range[]"
+        }
+      ],
+      "attributes": [
+        "@padding"
+      ],
       "category": "tensor_shape",
       "documentation": {
         "port_docs": "curated-from-signature",
@@ -5678,7 +5680,7 @@
     {
       "aliases": [],
       "arity": {
-        "maximum": 2,
+        "maximum": 3,
         "minimum": 2
       },
       "attribute_docs": [],
@@ -5693,7 +5695,7 @@
         "source_file": "LispEvaluator.swift"
       },
       "input_count": {
-        "maximum": 2,
+        "maximum": 3,
         "minimum": 2
       },
       "inputs": [
@@ -5701,13 +5703,19 @@
           "kind": "value",
           "name": "tensor",
           "required": true,
-          "summary": "Tensor input."
+          "summary": "Tensor to read from."
         },
         {
-          "kind": "value",
-          "name": "index",
+          "kind": "signal|float",
+          "name": "phase",
           "required": true,
-          "summary": "Lookup index."
+          "summary": "Normalized phase in 0..1. Wrapped, then scaled by the tensor's compile-time shape[0]."
+        },
+        {
+          "kind": "signal|float",
+          "name": "channel",
+          "required": false,
+          "summary": "Optional channel / wave position. Defaults to 0; fractional values interpolate across channels."
         }
       ],
       "name": "sample",
@@ -5718,15 +5726,16 @@
       "outputs": [
         {
           "index": 0,
-          "kind": "signalTensor",
+          "kind": "signal",
           "name": "out",
           "summary": "Operator result."
         }
       ],
       "signatures": [
-        "(sample tensor index)"
+        "(sample tensor phase)",
+        "(sample tensor phase channel)"
       ],
-      "summary": "Interpolated row read from a tensor."
+      "summary": "Interpolated scalar read at normalized phase 0..1 (gen-style). The phase is wrapped and scaled by the tensor's compile-time shape[0]; equivalent to (peek tensor (* (wrap phase 0 1) N) channel)."
     },
     {
       "aliases": [],
@@ -6690,7 +6699,7 @@
     {
       "aliases": [],
       "arity": {
-        "maximum": null,
+        "maximum": 0,
         "minimum": 0
       },
       "attribute_docs": [
@@ -6731,23 +6740,10 @@
         "source_file": "LispEvaluator.swift"
       },
       "input_count": {
-        "maximum": null,
+        "maximum": 0,
         "minimum": 0
       },
-      "inputs": [
-        {
-          "kind": "value",
-          "name": "rows",
-          "required": false,
-          "summary": "rows input."
-        },
-        {
-          "kind": "value",
-          "name": "cols",
-          "required": false,
-          "summary": "cols input."
-        }
-      ],
+      "inputs": [],
       "name": "tensor",
       "output_count": {
         "maximum": 1,
@@ -6762,19 +6758,24 @@
         }
       ],
       "signatures": [
-        "(tensor rows cols)",
-        "(tensor [d1,d2,...])",
-        "(tensor @shape [4] @data [1 0.5 0.25 0])"
+        "(tensor @shape [2 2] @data [60 90 155 290])",
+        "(tensor @shape [512 32] @file \"waves/bank.json\")",
+        "(tensor @shape [48000 2])"
       ],
-      "summary": "Zero-filled tensor alias, or inline data tensor with @shape/@data."
+      "summary": "Buffer-shaped data. @shape plus one source of contents: @data (inline), @file (JSON asset), or neither (zero-filled)."
     },
     {
       "aliases": [],
       "arity": {
-        "maximum": null,
-        "minimum": 1
+        "maximum": 0,
+        "minimum": 0
       },
       "attribute_docs": [
+        {
+          "name": "@data",
+          "summary": "Inline tensor or tensor-history data.",
+          "type": "float[]"
+        },
         {
           "name": "@default-file",
           "summary": "JSON file used to initialize a mutable tensor or wavetable parameter.",
@@ -6797,6 +6798,7 @@
         }
       ],
       "attributes": [
+        "@data",
         "@default-file",
         "@file",
         "@name",
@@ -6812,18 +6814,10 @@
         "source_file": "LispEvaluator.swift"
       },
       "input_count": {
-        "maximum": null,
-        "minimum": 1
+        "maximum": 0,
+        "minimum": 0
       },
-      "inputs": [
-        {
-          "kind": "int[]",
-          "name": "shape",
-          "required": false,
-          "summary": "Tensor parameter shape, either as a bracket list, individual dimension arguments, or @shape.",
-          "variadic": true
-        }
-      ],
+      "inputs": [],
       "name": "tensor-param",
       "output_count": {
         "maximum": 1,
@@ -6838,9 +6832,11 @@
         }
       ],
       "signatures": [
-        "(tensor-param [d1,d2,...])"
+        "(tensor-param @shape [512 32] @name wave)",
+        "(tensor-param @shape [512 32] @name wave @default-file \"waves/init.json\")",
+        "(tensor-param @shape [4] @name coeffs @data [1 0 0 0])"
       ],
-      "summary": "Host-visible tensor parameter."
+      "summary": "Host-writable tensor. Same surface as tensor, plus @name for host pushes; seed initial contents with @data or @default-file."
     },
     {
       "aliases": [
@@ -7051,60 +7047,57 @@
     {
       "aliases": [],
       "arity": {
-        "maximum": null,
-        "minimum": 0
+        "maximum": 5,
+        "minimum": 5
       },
-      "attribute_docs": [
-        {
-          "name": "@default-file",
-          "summary": "JSON file used to initialize a mutable tensor or wavetable parameter.",
-          "type": "path"
-        },
-        {
-          "name": "@file",
-          "summary": "Audio, tensor, or wavetable asset path.",
-          "type": "path"
-        },
-        {
-          "name": "@name",
-          "summary": "Host-visible parameter, input, output, or tensor name.",
-          "type": "string"
-        },
-        {
-          "name": "@shape",
-          "summary": "Tensor shape.",
-          "type": "int[]"
-        }
-      ],
-      "attributes": [
-        "@default-file",
-        "@file",
-        "@name",
-        "@shape"
-      ],
-      "category": "tensor_creation",
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
       "documentation": {
         "port_docs": "curated-from-signature",
-        "source": "curated"
+        "source": "curated-preamble"
       },
       "implementation": {
-        "function": "evalWavetable",
-        "source_file": "LispEvaluator.swift"
+        "function": null,
+        "source_file": "generated preamble"
       },
       "input_count": {
-        "maximum": null,
-        "minimum": 0
+        "maximum": 5,
+        "minimum": 5
       },
       "inputs": [
         {
-          "kind": "int[]",
-          "name": "shape",
-          "required": false,
-          "summary": "Wavetable shape when not supplied with @shape.",
-          "variadic": true
+          "kind": "value",
+          "name": "table",
+          "required": true,
+          "summary": "Wavetable buffer, shape [samples waves]."
+        },
+        {
+          "kind": "signal|float",
+          "name": "wave_a",
+          "required": true,
+          "summary": "First wave index."
+        },
+        {
+          "kind": "signal|float",
+          "name": "wave_b",
+          "required": true,
+          "summary": "Second wave index."
+        },
+        {
+          "kind": "signal|float",
+          "name": "phase",
+          "required": true,
+          "summary": "Phase signal, usually 0..1."
+        },
+        {
+          "kind": "signal|float",
+          "name": "morph",
+          "required": true,
+          "summary": "Crossfade amount, usually 0..1."
         }
       ],
-      "name": "wavetable",
+      "name": "wavetable-morph",
       "output_count": {
         "maximum": 1,
         "minimum": 1
@@ -7112,16 +7105,15 @@
       "outputs": [
         {
           "index": 0,
-          "kind": "tensor",
+          "kind": "value",
           "name": "out",
           "summary": "Operator result."
         }
       ],
       "signatures": [
-        "(wavetable @shape [512 32] @file \"waves/factory.json\")",
-        "(wavetable [512 32])"
+        "(wavetable-morph table wave_a wave_b phase morph)"
       ],
-      "summary": "Load a static wavetable tensor from JSON data, or create zero-filled wavetable data from a shape."
+      "summary": "Instrument preamble helper that reads and crossfades two waves of a wavetable buffer. Shape-aware: built on `sample`, so any row count works."
     },
     {
       "aliases": [],
@@ -7149,7 +7141,7 @@
           "kind": "value",
           "name": "table",
           "required": true,
-          "summary": "Wavetable buffer."
+          "summary": "Wavetable buffer, shape [samples waves]."
         },
         {
           "kind": "signal|float",
@@ -7192,82 +7184,7 @@
       "signatures": [
         "(wavetable-morph-512 table wave_a wave_b phase morph)"
       ],
-      "summary": "Instrument preamble helper that reads and crossfades two 512-sample wavetable waves."
-    },
-    {
-      "aliases": [],
-      "arity": {
-        "maximum": null,
-        "minimum": 0
-      },
-      "attribute_docs": [
-        {
-          "name": "@default-file",
-          "summary": "JSON file used to initialize a mutable tensor or wavetable parameter.",
-          "type": "path"
-        },
-        {
-          "name": "@file",
-          "summary": "Audio, tensor, or wavetable asset path.",
-          "type": "path"
-        },
-        {
-          "name": "@name",
-          "summary": "Host-visible parameter, input, output, or tensor name.",
-          "type": "string"
-        },
-        {
-          "name": "@shape",
-          "summary": "Tensor shape.",
-          "type": "int[]"
-        }
-      ],
-      "attributes": [
-        "@default-file",
-        "@file",
-        "@name",
-        "@shape"
-      ],
-      "category": "tensor_creation",
-      "documentation": {
-        "port_docs": "curated-from-signature",
-        "source": "curated"
-      },
-      "implementation": {
-        "function": "evalWavetable",
-        "source_file": "LispEvaluator.swift"
-      },
-      "input_count": {
-        "maximum": null,
-        "minimum": 0
-      },
-      "inputs": [
-        {
-          "kind": "int[]",
-          "name": "shape",
-          "required": false,
-          "summary": "Wavetable parameter shape when not supplied with @shape.",
-          "variadic": true
-        }
-      ],
-      "name": "wavetable-param",
-      "output_count": {
-        "maximum": 1,
-        "minimum": 1
-      },
-      "outputs": [
-        {
-          "index": 0,
-          "kind": "tensor",
-          "name": "out",
-          "summary": "Operator result."
-        }
-      ],
-      "signatures": [
-        "(wavetable-param @shape [512 32] @default-file \"waves/init.json\")",
-        "(wavetable-param [512 32])"
-      ],
-      "summary": "Host-editable wavetable tensor initialized from JSON data or zeros."
+      "summary": "Deprecated alias for wavetable-morph. The baked 512-row assumption is gone; use wavetable-morph."
     },
     {
       "aliases": [],
@@ -7295,13 +7212,72 @@
           "kind": "value",
           "name": "table",
           "required": true,
-          "summary": "Wavetable buffer."
+          "summary": "Wavetable buffer, shape [samples waves]."
         },
         {
           "kind": "signal|float",
           "name": "wave",
           "required": true,
-          "summary": "Wave index."
+          "summary": "Wave index (fractional values interpolate between waves)."
+        },
+        {
+          "kind": "signal|float",
+          "name": "phase",
+          "required": true,
+          "summary": "Phase signal, usually 0..1."
+        }
+      ],
+      "name": "wavetable-read",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(wavetable-read table wave phase)"
+      ],
+      "summary": "Instrument preamble helper that reads one wave of a wavetable buffer at a normalized phase. Shape-aware: built on `sample`, so any row count works."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "inputs": [
+        {
+          "kind": "value",
+          "name": "table",
+          "required": true,
+          "summary": "Wavetable buffer, shape [samples waves]."
+        },
+        {
+          "kind": "signal|float",
+          "name": "wave",
+          "required": true,
+          "summary": "Wave index (fractional values interpolate between waves)."
         },
         {
           "kind": "signal|float",
@@ -7326,7 +7302,7 @@
       "signatures": [
         "(wavetable-read-512 table wave phase)"
       ],
-      "summary": "Instrument preamble helper that reads a 512-sample wavetable wave with interpolation."
+      "summary": "Deprecated alias for wavetable-read. The baked 512-row assumption is gone; use wavetable-read."
     },
     {
       "aliases": [],

@@ -10,7 +10,7 @@
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
 
-(def waves (wavetable @shape [512 32] @file "waves/factory.json"))
+(def waves (tensor @shape [512 32] @file "waves/factory.json"))
 
 (defmacro semi_ratio (semi)
   (exp (/ (* (log 2) semi) 12)))
@@ -67,7 +67,7 @@
     scan_target
     (+ scan_prev (* scan_slew_coeff (- scan_target scan_prev)))))
 (write-history scan_hist scan_pos)
-(def raw_wave (wavetable-read-512 waves (clip scan_pos 0 31) osc_phase))
+(def raw_wave (wavetable-read waves (clip scan_pos 0 31) osc_phase))
 (def driven (tanh (* raw_wave (clip (mod drive) 0.5 6))))
 (def filter_cutoff (clip (+ (mod cutoff) (* tuned_pitch keytrack) (* filt_env (mod filter_env_amt))) 80 12000))
 (def filtered (biquad driven filter_cutoff (clip (mod resonance) 0.5 2.5) 1 0))

@@ -13,7 +13,7 @@
 (def mod3 (in 8 @name mod3 @modulator 3))
 (def mod4 (in 9 @name mod4 @modulator 4))
 
-(def bank (wavetable @shape [512 448] @file "waves/bank.json"))
+(def bank (tensor @shape [512 448] @file "waves/bank.json"))
 
 (defmacro semi_ratio (semi)
   (exp (/ (* (log 2) semi) 12)))
@@ -90,7 +90,7 @@
     (+ o1_scan_prev (* scan_coeff (- o1_wavepos o1_scan_prev)))))
 (write-history o1_scan_hist o1_scan)
 (def o1_idx (+ (* (clip (floor osc1_set) 0 27) 16) (clip o1_scan 0 15)))
-(def o1_raw (wavetable-read-512 bank o1_idx o1_phase))
+(def o1_raw (wavetable-read bank o1_idx o1_phase))
 (def o1_foldg (+ 1 (* 6 o1_fold)))
 (def o1_out (- 1 (abs (- (wrap (+ (* o1_raw o1_foldg) 1) 0 4) 2))))
 
@@ -107,7 +107,7 @@
     (+ o2_scan_prev (* scan_coeff (- o2_wavepos o2_scan_prev)))))
 (write-history o2_scan_hist o2_scan)
 (def o2_idx (+ (* (clip (floor osc2_set) 0 27) 16) (clip o2_scan 0 15)))
-(def o2_raw (wavetable-read-512 bank o2_idx o2_phase))
+(def o2_raw (wavetable-read bank o2_idx o2_phase))
 (def o2_foldg (+ 1 (* 6 o2_fold)))
 (def o2_out (- 1 (abs (- (wrap (+ (* o2_raw o2_foldg) 1) 0 4) 2))))
 

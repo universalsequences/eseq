@@ -101,7 +101,7 @@
   (+ sig (* (- (dbamp gain_db) 1.0) (/ 1.0 q) (svf sig (clip freq 40 12000) q 1))))
 ; === MNM CHAIN END ===
 
-(def waves (wavetable @shape [512 32] @file "waves/factory.json"))
+(def waves (tensor @shape [512 32] @file "waves/factory.json"))
 
 ; ---- DPRO wave machine params ----
 (param wave          @default 7    @min 1    @max 32 @mod true @mod-mode additive)
@@ -174,7 +174,7 @@
 ; DPRO-style phase morph: sine-warped table readout
 (def pm (clip (mod phase_morph) 0 1))
 (def warped_phase (wrap (+ osc_phase (* (sin (* twopi osc_phase)) pm 0.35)) 0 1))
-(def main_wave (wavetable-read-512 waves (clip scan_pos 0 31) warped_phase))
+(def main_wave (wavetable-read waves (clip scan_pos 0 31) warped_phase))
 
 ; stacked second voice at a stepped interval, same table position
 (def st_semi (clip (mnm_floor (mod stack_semi)) -24 24))
@@ -182,7 +182,7 @@
 (def st_phase (phasor st_freq))
 (def st_warped (wrap (+ st_phase (* (sin (* twopi st_phase)) pm 0.35)) 0 1))
 (def st_level (clip (mod stack_level) 0 1))
-(def stack_wave (* (wavetable-read-512 waves (clip scan_pos 0 31) st_warped) st_level))
+(def stack_wave (* (wavetable-read waves (clip scan_pos 0 31) st_warped) st_level))
 
 (def summed (/ (+ main_wave stack_wave) (+ 1 (* st_level 0.7))))
 (def bits_ctl (clip (mod bits) 4 16))

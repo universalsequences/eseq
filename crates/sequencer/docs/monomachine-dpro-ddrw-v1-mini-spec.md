@@ -24,7 +24,7 @@ Reference:
 `monomachine-dpro-ddrw-v1` uses a file-backed 512 x 64 wavetable:
 
 ```lisp
-(def waves (wavetable @shape [512 64] @file "waves/user-bank.json"))
+(def waves (tensor @shape [512 64] @file "waves/user-bank.json"))
 ```
 
 The first oscillator reads `wav1` at played pitch. The second oscillator reads `wav2` at played pitch plus `wid`, mixed by `mix`.

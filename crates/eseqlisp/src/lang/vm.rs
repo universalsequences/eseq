@@ -68,6 +68,28 @@ fn log_native_callback_error(vm: &VM, native_name: &str, index: usize, error: &V
     }
 }
 
+fn log_native_misuse(native_name: &str, message: &str) {
+    if debug_lisp_callback_errors_enabled() {
+        eprintln!("[lisp-error][{native_name}] {message}");
+    }
+}
+
+/// Run every listener registered on an extension hook, in registration order.
+/// A listener error is logged and does not stop the remaining listeners.
+fn run_extension_hook(vm: &mut VM, name: &str, args: Vec<Value>) -> Value {
+    let callbacks: Vec<Value> = vm
+        .extension_hooks
+        .get(name)
+        .map(|entries| entries.iter().map(|(_, callback)| callback.clone()).collect())
+        .unwrap_or_default();
+    for (idx, callback) in callbacks.into_iter().enumerate() {
+        if let Err(error) = vm.invoke(callback, args.clone()) {
+            log_native_callback_error(vm, name, idx, &error);
+        }
+    }
+    Value::Nil
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReactiveSource {
     NamespaceField { namespace: String, field: String },
@@ -1830,6 +1852,10 @@ pub struct VM {
     preserve_state_on_redefinition: bool,
     global_store_hooks: Vec<GlobalStoreHook>,
     inline_widget_metadata_resolver: Option<InlineWidgetMetadataResolver>,
+    /// Emacs-style extension points: hook name → ordered (entry key, callback)
+    /// listeners. Re-adding with an existing key replaces that entry in place,
+    /// so re-evaluating a module never duplicates its listeners.
+    pub extension_hooks: HashMap<String, Vec<(String, Value)>>,
 }
 
 pub struct VmStateSnapshot {
@@ -1863,6 +1889,7 @@ pub struct VmStateSnapshot {
     source_manager: SourceManager,
     source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
+    extension_hooks: HashMap<String, Vec<(String, Value)>>,
 }
 
 fn clone_globals_for_snapshot(
@@ -2290,6 +2317,67 @@ pub fn register_core_natives(vm: &mut VM) {
             }
         }
         Value::Nil
+    });
+
+    // Emacs-style extension hooks. (defhook "name") declares a hook and
+    // defines a global function of that name that runs its listeners, so call
+    // sites invoke hooks like ordinary functions. (add-hook name key fn)
+    // registers/replaces a listener; the key makes re-evaluation idempotent.
+    vm.register_native_with_vm("defhook", |args, vm| {
+        let Some(Value::String(name)) = args.first().cloned() else {
+            log_native_misuse("defhook", "expects a hook name string");
+            return Value::Nil;
+        };
+        vm.extension_hooks.entry(name.clone()).or_default();
+        let hook_name = name.clone();
+        vm.register_native_with_vm(&name, move |args, vm| {
+            run_extension_hook(vm, &hook_name, args)
+        });
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("add-hook", |mut args, vm| {
+        if args.len() != 3 {
+            log_native_misuse("add-hook", "expects (add-hook hook-name entry-key callback)");
+            return Value::Nil;
+        }
+        let callback = args.pop().expect("checked length");
+        let (Value::String(name), Value::String(key)) = (args.remove(0), args.remove(0)) else {
+            log_native_misuse("add-hook", "hook name and entry key must be strings");
+            return Value::Nil;
+        };
+        let entries = vm.extension_hooks.entry(name).or_default();
+        if let Some(existing) = entries.iter_mut().find(|(existing_key, _)| *existing_key == key)
+        {
+            existing.1 = callback;
+        } else {
+            entries.push((key, callback));
+        }
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("remove-hook", |args, vm| {
+        let (Some(Value::String(name)), Some(Value::String(key))) = (args.first(), args.get(1))
+        else {
+            log_native_misuse("remove-hook", "expects (remove-hook hook-name entry-key)");
+            return Value::Nil;
+        };
+        if let Some(entries) = vm.extension_hooks.get_mut(name) {
+            entries.retain(|(existing_key, _)| existing_key != key);
+        }
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("run-hook", |mut args, vm| {
+        if args.is_empty() {
+            log_native_misuse("run-hook", "expects (run-hook hook-name args...)");
+            return Value::Nil;
+        }
+        let Value::String(name) = args.remove(0) else {
+            log_native_misuse("run-hook", "hook name must be a string");
+            return Value::Nil;
+        };
+        run_extension_hook(vm, &name, args)
     });
 
     vm.register_native("zip", |args| {
@@ -3185,6 +3273,7 @@ impl VM {
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
+            extension_hooks: HashMap::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
         };
@@ -3380,6 +3469,21 @@ impl VM {
             source_manager: self.source_manager.clone(),
             source_load_errors: self.source_load_errors.clone(),
             preserve_state_on_redefinition: self.preserve_state_on_redefinition,
+            extension_hooks: self
+                .extension_hooks
+                .iter()
+                .map(|(name, entries)| {
+                    (
+                        name.clone(),
+                        entries
+                            .iter()
+                            .map(|(key, callback)| {
+                                (key.clone(), clone_value_for_snapshot(callback))
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -3414,6 +3518,7 @@ impl VM {
         self.source_manager = snapshot.source_manager;
         self.source_load_errors = snapshot.source_load_errors;
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
+        self.extension_hooks = snapshot.extension_hooks;
     }
 
     pub fn take_pending_reactive_sets(&mut self) -> Vec<(String, String, Value)> {
@@ -5637,6 +5742,61 @@ mod tests {
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
         debug_assert_cell_not_frozen, freeze_widget_tree,
     };
+
+    fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        let calls = Rc::new(RefCell::new(Vec::<f64>::new()));
+        let sink = calls.clone();
+        vm.register_native("record-hook-call", move |args| {
+            if let Some(Value::Number(n)) = args.first() {
+                sink.borrow_mut().push(*n);
+            }
+            Value::Nil
+        });
+        (vm, calls)
+    }
+
+    #[test]
+    fn extension_hooks_run_in_order_replace_by_key_and_remove() {
+        let (mut vm, calls) = hook_test_vm();
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-hooks-order-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"
+(defhook "test-hook")
+(add-hook "test-hook" "first" (lambda () (record-hook-call 1)))
+(add-hook "test-hook" "second" (lambda () (record-hook-call 2)))
+(test-hook)
+(add-hook "test-hook" "first" (lambda () (record-hook-call 10)))
+(test-hook)
+(remove-hook "test-hook" "second")
+(test-hook)
+"#;
+        vm.eval_module_source(path, source, 1).expect("module eval");
+        // Run 1: both listeners in registration order. Run 2: re-adding
+        // "first" replaced it IN PLACE (order kept). Run 3: "second" removed.
+        assert_eq!(*calls.borrow(), vec![1.0, 2.0, 10.0, 2.0, 10.0]);
+    }
+
+    #[test]
+    fn extension_hooks_forward_args_and_tolerate_no_listeners() {
+        let (mut vm, calls) = hook_test_vm();
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-hooks-args-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"
+(defhook "arg-hook")
+(arg-hook)
+(add-hook "arg-hook" "k" (lambda (x) (record-hook-call x)))
+(arg-hook 7)
+(run-hook "arg-hook" 9)
+"#;
+        vm.eval_module_source(path, source, 1).expect("module eval");
+        assert_eq!(*calls.borrow(), vec![7.0, 9.0]);
+    }
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
         let Value::Map(map) = value else {

@@ -121,12 +121,14 @@ Interpretation:
 
 - Axis 0 is frame index.
 - Axis 1 is one full-cycle frame/kernel at `N=2048`.
-- DGenLisp reads it with `(sample table frame-index)`, which interpolates rows
-  and returns a `[2048]` signalTensor.
+- DGenLisp reads it with `(peek-row table frame-index)`, which interpolates rows
+  and returns a `[2048]` signalTensor. (Do not use `sample` here — `sample` is
+  the gen-style *scalar* read at a normalized 0..1 phase.)
 
-Do not use DGenLisp oscillator `wavetable` sample-major `[samples, waves]`
-convention for this effect. That convention is correct for `(peek table phase
-wave)`, but it is wrong for table-row scanning with `(sample table frame)`.
+Do not use the oscillator-table sample-major `[samples, waves]` convention for
+this effect. That convention is correct for `(peek table idx wave)` /
+`(sample table phase wave)`, but it is wrong for table-row scanning with
+`(peek-row table frame)`.
 
 Required helper tensors:
 
@@ -193,7 +195,7 @@ Use the established stereo STFT skeleton:
 (def table (tensor @shape [64 2048] @file "tables/default.json"))
 (def frame-count 64)
 (def frame-h (hop-hold (* (clip (mod frame) 0 1) (- frame-count 1)) 512))
-(def table-frame-raw (sample table frame-h))
+(def table-frame-raw (peek-row table frame-h))
 ```
 
 Normalize the selected frame before turning it into a response:
