@@ -686,6 +686,31 @@ stays as-is; real macro hygiene is out of scope for this spec.
      `ui/sequencer.lisp` makes the same write at `:381` and will need the same
      check.
 
+  k. **The prefix strip can collide with a pre-existing *local* binding**
+     (found converting `ui/arrangement.lisp`, batch 4). Dropping the
+     hand-rolled prefix shortens every global to a name the file's own `let`
+     heads, `lambda` args and `def` params may already use. Where that
+     happens the rename does not error, does not warn, and does not change the
+     local's meaning — it changes the meaning of the *global* reference that
+     used to be distinguishable:
+
+     ```lisp
+     ;; before                                   ;; after the mechanical strip
+     (let ((view-start (get event :view-start)))  (let ((view-start …))
+       (if (= view-start nil)                       (if (= view-start nil)
+         (+ arrangement-view-start delta)             (+ view-start delta)   ; ← now nil
+         view-start))                                 view-start))
+     ```
+
+     The nil branch meant the module global; after the strip it reads the local
+     that was just proven nil. It compiles and the whole test family stays
+     green, because fixtures normally supply the field. **Required step:**
+     after renaming, intersect the post-rename global names with every binder
+     in the file (`def` params, `let`/`let*` heads, `lambda` args, `each`
+     `|pipe|` vars). Any intersection is either a genuine shadow to rename
+     (the arrangement fix renames the local to `event-start`) or a merged
+     reference to audit. One hit in 128 defs, and no test caught it.
+
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
   tests that load the converted file's family. Consumers stay untouched;
@@ -854,7 +879,10 @@ stays as-is; real macro hygiene is out of scope for this spec.
      references `seq-grid-mode` (`sequencer.lisp:1957`) but does not define
      it: that reference qualifies to `eseq.sequencer/seq-grid-mode` and lands
      on vanilla through rung 3, pinned by
-     `module_mode_reference_falls_back_to_a_vanilla_mode`.
+     `module_mode_reference_falls_back_to_a_vanilla_mode`. It also carries the
+     live hazard (j) (`:381`) and, being the biggest of the four, the most
+     hazard-(k) surface: run the binder intersection before trusting a green
+     suite.
   4. **`browser.lisp`** — highest risk, convert last. It is the **only** one
      of the four with hazard (i), and it has six pinned names — five of them
      `defstate`, so hazard (b) compounds: a pinned `defstate` must keep both
@@ -899,6 +927,52 @@ stays as-is; real macro hygiene is out of scope for this spec.
   exposure in this file, as predicted.
 
   Running conversion count: 10 files.
+
+  ### Batch 4 tally — `arrangement.lisp` (2026-08-12)
+
+  `ui/arrangement.lisp` → `eseq.arrangement`. 128 defs, all renamed by dropping
+  the `arrangement-` prefix: 93 `%`-private, 35 public. 35 compat aliases, one
+  per public name. Nothing is left flat — the file has no `defwidget`, no
+  `defchan`, no `defhook`, no `defmacro`, no `define-mode`, no
+  `:shader`/`:material`, and no production Rust writer, so hazards (c), (d),
+  (h) and (i) have zero exposure exactly as the preflight table predicted.
+
+  **Hazard (j) has zero exposure, and the reason generalizes.** All 11 outbound
+  `set!`s target the file's own defs, and — unlike `mixer.lisp` — nothing evals
+  arrangement's source standalone: `main.lisp:59` is the only loader, and
+  `state_values/tests.rs:849` merely *parses* it in the syntax-lint test. The
+  check to run per file is therefore two-part: (1) do any outbound `set!`s
+  exist, and (2) is there a harness that evals this file without its peers. A
+  "no" to either retires the hazard for that file.
+
+  **Preflight-table corrections.** Column 4's four lisp-side names are exactly
+  right (`set-arrangement-cursor` from `transport.lisp:456`; `arrangement-ghost`
+  / `-view-start` / `-view-duration` from `ui/capture-fixtures/*.lisp` only).
+  What it misses, as with mixer, is that lisp callers are not the alias set:
+  adding the Rust test files that eval names takes it from 4 to **35**. Three
+  names the sweep surfaces get **no** alias: `arrangement-region-all-tracks` and
+  `arrangement-windowed-dots` appear only in Rust *comments* (the mixer
+  `patch-mixer-strip` precedent), and every hit for `arrangement-scene-lane`
+  outside the file is the widget `:key` string of the same spelling rather than
+  a call — the def is now `%scene-lane` and the string is handled as a key.
+  Column 2's four `set!`-only stub writers are confirmed alias-covered through
+  the hazard-(b) `defstate` ladder; no test file `def`s any of them.
+
+  Column 3 / hazard (a) undercount again: **21** assertion sites outside the
+  file against the table's "~12", from just **6** widget `:key` sites inside it.
+  20 lookups plus one `format!`-built key move to the `/`-suffix matcher,
+  including three shared `lane`/`lane_rect` closures rewritten in their bodies.
+  The **5** subtree `:key`s and the 2 assertions on `arr-track-0` stay
+  byte-identical, per the keyspace split. So do the `"arr-*"` SEQV channel
+  strings that `(channel name i)` builds — a third keyspace the tests read by
+  exact spelling.
+
+  Hazard (k) is new and was found here: exactly one of the 128 shortened names
+  collided with a pre-existing local binding, silently changing what the global
+  reference resolved to, with the whole test family still green. The binder
+  intersection described in (k) is now a required conversion step.
+
+  Running conversion count: 11 files.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
