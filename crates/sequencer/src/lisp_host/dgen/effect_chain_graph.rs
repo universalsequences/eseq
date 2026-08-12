@@ -232,7 +232,7 @@ pub unsafe fn add_effect_to_chain_at_successor(
     existing_modulator: Option<i32>,
     ext_mod_input_nodes: Option<&[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>,
 ) -> Result<EffectGraphNodeIds, String> {
-    // Full state allocation (header + distinct read/write buffers), zeroed by the engine
+    // Full state allocation (header + single memory span + redzone), zeroed by the engine
     let state_size =
         dgen_total_state_slots(manifest.total_memory_slots) * std::mem::size_of::<f32>();
 

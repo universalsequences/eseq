@@ -26,6 +26,10 @@
 /patch.dylib
 /patch.json
 /tools/*.bak-*
+# Staged hermetic dgen toolchain (~147 MB): vendored by rebuild_dgenlisp_tool.sh,
+# recorded by the committed tools/dgen-toolchain.lock — never committed itself.
+/tools/dgen-toolchain/
+/tools/dgen-toolchain.staging.*/
 
 # Diagnostics and accidental temporary output
 /sequencer-crash.log

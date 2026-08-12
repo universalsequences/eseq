@@ -15,6 +15,15 @@ resolved to when running from the workspace (post `enter_sequencer_dir()`).
 The release arm carries the `.app` bundle shapes from the parent product spec
 (`embedded-dgen-toolchain-v0.1-spec.md`, "Writable Runtime Layout") but is
 unexercised until Phase 5.
+
+Dev-only override: `ESEQ_DGEN_TOOLCHAIN_ROOT=/abs/path` redirects
+[`AppPaths::dgen_toolchain_root`] away from the per-checkout
+`tools/dgen-toolchain/` stage. The stage is gitignored (~147 MB), so git
+worktrees don't inherit it; the override lets worktrees share the main
+checkout's stage. It is captured once at construction, validated (a missing
+directory is loudly reported, never silently ignored), and always logged when
+active — per the parent spec's "Development Mode" rules. The release arm
+ignores it.
 */
 
 use std::io;
@@ -30,6 +39,9 @@ pub enum AppPaths {
         sequencer_dir: PathBuf,
         workspace_root: PathBuf,
         temp_dir: PathBuf,
+        /// `ESEQ_DGEN_TOOLCHAIN_ROOT` override, captured at construction (see
+        /// module doc). `None` = the default per-checkout stage.
+        dgen_toolchain_override: Option<PathBuf>,
     },
     /// `.app` bundle layout per the parent spec: helper binaries in
     /// `Contents/MacOS`, the staged toolchain in `Contents/Resources`,
@@ -52,7 +64,27 @@ impl AppPaths {
             sequencer_dir,
             workspace_root,
             temp_dir: std::env::temp_dir(),
+            dgen_toolchain_override: None,
         }
+    }
+
+    /// Dev construction that also captures the `ESEQ_DGEN_TOOLCHAIN_ROOT`
+    /// override from the environment (see module doc). Used by [`init_dev`]
+    /// and the [`app_paths`] fallback; [`Self::dev`] stays env-free for
+    /// tests.
+    pub fn dev_from_env(sequencer_dir: PathBuf, workspace_root: PathBuf) -> Self {
+        let mut paths = Self::dev(sequencer_dir, workspace_root);
+        if let Some(override_root) = dev_toolchain_override_from_env() {
+            let AppPaths::Dev {
+                dgen_toolchain_override,
+                ..
+            } = &mut paths
+            else {
+                unreachable!("Self::dev constructs the Dev arm");
+            };
+            *dgen_toolchain_override = Some(override_root);
+        }
+        paths
     }
 
     /// Phase 5 only: deriving these roots (bundle location, `<bundle-id>`
@@ -84,11 +116,55 @@ impl AppPaths {
     /// E2); the directory does not exist until that slice lands.
     pub fn dgen_toolchain_root(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("tools/dgen-toolchain"),
+            AppPaths::Dev {
+                sequencer_dir,
+                dgen_toolchain_override,
+                ..
+            } => dgen_toolchain_override
+                .clone()
+                .unwrap_or_else(|| sequencer_dir.join("tools/dgen-toolchain")),
             AppPaths::Release {
                 contents_resources, ..
             } => contents_resources.join("dgen-toolchain"),
         }
+    }
+
+    /// [`Self::dgen_toolchain_root`], preflight-checked for the two staged
+    /// executables the compile cannot run without. There is deliberately no
+    /// fallback to a system compiler (parent spec, Locked Principle 1): a
+    /// missing or incomplete stage is a hard, actionable error.
+    pub fn dgen_toolchain_root_checked(&self) -> Result<PathBuf, String> {
+        let root = self.dgen_toolchain_root();
+        let overridden = matches!(
+            self,
+            AppPaths::Dev {
+                dgen_toolchain_override: Some(_),
+                ..
+            }
+        );
+        let hint = if overridden {
+            "The stage comes from the ESEQ_DGEN_TOOLCHAIN_ROOT override; point it at a \
+             complete stage (or unset it and run ./rebuild_dgenlisp_tool.sh to stage one \
+             in this checkout)."
+        } else {
+            "Run ./rebuild_dgenlisp_tool.sh at the repo root to stage it (the stage is \
+             gitignored, so fresh checkouts and worktrees start without one)."
+        };
+        if !root.is_dir() {
+            return Err(format!(
+                "DGen toolchain stage not found at {}. {hint}",
+                root.display()
+            ));
+        }
+        for rel in ["bin/dgen-clang", "bin/ld64.lld"] {
+            if !root.join(rel).is_file() {
+                return Err(format!(
+                    "DGen toolchain stage at {} is incomplete (missing {rel}). {hint}",
+                    root.display()
+                ));
+            }
+        }
+        Ok(root)
     }
 
     /// ABI allowlist dir (`exports-v1.txt`, `libsystem-symbols-v1.txt`) read
@@ -160,13 +236,38 @@ impl AppPaths {
     }
 }
 
+/// Read and validate the dev-only `ESEQ_DGEN_TOOLCHAIN_ROOT` override.
+/// Always loud: an active override is logged, and a set-but-missing path is
+/// reported (and still honored, so the compile preflight hard-errors against
+/// the path the user asked for instead of silently using another toolchain).
+fn dev_toolchain_override_from_env() -> Option<PathBuf> {
+    let raw = std::env::var_os("ESEQ_DGEN_TOOLCHAIN_ROOT")?;
+    if raw.is_empty() {
+        return None;
+    }
+    let root = PathBuf::from(raw);
+    if root.is_dir() {
+        eprintln!(
+            "[app_paths] ESEQ_DGEN_TOOLCHAIN_ROOT override active: dgen toolchain root = {}",
+            root.display()
+        );
+    } else {
+        eprintln!(
+            "[app_paths] ESEQ_DGEN_TOOLCHAIN_ROOT is set but {} is not a directory; \
+             DGen compiles will fail until it points at a staged toolchain",
+            root.display()
+        );
+    }
+    Some(root)
+}
+
 static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
 
 /// Install the dev-layout `AppPaths` for this process. Called at startup next
 /// to `paths::enter_sequencer_dir()`, while the workspace is still locatable.
 /// Idempotent; later calls keep the first installation.
 pub fn init_dev() -> io::Result<()> {
-    let paths = AppPaths::dev(
+    let paths = AppPaths::dev_from_env(
         crate::paths::sequencer_dir()?,
         crate::paths::workspace_root(),
     );
@@ -182,7 +283,7 @@ pub fn app_paths() -> &'static AppPaths {
     APP_PATHS.get_or_init(|| {
         let sequencer_dir = crate::paths::sequencer_dir()
             .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        AppPaths::dev(sequencer_dir, crate::paths::workspace_root())
+        AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root())
     })
 }
 
@@ -229,6 +330,41 @@ mod tests {
             paths.ir_prep_dir(),
             std::env::temp_dir().join("sequencer_ir_prep")
         );
+    }
+
+    #[test]
+    fn toolchain_override_redirects_root_and_preflight_reports_it() {
+        let mut paths = AppPaths::dev(PathBuf::from("/ws/crates/sequencer"), PathBuf::from("/ws"));
+        let AppPaths::Dev {
+            dgen_toolchain_override,
+            ..
+        } = &mut paths
+        else {
+            unreachable!()
+        };
+        *dgen_toolchain_override = Some(PathBuf::from("/shared/dgen-toolchain"));
+        assert_eq!(
+            paths.dgen_toolchain_root(),
+            PathBuf::from("/shared/dgen-toolchain")
+        );
+        let err = paths
+            .dgen_toolchain_root_checked()
+            .expect_err("missing override dir must be a hard error");
+        assert!(err.contains("/shared/dgen-toolchain"), "{err}");
+        assert!(err.contains("ESEQ_DGEN_TOOLCHAIN_ROOT"), "{err}");
+    }
+
+    #[test]
+    fn missing_default_stage_error_mentions_rebuild_script() {
+        let paths = AppPaths::dev(
+            PathBuf::from("/nonexistent/crates/sequencer"),
+            PathBuf::from("/nonexistent"),
+        );
+        let err = paths
+            .dgen_toolchain_root_checked()
+            .expect_err("missing stage must be a hard error");
+        assert!(err.contains("rebuild_dgenlisp_tool.sh"), "{err}");
+        assert!(err.contains("tools/dgen-toolchain"), "{err}");
     }
 
     #[test]

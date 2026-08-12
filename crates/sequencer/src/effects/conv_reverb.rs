@@ -428,12 +428,18 @@ fn partition_channel(samples: &[f32], host_sr: u32) -> Result<ChannelIr, String>
     );
     std::fs::write(&lisp_path, &src).map_err(|e| format!("write IR prep lisp: {e}"))?;
 
+    // Same hermetic toolchain hand-off as the effect/instrument compile path
+    // (impl spec, slice E2): staged root passed unconditionally, preflighted,
+    // no system-compiler fallback.
+    let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
     let out_name = format!("ir_{seq}");
     let output = std::process::Command::new(tool_path())
         .args(["compile", lisp_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", &out_name])
         .args(["--sample-rate", &host_sr.to_string()])
+        .arg("--toolchain-root")
+        .arg(&toolchain_root)
         .output()
         .map_err(|e| format!("run DGenLisp for IR prep: {e}"))?;
     if !output.status.success() {

@@ -156,14 +156,14 @@ unsafe impl Sync for LoadedDGenLib {}
 #[cfg(test)]
 pub(crate) fn test_loaded_dgen_lib() -> LoadedDGenLib {
     unsafe extern "C" fn silent_process(
-        _inputs: *const *mut f32,
+        _inputs: *const *const f32,
         outputs: *const *mut f32,
-        frame_count: c_int,
-        _memory_read: *mut c_void,
-        _memory_write: *mut c_void,
-        _host_sample_rate: c_float,
+        frame_count: u32,
+        _state: *mut c_void,
+        _context: *const DGenProcessContextV1,
+        _host: *const DGenHostServicesV1,
     ) {
-        if outputs.is_null() || frame_count <= 0 {
+        if outputs.is_null() || frame_count == 0 {
             return;
         }
         let output = *outputs;
@@ -193,6 +193,21 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
     let dylib_path = base_dir.join(dylib_name);
     let version = v["version"].as_u64().unwrap_or(0) as u32;
     let process_abi = v["processAbi"].as_str().unwrap_or("").to_string();
+    // The host only speaks DGen ABI v1 (dgen_process_v1 + single memory
+    // span); a manifest naming any other ABI came from a stale/incompatible
+    // compiler and must not be loaded.
+    if process_abi != DGEN_PROCESS_ABI_V1 {
+        if process_abi.is_empty() {
+            return Err(format!(
+                "manifest is missing 'processAbi' (expected \"{DGEN_PROCESS_ABI_V1}\"); \
+                 recompile with the vendored DGenLisp toolchain"
+            ));
+        }
+        return Err(format!(
+            "unsupported manifest processAbi \"{process_abi}\" (this host requires \
+             \"{DGEN_PROCESS_ABI_V1}\"); recompile with the vendored DGenLisp toolchain"
+        ));
+    }
 
     let params = v["params"]
         .as_array()
@@ -619,11 +634,22 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
             return Err(format!("dlopen failed: {err}"));
         }
 
-        let process_sym = CString::new("process").unwrap();
+        let process_sym = CString::new("dgen_process_v1").unwrap();
         let process_ptr = dlsym(handle, process_sym.as_ptr());
         if process_ptr.is_null() {
             let err = CStr::from_ptr(dlerror()).to_string_lossy().to_string();
-            return Err(format!("dlsym 'process' failed: {err}"));
+            return Err(format!("dlsym 'dgen_process_v1' failed: {err}"));
+        }
+
+        // The v1 export set also includes dgen_set_param_value_v1 (a no-op
+        // stub today — ESeq writes state memory directly). Resolve it so a
+        // dylib missing the export is caught at load, keeping the export
+        // audit and a future non-stub implementation honest.
+        let set_param_sym = CString::new("dgen_set_param_value_v1").unwrap();
+        let set_param_ptr = dlsym(handle, set_param_sym.as_ptr());
+        if set_param_ptr.is_null() {
+            let err = CStr::from_ptr(dlerror()).to_string_lossy().to_string();
+            return Err(format!("dlsym 'dgen_set_param_value_v1' failed: {err}"));
         }
 
         Ok(LoadedDGenLib {
@@ -633,18 +659,107 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
     }
 }
 
+/// Load a compiled DGen dylib and, when it needs one, run a short warm-up
+/// render on a scratch state span from the calling (control) thread. Generated
+/// spectral code creates its FFT setups lazily via `host->fft_setup_create_fn`
+/// on the first hop boundary it crosses — an allocation that would otherwise
+/// happen inside the audio callback. Only dylibs that actually call that hook
+/// are warmed (see `generated_code_uses_host_fft`): the render costs a full
+/// state allocation plus 2048 frames, and every load — including cache hits on
+/// the project/scene-load path — would otherwise pay it. The warm-up touches
+/// only its own scratch memory (plus the dylib's internal per-call scratch),
+/// never live node state.
+pub fn load_dylib_prewarmed(manifest: &DGenManifest) -> Result<LoadedDGenLib, String> {
+    let lib = load_dylib(&manifest.dylib_path)?;
+    if generated_code_uses_host_fft(&manifest.dylib_path) {
+        prewarm_dgen_process(manifest, &lib);
+    }
+    Ok(lib)
+}
+
+/// Does this dylib's generated code call the host FFT-setup hook? DGenLisp
+/// leaves the C it compiled next to the dylib (same stem) in both the cache
+/// artifact dir and the scratch output dir, and a `host->fft_setup_create_fn`
+/// call site is an exact signal — the manifest carries no "uses spectral ops"
+/// flag. A missing or unreadable `.c` falls back to warming up, so the cost is
+/// paid only when the answer is unknown.
+pub(in crate::lisp_host) fn generated_code_uses_host_fft(dylib_path: &Path) -> bool {
+    let c_path = dylib_path.with_extension("c");
+    match std::fs::read(&c_path) {
+        Ok(bytes) => bytes
+            .windows(DGEN_FFT_SETUP_HOOK.len())
+            .any(|window| window == DGEN_FFT_SETUP_HOOK),
+        Err(_) => true,
+    }
+}
+
+const DGEN_FFT_SETUP_HOOK: &[u8] = b"fft_setup_create_fn";
+
+/// Frames of warm-up rendered by `load_dylib_prewarmed`. Covers the largest
+/// STFT hop builtin generated code uses (`@hop 512`, spectral density ceiling
+/// 1024 bins) so every lazily-created FFT setup exists before the node goes
+/// live. A user-authored `@hop 2048` or larger crosses no boundary inside the
+/// warm-up and still creates its setup on the audio thread — known gap, see
+/// the impl spec.
+const DGEN_PREWARM_FRAMES: usize = 2048;
+const DGEN_PREWARM_BLOCK: usize = 256;
+
+/// Runs the warm-up and returns the scratch memory span it rendered into (the
+/// span is otherwise dropped; tests use it to assert the seeded init state).
+pub(in crate::lisp_host) fn prewarm_dgen_process(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+) -> Vec<f32> {
+    let n_inputs = manifest.n_inputs.max(4);
+    let n_outputs = manifest.n_outputs.max(2);
+    let mut memory = vec![0.0f32; manifest.total_memory_slots + DGEN_STATE_REDZONE_SLOTS];
+    // Seed the scratch span the way `dgenlisp_init` seeds a live node's. An
+    // all-zero span both hides the spectral branch behind param gates that
+    // default non-zero (mix/mode/enabled) — defeating the warm-up — and turns
+    // legitimately non-zero cells into zero divisors, whose NaN/Inf results
+    // reach the unguarded `memory[base + (int)expr]` sites in generated code
+    // as saturated indices far outside the redzone.
+    for (idx, value) in init_state_entries(manifest) {
+        if idx < manifest.total_memory_slots {
+            memory[idx] = value;
+        }
+    }
+    let input_buffers = vec![vec![0.0f32; DGEN_PREWARM_BLOCK]; n_inputs];
+    let mut output_buffers = vec![vec![0.0f32; DGEN_PREWARM_BLOCK]; n_outputs];
+    let input_ptrs: Vec<*const f32> = input_buffers
+        .iter()
+        .map(|buffer| buffer.as_ptr())
+        .collect();
+    let output_ptrs: Vec<*mut f32> = output_buffers
+        .iter_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .collect();
+    let context = dgen_process_context_v1(48_000.0);
+    let mut frames_done = 0usize;
+    while frames_done < DGEN_PREWARM_FRAMES {
+        unsafe {
+            (lib.process_fn)(
+                input_ptrs.as_ptr(),
+                output_ptrs.as_ptr(),
+                DGEN_PREWARM_BLOCK as u32,
+                memory.as_mut_ptr() as *mut c_void,
+                &context,
+                dgen_host_services_v1(),
+            );
+        }
+        frames_done += DGEN_PREWARM_BLOCK;
+    }
+    memory
+}
+
 // ── Build initial state message (compact) ──
 
-/// Build a compact init message:
-/// [slot_id, total_memory_slots, canary, declared_input_count, enabled,
-///  process_fn_chunk0..3, num_entries, idx0, val0, ...]
-/// The engine zeroes state; init only needs to set non-zero values.
-pub(in crate::lisp_host) fn build_init_message(
-    slot_id: usize,
-    manifest: &DGenManifest,
-    process_fn: Option<DGenProcessFn>,
-) -> Vec<f32> {
-    // Collect all non-zero index/value pairs
+/// Non-zero (memory index, value) pairs a fresh node's memory span starts
+/// from: param defaults and tensor init payloads. Shared by the init-message
+/// builders (which ship them to the audio thread as sparse pairs) and by the
+/// warm-up render (which writes them straight into its scratch span), so a
+/// warmed-up dylib sees the same state a live node does.
+pub(in crate::lisp_host) fn init_state_entries(manifest: &DGenManifest) -> Vec<(usize, f32)> {
     let mut entries: Vec<(usize, f32)> = Vec::new();
 
     for param in &manifest.params {
@@ -666,6 +781,20 @@ pub(in crate::lisp_host) fn build_init_message(
             }
         }
     }
+
+    entries
+}
+
+/// Build a compact init message:
+/// [slot_id, total_memory_slots, canary, declared_input_count, enabled,
+///  process_fn_chunk0..3, num_entries, idx0, val0, ...]
+/// The engine zeroes state; init only needs to set non-zero values.
+pub(in crate::lisp_host) fn build_init_message(
+    slot_id: usize,
+    manifest: &DGenManifest,
+    process_fn: Option<DGenProcessFn>,
+) -> Vec<f32> {
+    let entries = init_state_entries(manifest);
 
     // Header (10) + pairs (2 * N)
     let mut msg = Vec::with_capacity(10 + entries.len() * 2);

@@ -4236,38 +4236,47 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     static CAPTURED_DGEN_SAMPLE_RATE_BITS: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn capture_dgen_sample_rate_process(
-        _inp: *const *mut f32,
+        _inp: *const *const f32,
         _out: *const *mut f32,
-        _nframes: std::os::raw::c_int,
+        _nframes: u32,
         _state: *mut std::ffi::c_void,
-        _buffers: *mut std::ffi::c_void,
-        host_sample_rate: std::os::raw::c_float,
+        context: *const super::DGenProcessContextV1,
+        _host: *const super::DGenHostServicesV1,
     ) {
-        CAPTURED_DGEN_SAMPLE_RATE_BITS.store(host_sample_rate.to_bits(), Ordering::SeqCst);
+        let sample_rate = if context.is_null()
+            || (*context).abi_version != super::DGEN_ABI_VERSION_V1
+            || ((*context).struct_size as usize)
+                < std::mem::size_of::<super::DGenProcessContextV1>()
+        {
+            0.0
+        } else {
+            (*context).sample_rate
+        };
+        CAPTURED_DGEN_SAMPLE_RATE_BITS.store(sample_rate.to_bits(), Ordering::SeqCst);
     }
 
     unsafe extern "C" fn write_one_process(
-        _inp: *const *mut f32,
+        _inp: *const *const f32,
         out: *const *mut f32,
-        nframes: std::os::raw::c_int,
+        nframes: u32,
         _state: *mut std::ffi::c_void,
-        _buffers: *mut std::ffi::c_void,
-        _host_sample_rate: std::os::raw::c_float,
+        _context: *const super::DGenProcessContextV1,
+        _host: *const super::DGenHostServicesV1,
     ) {
-        for frame in 0..nframes.max(0) as usize {
+        for frame in 0..nframes as usize {
             *(*out).add(frame) = 1.0;
         }
     }
 
     unsafe extern "C" fn write_two_process(
-        _inp: *const *mut f32,
+        _inp: *const *const f32,
         out: *const *mut f32,
-        nframes: std::os::raw::c_int,
+        nframes: u32,
         _state: *mut std::ffi::c_void,
-        _buffers: *mut std::ffi::c_void,
-        _host_sample_rate: std::os::raw::c_float,
+        _context: *const super::DGenProcessContextV1,
+        _host: *const super::DGenHostServicesV1,
     ) {
-        for frame in 0..nframes.max(0) as usize {
+        for frame in 0..nframes as usize {
             *(*out).add(frame) = 2.0;
         }
     }
@@ -4304,6 +4313,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn parse_manifest_uses_dgen_param_span_metadata() {
         let manifest = parse_manifest(
             r#"{
+                "processAbi": "dgen-host-abi-v1",
                 "dylib": "test.dylib",
                 "totalMemorySlots": 16,
                 "params": [
@@ -4329,6 +4339,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn parse_manifest_reads_ui_metadata() {
         let manifest = parse_manifest(
             r#"{
+                "processAbi": "dgen-host-abi-v1",
                 "dylib": "test.dylib",
                 "totalMemorySlots": 16,
                 "params": [
@@ -4402,7 +4413,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = super::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
             version: 2,
-            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
+            process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots: 16,
             params: vec![
                 DGenParam {
@@ -4463,7 +4474,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = super::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
             version: 2,
-            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
+            process_abi: "dgen-host-abi-v1".to_string(),
             total_memory_slots,
             params: vec![DGenParam {
                 name: "scalar".to_string(),
@@ -4546,9 +4557,48 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(state[super::DGEN_HOST_SAMPLE_RATE_IDX], 48_000.0);
         assert_eq!(state[super::HEADER_SLOTS + 4], 0.25);
         assert_eq!(state[super::HEADER_SLOTS + 8], 0.5);
-        let write_offset = super::HEADER_SLOTS + super::dgen_buffer_span_slots(total_memory_slots);
-        assert_eq!(state[write_offset + 4], 0.25);
-        assert_eq!(state[write_offset + 8], 0.5);
+    }
+
+    #[test]
+    fn dgen_total_state_slots_is_header_plus_single_span_plus_redzone() {
+        // ABI v1: one memory span (the old split read/write pair is gone).
+        assert_eq!(
+            super::dgen_total_state_slots(16),
+            super::HEADER_SLOTS + 16 + super::DGEN_STATE_REDZONE_SLOTS
+        );
+    }
+
+    #[test]
+    fn vendored_dgen_abi_header_matches_staged_toolchain_header() {
+        use sha2::{Digest, Sha256};
+
+        let sequencer_dir = crate::paths::sequencer_dir().expect("sequencer dir");
+        let vendored_path = sequencer_dir.join("audiograph/dgen_abi_v1.h");
+        let vendored = std::fs::read_to_string(&vendored_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", vendored_path.display()));
+        let recorded_sha = vendored
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("* Source-sha256: "))
+            .map(str::trim)
+            .expect("dgen_abi_v1.h must record a `Source-sha256:` line");
+
+        let staged_path = crate::app_paths::app_paths()
+            .dgen_toolchain_root()
+            .join("include/dgen_runtime.h");
+        let staged = std::fs::read(&staged_path).unwrap_or_else(|e| {
+            panic!(
+                "read staged toolchain header {}: {e} (run rebuild_dgenlisp_tool.sh \
+                 to stage the vendored toolchain)",
+                staged_path.display()
+            )
+        });
+        let staged_sha = format!("{:x}", Sha256::digest(&staged));
+        assert_eq!(
+            staged_sha, recorded_sha,
+            "staged include/dgen_runtime.h drifted from the recorded hash — \
+             re-vendor audiograph/dgen_abi_v1.h from the staged header's ABI \
+             section and update its Source-sha256 comment"
+        );
     }
 
     #[test]
@@ -4639,8 +4689,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn parse_manifest_reads_process_abi_and_tensor_source_sample_rate() {
         let manifest = parse_manifest(
             r#"{
-                "version": 2,
-                "processAbi": "dgen-c-v2-host-sample-rate",
+                "version": 3,
+                "processAbi": "dgen-host-abi-v1",
                 "dylib": "test.dylib",
                 "totalMemorySlots": 16,
                 "params": [],
@@ -4660,10 +4710,35 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         )
         .expect("manifest parses");
 
-        assert_eq!(manifest.version, 2);
-        assert_eq!(manifest.process_abi, "dgen-c-v2-host-sample-rate");
+        assert_eq!(manifest.version, 3);
+        assert_eq!(manifest.process_abi, super::DGEN_PROCESS_ABI_V1);
         assert_eq!(manifest.tensors.len(), 1);
         assert_eq!(manifest.tensors[0].source_sample_rate, Some(48_000));
+    }
+
+    #[test]
+    fn parse_manifest_rejects_missing_or_mismatched_process_abi() {
+        let missing = parse_manifest(r#"{ "dylib": "test.dylib", "totalMemorySlots": 4 }"#)
+            .map(|_| ())
+            .expect_err("manifest without processAbi must be rejected");
+        assert!(
+            missing.contains("missing 'processAbi'"),
+            "unexpected error: {missing}"
+        );
+
+        let stale = parse_manifest(
+            r#"{
+                "processAbi": "dgen-c-v2-host-sample-rate",
+                "dylib": "test.dylib",
+                "totalMemorySlots": 4
+            }"#,
+        )
+        .map(|_| ())
+        .expect_err("pre-v1 manifest must be rejected");
+        assert!(
+            stale.contains("dgen-c-v2-host-sample-rate") && stale.contains("dgen-host-abi-v1"),
+            "unexpected error: {stale}"
+        );
     }
 
     #[test]
@@ -4707,6 +4782,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn parse_manifest_reads_mod_active_flag_and_depth_lanes() {
         let json = r#"
         {
+          "processAbi": "dgen-host-abi-v1",
           "totalMemorySlots": 128,
           "params": [
             { "name": "gain", "cellId": 10, "default": 0.5, "min": 0, "max": 1 }
@@ -4753,6 +4829,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn parse_manifest_reads_modulation_outputs() {
         let json = r#"
         {
+          "processAbi": "dgen-host-abi-v1",
           "totalMemorySlots": 128,
           "inputs": [],
           "outputs": [{ "channel": 0, "name": "audio" }],
@@ -4787,6 +4864,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn parse_manifest_defaults_missing_modulation_outputs_to_empty() {
         let manifest = parse_manifest(
             r#"{
+                "processAbi": "dgen-host-abi-v1",
                 "totalMemorySlots": 16,
                 "inputs": [],
                 "outputs": [{ "channel": 0, "name": "audio" }]
@@ -4803,6 +4881,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = parse_manifest(
             r#"
             {
+              "processAbi": "dgen-host-abi-v1",
               "totalMemorySlots": 128,
               "params": [
                 { "name": "gain", "cellId": 10, "default": 0.5, "min": 0, "max": 1 }
@@ -4884,6 +4963,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = parse_manifest(
             r#"
             {
+              "processAbi": "dgen-host-abi-v1",
               "totalMemorySlots": 128,
               "params": [],
               "inputs": [
@@ -4920,6 +5000,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = parse_manifest(
             r#"
             {
+              "processAbi": "dgen-host-abi-v1",
               "totalMemorySlots": 128,
               "params": [
                 { "name": "threshold", "cellId": 10, "default": -20, "min": -80, "max": -2 }
@@ -11385,6 +11466,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = parse_manifest(
             r#"{
               "version": 1,
+              "processAbi": "dgen-host-abi-v1",
               "dylib": "test.dylib",
               "totalMemorySlots": 16,
               "params": [],
@@ -11841,6 +11923,125 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("effect compiler should inject shared preamble helpers");
         assert_eq!(result.manifest.n_inputs, 2);
         assert_eq!(result.manifest.n_outputs, 2);
+    }
+
+    #[test]
+    fn spectral_effect_renders_finite_nonzero_audio_through_host_services() {
+        // Stereo adaptation of dgen's toolchain/fixtures/spectral-effect.lisp:
+        // partitioned convolution exercises the full DGenHostServicesV1 table
+        // (fft_setup_create, forward/inverse FFT, complex MAC) that
+        // audiograph/dgen_host_services.c implements over Accelerate.
+        let source = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (def impulse (tensor @shape [32] @data [
+              1 0 0 0 0 0 0 0
+              0.35 0 0 0 0 0 0 0
+              0.15 0 0 0 0 0 0 0
+              0.05 0 0 0 0 0 0 0]))
+            (out (partitioned-convolve dry_l impulse @N 16 @hop 8 @gain 0.5) 1 @name Left)
+            (out (partitioned-convolve dry_r impulse @N 16 @hop 8 @gain 0.5) 2 @name Right)
+        "#;
+
+        let render = || {
+            super::render_effect_source_for_test(
+                source,
+                &super::EffectRenderOptions {
+                    sample_rate: 48_000,
+                    block_size: 128,
+                    frames: 4096,
+                    param_overrides: Vec::new(),
+                    input_overrides: Vec::new(),
+                },
+            )
+            .expect("spectral effect should compile and render")
+        };
+
+        let first = render();
+        assert!(first.peak.is_finite(), "peak must be finite");
+        assert!(first.rms.is_finite(), "rms must be finite");
+        assert!(
+            first.nonzero_frames > 0,
+            "spectral output must be nonzero (peak={}, rms={})",
+            first.peak,
+            first.rms
+        );
+
+        let second = render();
+        assert_eq!(
+            first.first_samples, second.first_samples,
+            "spectral render must be deterministic across runs"
+        );
+        assert_eq!(first.peak, second.peak);
+        assert_eq!(first.rms, second.rms);
+    }
+
+    #[test]
+    fn prewarm_gate_follows_generated_code_fft_usage() {
+        // The load-time warm-up exists only to create FFT setups off the audio
+        // thread, and it costs a full state allocation plus 2048 rendered
+        // frames — so it must run for spectral dylibs and not for the rest.
+        let spectral = r#"
+            (def dry_l (in 1 @name Left))
+            (def impulse (tensor @shape [16] @data [1 0 0 0 0 0 0 0 0.25 0 0 0 0 0 0 0]))
+            (out (partitioned-convolve dry_l impulse @N 16 @hop 8 @gain 0.5) 1 @name Left)
+            (out dry_l 2 @name Right)
+        "#;
+        let plain = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (param gain @default 0.5 @min 0.0 @max 1.0)
+            (out (* dry_l gain) 1 @name Left)
+            (out (* dry_r gain) 2 @name Right)
+        "#;
+
+        let spectral = super::compile_and_load(spectral, 48_000)
+            .expect("spectral effect should compile and load");
+        assert!(
+            super::generated_code_uses_host_fft(&spectral.manifest.dylib_path),
+            "spectral generated code calls the host FFT hook and must be warmed up"
+        );
+
+        let plain =
+            super::compile_and_load(plain, 48_000).expect("plain effect should compile and load");
+        assert!(
+            !super::generated_code_uses_host_fft(&plain.manifest.dylib_path),
+            "non-spectral generated code must not pay for the warm-up render"
+        );
+    }
+
+    #[test]
+    fn prewarm_renders_against_seeded_init_state() {
+        // Regression: the warm-up used to render against an all-zero span, so
+        // any DSP gated behind a param that defaults non-zero never reached its
+        // FFT setup (and zero-valued divisors produced NaN indices).
+        let source = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (param gain @default 0.75 @min 0.0 @max 1.0)
+            (out (* dry_l gain) 1 @name Left)
+            (out (* dry_r gain) 2 @name Right)
+        "#;
+
+        let compiled =
+            super::compile_and_load(source, 48_000).expect("effect should compile and load");
+        let param = compiled
+            .manifest
+            .params
+            .iter()
+            .find(|param| param.name == "gain")
+            .expect("manifest should expose the gain param");
+        assert_eq!(param.default, 0.75);
+
+        let state = super::prewarm_dgen_process(&compiled.manifest, &compiled.lib);
+        assert_eq!(
+            state[param.cell_id], 0.75,
+            "warm-up scratch span must carry the param defaults a live node inits with"
+        );
+        assert!(
+            state.iter().all(|value| value.is_finite()),
+            "warm-up must not leave NaN/Inf in the state span"
+        );
     }
 
     #[test]
