@@ -547,7 +547,27 @@ stays as-is; real macro hygiene is out of scope for this spec.
   c. **`defwidget :state` sets** are bare-keyed at shader compile time even
      though runtime reads ladder — keep widget state names inside one file.
   d. **`(current-buffer-mode)` and mode names** qualify: lisp comparing
-     against flat mode strings breaks. None in batch 1.
+     against flat mode strings breaks. None in batch 1. **Batch 3 vetoed
+     `ui/seq-grid-mode.lisp` on this hazard** — it is the reason the mode
+     keyspace is the next piece of infra, not a conversion. `define_mode`
+     qualifies the mode name *and* its `:on-enter`/`:on-key` handler strings
+     (`runtime.rs`), and `mode_bind_key` / `set_buffer_mode_for` qualify
+     their mode argument against the *caller's* module — but
+     `Editor::resolve_mode_name` ladders qualified → flat only, with **no
+     flat → qualified rung and no compat-alias rung**. So the moment
+     `(define-mode "seq-grid-mode" …)` moves into a module, the live vanilla
+     call `(set-buffer-mode-for "*sequencer*" "seq-grid-mode")` in
+     `sequencer.lisp` stops resolving — the `*sequencer*` buffer loses its
+     keymap, silently. Second, unfinished thread: `mode_bind_key` qualifies
+     the handler string unconditionally, and this file binds seven handlers
+     that live *outside* it (`cursor-left`, `cursor-right`,
+     `select-all-steps`, `delete-selected-steps`, `cursor-toggle`,
+     `seqv-collapse-all-tracks`), so the handler ladder's qualified → flat
+     fallback needs its own test before any mode-defining file converts.
+     Infra shape, when it lands: give `resolve_mode_name` the same alias
+     rung the global, `defstate` and macro ladders already have — the alias
+     table is name → name and keyspace-agnostic, exactly as stage 2 reused
+     it for macros.
   e. **Flat keyspaces that do NOT qualify**: hook names (`defhook`/`add-hook`
      strings), `defchan`, subtree keys, `defwidget` names. Leave those
      strings alone. Corollary discovered in batch 1: `defhook` registers its
@@ -630,6 +650,25 @@ stays as-is; real macro hygiene is out of scope for this spec.
   needed one for `track-collapse`. Those edits stay, but with the stage-3
   heal a def-only conversion no longer requires them — only a harness whose
   consumer expands the converted file's *macros* still does.
+
+  **Batch 3 tally (2026-08-12).** Infra: the stage-3 heal above. Converted:
+  `ui/sound-palette.lisp` → `eseq.sound-palette` (23 defs, 12 `%`-private, 3
+  aliases, hazard a — 9 requalified key assertions),
+  `ui/effects/state.lisp` → `eseq.effects.state` (32 defs, 23 identity
+  aliases, no renames — six unrelated prefix families in one hub file, so
+  stripping collides; hazard i found and 7 names kept in vanilla),
+  `ui/seq-layout.lisp` → `eseq.seq-layout` (25 defs, 14 `%`-private, 8
+  aliases; first module→module reference in the migration, resolved through
+  the alias rung). Vetoed: `ui/seq-grid-mode.lisp` on hazard d.
+
+  Running conversion count: 9 files. What batch 3 changes for the big four
+  (`sequencer`, `browser`, `arrangement`, `mixer`): load order is no longer
+  a gate for their globals, so they can be attacked in any order; the two
+  live gates are hazard (a) — those files own most of the app's widget
+  `:key`s and therefore most of the ~280
+  `find_layout_node_by_stable_key` assertions — and hazard (d), which vetoes
+  any of them that defines a mode until the mode keyspace gets its alias
+  rung.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
