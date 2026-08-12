@@ -516,6 +516,19 @@ stays as-is; real macro hygiene is out of scope for this spec.
      anyway: the def-site shadow warning firing during conversion is the
      signal to rename.
 
+  h. **Auto-quoted `:shader` / `:material` bodies expand outside the
+     module.** Both props are compiled with `compile_quoted_expression`, so
+     the macros inside them are expanded much later, at shader-compile time,
+     by a throwaway implicit-module compiler (`expand_sdf_expression`) — not
+     by the compile of the file they are written in. Consequences, both hit
+     converting `ui/materials.lisp`: a module's own shader bodies must
+     reference its macros **qualified** (`eseq.materials/color`), because
+     "current module" there is `eseq.vanilla`; and an unconverted consumer's
+     shader body reaches the converted macros only through the compat alias,
+     which is why the alias table is now seeded into that expansion path. The
+     upside is that `:material` macro calls are late-bound: they resolve at
+     render time, so they are exempt from the step-0 load-order gate.
+
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
   tests that load the converted file's family. Consumers stay untouched;

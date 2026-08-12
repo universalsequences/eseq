@@ -1,6 +1,27 @@
 ;; ui/materials.lisp - Shared Metal Sequencer materials and widgets.
 ;; Loaded before the Metal Seq UI buffers that reference these definitions.
 
+(module eseq.materials)
+
+;; Migration compat aliases (spec §10 slice 3): every renamed macro with a
+;; caller outside this file. `aqua-color` has ~10 call sites in
+;; sequencer.lisp / step-grid.lisp / legacy/mixer.lisp shader bodies, so it
+;; stays public. `aqua-color-button` and `aqua-slider-material2` have none
+;; and go `%`-private. The standalone eseqlisp demos (sdf-aqua-demo.lisp,
+;; slider-material-demo.lisp) and the Rust test fixtures that define their
+;; own flat `aqua-color`/`aqua-slider-material` never load this file, so
+;; the alias cannot shadow them.
+(module-compat-alias aqua-color color)
+(module-compat-alias aqua-slider-material slider-material)
+(module-compat-alias aqua-slider-muted-material slider-muted-material)
+(module-compat-alias aqua-slider-track-material slider-track-material)
+(module-compat-alias aqua-slider-track-muted-material slider-track-muted-material)
+
+;; NOTE: `:shader` and `:material` values are auto-quoted and expand at
+;; shader-compile time in a throwaway implicit-module compiler, NOT in this
+;; module — so macro references inside them must be written qualified
+;; (`eseq.materials/color`), bare names would not find this module's table.
+
 ;; ── Step cursor highlight ──
 
 (defwidget cursor-highlight
@@ -18,7 +39,7 @@
 ;; ── Aqua material for sliders ──
 
 
-(defmacro aqua-slider-material2 ()
+(defmacro %slider-material2 ()
     `(material
        :lighting (lighting :edge-min -0.2015 :edge-max 0.01413
          :light (vec3 -0.1 -1.1 0.5) :shininess 71.0)
@@ -30,38 +51,38 @@
          (+ (* base (rgba lit lit lit 1.0))
             (rgba shine shine shine 0.0)))))
 
-(defmacro aqua-slider-material ()
+(defmacro slider-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
        :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
-     :color (aqua-color (rgba 0.35 0.35 0.8 1.0) (rgba 0.20 0.20 0.92 1.0))))
+     :color (eseq.materials/color (rgba 0.35 0.35 0.8 1.0) (rgba 0.20 0.20 0.92 1.0))))
 
-(defmacro aqua-slider-muted-material ()
+(defmacro slider-muted-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
        :light (vec3 -0.1 -0.61 2.4) :shininess 38.0)
      :color
        (* 0.38
-          (aqua-color
+          (eseq.materials/color
             (rgba 0.10 0.10 0.22 0.85)
             (rgba 0.08 0.08 0.30 0.85)))))
 
-(defmacro aqua-slider-track-material ()
+(defmacro slider-track-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
        :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
      :color
-       (aqua-color
+       (eseq.materials/color
          (rgba (* metal-track-r 0.55) (* metal-track-g 0.55) (* metal-track-b 0.55) 1.0)
          (rgba metal-track-r metal-track-g metal-track-b 1.0))))
 
-(defmacro aqua-slider-track-muted-material ()
+(defmacro slider-track-muted-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
        :light (vec3 -0.1 -0.61 2.4) :shininess 38.0)
      :color
        (* 0.42
-          (aqua-color
+          (eseq.materials/color
             (rgba
               (+ (* metal-track-r 0.36) 0.06)
               (+ (* metal-track-g 0.36) 0.06)
@@ -77,7 +98,7 @@
 
 ;; ── Aqua widgets ──
 
-(defmacro aqua-color (base1 base2)
+(defmacro color (base1 base2)
   `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
       (__base (mix ,base1
           ,base2
@@ -97,7 +118,7 @@
         0.0))))
 
 
-(defmacro aqua-color-button (base1 base2)
+(defmacro %color-button (base1 base2)
   `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
             (__base (mix ,base1
                 ,base2
@@ -130,7 +151,7 @@
             (lighting :edge-min -0.25 :edge-max 0.15
               :light (vec3 0.1 -1.0 0.5) :shininess 62.0)
             :color
-            (* (if (= active 1) 1 0.7) (aqua-color-button (rgba 0.35 0.35 0.45 1.0) (rgba 0.30 0.30 0.92 1.0)))
+            (* (if (= active 1) 1 0.7) (eseq.materials/%color-button (rgba 0.35 0.35 0.45 1.0) (rgba 0.30 0.30 0.92 1.0)))
             :shadow (shadow
               :color (rgba 0 0 0 0.3)
               :blur 0.15
@@ -157,7 +178,7 @@
               :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
             :color
             (* (if (= active 1) 1 0.3)
-              (aqua-color
+              (eseq.materials/color
                 (rgba 0.3 0.3 0.85 1.0)
                 (rgba 0.90 0.50 0.82 1.0)))))))))
 
