@@ -6435,6 +6435,41 @@ counter
     }
 
     #[test]
+    fn module_def_process_name_qualifies_and_constructor_resolves() {
+        let mut vm = module_test_vm();
+        let captured = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        // Stub of the sequencer's def-process native: record the class
+        // name and register the constructor under it (the real one does
+        // the same via register_process_constructor_native).
+        vm.register_native_with_vm("def-process", move |args, vm| {
+            let Some(Value::Symbol(name)) = args.first() else {
+                panic!("def-process expects a symbol, got {:?}", args.first());
+            };
+            sink.borrow_mut().push(name.clone());
+            vm.register_native_with_vm(name, |_args, _vm| Value::Number(7.0));
+            Value::String(name.clone())
+        });
+        let source = r#"
+(module test.procmod)
+(def-process my-proc)
+(my-proc)
+"#;
+        let result = vm
+            .eval_module_source(temp_lisp_path("def-process"), source, 1)
+            .expect("module eval");
+        // The bare constructor call inside the module resolves to the
+        // qualified registration.
+        assert_eq!(result, Some(Value::Number(7.0)));
+        vm.eval_str("(def-process plain-proc)").expect("vanilla def");
+        assert_eq!(
+            *captured.borrow(),
+            vec!["test.procmod/my-proc".to_string(), "plain-proc".to_string()],
+            "declared-module class names qualify; vanilla stays flat"
+        );
+    }
+
+    #[test]
     fn chunk_module_provenance_reaches_natives() {
         let mut vm = module_test_vm();
         let seen = Rc::new(RefCell::new(Vec::<String>::new()));

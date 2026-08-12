@@ -734,6 +734,11 @@ pub struct SymbolMetadata {
 
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeBridgeState {
+    /// The module of the chunk executing the current native call (None =
+    /// implicit eseq.vanilla). Stamped by `register_native_impl` before
+    /// each dispatch so registration natives (`bind-key`, `define-mode`,
+    /// …) can qualify late-bound handler-name strings (spec §5).
+    pub current_native_module: Option<String>,
     pub current_buffer_id: Option<BufferId>,
     pub current_buffer_name: String,
     pub current_buffer_path: Option<PathBuf>,
@@ -825,7 +830,29 @@ impl NativeContext {
         self.shared.borrow_mut().queued_commands.push(command);
     }
 
+    /// The declared module of the chunk executing this native call, if
+    /// any (None inside headerless eseq.vanilla code).
+    pub fn current_module(&self) -> Option<String> {
+        self.shared.borrow().current_native_module.clone()
+    }
+
+    /// Registry auto-qualification for late-bound handler-name strings
+    /// (spec §5): a `bind-key` / mode handler registered from a declared
+    /// module stores `module/handler` so dispatch resolves against the
+    /// registering module first (the editor falls back to the flat base
+    /// name when the module has no such global). Vanilla registrations
+    /// stay verbatim.
+    pub fn qualify_registration_name(&self, name: &str) -> String {
+        match self.current_module() {
+            Some(module) if !crate::modules::is_qualified(name) => {
+                crate::modules::qualify(&module, name)
+            }
+            _ => name.to_string(),
+        }
+    }
+
     pub fn bind_key(&mut self, key: String, handler: String) {
+        let handler = self.qualify_registration_name(&handler);
         self.shared.borrow_mut().lisp_bindings.insert(key, handler);
     }
 
@@ -864,6 +891,12 @@ impl NativeContext {
         on_enter: Option<String>,
         on_key: Option<String>,
     ) {
+        // Registry auto-qualification (spec §5): a declared module's mode
+        // name AND its late-bound handler strings capture the module
+        // current at definition time.
+        let name = self.qualify_registration_name(&name);
+        let on_enter = on_enter.map(|h| self.qualify_registration_name(&h));
+        let on_key = on_key.map(|h| self.qualify_registration_name(&h));
         self.shared
             .borrow_mut()
             .pending_mode_defs
@@ -871,6 +904,11 @@ impl NativeContext {
     }
 
     pub fn mode_bind_key(&mut self, mode: String, key: String, handler: String) {
+        // Mode references qualify against the current module first; the
+        // editor falls back to the flat mode name when the module has no
+        // mode of that name (referencing a vanilla mode from a module).
+        let mode = self.qualify_registration_name(&mode);
+        let handler = self.qualify_registration_name(&handler);
         self.shared
             .borrow_mut()
             .pending_mode_bindings
@@ -878,10 +916,12 @@ impl NativeContext {
     }
 
     pub fn set_buffer_mode(&mut self, mode: String) {
+        let mode = self.qualify_registration_name(&mode);
         self.shared.borrow_mut().pending_set_mode = Some(mode);
     }
 
     pub fn set_buffer_mode_for(&mut self, buffer_name: String, mode: String) {
+        let mode = self.qualify_registration_name(&mode);
         self.shared
             .borrow_mut()
             .pending_set_mode_for
@@ -1704,7 +1744,13 @@ impl Runtime {
         F: Fn(Vec<Value>, &mut NativeContext) -> NativeResult + 'static,
     {
         let shared = self.shared.clone();
-        self.vm.register_native(name, move |args| {
+        self.vm.register_native_with_vm(name, move |args, vm| {
+            // Stamp the executing chunk's module so registration natives
+            // (bind-key, define-mode, …) can qualify late-bound handler
+            // names against the module current at their call site (spec §5).
+            let module = vm.current_module_name();
+            shared.borrow_mut().current_native_module =
+                (module != crate::modules::IMPLICIT_MODULE).then(|| module.to_string());
             let mut ctx = NativeContext::new(shared.clone());
             match f(args, &mut ctx) {
                 Ok(value) => value,
@@ -2169,6 +2215,24 @@ impl Runtime {
 
     pub fn global_value(&self, name: &str) -> Option<Value> {
         self.vm.global_value(name)
+    }
+
+    pub fn has_global(&self, name: &str) -> bool {
+        self.vm.has_global(name)
+    }
+
+    /// Resolve a stored handler-name string for dispatch (spec §5): a
+    /// handler registered from a declared module was stored qualified
+    /// (`module/handler`); if that module never defined it, fall back to
+    /// the flat base name (the normal ladder — the handler was a vanilla
+    /// global or an editor builtin referenced from the module).
+    pub fn resolve_handler_name<'a>(&self, handler: &'a str) -> &'a str {
+        if let Some((_, base)) = crate::modules::split_qualified(handler)
+            && !self.vm.has_global(handler)
+        {
+            return base;
+        }
+        handler
     }
 
     /// Borrows one field of a reactive namespace without cloning the whole

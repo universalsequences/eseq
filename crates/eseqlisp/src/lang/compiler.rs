@@ -2086,7 +2086,19 @@ impl Compiler {
                         Expression::Symbol(_)
                             if (is_def_process || is_def_accumulator || is_defchan) && i == 0 =>
                         {
-                            let idx = self.use_string_constant(c);
+                            // Registry auto-qualification (spec §5):
+                            // def-process/def-accumulator class names inside
+                            // a declared module qualify, so the registry
+                            // entry and the constructor native land under
+                            // the module's name. defchan channel names stay
+                            // flat for now (channels are a separate,
+                            // handle-first keyspace).
+                            let name = if is_def_process || is_def_accumulator {
+                                self.qualify_registration_name(c)
+                            } else {
+                                c.clone()
+                            };
+                            let idx = self.use_string_constant(&name);
                             self.emit(OpCode::PushSymbol(idx));
                         }
                         _ => {

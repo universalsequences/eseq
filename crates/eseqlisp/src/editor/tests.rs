@@ -12791,3 +12791,139 @@ fn save_prompt_keys_outrank_an_open_modal() {
         "with the prompt gone, Esc closes the modal"
     );
 }
+
+// ── Module-system slice 3: late-bound handler module capture (spec §5) ──
+
+fn eval_module(editor: &mut Editor, tag: &str, source: &str) {
+    let path = temp_file_path(&format!("module-{tag}.lisp"));
+    editor
+        .runtime_mut()
+        .eval_source_at_path(path, source)
+        .expect("module eval");
+    editor.refresh_runtime_side_effects();
+}
+
+#[test]
+fn module_bind_key_captures_module_and_dispatches_local_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "x");
+    eval_module(
+        &mut editor,
+        "bindkey-local",
+        r#"
+(module test.keys)
+(def my-handler () (host-command "module-handler-ran" true))
+(bind-key "C-y" "my-handler")
+"#,
+    );
+    // The stored binding record carries the module (qualified handler).
+    assert_eq!(
+        editor.runtime.lisp_bindings().get("C-y").map(String::as_str),
+        Some("test.keys/my-handler"),
+        "bind-key from a declared module must store the module-qualified handler"
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "module-handler-ran")),
+        "module-local handler should dispatch, got {commands:?}"
+    );
+}
+
+#[test]
+fn module_bind_key_falls_back_to_flat_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "x");
+    editor
+        .runtime_mut()
+        .eval_str(r#"(def shared-handler () (host-command "shared-ran" true))"#)
+        .expect("vanilla handler");
+    eval_module(
+        &mut editor,
+        "bindkey-fallback",
+        r#"
+(module test.keys2)
+(bind-key "C-u" "shared-handler")
+"#,
+    );
+    assert_eq!(
+        editor.runtime.lisp_bindings().get("C-u").map(String::as_str),
+        Some("test.keys2/shared-handler")
+    );
+    // test.keys2 never defined shared-handler: dispatch resolves the
+    // stored module first, then falls back to the flat name (spec §5).
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "shared-ran")),
+        "flat-handler fallback should dispatch, got {commands:?}"
+    );
+}
+
+#[test]
+fn module_define_mode_qualifies_name_and_on_key_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*modetest*", "");
+    eval_module(
+        &mut editor,
+        "define-mode",
+        r#"
+(module test.modes)
+(def my-on-key (k txt) (host-command "mode-key" k) true)
+(define-mode "special" :read-only true :on-key "my-on-key")
+(set-buffer-mode "special")
+"#,
+    );
+    // Registry key and buffer mode are the module-qualified name; the flat
+    // set-buffer-mode reference from inside the module resolved to it.
+    assert!(
+        editor.mode_registry.contains_key("test.modes/special"),
+        "define-mode in a declared module must register qualified, got {:?}",
+        editor.mode_registry.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        editor.active_buffer().mode,
+        BufferMode::Named("test.modes/special".to_string())
+    );
+    // The on-key handler captured its module and dispatches.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "mode-key")),
+        "module on-key handler should dispatch, got {commands:?}"
+    );
+}
+
+#[test]
+fn vanilla_bind_key_records_stay_flat() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "x");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(def flat-handler () (host-command "flat-ran" true))
+(bind-key "C-j" "flat-handler")
+"#,
+        )
+        .expect("vanilla bind");
+    editor.refresh_runtime_side_effects();
+    assert_eq!(
+        editor.runtime.lisp_bindings().get("C-j").map(String::as_str),
+        Some("flat-handler"),
+        "headerless bind-key must keep today's flat handler string"
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "flat-ran"))
+    );
+}
