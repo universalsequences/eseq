@@ -3836,6 +3836,13 @@ impl VM {
             }
             return None;
         }
+        // Reactive namespaces (SEQ, THEME, …) are a flat keyspace: runtime
+        // field access looks the namespace map up by its flat name, so
+        // by-name writes must never divert into a qualified slot. Mirrors
+        // the compiler ladder's reactive_namespaces exemption.
+        if self.reactive_namespaces.contains(name) {
+            return self.global_names.iter().position(|n| n == name);
+        }
         // Migration compat alias (spec §10 slice 3): checked before the
         // implicit-module and flat entries, mirroring the compiler ladder —
         // a converted symbol's stale eseq.vanilla slot (left interned from
@@ -3856,6 +3863,58 @@ impl VM {
 
     pub fn has_global(&self, name: &str) -> bool {
         self.resolve_global_read_index(name).is_some()
+    }
+
+    /// Late-binding heal for a compile-time forward reference (module-system
+    /// spec §3, migration pragmatics): a qualified slot interned before its
+    /// symbol existed anywhere stays empty if the definition later landed in
+    /// a DIFFERENT slot — a declared module's bare forward reference to a
+    /// vanilla symbol defined in a later-loaded file, or a flat native
+    /// registered after a reference compiled. On the first read of an empty
+    /// qualified slot, retry the implicit-module and flat spellings of the
+    /// base name and alias this slot to the found cell (a later StoreGlobal
+    /// to this index replaces the slot Option, unlinking the alias).
+    fn late_bind_empty_global(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        let name = self.global_names.get(idx)?.clone();
+        let (ns, base) = crate::modules::split_qualified(&name)?;
+        let mut candidates: Vec<String> = Vec::new();
+        if ns != crate::modules::IMPLICIT_MODULE {
+            candidates.push(crate::modules::qualify(crate::modules::IMPLICIT_MODULE, base));
+        }
+        candidates.push(base.to_string());
+        for candidate in candidates {
+            if let Some(candidate_idx) =
+                self.global_names.iter().position(|n| *n == candidate)
+            {
+                if let Some(Some(cell)) = self.globals.get(candidate_idx).cloned() {
+                    if idx >= self.globals.len() {
+                        self.globals.resize(idx + 1, None);
+                    }
+                    self.globals[idx] = Some(cell.clone());
+                    return Some(cell);
+                }
+            }
+        }
+        None
+    }
+
+    /// A reactive namespace registered after code already compiled a bare
+    /// reference to its name (interned `eseq.vanilla/NAME` while the
+    /// namespace was unknown) leaves that qualified slot stale. Point it at
+    /// the flat slot's cell so early-compiled references see the live map.
+    pub fn alias_stale_qualified_slot(&mut self, name: &str) {
+        let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
+        let Some(qualified_idx) = self.global_names.iter().position(|n| *n == qualified) else {
+            return;
+        };
+        let Some(flat_idx) = self.global_names.iter().position(|n| n == name) else {
+            return;
+        };
+        if let Some(Some(cell)) = self.globals.get(flat_idx).cloned() {
+            if qualified_idx < self.globals.len() {
+                self.globals[qualified_idx] = Some(cell);
+            }
+        }
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
@@ -5329,8 +5388,14 @@ impl VM {
                                 stack.push(Rc::new(RefCell::new(Value::Bool(result))));
                             }
                             (right, left) => {
-                                self.last_reactive_error_detail =
-                                    Some(format!("{op:?} left={left:?} right={right:?}"));
+                                let chunk_sym = frames
+                                    .last()
+                                    .and_then(|f| self.chunks.get(f.chunk_idx))
+                                    .and_then(|c| c.source_symbol.clone())
+                                    .unwrap_or_default();
+                                self.last_reactive_error_detail = Some(format!(
+                                    "{op:?} left={left:?} right={right:?} in={chunk_sym}"
+                                ));
                                 return Err(VMError::IncorrectType);
                             }
                         }
@@ -5472,6 +5537,12 @@ impl VM {
                 OpCode::LoadGlobal(idx) => {
                     if let Some(frame) = frames.last_mut() {
                         if let Some(Some(val)) = self.globals.get(idx).cloned() {
+                            if let Some(name) = self.global_names.get(idx).cloned() {
+                                self.record_symbol_read(&name);
+                            }
+                            stack.push(val);
+                            frame.pc += 1;
+                        } else if let Some(val) = self.late_bind_empty_global(idx) {
                             if let Some(name) = self.global_names.get(idx).cloned() {
                                 self.record_symbol_read(&name);
                             }
@@ -6309,6 +6380,48 @@ counter
             vm.eval_str("plain-state").expect("state read"),
             Some(Value::Number(7.0))
         );
+    }
+
+    #[test]
+    fn module_def_colliding_with_flat_native_does_not_clobber_it() {
+        let mut vm = module_test_vm();
+        vm.register_native("collide-native", |_args| Value::Number(7.0));
+        let source = r#"
+(module test.defsite)
+(def collide-native (v) (+ v 1))
+(collide-native 1)
+"#;
+        // The module's def interns test.defsite/collide-native; its own
+        // bare call resolves to the module entry (declared-module rung).
+        let result = vm
+            .eval_module_source(temp_lisp_path("def-site-collision"), source, 1)
+            .expect("module eval");
+        assert_eq!(result, Some(Value::Number(2.0)));
+        // The flat native survives untouched for everyone else.
+        let flat = vm.eval_str("(collide-native 1)").expect("flat call");
+        assert_eq!(flat, Some(Value::Number(7.0)));
+        assert!(matches!(
+            vm.global_value("test.defsite/collide-native"),
+            Some(Value::Closure { .. })
+        ));
+    }
+
+    #[test]
+    fn module_forward_reference_to_later_vanilla_def_late_binds() {
+        let mut vm = module_test_vm();
+        let module_source = r#"
+(module test.fwdref)
+(def call-later () (defined-later 2))
+"#;
+        vm.eval_module_source(temp_lisp_path("fwd-ref-module"), module_source, 1)
+            .expect("module eval");
+        // The vanilla definition lands AFTER the module compiled its bare
+        // forward reference (which interned test.fwdref/defined-later).
+        vm.eval_str("(def defined-later (v) (* v 10))")
+            .expect("vanilla def");
+        // First read of the empty qualified slot heals to the vanilla cell.
+        let result = vm.eval_str("(test.fwdref/call-later)").expect("healed call");
+        assert_eq!(result, Some(Value::Number(20.0)));
     }
 
     #[test]

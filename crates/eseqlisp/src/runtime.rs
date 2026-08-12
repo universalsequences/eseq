@@ -2245,8 +2245,12 @@ impl Runtime {
 
     pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
         let map = self.reactive_registry.register(name, fields, writable);
-        self.vm.set_global_value(name, map);
+        // Mark the namespace reactive BEFORE the global write so the
+        // by-name ladder pins it to the flat slot; then alias any stale
+        // `eseq.vanilla/NAME` slot interned by code compiled earlier.
         self.vm.reactive_namespaces.insert(name.to_string());
+        self.vm.set_global_value(name, map);
+        self.vm.alias_stale_qualified_slot(name);
         if writable {
             self.vm
                 .writable_reactive_namespaces

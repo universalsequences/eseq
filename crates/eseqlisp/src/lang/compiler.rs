@@ -700,7 +700,7 @@ impl Compiler {
         let chunk_idx = self.compile_reactive_chunk(node_id, body, false)?;
         self.derived_bindings.insert(name.to_string(), node_id);
         self.emit(OpCode::InitDerived(node_id, chunk_idx));
-        self.emit_symbol_store(name);
+        self.emit_symbol_store_for_definition(name);
         self.emit(OpCode::PushNil);
         Ok(())
     }
@@ -723,7 +723,7 @@ impl Compiler {
         self.state_bindings.insert(key, node_id);
         self.compile_expression(initial)?;
         self.emit(OpCode::InitState(node_id));
-        let global_idx = self.use_global(name);
+        let global_idx = self.use_global_for_definition(name);
         self.emit(OpCode::StoreGlobal(global_idx));
         self.emit(OpCode::PushNil);
         Ok(())
@@ -1454,6 +1454,56 @@ impl Compiler {
         }
     }
 
+    /// Definition sites (`def`, defstate, derived defs) in a DECLARED
+    /// module always intern under that module: the reference ladder's
+    /// flat-entry fallback exists so vanilla defs keep today's
+    /// shadow-natives-in-place semantics, but inside a module it would
+    /// silently define into (and clobber) a same-named flat native — the
+    /// `select` builtin-widget collision found in S3 batch 1. Shadowing a
+    /// flat/core name from a module warns (spec §3) and creates the
+    /// module's own entry instead.
+    fn emit_symbol_store_for_definition(&mut self, name: &str) {
+        if self.declared_module().is_some()
+            && !super::modules::is_qualified(name)
+            && !self.reactive_namespaces.contains(name)
+        {
+            let idx = self.use_global_for_definition(name);
+            match self.state_binding_for(name) {
+                Some(node_id) => self.emit(OpCode::StoreState(node_id)),
+                None => self.emit(OpCode::StoreGlobal(idx)),
+            }
+            return;
+        }
+        self.emit_symbol_store(name);
+    }
+
+    /// Index for a definition-site global: in a declared module, always the
+    /// module-qualified entry (see `emit_symbol_store_for_definition`);
+    /// otherwise the ordinary reference ladder.
+    fn use_global_for_definition(&mut self, name: &str) -> usize {
+        if self.declared_module().is_none()
+            || super::modules::is_qualified(name)
+            || self.reactive_namespaces.contains(name)
+        {
+            return self.use_global(name);
+        }
+        if self.global_symbols.iter().any(|s| s == name) {
+            let module = self.current_module.clone();
+            self.warn_once(format!(
+                "warning: (def {name} …) in {module} does not replace the \
+                 existing flat/core `{name}`; it defines {module}/{name} \
+                 (use an explicit qualified def to overwrite the flat entry)"
+            ));
+        }
+        let qualified = super::modules::qualify(&self.current_module, name);
+        if let Some(index) = self.global_symbols.iter().position(|r| *r == qualified) {
+            return index;
+        }
+        let idx = self.global_symbols.len();
+        self.global_symbols.push(qualified);
+        idx
+    }
+
     pub fn compile_function(
         &mut self,
         name: Option<String>,
@@ -1518,7 +1568,7 @@ impl Compiler {
         }
         self.emit(OpCode::MakeClosure(new_chunk_idx, scope.upvalues.len()));
         if let Some(name) = name {
-            self.emit_symbol_store(&name);
+            self.emit_symbol_store_for_definition(&name);
             self.emit(OpCode::PushNil);
         }
 
@@ -2189,7 +2239,7 @@ impl Compiler {
                 Expression::Symbol(s) if s == ">=" => self.emit(OpCode::Gte),
                 Expression::Symbol(s) if s == "def" => {
                     if let Some(Expression::Symbol(s)) = list.get(1) {
-                        self.emit_symbol_store(s);
+                        self.emit_symbol_store_for_definition(s);
                         self.emit(OpCode::PushNil);
                     }
                 }
