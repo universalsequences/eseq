@@ -7537,6 +7537,70 @@ fn writeback_created_history_uses_generated_name_for_make_read_and_write() {
 }
 
 #[test]
+fn writeback_created_tensor_history_carries_shape_attributes() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let history_id = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &history_id))
+        .unwrap()
+        .text = "history @shape [2 2]".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: sig.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: history_id.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: history_id,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(make-history history1 @shape [2 2])\n(def sig (in 1))\n(out (read-history history1) 1)\n(write-history history1 sig)"
+    );
+}
+
+#[test]
 fn writeback_created_history_feedback_into_created_mix_emits_onepole() {
     let source = r#"
         (def sig (in 1))
@@ -15379,7 +15443,10 @@ fn patcher_autocomplete_documents_patcher_only_history_node() {
         .expect("patcher history documentation");
 
     assert_eq!(docs.category.as_deref(), Some("patcher"));
-    assert_eq!(docs.signatures, vec!["(history)"]);
+    assert_eq!(
+        docs.signatures,
+        vec!["(history)", "(history @shape [d1 d2 ...])"]
+    );
     assert_eq!(docs.inputs.len(), 1);
     assert_eq!(docs.outputs.len(), 1);
     assert!(
@@ -19086,6 +19153,83 @@ fn generation_roundtrip_history_feedback_effect() {
                   (write-history loop delayed)\n\
                   (out delayed 1 @name out-l)\n";
     assert_generation_roundtrip("history-feedback", source, PatcherIntent::Effect, None);
+}
+
+#[test]
+fn generation_roundtrip_tensor_history_feedback_effect() {
+    let source = "(def in-l (in 1 @name signal))\n\
+                  (make-history grid @shape [2 2])\n\
+                  (def freqs (tensor @shape [2 2] @data [90 120 53 300]))\n\
+                  (def ph (phasor (+ freqs (read-history grid))))\n\
+                  (def wet (+ in-l ph))\n\
+                  (write-history grid ph)\n\
+                  (out wet 1 @name out-l)\n";
+    assert_generation_roundtrip(
+        "tensor-history-feedback",
+        source,
+        PatcherIntent::Effect,
+        None,
+    );
+}
+
+#[test]
+fn projected_tensor_history_keeps_shape_through_label_and_generation() {
+    let patch = parse(
+        "(make-history grid @shape [2 2])\n\
+         (def sig (phasor (read-history grid)))\n\
+         (write-history grid sig)\n\
+         (out sig 1)",
+    );
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .expect("history node");
+    assert_eq!(node_display_label(history), "history @shape [2 2]");
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(make-history grid @shape [2 2])"),
+        "generated source must keep the tensor shape:\n{}",
+        generated.source
+    );
+}
+
+#[test]
+fn tensor_history_spellings_project_as_history_with_feedback_write() {
+    let patch = parse(
+        "(make-tensor-history grid @shape [2 2])\n\
+         (def sig (phasor (read-tensor-history grid)))\n\
+         (write-tensor-history grid sig)\n\
+         (out sig 1)",
+    );
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .expect("tensor-history spellings must collapse into one history node");
+    assert_eq!(node_display_label(history), "history @shape [2 2]");
+    assert!(
+        patch
+            .connections
+            .iter()
+            .any(|connection| connection.to_node == history.id
+                && connection.kind == ConnectionKind::Feedback),
+        "write-tensor-history must classify as a feedback edge"
+    );
+    assert!(
+        patch
+            .connections
+            .iter()
+            .any(|connection| connection.from_node == history.id
+                && connection.kind == ConnectionKind::Forward)
+    );
+    // Regeneration normalizes onto the polymorphic spelling, shape intact.
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(make-history grid @shape [2 2])"),
+        "generated source must keep the tensor shape:\n{}",
+        generated.source
+    );
 }
 
 // ── Promotion / eject sidecar flips (spec §3.3 / §3.4) ──

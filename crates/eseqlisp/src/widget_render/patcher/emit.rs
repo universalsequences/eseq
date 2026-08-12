@@ -264,7 +264,11 @@ fn emit_top_level_node(
             format!(";; unsupported code island: {}", node.label)
         }
         SourceOwner::Compound { .. } if node.kind == NodeKind::History => {
-            format!("(make-history {})", node.id)
+            format!(
+                "(make-history {}{})",
+                node.id,
+                super::lisp::label_attributes_suffix(&node.label)
+            )
         }
         _ => emit_node_expr(node, nodes, inbound, stack),
     })
