@@ -64,7 +64,7 @@ pub(crate) struct PendingInlineWidgets {
 
 struct ActiveSubtreeReplacement {
     source_buffer_id: Option<BufferId>,
-    source_module: Option<PathBuf>,
+    source_file: Option<PathBuf>,
     target: EffectTarget,
     subtree_root_id: u64,
     tree: Value,
@@ -935,7 +935,7 @@ impl NativeContext {
             .pending_buffer_widget_trees
             .push(PendingUiUpdate::FullTree(PendingWidgetTree {
                 source_buffer_id,
-                source_module: None,
+                source_file: None,
                 target: EffectTarget::BufferName(buffer_name),
                 tree: probed_shallow_clone("w2:render-widget-to-buffer", &tree),
                 reactive_dependencies: Vec::new(),
@@ -1201,7 +1201,7 @@ impl Runtime {
             .vm
             .register_native_with_vm("current-source-path", |_args, vm| {
                 vm.source_manager
-                    .current_module()
+                    .current_source_file()
                     .map(|path| Value::String(path.display().to_string()))
                     .unwrap_or_else(|| Value::String(String::new()))
             });
@@ -3479,7 +3479,7 @@ impl Runtime {
                     fallback_pending.extend(replacements.drain(..).map(|replacement| {
                         PendingUiUpdate::ReplaceSubtree {
                             source_buffer_id: replacement.source_buffer_id,
-                            source_module: replacement.source_module,
+                            source_file: replacement.source_file,
                             target: replacement.target,
                             subtree_root_id: replacement.subtree_root_id,
                             tree: replacement.tree,
@@ -3522,7 +3522,7 @@ impl Runtime {
                                             active_subtree_replacements.push(
                                                 ActiveSubtreeReplacement {
                                                     source_buffer_id: pending.source_buffer_id,
-                                                    source_module: pending.source_module.clone(),
+                                                    source_file: pending.source_file.clone(),
                                                     target: pending.target.clone(),
                                                     subtree_root_id,
                                                     tree: probed_shallow_clone(
@@ -3592,7 +3592,7 @@ impl Runtime {
                     } => {
                         active_subtree_replacements.push(ActiveSubtreeReplacement {
                             source_buffer_id: *source_buffer_id,
-                            source_module: pending.source_module().map(PathBuf::from),
+                            source_file: pending.source_file().map(PathBuf::from),
                             target: pending.target().clone(),
                             subtree_root_id: *subtree_root_id,
                             tree: probed_shallow_clone("w2:flush-replace-subtree", tree),

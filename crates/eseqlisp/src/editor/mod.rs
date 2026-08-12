@@ -242,7 +242,7 @@ fn inspect_node_source_buffer_id(node: &crate::layout::LayoutNode) -> Option<Buf
     }
 }
 
-fn inspect_node_source_module_path(node: &crate::layout::LayoutNode) -> Option<PathBuf> {
+fn inspect_node_source_file_path(node: &crate::layout::LayoutNode) -> Option<PathBuf> {
     match node.props.get(crate::vm::SOURCE_MODULE_PATH_PROP) {
         Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
         _ => None,
@@ -5142,7 +5142,7 @@ impl Editor {
     }
 
     fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
-        let source = inspect_node_source_module_path(node)
+        let source = inspect_node_source_file_path(node)
             .map(|path| path.display().to_string())
             .or_else(|| {
                 inspect_node_source_buffer_id(node).and_then(|id| {
@@ -5173,18 +5173,18 @@ impl Editor {
         node: &crate::layout::LayoutNode,
     ) -> Result<bool, EditorError> {
         inspect_debug_log(format!(
-            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_module={:?} source_symbol={:?} source_span={:?} source_revision={:?}",
+            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_file={:?} source_symbol={:?} source_span={:?} source_revision={:?}",
             node.widget_type,
             node.stable_key,
             inspect_node_prop_string(node, "debug-name"),
             inspect_node_source_buffer_id(node),
-            inspect_node_source_module_path(node),
+            inspect_node_source_file_path(node),
             inspect_node_source_symbol(node),
             inspect_node_source_span(node),
             inspect_node_source_revision(node)
         ));
-        let source_module_path = inspect_node_source_module_path(node);
-        let source_buffer_id = if let Some(path) = source_module_path.clone() {
+        let source_file_path = inspect_node_source_file_path(node);
+        let source_buffer_id = if let Some(path) = source_file_path.clone() {
             inspect_debug_log(format!("opening source module path {}", path.display()));
             Some(self.upsert_inactive_file_buffer_with_mode(path, BufferMode::ESeqLisp)?)
         } else if let Some(id) = inspect_node_source_buffer_id(node) {
@@ -5205,7 +5205,7 @@ impl Editor {
         };
         let mut opened_stale_snapshot = false;
         if let (Some(path), Some(revision), Some(_span)) = (
-            source_module_path.as_deref(),
+            source_file_path.as_deref(),
             inspect_node_source_revision(node),
             inspect_node_source_span(node),
         ) {

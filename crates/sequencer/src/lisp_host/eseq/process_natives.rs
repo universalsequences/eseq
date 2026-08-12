@@ -2647,7 +2647,7 @@ pub(in crate::lisp_host) fn register_process_def(
     )?;
     let mut def = parse_process_def(&name, &args[1..])?;
     def.source_path = vm
-        .current_source_module()
+        .current_source_file()
         .map(|path| path.to_string_lossy().into_owned());
     process_authoring
         .lock()
@@ -2720,7 +2720,7 @@ pub(in crate::lisp_host) fn register_process_accumulator_def(
     )?;
     let mut def = parse_process_accumulator_def(&name, &args[1..])?;
     def.source_path = vm
-        .current_source_module()
+        .current_source_file()
         .map(|path| path.to_string_lossy().into_owned());
     process_authoring
         .lock()

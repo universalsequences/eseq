@@ -1,6 +1,6 @@
 use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
 use crate::host::BufferId;
-use crate::hot_reload::{ModuleStackEntry, SourceManager, extract_defined_symbols_from_source};
+use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
 use crate::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -185,7 +185,7 @@ pub enum ReactiveNode {
         chunk_idx: usize,
         callable: Option<Value>,
         source_buffer_id: Option<BufferId>,
-        source_module: Option<std::path::PathBuf>,
+        source_file: Option<std::path::PathBuf>,
         source_revision: Option<u64>,
         target: EffectTarget,
         subtree_root_id: Option<u64>,
@@ -213,7 +213,7 @@ pub struct EvalProfile {
 #[derive(Clone)]
 pub struct PendingWidgetTree {
     pub source_buffer_id: Option<BufferId>,
-    pub source_module: Option<std::path::PathBuf>,
+    pub source_file: Option<std::path::PathBuf>,
     pub target: EffectTarget,
     pub tree: Value,
     pub reactive_dependencies: Vec<ReactiveFieldKey>,
@@ -224,7 +224,7 @@ pub enum PendingUiUpdate {
     FullTree(PendingWidgetTree),
     ReplaceSubtree {
         source_buffer_id: Option<BufferId>,
-        source_module: Option<std::path::PathBuf>,
+        source_file: Option<std::path::PathBuf>,
         target: EffectTarget,
         subtree_root_id: u64,
         tree: Value,
@@ -242,10 +242,10 @@ impl PendingUiUpdate {
         }
     }
 
-    pub fn source_module(&self) -> Option<&std::path::Path> {
+    pub fn source_file(&self) -> Option<&std::path::Path> {
         match self {
-            PendingUiUpdate::FullTree(pending) => pending.source_module.as_deref(),
-            PendingUiUpdate::ReplaceSubtree { source_module, .. } => source_module.as_deref(),
+            PendingUiUpdate::FullTree(pending) => pending.source_file.as_deref(),
+            PendingUiUpdate::ReplaceSubtree { source_file, .. } => source_file.as_deref(),
         }
     }
 
@@ -1710,7 +1710,7 @@ fn annotate_explicit_subtree_root(
 fn annotate_widget_tree_stable_ids(
     value: &Value,
     source_buffer_id: Option<BufferId>,
-    source_module: Option<&std::path::Path>,
+    source_file: Option<&std::path::Path>,
     target: &EffectTarget,
     parent_stable_id: Option<u64>,
     path: &mut Vec<usize>,
@@ -1749,7 +1749,7 @@ fn annotate_widget_tree_stable_ids(
                             let annotated_child = annotate_widget_tree_stable_ids(
                                 &child.borrow(),
                                 source_buffer_id,
-                                source_module,
+                                source_file,
                                 target,
                                 Some(stable_id),
                                 path,
@@ -1780,13 +1780,13 @@ fn annotate_widget_tree_stable_ids(
             Rc::new(RefCell::new(Value::Number(source_buffer_id as f64))),
         );
     }
-    if let Some(source_module) = source_module
+    if let Some(source_file) = source_file
         && !annotated.contains_key(SOURCE_MODULE_PATH_PROP)
     {
         annotated.insert(
             SOURCE_MODULE_PATH_PROP.to_string(),
             Rc::new(RefCell::new(Value::String(
-                source_module.display().to_string(),
+                source_file.display().to_string(),
             ))),
         );
     }
@@ -3319,11 +3319,11 @@ impl VM {
             .and_then(|chunk| chunk.source_symbol.clone())
     }
 
-    pub fn current_source_module(&self) -> Option<std::path::PathBuf> {
+    pub fn current_source_file(&self) -> Option<std::path::PathBuf> {
         self.chunks
             .get(self.current_chunk)
-            .and_then(|chunk| chunk.source_module.clone())
-            .or_else(|| self.source_manager.current_module())
+            .and_then(|chunk| chunk.source_file.clone())
+            .or_else(|| self.source_manager.current_source_file())
     }
 
     /// Compile and run `code` in this VM's existing context (globals persist).
@@ -3361,7 +3361,7 @@ impl VM {
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
-        let source_module = self.source_manager.current_module();
+        let source_file = self.source_manager.current_source_file();
         let mut compiler = Compiler::new_repl(
             exprs,
             existing,
@@ -3371,7 +3371,7 @@ impl VM {
             state_bindings,
             next_node_id,
             macros,
-            source_module,
+            source_file,
         );
         match compiler.compile() {
             Ok(chunks) => {
@@ -3412,9 +3412,9 @@ impl VM {
         self.clear_effects_for_module(&path);
         self.source_manager
             .remember_evaluated_source(path.clone(), revision, source);
-        self.source_manager.enter_module(path.clone(), revision);
+        self.source_manager.enter_file(path.clone(), revision);
         let result = self.eval_str(source);
-        self.source_manager.leave_module();
+        self.source_manager.leave_file();
         if result.is_ok() {
             self.source_manager.record_module_success(
                 path,
@@ -3567,7 +3567,7 @@ impl VM {
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
-        let source_module = self.source_manager.current_module();
+        let source_file = self.source_manager.current_source_file();
         let compile_started = std::time::Instant::now();
         let mut compiler = Compiler::new_repl(
             exprs,
@@ -3578,7 +3578,7 @@ impl VM {
             state_bindings,
             next_node_id,
             macros,
-            source_module,
+            source_file,
         );
         match compiler.compile() {
             Ok(chunks) => {
@@ -3694,9 +3694,9 @@ impl VM {
             .iter()
             .filter_map(|(id, node)| match node {
                 ReactiveNode::Effect {
-                    source_module: Some(source_module),
+                    source_file: Some(source_file),
                     ..
-                } if source_module == module => Some(*id),
+                } if source_file == module => Some(*id),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -3714,9 +3714,9 @@ impl VM {
                 matches!(
                     node,
                     ReactiveNode::Effect {
-                        source_module: Some(source_module),
+                        source_file: Some(source_file),
                         ..
-                    } if source_module == module
+                    } if source_file == module
                 )
             })
             .count()
@@ -3729,14 +3729,14 @@ impl VM {
         target: EffectTarget,
     ) {
         let source_buffer_id = self.current_effect_source_buffer_id;
-        let source_module = self.source_manager.current_module();
+        let source_file = self.source_manager.current_source_file();
         let source_revision = self.source_manager.current_revision();
         match self.dag.nodes.get_mut(&node_id) {
             Some(ReactiveNode::Effect {
                 chunk_idx: current_chunk_idx,
                 callable,
                 source_buffer_id: current_source_buffer_id,
-                source_module: current_source_module,
+                source_file: current_source_file,
                 source_revision: current_source_revision,
                 target: current_target,
                 subtree_root_id: None,
@@ -3748,7 +3748,7 @@ impl VM {
                 *current_chunk_idx = chunk_idx;
                 *callable = None;
                 *current_source_buffer_id = source_buffer_id;
-                *current_source_module = source_module;
+                *current_source_file = source_file;
                 *current_source_revision = source_revision;
                 *current_target = target;
                 *parent_subtree_root_id = None;
@@ -3763,7 +3763,7 @@ impl VM {
                     chunk_idx,
                     callable: None,
                     source_buffer_id,
-                    source_module,
+                    source_file,
                     source_revision,
                     target,
                     subtree_root_id: None,
@@ -3779,7 +3779,7 @@ impl VM {
                     chunk_idx,
                     callable: None,
                     source_buffer_id,
-                    source_module,
+                    source_file,
                     source_revision,
                     target,
                     subtree_root_id: None,
@@ -4060,7 +4060,7 @@ impl VM {
             chunk_idx,
             callable: Some(callable.clone()),
             source_buffer_id: self.current_effect_source_buffer_id,
-            source_module: self.source_manager.current_module(),
+            source_file: self.source_manager.current_source_file(),
             source_revision: self.source_manager.current_revision(),
             target: self.current_effect_target.clone(),
             subtree_root_id: Some(root_id),
@@ -4588,26 +4588,26 @@ impl VM {
                     progressed = true;
                     let previous_owner = (
                         self.current_effect_source_buffer_id,
-                        self.source_manager.module_stack_snapshot(),
+                        self.source_manager.source_stack_snapshot(),
                         self.current_effect_target.clone(),
                     );
                     if let Some((
                         source_buffer_id,
-                        source_module,
+                        source_file,
                         source_revision,
                         target,
                         subtree_root_id,
                     )) = self.dag.nodes.get(&node_id).and_then(|node| match node {
                         ReactiveNode::Effect {
                             source_buffer_id,
-                            source_module,
+                            source_file,
                             source_revision,
                             target,
                             subtree_root_id,
                             ..
                         } => Some((
                             *source_buffer_id,
-                            source_module.clone(),
+                            source_file.clone(),
                             *source_revision,
                             target.clone(),
                             *subtree_root_id,
@@ -4615,14 +4615,14 @@ impl VM {
                         _ => None,
                     }) {
                         self.current_effect_source_buffer_id = source_buffer_id;
-                        let source_module_stack = match (source_module.clone(), source_revision) {
+                        let source_file_stack = match (source_file.clone(), source_revision) {
                             (Some(path), Some(revision)) => {
-                                vec![ModuleStackEntry { path, revision }]
+                                vec![SourceStackEntry { path, revision }]
                             }
                             _ => Vec::new(),
                         };
                         self.source_manager
-                            .restore_module_stack(source_module_stack);
+                            .restore_source_stack(source_file_stack);
                         self.current_effect_target = target;
                         if let Some(root_id) = subtree_root_id {
                             let Some(owner) = self.registered_subtree_owner(root_id) else {
@@ -4652,7 +4652,7 @@ impl VM {
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
                                 self.current_effect_source_buffer_id,
-                                source_module.as_deref(),
+                                source_file.as_deref(),
                                 &self.current_effect_target,
                                 None,
                                 &mut path,
@@ -4681,7 +4681,7 @@ impl VM {
                             self.pending_widget_trees
                                 .push(PendingUiUpdate::ReplaceSubtree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_module: source_module.clone(),
+                                    source_file: source_file.clone(),
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id: root_id,
                                     tree: annotated_tree,
@@ -4703,7 +4703,7 @@ impl VM {
                             self.current_subtree_capture_stack = previous_subtree_capture_stack;
                             self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                             self.current_effect_source_buffer_id = previous_owner.0;
-                            self.source_manager.restore_module_stack(previous_owner.1);
+                            self.source_manager.restore_source_stack(previous_owner.1);
                             self.current_effect_target = previous_owner.2;
                             continue;
                         }
@@ -4785,7 +4785,7 @@ impl VM {
                     self.current_subtree_capture_stack = previous_subtree_capture_stack;
                     self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                     self.current_effect_source_buffer_id = previous_owner.0;
-                    self.source_manager.restore_module_stack(previous_owner.1);
+                    self.source_manager.restore_source_stack(previous_owner.1);
                     self.current_effect_target = previous_owner.2;
                 }
 
@@ -5665,7 +5665,7 @@ impl VM {
                         let annotated_tree = annotate_widget_tree_stable_ids(
                             &tree.borrow(),
                             self.current_effect_source_buffer_id,
-                            self.source_manager.current_module().as_deref(),
+                            self.source_manager.current_source_file().as_deref(),
                             &self.current_effect_target,
                             None,
                             &mut path,
@@ -5683,7 +5683,7 @@ impl VM {
                             self.pending_widget_trees
                                 .push(PendingUiUpdate::ReplaceSubtree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_module: self.source_manager.current_module(),
+                                    source_file: self.source_manager.current_source_file(),
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id,
                                     tree: annotated_tree,
@@ -5693,7 +5693,7 @@ impl VM {
                             self.pending_widget_trees.push(PendingUiUpdate::FullTree(
                                 PendingWidgetTree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_module: self.source_manager.current_module(),
+                                    source_file: self.source_manager.current_source_file(),
                                     target: self.current_effect_target.clone(),
                                     tree: annotated_tree,
                                     reactive_dependencies: Vec::new(),
@@ -6415,7 +6415,7 @@ mod tests {
             chunk_idx: 0,
             callable: None,
             source_buffer_id: None,
-            source_module: None,
+            source_file: None,
             source_revision: None,
             target: EffectTarget::BufferId(None),
             subtree_root_id: None,
@@ -6466,7 +6466,7 @@ mod tests {
             chunk_idx: 0,
             callable: None,
             source_buffer_id: None,
-            source_module: None,
+            source_file: None,
             source_revision: None,
             target: EffectTarget::BufferId(None),
             subtree_root_id: None,

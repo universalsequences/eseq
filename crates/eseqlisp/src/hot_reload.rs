@@ -30,7 +30,7 @@ pub struct LoadedSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleStackEntry {
+pub struct SourceStackEntry {
     pub path: PathBuf,
     pub revision: u64,
 }
@@ -319,18 +319,18 @@ impl SourceManager {
         })
     }
 
-    pub fn enter_module(&mut self, path: PathBuf, revision: u64) {
+    pub fn enter_file(&mut self, path: PathBuf, revision: u64) {
         self.pending_children.entry(path.clone()).or_default();
         self.load_stack.push(path);
         self.revision_stack.push(revision);
     }
 
-    pub fn leave_module(&mut self) {
+    pub fn leave_file(&mut self) {
         let _ = self.load_stack.pop();
         let _ = self.revision_stack.pop();
     }
 
-    pub fn current_module(&self) -> Option<PathBuf> {
+    pub fn current_source_file(&self) -> Option<PathBuf> {
         self.load_stack.last().cloned()
     }
 
@@ -338,16 +338,16 @@ impl SourceManager {
         self.revision_stack.last().copied()
     }
 
-    pub fn module_stack_snapshot(&self) -> Vec<ModuleStackEntry> {
+    pub fn source_stack_snapshot(&self) -> Vec<SourceStackEntry> {
         self.load_stack
             .iter()
             .cloned()
             .zip(self.revision_stack.iter().copied())
-            .map(|(path, revision)| ModuleStackEntry { path, revision })
+            .map(|(path, revision)| SourceStackEntry { path, revision })
             .collect()
     }
 
-    pub fn restore_module_stack(&mut self, stack: Vec<ModuleStackEntry>) {
+    pub fn restore_source_stack(&mut self, stack: Vec<SourceStackEntry>) {
         self.load_stack = stack.iter().map(|entry| entry.path.clone()).collect();
         self.revision_stack = stack.iter().map(|entry| entry.revision).collect();
     }
@@ -390,7 +390,7 @@ impl SourceManager {
     }
 
     pub fn record_render_root(&mut self, node_id: u32) {
-        if let Some(module) = self.current_module() {
+        if let Some(module) = self.current_source_file() {
             self.module_graph.record_render_root(&module, node_id);
         }
     }
@@ -507,7 +507,7 @@ mod tests {
         let cwd = std::env::temp_dir().join("eseqlisp-source-root");
         let mut manager = SourceManager::new();
         manager.cwd = cwd.clone();
-        manager.enter_module(cwd.join("ui/main.lisp"), 1);
+        manager.enter_file(cwd.join("ui/main.lisp"), 1);
 
         assert_eq!(
             manager.resolve_load_path("@/ui/themes.lisp"),

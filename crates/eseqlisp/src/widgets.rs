@@ -79,7 +79,7 @@ pub fn register_widget_natives(vm: &mut VM) {
                     );
                 }
             }
-            if let Some(module) = vm.current_source_module() {
+            if let Some(module) = vm.current_source_file() {
                 if let Value::Map(map) = &mut widget {
                     map.insert(
                         SOURCE_MODULE_PATH_PROP.to_string(),
