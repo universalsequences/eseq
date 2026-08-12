@@ -3,17 +3,38 @@ Content-addressed cache of compiled DGenLisp dylibs.
 
 Compiling through the external dgenlisp tool is slow, so `DylibCacheManager`
 (see `global_cache_manager()`) keys each artifact by a fingerprint of the
-effective source, referenced assets, compile kind (`DGenCompileKind`), source
-origin, sample rate, and the dgenlisp tool binary itself. A cache hit hands out
-a `DylibLease` (refcounted so an artifact directory is not evicted while a
-loaded dylib still points into it); a miss compiles into a fresh artifact
-directory and records `CacheMetadata`. Includes a small lisp tokenizer used to
-discover `(asset ...)` references that must participate in the fingerprint.
+effective source, referenced assets, compile kind (`DGenCompileKind`), sample
+rate, the dgenlisp tool binary itself, and the staged toolchain identity
+(`VERSION.json` hash, vendored ABI header hash, target triple, minimum
+macOS). A cache hit hands out a `DylibLease` (refcounted: repeat hits on a
+live artifact share it, so an artifact directory is never evicted or
+duplicated while a loaded dylib still points into it); a miss compiles into a
+fresh artifact directory and records `CacheMetadata`. Concurrent misses on
+the same key are serialized by a per-key in-flight latch so exactly one
+compilation runs; different keys still compile concurrently. Includes a small
+lisp tokenizer used to discover `(asset ...)` references that must
+participate in the fingerprint.
+
+On-disk layout (impl spec, slice E6 / decision 7):
+
+```text
+<cache_root>/<schema>/<target-triple>/dylibs/<cache-key>/<artifact-id>/
+<cache_root>/<schema>/<target-triple>/staging/<artifact-id>.tmp
+```
+
+Schema-1 leftovers (`dylibs/`, `staging/` directly under the cache root) are
+ignored and deleted opportunistically by the construction-time sweep, which
+also clears orphaned staging dirs and artifact dirs whose metadata fails to
+parse. Sibling dirs under the cache root (e.g. `ir-prep/`, owned by the
+convolution reverb) are never touched.
+
+Everything here runs on control threads only (edit sessions, agent tasks,
+effect setup); nothing is reachable from the audio process callback.
 */
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -24,8 +45,27 @@ use super::super::{
     load_dylib_prewarmed, parse_manifest_with_base, CompileResult,
 };
 
-const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
+/// The only lowering the toolchain performs today (impl spec, decision 7).
+/// Part of the on-disk path tier and the cache key.
+const CACHE_TARGET_TRIPLE: &str = "arm64-apple-macos";
+/// Deployment floor the staged toolchain links against; key material so a
+/// floor bump invalidates artifacts.
+const CACHE_MINIMUM_MACOS: &str = "11.0";
 const INSTRUMENT_VOICES: u32 = 12;
+
+/// The vendored ABI header is a build input: `dgen_ffi.rs` mirrors it as
+/// `#[repr(C)]` types compiled into this binary. Hashing the compiled-in
+/// bytes (rather than re-reading a file at runtime) guarantees the key
+/// material matches the ABI this exact binary implements, works identically
+/// in the release bundle (which ships no header file), and cannot drift from
+/// filesystem state.
+const ABI_HEADER_BYTES: &[u8] = include_bytes!("../../../audiograph/dgen_abi_v1.h");
+
+fn abi_header_sha256() -> &'static str {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| sha256_hex(ABI_HEADER_BYTES))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -67,7 +107,65 @@ pub struct DylibCacheManager {
 struct DylibCacheInner {
     root: PathBuf,
     live_leases: HashMap<PathBuf, usize>,
+    /// Per-key compile latches: present while a compilation for that cache
+    /// key is running. Guarded by the manager mutex, but the mutex is never
+    /// held across compilation — waiters block on the latch, not on this map.
+    in_flight: HashMap<String, Arc<InFlightLatch>>,
     next_artifact_seq: u64,
+}
+
+/// Latch a second requester for an in-flight cache key waits on. The leader
+/// marks it done (successful or not) when its compile attempt finishes;
+/// waiters then re-check the cache and, if the leader failed, take their own
+/// turn as leader (retry-compile — simplest failure policy, so a failed
+/// leader never strands waiters).
+#[derive(Debug, Default)]
+struct InFlightLatch {
+    done: Mutex<bool>,
+    cond: Condvar,
+}
+
+impl InFlightLatch {
+    fn wait_done(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|p| p.into_inner());
+        while !*done {
+            done = self.cond.wait(done).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    fn mark_done(&self) {
+        *self.done.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        self.cond.notify_all();
+    }
+}
+
+/// RAII leadership token for one cache key. Dropping it (normal return or
+/// unwind) removes the in-flight entry and wakes every waiter, so a
+/// panicking or failing leader can never hang the queue.
+struct CompileTurnGuard {
+    manager: Weak<Mutex<DylibCacheInner>>,
+    key: String,
+    latch: Arc<InFlightLatch>,
+}
+
+impl Drop for CompileTurnGuard {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            if let Ok(mut inner) = manager.lock() {
+                if let Some(current) = inner.in_flight.get(&self.key) {
+                    if Arc::ptr_eq(current, &self.latch) {
+                        inner.in_flight.remove(&self.key);
+                    }
+                }
+            }
+        }
+        self.latch.mark_done();
+    }
+}
+
+enum CompileTurn {
+    Leader(CompileTurnGuard),
+    Waiter(Arc<InFlightLatch>),
 }
 
 #[derive(Debug)]
@@ -96,6 +194,20 @@ struct ToolFingerprint {
     sha256: Option<String>,
 }
 
+/// Identity of the staged toolchain + vendored ABI (impl spec, slice E6).
+/// `version_json_sha256` covers the staged distribution/policy/llvm identity
+/// (`VERSION.json`'s `dgen_compiler_version` is the stable, intentionally
+/// bumped `"abi-v1.1"` string, so this hash only churns on real toolchain
+/// changes); `abi_header_sha256` is the compiled-in vendored header (see
+/// [`ABI_HEADER_BYTES`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ToolchainFingerprint {
+    version_json_sha256: String,
+    abi_header_sha256: String,
+    target_triple: String,
+    minimum_macos: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CacheMetadata {
     schema_version: u32,
@@ -106,6 +218,7 @@ struct CacheMetadata {
     voices: Option<u32>,
     effective_source_sha256: String,
     tool: ToolFingerprint,
+    toolchain: ToolchainFingerprint,
     assets: Vec<AssetFingerprint>,
     dylib_name: String,
 }
@@ -120,15 +233,18 @@ struct CacheRequest {
     effective_source: String,
     effective_source_sha256: String,
     tool: ToolFingerprint,
+    toolchain: ToolchainFingerprint,
     assets: Vec<AssetFingerprint>,
 }
 
 impl DylibCacheManager {
     pub fn new(root: PathBuf) -> Self {
+        sweep_cache_root(&root);
         Self {
             inner: Arc::new(Mutex::new(DylibCacheInner {
                 root,
                 live_leases: HashMap::new(),
+                in_flight: HashMap::new(),
                 next_artifact_seq: 0,
             })),
         }
@@ -148,11 +264,48 @@ impl DylibCacheManager {
     ) -> Result<CompileResult, String> {
         let request = build_request(kind, origin, source, sample_rate, asset_base)?;
 
-        if let Some(result) = self.try_load_free_artifact(&request)? {
-            return Ok(result);
+        loop {
+            if let Some(result) = self.try_load_free_artifact(&request)? {
+                return Ok(result);
+            }
+            match self.begin_compile_turn(&request.key)? {
+                CompileTurn::Leader(_guard) => {
+                    // Double-check under leadership: a previous leader may
+                    // have published between this thread's cache miss and it
+                    // winning the compile turn (publication happens-before
+                    // its guard drop, which happens-before this turn).
+                    if let Some(result) = self.try_load_free_artifact(&request)? {
+                        return Ok(result);
+                    }
+                    // `_guard` wakes waiters + clears the in-flight entry on
+                    // any exit (Ok, Err, unwind).
+                    return self.compile_new_artifact(&request, asset_base);
+                }
+                CompileTurn::Waiter(latch) => {
+                    latch.wait_done();
+                    // Loop: on leader success the re-check leases the
+                    // published artifact; on leader failure this thread takes
+                    // its own compile turn.
+                }
+            }
         }
+    }
 
-        self.compile_new_artifact(&request, asset_base)
+    fn begin_compile_turn(&self, key: &str) -> Result<CompileTurn, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "DGenLisp cache lock poisoned".to_string())?;
+        if let Some(latch) = inner.in_flight.get(key) {
+            return Ok(CompileTurn::Waiter(Arc::clone(latch)));
+        }
+        let latch = Arc::new(InFlightLatch::default());
+        inner.in_flight.insert(key.to_string(), Arc::clone(&latch));
+        Ok(CompileTurn::Leader(CompileTurnGuard {
+            manager: Arc::downgrade(&self.inner),
+            key: key.to_string(),
+            latch,
+        }))
     }
 
     fn try_load_free_artifact(
@@ -172,9 +325,7 @@ impl DylibCacheManager {
                     continue;
                 }
             }
-            let Some(lease) = self.try_lease_artifact(&artifact_dir)? else {
-                continue;
-            };
+            let lease = self.lease_artifact(&artifact_dir)?;
             match self.load_leased_artifact(&artifact_dir, lease) {
                 Ok(result) => return Ok(Some(result)),
                 Err(error) => {
@@ -188,14 +339,17 @@ impl DylibCacheManager {
         Ok(None)
     }
 
-    fn artifact_dirs(&self, key: &str) -> Result<Vec<PathBuf>, String> {
-        let root = self
+    fn cache_root(&self) -> Result<PathBuf, String> {
+        Ok(self
             .inner
             .lock()
             .map_err(|_| "DGenLisp cache lock poisoned".to_string())?
             .root
-            .join("dylibs")
-            .join(key);
+            .clone())
+    }
+
+    fn artifact_dirs(&self, key: &str) -> Result<Vec<PathBuf>, String> {
+        let root = dylibs_root(&self.cache_root()?).join(key);
         let Ok(entries) = std::fs::read_dir(&root) else {
             return Ok(Vec::new());
         };
@@ -228,8 +382,8 @@ impl DylibCacheManager {
             (inner.root.clone(), artifact_id)
         };
 
-        let key_dir = cache_root.join("dylibs").join(&request.key);
-        let staging_parent = cache_root.join("staging");
+        let key_dir = dylibs_root(&cache_root).join(&request.key);
+        let staging_parent = staging_root(&cache_root);
         std::fs::create_dir_all(&key_dir)
             .map_err(|e| format!("create dylib cache key dir: {e}"))?;
         std::fs::create_dir_all(&staging_parent)
@@ -268,11 +422,9 @@ impl DylibCacheManager {
         // be published. The subprocess ran with --skip-inline-audit, so this
         // is the only audit on the production path; failure publishes
         // nothing.
-        if let Err(error) =
-            crate::lisp_host::dgen::dgen_audit::audit_dylib(&staging_dir.join(format!(
-                "{dylib_name}.dylib"
-            )))
-        {
+        if let Err(error) = crate::lisp_host::dgen::dgen_audit::audit_dylib(
+            &staging_dir.join(format!("{dylib_name}.dylib")),
+        ) {
             let _ = std::fs::remove_dir_all(&staging_dir);
             return Err(error);
         }
@@ -286,6 +438,7 @@ impl DylibCacheManager {
             voices: request.voices,
             effective_source_sha256: request.effective_source_sha256.clone(),
             tool: request.tool.clone(),
+            toolchain: request.toolchain.clone(),
             assets: request.assets.clone(),
             dylib_name,
         };
@@ -304,12 +457,7 @@ impl DylibCacheManager {
     }
 
     fn load_artifact(&self, artifact_dir: &Path) -> Result<CompileResult, String> {
-        let lease = self.try_lease_artifact(artifact_dir)?.ok_or_else(|| {
-            format!(
-                "cached artifact is already in use: {}",
-                artifact_dir.display()
-            )
-        })?;
+        let lease = self.lease_artifact(artifact_dir)?;
         self.load_leased_artifact(artifact_dir, lease)
     }
 
@@ -335,29 +483,25 @@ impl DylibCacheManager {
         })
     }
 
+    /// Refcounted: leasing an already-live artifact shares it (increments
+    /// the count) instead of failing, so repeat requesters reuse one artifact
+    /// directory rather than compiling duplicates. `DylibLease` drop/release
+    /// decrements; the directory is only considered free when the count
+    /// reaches zero.
     fn lease_artifact(&self, artifact_dir: &Path) -> Result<DylibLease, String> {
-        self.try_lease_artifact(artifact_dir)?.ok_or_else(|| {
-            format!(
-                "cached artifact is already in use: {}",
-                artifact_dir.display()
-            )
-        })
-    }
-
-    fn try_lease_artifact(&self, artifact_dir: &Path) -> Result<Option<DylibLease>, String> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| "DGenLisp cache lock poisoned".to_string())?;
-        if inner.live_leases.contains_key(artifact_dir) {
-            return Ok(None);
-        }
-        inner.live_leases.insert(artifact_dir.to_path_buf(), 1);
-        Ok(Some(DylibLease {
+        *inner
+            .live_leases
+            .entry(artifact_dir.to_path_buf())
+            .or_insert(0) += 1;
+        Ok(DylibLease {
             manager: Arc::downgrade(&self.inner),
             artifact_dir: artifact_dir.to_path_buf(),
             released: false,
-        }))
+        })
     }
 
     fn release_artifact(&self, artifact_dir: &Path) {
@@ -435,6 +579,22 @@ pub fn global_cache_manager() -> &'static DylibCacheManager {
     GLOBAL.get_or_init(DylibCacheManager::workspace_default)
 }
 
+/// Path tier for the current schema:
+/// `<cache_root>/<schema>/<target-triple>/` (impl spec, decision 7).
+fn schema_tier_root(cache_root: &Path) -> PathBuf {
+    cache_root
+        .join(CACHE_SCHEMA_VERSION.to_string())
+        .join(CACHE_TARGET_TRIPLE)
+}
+
+fn dylibs_root(cache_root: &Path) -> PathBuf {
+    schema_tier_root(cache_root).join("dylibs")
+}
+
+fn staging_root(cache_root: &Path) -> PathBuf {
+    schema_tier_root(cache_root).join("staging")
+}
+
 fn build_request(
     kind: DGenCompileKind,
     origin: DGenSourceOrigin,
@@ -445,22 +605,18 @@ fn build_request(
     let effective_source = effective_dgen_source(kind, source, sample_rate)?;
     let effective_source_sha256 = sha256_hex(effective_source.as_bytes());
     let tool = fingerprint_tool(&dgenlisp_tool_path())?;
+    let toolchain = fingerprint_toolchain(&crate::app_paths::app_paths().dgen_toolchain_root())?;
     let assets = fingerprint_source_assets(&effective_source, asset_base)?;
     let voices = kind.voices();
-    let key_material = serde_json::json!({
-        "schemaVersion": CACHE_SCHEMA_VERSION,
-        "kind": kind,
-        "sampleRate": sample_rate,
-        "voices": voices,
-        "effectiveSourceSha256": effective_source_sha256,
-        "tool": tool,
-        "assets": assets,
-    });
-    let key = sha256_hex(
-        serde_json::to_string(&key_material)
-            .map_err(|e| format!("serialize dylib cache key: {e}"))?
-            .as_bytes(),
-    );
+    let key = cache_key(
+        kind,
+        sample_rate,
+        voices,
+        &effective_source_sha256,
+        &tool,
+        &toolchain,
+        &assets,
+    )?;
     Ok(CacheRequest {
         key,
         kind,
@@ -470,7 +626,75 @@ fn build_request(
         effective_source,
         effective_source_sha256,
         tool,
+        toolchain,
         assets,
+    })
+}
+
+fn cache_key_material(
+    kind: DGenCompileKind,
+    sample_rate: u32,
+    voices: Option<u32>,
+    effective_source_sha256: &str,
+    tool: &ToolFingerprint,
+    toolchain: &ToolchainFingerprint,
+    assets: &[AssetFingerprint],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": CACHE_SCHEMA_VERSION,
+        "kind": kind,
+        "sampleRate": sample_rate,
+        "voices": voices,
+        "effectiveSourceSha256": effective_source_sha256,
+        "tool": tool,
+        "toolchain": toolchain,
+        "assets": assets,
+    })
+}
+
+fn cache_key(
+    kind: DGenCompileKind,
+    sample_rate: u32,
+    voices: Option<u32>,
+    effective_source_sha256: &str,
+    tool: &ToolFingerprint,
+    toolchain: &ToolchainFingerprint,
+    assets: &[AssetFingerprint],
+) -> Result<String, String> {
+    let material = cache_key_material(
+        kind,
+        sample_rate,
+        voices,
+        effective_source_sha256,
+        tool,
+        toolchain,
+        assets,
+    );
+    Ok(sha256_hex(
+        serde_json::to_string(&material)
+            .map_err(|e| format!("serialize dylib cache key: {e}"))?
+            .as_bytes(),
+    ))
+}
+
+/// A missing/unreadable `VERSION.json` is a hard error, never silently
+/// omitted key material — the toolchain preflight
+/// (`dgen_toolchain_root_checked`) should have failed long before this.
+fn fingerprint_toolchain(toolchain_root: &Path) -> Result<ToolchainFingerprint, String> {
+    let version_json_path = toolchain_root.join("VERSION.json");
+    let version_json = std::fs::read(&version_json_path).map_err(|e| {
+        format!(
+            "read staged toolchain VERSION.json for cache fingerprint at {}: {e}. \
+             Run ./rebuild_dgenlisp_tool.sh at the repo root to stage the toolchain \
+             (or fix ESEQ_DGEN_TOOLCHAIN_ROOT if the override is active).",
+            version_json_path.display()
+        )
+    })?;
+    Ok(ToolchainFingerprint {
+        version_json_sha256: sha256_hex(&version_json),
+        abi_header_sha256: abi_header_sha256().to_string(),
+        target_triple: CACHE_TARGET_TRIPLE.to_string(),
+        minimum_macos: CACHE_MINIMUM_MACOS.to_string(),
     })
 }
 
@@ -492,6 +716,7 @@ fn metadata_matches(artifact_dir: &Path, request: &CacheRequest) -> Result<bool,
         || metadata.voices != request.voices
         || metadata.effective_source_sha256 != request.effective_source_sha256
         || metadata.tool != request.tool
+        || metadata.toolchain != request.toolchain
         || metadata.assets != request.assets
     {
         return Ok(false);
@@ -501,6 +726,88 @@ fn metadata_matches(artifact_dir: &Path, request: &CacheRequest) -> Result<bool,
         && artifact_dir
             .join(format!("{}.dylib", metadata.dylib_name))
             .is_file())
+}
+
+/// Construction-time cache hygiene (impl spec, slice E6). Deletes, best
+/// effort:
+///
+/// - schema-1 leftovers: the old `dylibs/` + `staging/` dirs directly under
+///   the cache root (only those two names — sibling dirs like `ir-prep/`
+///   belong to other subsystems and are never touched);
+/// - orphaned staging dirs under the current schema tier. Nothing can be
+///   leased at manager construction, so all staging dirs are orphans —
+///   except ones created by *this* process (another live manager instance
+///   sharing the root may be mid-compile), which are identifiable by the
+///   `<pid>-…` artifact-id prefix and skipped;
+/// - artifact dirs under the current tier whose `metadata.json` is missing
+///   or fails to parse (quarantine-by-delete; they recompile from source).
+///
+/// Live leased artifacts are safe by construction: leasing requires a
+/// parseable, matching `metadata.json`, and this-process staging is skipped.
+fn sweep_cache_root(cache_root: &Path) {
+    let mut swept_old_schema = 0usize;
+    let mut swept_staging = 0usize;
+    let mut swept_corrupt = 0usize;
+
+    // Old schema-1 layout: dylibs/ + staging/ directly under the root.
+    for legacy in ["dylibs", "staging"] {
+        let dir = cache_root.join(legacy);
+        if dir.is_dir() && std::fs::remove_dir_all(&dir).is_ok() {
+            swept_old_schema += 1;
+        }
+    }
+
+    // Orphaned staging dirs in the current tier (skip this process's own).
+    let own_prefix = format!("{}-", process_id());
+    if let Ok(entries) = std::fs::read_dir(staging_root(cache_root)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&own_prefix) {
+                continue;
+            }
+            if std::fs::remove_dir_all(&path).is_ok() {
+                swept_staging += 1;
+            }
+        }
+    }
+
+    // Artifact dirs with missing/corrupt metadata in the current tier.
+    if let Ok(key_entries) = std::fs::read_dir(dylibs_root(cache_root)) {
+        for key_entry in key_entries.flatten() {
+            let key_dir = key_entry.path();
+            if !key_dir.is_dir() {
+                continue;
+            }
+            let Ok(artifact_entries) = std::fs::read_dir(&key_dir) else {
+                continue;
+            };
+            for artifact_entry in artifact_entries.flatten() {
+                let artifact_dir = artifact_entry.path();
+                if !artifact_dir.is_dir() {
+                    continue;
+                }
+                let parses = std::fs::read_to_string(artifact_dir.join("metadata.json"))
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<CacheMetadata>(&text).ok())
+                    .is_some();
+                if !parses && std::fs::remove_dir_all(&artifact_dir).is_ok() {
+                    swept_corrupt += 1;
+                }
+            }
+        }
+    }
+
+    if swept_old_schema + swept_staging + swept_corrupt > 0 {
+        eprintln!(
+            "[dgenlisp cache] startup sweep at {}: removed {swept_old_schema} old-schema dir(s), \
+             {swept_staging} orphaned staging dir(s), {swept_corrupt} corrupt artifact dir(s)",
+            cache_root.display()
+        );
+    }
 }
 
 fn fingerprint_tool(path: &Path) -> Result<ToolFingerprint, String> {
@@ -770,6 +1077,9 @@ mod tests {
 
     #[test]
     fn asset_fingerprint_changes_cache_key() {
+        if !staged_toolchain_present() {
+            return;
+        }
         let root = std::env::temp_dir().join(format!(
             "eseq-dylib-cache-asset-test-{}-{}",
             process_id(),
@@ -805,8 +1115,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Slice E6 exit criterion: repeat acquires of a live artifact share it
+    /// (refcounted lease) instead of compiling a duplicate directory.
     #[test]
-    fn acquire_compiles_duplicate_when_matching_artifact_is_live_then_reuses_after_release() {
+    fn acquire_shares_live_artifact_via_refcounted_lease() {
         if !dgenlisp_tool_path().exists() {
             eprintln!(
                 "skipping: DGenLisp tool not found at {:?}",
@@ -824,61 +1136,337 @@ mod tests {
             (def input_l (in 1 @name Left))
             (out input_l 1 @name Left)
         "#;
+        let acquire = |label: &str| {
+            manager
+                .acquire(
+                    DGenCompileKind::Effect,
+                    DGenSourceOrigin::Custom,
+                    source,
+                    44_100,
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("{label} acquire: {e}"))
+        };
 
-        let first = manager
-            .acquire(
-                DGenCompileKind::Effect,
-                DGenSourceOrigin::Custom,
-                source,
-                44_100,
-                None,
-            )
-            .expect("first acquire");
+        let first = acquire("first");
         let first_dir = first
             .lease
             .as_ref()
             .expect("first lease")
             .artifact_dir()
             .to_path_buf();
+        assert_eq!(manager.live_lease_count(&first_dir), 1);
 
-        let second = manager
-            .acquire(
-                DGenCompileKind::Effect,
-                DGenSourceOrigin::Custom,
-                source,
-                44_100,
-                None,
-            )
-            .expect("second acquire");
+        let second = acquire("second");
         let second_dir = second
             .lease
             .as_ref()
             .expect("second lease")
             .artifact_dir()
             .to_path_buf();
-        assert_ne!(first_dir, second_dir);
+        assert_eq!(second_dir, first_dir, "live artifact must be shared");
+        assert_eq!(manager.live_lease_count(&first_dir), 2);
+
+        let key_dir = first_dir.parent().expect("key dir");
+        let artifact_count = std::fs::read_dir(key_dir)
+            .expect("read key dir")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .count();
+        assert_eq!(artifact_count, 1, "no duplicate artifact dirs");
 
         drop(first);
-        let third = manager
-            .acquire(
+        assert_eq!(manager.live_lease_count(&first_dir), 1);
+        drop(second);
+        assert_eq!(manager.live_lease_count(&first_dir), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Slice E6 exit criterion: two threads racing one cache key produce
+    /// exactly one artifact directory and two working leases.
+    #[test]
+    fn racing_threads_on_one_key_share_one_compilation() {
+        if !dgenlisp_tool_path().exists() {
+            eprintln!(
+                "skipping: DGenLisp tool not found at {:?}",
+                dgenlisp_tool_path()
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-race-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let manager = DylibCacheManager::new(root.clone());
+        let source = r#"
+            (def input_l (in 1 @name Left))
+            (out input_l 1 @name Left)
+        "#;
+
+        let results = std::thread::scope(|scope| {
+            let handles = [0, 1].map(|_| {
+                let manager = manager.clone();
+                scope.spawn(move || {
+                    manager.acquire(
+                        DGenCompileKind::Effect,
+                        DGenSourceOrigin::Custom,
+                        source,
+                        44_100,
+                        None,
+                    )
+                })
+            });
+            handles.map(|handle| handle.join().expect("racing thread panicked"))
+        });
+
+        let dirs = results
+            .iter()
+            .map(|result| {
+                result
+                    .as_ref()
+                    .expect("racing acquire failed")
+                    .lease
+                    .as_ref()
+                    .expect("racing lease")
+                    .artifact_dir()
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dirs[0], dirs[1], "both racers must share one artifact");
+        assert_eq!(manager.live_lease_count(&dirs[0]), 2);
+
+        let key_dir = dirs[0].parent().expect("key dir");
+        let artifact_count = std::fs::read_dir(key_dir)
+            .expect("read key dir")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .count();
+        assert_eq!(artifact_count, 1, "exactly one artifact dir for the key");
+
+        drop(results);
+        assert_eq!(manager.live_lease_count(&dirs[0]), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolchain_version_json_content_changes_cache_key() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-toolchain-key-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let stage_a = root.join("stage-a");
+        let stage_b = root.join("stage-b");
+        std::fs::create_dir_all(&stage_a).expect("create stage a");
+        std::fs::create_dir_all(&stage_b).expect("create stage b");
+        std::fs::write(stage_a.join("VERSION.json"), r#"{"dgen_abi_version":1}"#)
+            .expect("write VERSION.json a");
+        std::fs::write(stage_b.join("VERSION.json"), r#"{"dgen_abi_version":2}"#)
+            .expect("write VERSION.json b");
+
+        let toolchain_a = fingerprint_toolchain(&stage_a).expect("fingerprint a");
+        let toolchain_b = fingerprint_toolchain(&stage_b).expect("fingerprint b");
+        assert_ne!(
+            toolchain_a.version_json_sha256,
+            toolchain_b.version_json_sha256
+        );
+
+        let tool = ToolFingerprint {
+            path: "/tools/DGenLisp".to_string(),
+            exists: true,
+            len: Some(1),
+            modified_unix_ms: Some(1),
+            sha256: Some("aa".to_string()),
+        };
+        let key = |toolchain: &ToolchainFingerprint| {
+            cache_key(
+                DGenCompileKind::Effect,
+                44_100,
+                None,
+                "source-sha",
+                &tool,
+                toolchain,
+                &[],
+            )
+            .expect("cache key")
+        };
+        assert_ne!(key(&toolchain_a), key(&toolchain_b));
+
+        // Missing VERSION.json is a hard error, never omitted key material.
+        let err = fingerprint_toolchain(&root.join("missing-stage"))
+            .expect_err("missing VERSION.json must fail");
+        assert!(err.contains("VERSION.json"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn key_material_carries_toolchain_identity_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-key-material-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("create stage");
+        std::fs::write(root.join("VERSION.json"), r#"{"dgen_abi_version":1}"#)
+            .expect("write VERSION.json");
+        let toolchain = fingerprint_toolchain(&root).expect("fingerprint");
+        assert_eq!(toolchain.abi_header_sha256.len(), 64);
+        assert_eq!(toolchain.version_json_sha256.len(), 64);
+        assert_eq!(toolchain.target_triple, CACHE_TARGET_TRIPLE);
+        assert_eq!(toolchain.minimum_macos, CACHE_MINIMUM_MACOS);
+
+        let tool = ToolFingerprint {
+            path: "/tools/DGenLisp".to_string(),
+            exists: true,
+            len: Some(1),
+            modified_unix_ms: Some(1),
+            sha256: Some("aa".to_string()),
+        };
+        let material = cache_key_material(
+            DGenCompileKind::Effect,
+            44_100,
+            None,
+            "source-sha",
+            &tool,
+            &toolchain,
+            &[],
+        );
+        assert_eq!(material["schemaVersion"], CACHE_SCHEMA_VERSION);
+        let toolchain_value = &material["toolchain"];
+        assert_eq!(
+            toolchain_value["abi_header_sha256"],
+            serde_json::json!(abi_header_sha256())
+        );
+        assert_eq!(
+            toolchain_value["target_triple"],
+            serde_json::json!(CACHE_TARGET_TRIPLE)
+        );
+        assert_eq!(
+            toolchain_value["minimum_macos"],
+            serde_json::json!(CACHE_MINIMUM_MACOS)
+        );
+        assert_eq!(
+            toolchain_value["version_json_sha256"],
+            serde_json::json!(toolchain.version_json_sha256)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_key_is_stable_across_manager_instances() {
+        if !staged_toolchain_present() {
+            return;
+        }
+        let source = r#"
+            (def input_l (in 1 @name Left))
+            (out input_l 1 @name Left)
+        "#;
+        let build = || {
+            build_request(
                 DGenCompileKind::Effect,
                 DGenSourceOrigin::Custom,
                 source,
                 44_100,
                 None,
             )
-            .expect("third acquire");
-        let third_dir = third
-            .lease
-            .as_ref()
-            .expect("third lease")
-            .artifact_dir()
-            .to_path_buf();
-        assert_eq!(third_dir, first_dir);
+            .expect("build request")
+        };
+        // The key must derive only from content fingerprints — no manager
+        // state, cache-root path, or timestamps.
+        let _manager_a = DylibCacheManager::new(std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-stable-a-{}-{}",
+            process_id(),
+            now_unix_ms()
+        )));
+        let first = build();
+        let _manager_b = DylibCacheManager::new(std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-stable-b-{}-{}",
+            process_id(),
+            now_unix_ms()
+        )));
+        let second = build();
+        assert_eq!(first.key, second.key);
+    }
 
-        drop(second);
-        drop(third);
+    #[test]
+    fn startup_sweep_clears_orphans_and_old_schema_but_keeps_valid_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-sweep-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+
+        // Old schema-1 layout directly under the root.
+        std::fs::create_dir_all(root.join("dylibs/oldkey/artifact")).expect("old dylibs");
+        std::fs::create_dir_all(root.join("staging/old.tmp")).expect("old staging");
+        // Sibling dir owned by another subsystem (conv-reverb IR cache).
+        std::fs::create_dir_all(root.join("ir-prep")).expect("ir-prep");
+
+        // Current tier: an orphaned staging dir from a dead process, plus a
+        // corrupt-metadata artifact and a valid one.
+        let staging = staging_root(&root);
+        std::fs::create_dir_all(staging.join("999999999-1-0.tmp")).expect("orphan staging");
+        let corrupt = dylibs_root(&root).join("key-a").join("artifact-corrupt");
+        std::fs::create_dir_all(&corrupt).expect("corrupt artifact");
+        std::fs::write(corrupt.join("metadata.json"), "not json").expect("corrupt metadata");
+        let missing_meta = dylibs_root(&root).join("key-a").join("artifact-missing");
+        std::fs::create_dir_all(&missing_meta).expect("missing-meta artifact");
+
+        let valid = dylibs_root(&root).join("key-b").join("artifact-valid");
+        std::fs::create_dir_all(&valid).expect("valid artifact");
+        let metadata = CacheMetadata {
+            schema_version: CACHE_SCHEMA_VERSION,
+            key: "key-b".to_string(),
+            kind: DGenCompileKind::Effect,
+            origin: DGenSourceOrigin::Custom,
+            sample_rate: 44_100,
+            voices: None,
+            effective_source_sha256: "aa".to_string(),
+            tool: ToolFingerprint {
+                path: "/tools/DGenLisp".to_string(),
+                exists: true,
+                len: Some(1),
+                modified_unix_ms: Some(1),
+                sha256: Some("aa".to_string()),
+            },
+            toolchain: ToolchainFingerprint {
+                version_json_sha256: "bb".to_string(),
+                abi_header_sha256: "cc".to_string(),
+                target_triple: CACHE_TARGET_TRIPLE.to_string(),
+                minimum_macos: CACHE_MINIMUM_MACOS.to_string(),
+            },
+            assets: Vec::new(),
+            dylib_name: "dgen_effect_valid".to_string(),
+        };
+        std::fs::write(
+            valid.join("metadata.json"),
+            serde_json::to_string_pretty(&metadata).expect("serialize metadata"),
+        )
+        .expect("valid metadata");
+
+        let _manager = DylibCacheManager::new(root.clone());
+
+        assert!(!root.join("dylibs").exists(), "old-schema dylibs swept");
+        assert!(!root.join("staging").exists(), "old-schema staging swept");
+        assert!(root.join("ir-prep").exists(), "sibling dirs untouched");
+        assert!(
+            !staging.join("999999999-1-0.tmp").exists(),
+            "orphan staging swept"
+        );
+        assert!(!corrupt.exists(), "corrupt-metadata artifact swept");
+        assert!(!missing_meta.exists(), "missing-metadata artifact swept");
+        assert!(valid.exists(), "valid artifact kept");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn staged_toolchain_present() -> bool {
+        let root = crate::app_paths::app_paths().dgen_toolchain_root();
+        if root.join("VERSION.json").is_file() {
+            return true;
+        }
+        eprintln!("skipping: staged toolchain not found at {root:?}");
+        false
     }
 
     /// Slice E1 exit criterion (embedded-dgen-connector-impl-spec.md): with
