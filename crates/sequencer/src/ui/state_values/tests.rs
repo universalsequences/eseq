@@ -23286,7 +23286,7 @@
         // Click the middle of the clip in track lane 0 (clip covers beats
         // 0..16 of a 64-beat view: the left quarter of the lane).
         let layout = editor.widget_layout().expect("arrangement layout");
-        let container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-0")
+        let container = find_layout_node_by_stable_key_suffix(&layout, "/track-lane-0")
             .expect("track lane container");
         let lane = find_layout_node_by_widget_type(container, "timeline")
             .expect("track timeline instance");
@@ -23421,10 +23421,10 @@
         editor.set_layout_viewport(72, 20);
 
         let layout = editor.widget_layout().expect("arrangement layout");
-        let scroll_node = find_layout_node_by_stable_key(&layout, "arrangement-track-scroll")
+        let scroll_node = find_layout_node_by_stable_key_suffix(&layout, "/track-scroll")
             .expect("track scroll container");
         assert_eq!(scroll_node.widget_type, "scroll");
-        let lane5_container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-5")
+        let lane5_container = find_layout_node_by_stable_key_suffix(&layout, "/track-lane-5")
             .expect("track lane 5 container");
         let lane5 = find_layout_node_by_widget_type(lane5_container, "timeline")
             .expect("lane 5 timeline instance");
@@ -24244,7 +24244,7 @@
         editor.refresh_runtime_side_effects();
 
         let layout = editor.widget_layout().expect("arrangement layout");
-        let scene_container = find_layout_node_by_stable_key(&layout, "arrangement-scene-lane")
+        let scene_container = find_layout_node_by_stable_key_suffix(&layout, "/scene-lane")
             .expect("scene lane container");
         assert_finite_nonzero_rect(scene_container, "arrangement-scene-lane");
         let scene_lane = find_layout_node_by_widget_type(scene_container, "timeline")
@@ -24355,7 +24355,7 @@
 
         // The reused track header renders beside the lane.
         let track_header =
-            find_layout_node_by_stable_key(&layout, "arrangement-track-header-0")
+            find_layout_node_by_stable_key_suffix(&layout, "/track-header-0")
                 .expect("arrangement track header container");
         assert_finite_nonzero_rect(track_header, "arrangement track header container");
         assert_eq!(
@@ -24407,7 +24407,7 @@
         // Sticky ruler: the track rows live inside a scroll container that
         // starts flush under the pinned scene lane and absorbs the rest of
         // the pane, so vertical track scrolling never moves the ruler.
-        let track_scroll = find_layout_node_by_stable_key(&layout, "arrangement-track-scroll")
+        let track_scroll = find_layout_node_by_stable_key_suffix(&layout, "/track-scroll")
             .expect("track scroll container");
         assert_eq!(track_scroll.widget_type, "scroll");
         assert_finite_nonzero_rect(track_scroll, "arrangement-track-scroll");
@@ -24533,7 +24533,7 @@
             });
 
         let layout = editor.widget_layout().expect("arrangement layout");
-        let header = find_layout_node_by_stable_key(&layout, "arrangement-track-header-1")
+        let header = find_layout_node_by_stable_key_suffix(&layout, "/track-header-1")
             .expect("track header container");
         let header_body = find_layout_node_by_stable_key(header, "seqv-track-header-1")
             .expect("track header body");
@@ -24548,7 +24548,7 @@
             "fixture needs exposed header-body space below the compact controls"
         );
         let lane = find_layout_node_by_widget_type(
-            find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+            find_layout_node_by_stable_key_suffix(&layout, "/track-lane-1")
                 .expect("track lane container"),
             "timeline",
         )
@@ -24609,7 +24609,7 @@
         let mut editor = arrangement_region_editor(2, &[]);
         let layout = editor.widget_layout().expect("arrangement layout");
         let lane = find_layout_node_by_widget_type(
-            find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+            find_layout_node_by_stable_key_suffix(&layout, "/track-lane-1")
                 .expect("empty track lane"),
             "timeline",
         )
@@ -24838,14 +24838,14 @@
         let layout = editor.widget_layout().expect("arrangement layout");
         let lane = |key: &str| {
             let container =
-                find_layout_node_by_stable_key(&layout, key).expect("track lane container");
+                find_layout_node_by_stable_key_suffix(&layout, key).expect("track lane container");
             find_layout_node_by_widget_type(container, "timeline")
                 .expect("timeline instance")
                 .rect
                 .row
         };
-        let measured = lane("arrangement-track-lane-1") - lane("arrangement-track-lane-0");
-        let measured_next = lane("arrangement-track-lane-2") - lane("arrangement-track-lane-1");
+        let measured = lane("/track-lane-1") - lane("/track-lane-0");
+        let measured_next = lane("/track-lane-2") - lane("/track-lane-1");
         assert!(
             (measured - measured_next).abs() < 0.01,
             "track rows must be evenly pitched ({measured} vs {measured_next})"
@@ -24983,13 +24983,13 @@
         let layout = editor.widget_layout().expect("arrangement layout");
         let lane_rect = |key: &str| {
             let container =
-                find_layout_node_by_stable_key(&layout, key).expect("track lane container");
+                find_layout_node_by_stable_key_suffix(&layout, key).expect("track lane container");
             find_layout_node_by_widget_type(container, "timeline")
                 .expect("timeline instance")
                 .rect
         };
-        let lane1 = lane_rect("arrangement-track-lane-1");
-        let lane3 = lane_rect("arrangement-track-lane-3");
+        let lane1 = lane_rect("/track-lane-1");
+        let lane3 = lane_rect("/track-lane-3");
 
         let mouse = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
             kind,
@@ -25070,7 +25070,7 @@
         // A plain click on empty lane space clears the region and parks the
         // edit cursor on that track (region spec 4.4).
         *cleared.lock().unwrap() = 0;
-        let lane4 = lane_rect("arrangement-track-lane-4");
+        let lane4 = lane_rect("/track-lane-4");
         let click_col = lane4.col + lane4.width * (40.0 / 64.0);
         let click_row = lane4.row + lane4.height * 0.5;
         for kind in [
@@ -25114,15 +25114,15 @@
                 let layout = editor.widget_layout().expect("arrangement layout");
                 let lane = |key: &str| {
                     find_layout_node_by_widget_type(
-                        find_layout_node_by_stable_key(&layout, key).expect("lane container"),
+                        find_layout_node_by_stable_key_suffix(&layout, key).expect("lane container"),
                         "timeline",
                     )
                     .expect("timeline instance")
                 };
                 let (scene_step, _, labels) =
-                    eseqlisp::widget_render::timeline::debug_grid(lane("arrangement-scene-lane"));
+                    eseqlisp::widget_render::timeline::debug_grid(lane("/scene-lane"));
                 let (track_step, track_lines, _) = eseqlisp::widget_render::timeline::debug_grid(
-                    lane("arrangement-track-lane-1"),
+                    lane("/track-lane-1"),
                 );
                 assert_eq!(
                     scene_step, track_step,
@@ -25244,7 +25244,7 @@
             });
 
         let layout = editor.widget_layout().expect("arrangement layout");
-        let container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+        let container = find_layout_node_by_stable_key_suffix(&layout, "/track-lane-1")
             .expect("track lane container");
         let lane = find_layout_node_by_widget_type(container, "timeline")
             .expect("timeline instance")

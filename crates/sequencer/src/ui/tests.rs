@@ -9941,8 +9941,8 @@
         let _ = editor.widget_layout();
         let lane_rect = |editor: &mut Editor| -> (f32, f32, f32, f32) {
             let layout = editor.widget_layout().expect("arrangement layout");
-            let key = format!("arrangement-track-lane-{fixture_track}");
-            let container = find_layout_node_by_stable_key(&layout, &key)
+            let key = format!("/track-lane-{fixture_track}");
+            let container = find_layout_node_by_stable_key_suffix(&layout, &key)
                 .expect("fixture track lane container");
             let lane = find_layout_node_by_widget_type(container, "timeline")
                 .expect("track 0 timeline instance");
