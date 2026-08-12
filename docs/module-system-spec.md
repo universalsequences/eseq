@@ -487,7 +487,18 @@ stays as-is; real macro hygiene is out of scope for this spec.
   f. **Name surfaces show the qualified spelling.** M-x candidates and
      completions come from `global_names`, so a converted command lists as
      `eseq.choose-model/choose-model` (still filtered by typing
-     `choose-model`, and still callable bare through its alias).
+     `choose-model`, and still callable bare through its alias). Alias old
+     names are also completion/M-x candidates (`completion_symbols` includes
+     the alias table's keys).
+  g. **Module defs colliding with builtin widget names.** A module `def`
+     never clobbers the flat native (it interns qualified, with a warning),
+     and the source-annotation pass knows a unit's own defs shadow widget
+     names — without that, `(select v)` in `eseq.choose-model` was
+     annotated with `__source-*` widget props and called the 1-arg module
+     fn with 4+ args (`ArityMismatch` on every dropdown pick). Both are
+     handled in the infrastructure now, but prefer non-colliding def names
+     anyway: the def-site shadow warning firing during conversion is the
+     signal to rename.
 
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
