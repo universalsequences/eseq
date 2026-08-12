@@ -13092,3 +13092,149 @@ fn module_dropdown_row_click_applies_selection_and_closes_modal() {
         "the module fn should close the modal"
     );
 }
+
+/// Load the REAL ui/choose-model.lisp (agent natives stubbed) and click a
+/// dropdown row — reproduces the in-app ArityMismatch report if present.
+#[cfg(target_os = "macos")]
+#[test]
+fn real_choose_model_dropdown_row_click_selects() {
+    let _overlay_guard = OverlayClearGuard;
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .register_native("agent/models", |_args, _ctx| {
+            Ok(Value::List(vec![
+                Rc::new(RefCell::new(Value::String("gpt-5.5".into()))),
+                Rc::new(RefCell::new(Value::String("claude-fable-5".into()))),
+            ]))
+        });
+    let picked = Rc::new(RefCell::new(String::new()));
+    let picked_for_native = picked.clone();
+    editor
+        .runtime_mut()
+        .register_native("agent/patch-model", move |_args, _ctx| {
+            Ok(Value::String(picked_for_native.borrow().clone()))
+        });
+    let picked_for_set = picked.clone();
+    editor
+        .runtime_mut()
+        .register_native("agent/set-patch-model", move |args, _ctx| {
+            if let Some(Value::String(v)) = args.first() {
+                *picked_for_set.borrow_mut() = v.clone();
+            }
+            Ok(Value::Nil)
+        });
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sequencer/ui/choose-model.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real choose-model.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real choose-model.lisp");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*panel*" (choose-model-panel))
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 18
+                :on-click (lambda (event) true)))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*panel*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#,
+        )
+        .expect("mount panel");
+    editor
+        .runtime_mut()
+        .eval_str("(choose-model)")
+        .expect("open picker");
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(200, 60);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 200, 60);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 200, 60);
+
+    open_dropdown_inside_modal(&mut editor);
+
+    // Click the "claude-fable-5" row: options = Default (auto), gpt-5.5,
+    // claude-fable-5 → index 2. MENU_PADDING_V=0.3, MENU_ROW_HEIGHT=1.4.
+    let menu = crate::widget_render::get_overlay_rect().expect("open dropdown menu rect");
+    let row = menu.row + 0.3 + 1.4 * 2.0 + 0.7;
+    let col = menu.col + menu.width * 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col.floor() as u16,
+            row.floor() as u16,
+        ),
+        col,
+        row,
+        0,
+    );
+    editor.refresh_runtime_side_effects();
+    assert_eq!(
+        picked.borrow().as_str(),
+        "claude-fable-5",
+        "row click should write through agent/set-patch-model"
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+        Some(Value::Bool(false)),
+        "select should close the picker"
+    );
+}
+
+
+/// Differential probe: identical to module_dropdown_row_click test but the
+/// module fn is named `select` (a builtin widget name).
+#[cfg(target_os = "macos")]
+#[test]
+fn module_fn_named_select_compiles_with_correct_arity() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_source_at_path(
+            std::env::temp_dir().join("module-select-arity-test.lisp"),
+            r#"
+(module test.selarity)
+(defstate picked "plate")
+(def select (v) (set! picked v))
+(def handler-holder ()
+  (lambda (v) (select v)))
+"#,
+        )
+        .expect("module source");
+    let cb = editor
+        .runtime_mut()
+        .eval_str("(test.selarity/handler-holder)")
+        .expect("build handler")
+        .expect("closure value");
+    let one = editor
+        .runtime
+        .invoke(cb.clone(), vec![Value::String("hall".into())]);
+    eprintln!("[probe-arity] invoke 1 arg => {one:?}");
+    assert!(one.is_ok(), "lambda calling module fn named select must take 1 arg: {one:?}");
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.selarity/picked").unwrap(),
+        Some(Value::String("hall".to_string()))
+    );
+}
+
+

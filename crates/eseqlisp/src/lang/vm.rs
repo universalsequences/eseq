@@ -956,6 +956,36 @@ fn is_source_prop_keyword(expr: &Expr) -> bool {
     )
 }
 
+fn is_module_declaration(expr: &Expr) -> bool {
+    if let ExprKind::List(items) = &expr.kind
+        && let Some(head) = items.first()
+        && let ExprKind::Symbol(name) = &head.kind
+    {
+        return name == "module";
+    }
+    false
+}
+
+/// Top-level `(def NAME …)` forms whose NAME collides with a widget
+/// constructor name — inside a declared module these defs shadow the
+/// builtin for bare calls in the same unit.
+fn collect_shadowing_def_names(
+    expr: &Expr,
+    local_defwidgets: &HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    if let ExprKind::List(items) = &expr.kind
+        && items.len() >= 2
+        && let Some(head) = items.first()
+        && let ExprKind::Symbol(def) = &head.kind
+        && def == "def"
+        && let ExprKind::Symbol(name) = &items[1].kind
+        && is_widget_constructor_name(name, local_defwidgets)
+    {
+        out.insert(name.clone());
+    }
+}
+
 fn is_widget_constructor_name(name: &str, local_defwidgets: &HashSet<String>) -> bool {
     crate::widgets::is_builtin_widget_name(name)
         || is_inline_widget_constructor_name(name)
@@ -1044,19 +1074,21 @@ fn convert_source_data_expr(
     expr: &Expr,
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
-    convert_source_expr(expr, source_revision, local_defwidgets, macro_names, false)
+    convert_source_expr(expr, source_revision, local_defwidgets, shadowed_widget_names, macro_names, false)
 }
 
 fn convert_let_bindings(
     expr: &Expr,
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
     let ExprKind::List(bindings) = &expr.kind else {
-        return convert_source_data_expr(expr, source_revision, local_defwidgets, macro_names);
+        return convert_source_data_expr(expr, source_revision, local_defwidgets, shadowed_widget_names, macro_names);
     };
     Expression::List(
         bindings
@@ -1067,6 +1099,7 @@ fn convert_let_bindings(
                         binding,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     );
                 };
@@ -1079,6 +1112,7 @@ fn convert_let_bindings(
                                 part,
                                 source_revision,
                                 local_defwidgets,
+                                shadowed_widget_names,
                                 macro_names,
                                 idx > 0,
                             )
@@ -1094,6 +1128,7 @@ fn convert_list_with_code_from_idx(
     items: &[Expr],
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
     code_start_idx: usize,
 ) -> Expression {
@@ -1106,6 +1141,7 @@ fn convert_list_with_code_from_idx(
                     item,
                     source_revision,
                     local_defwidgets,
+                    shadowed_widget_names,
                     macro_names,
                     idx >= code_start_idx,
                 )
@@ -1118,6 +1154,7 @@ fn convert_defwidget_list(
     items: &[Expr],
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
     let mut converted = Vec::with_capacity(items.len());
@@ -1128,6 +1165,7 @@ fn convert_defwidget_list(
             item,
             source_revision,
             local_defwidgets,
+            shadowed_widget_names,
             macro_names,
             idx > 1,
         ));
@@ -1139,6 +1177,7 @@ fn convert_defwidget_list(
                 next,
                 source_revision,
                 local_defwidgets,
+                shadowed_widget_names,
                 macro_names,
             ));
             idx += 2;
@@ -1153,6 +1192,7 @@ fn convert_match_list(
     items: &[Expr],
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
     Expression::List(
@@ -1165,6 +1205,7 @@ fn convert_match_list(
                     item,
                     source_revision,
                     local_defwidgets,
+                    shadowed_widget_names,
                     macro_names,
                     is_code,
                 )
@@ -1177,6 +1218,7 @@ fn convert_source_expr(
     expr: &Expr,
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
     annotate_widgets: bool,
 ) -> Expression {
@@ -1194,6 +1236,7 @@ fn convert_source_expr(
             inner,
             source_revision,
             local_defwidgets,
+            shadowed_widget_names,
             macro_names,
             annotate_widgets,
         ))),
@@ -1209,6 +1252,7 @@ fn convert_source_expr(
                                 item,
                                 source_revision,
                                 local_defwidgets,
+                                shadowed_widget_names,
                                 macro_names,
                             )
                         })
@@ -1221,12 +1265,14 @@ fn convert_source_expr(
                         &items[0],
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     ));
                     converted.push(convert_let_bindings(
                         &items[1],
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     ));
                     converted.extend(items[2..].iter().map(|item| {
@@ -1234,6 +1280,7 @@ fn convert_source_expr(
                             item,
                             source_revision,
                             local_defwidgets,
+                            shadowed_widget_names,
                             macro_names,
                             true,
                         )
@@ -1245,6 +1292,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                         2,
                     );
@@ -1262,6 +1310,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                         body_start_idx,
                     );
@@ -1275,6 +1324,7 @@ fn convert_source_expr(
                                     item,
                                     source_revision,
                                     local_defwidgets,
+                                    shadowed_widget_names,
                                     macro_names,
                                 )
                             })
@@ -1286,6 +1336,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     );
                 }
@@ -1294,6 +1345,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     );
                 }
@@ -1303,7 +1355,10 @@ fn convert_source_expr(
                 annotate_widgets && head_name.is_some_and(|name| macro_names.contains(name));
             let should_annotate = annotate_widgets
                 && !is_macro_call
-                && head_name.is_some_and(|name| is_widget_constructor_name(name, local_defwidgets));
+                && head_name.is_some_and(|name| {
+                    is_widget_constructor_name(name, local_defwidgets)
+                        && !shadowed_widget_names.contains(name)
+                });
             let mut idx = 0;
             while idx < items.len() {
                 let item = &items[idx];
@@ -1315,6 +1370,7 @@ fn convert_source_expr(
                     item,
                     source_revision,
                     local_defwidgets,
+                    shadowed_widget_names,
                     macro_names,
                     annotate_widgets,
                 );
@@ -1351,6 +1407,7 @@ fn convert_source_expr(
                         next,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                         false,
                     ));
@@ -1411,10 +1468,29 @@ fn convert_source_exprs_with_origins(
         collect_defwidget_names(expr, &mut local_defwidgets);
         collect_defmacro_names(expr, &mut macro_names);
     }
+    // Inside a declared module, the module's own top-level defs shadow
+    // builtin widget-constructor names (spec §3: current module wins), so
+    // calls to them are ordinary calls and must not get `__source-*`
+    // widget-provenance props appended — a module fn has fixed arity and
+    // the injected keyword args made the call an ArityMismatch (found via
+    // eseq.choose-model's `select` in S3 batch 1).
+    let mut shadowed_widget_names = HashSet::new();
+    if exprs.iter().any(is_module_declaration) {
+        for expr in exprs {
+            collect_shadowing_def_names(expr, &local_defwidgets, &mut shadowed_widget_names);
+        }
+    }
     exprs
         .iter()
         .map(|expr| {
-            convert_source_expr(expr, source_revision, &local_defwidgets, &macro_names, true)
+            convert_source_expr(
+                expr,
+                source_revision,
+                &local_defwidgets,
+                &shadowed_widget_names,
+                &macro_names,
+                true,
+            )
         })
         .collect()
 }
