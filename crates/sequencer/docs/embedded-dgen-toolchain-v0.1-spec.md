@@ -856,6 +856,65 @@ ESeq v0.1 satisfies this spec when all of the following are true:
 10. No production compile depends on an absolute repository, Xcode, SDK,
     Command Line Tools, or current-working-directory path.
 
+## Open Gaps From The Slice E2–E4 Review (PR #38)
+
+Review findings from the connector slices that were not fixed in that PR. The
+two that were fixed there — the warm-up rendering against an all-zero span
+instead of the init state, and the warm-up running on every dylib load rather
+than only on dylibs whose generated code calls the host FFT hook — are done and
+covered by `prewarm_renders_against_seeded_init_state` and
+`prewarm_gate_follows_generated_code_fft_usage`.
+
+- **Toolchain-stage test hard-panics on a fresh clone.**
+  `vendored_dgen_abi_header_matches_staged_toolchain_header`
+  (`lisp_host/tests.rs`) asserts against `tools/dgen-toolchain/include/
+  dgen_runtime.h`, but the stage is gitignored (~147 MB), so a fresh clone or a
+  worktree without `ESEQ_DGEN_TOOLCHAIN_ROOT` fails `cargo test -p sequencer` on
+  an unrelated change. It should skip when the stage is absent, the way the
+  neighbouring dgen tests in `dylib_cache.rs` skip on a missing DGenLisp tool,
+  and assert only when the stage exists.
+
+- **`dgen_toolchain_root_checked` preflights 2 of the 8 required files.**
+  `app_paths::dgen_toolchain_root_checked` checks only `bin/dgen-clang` and
+  `bin/ld64.lld`; `rebuild_dgenlisp_tool.sh` validates eight paths
+  (`VERSION.json`, both ABI symbol lists, `include/dgen_runtime.h`, both
+  binaries, `libclang_rt.builtins.a`, `lib/libSystem.tbd`). A stage truncated by
+  an interrupted extract, or an `ESEQ_DGEN_TOOLCHAIN_ROOT` aimed at a
+  half-copied directory, passes preflight and then fails deep inside clang/lld —
+  the opaque failure the hard-error design exists to prevent. The runtime check
+  should assert the same required-file list as the staging script.
+
+- **`rebuild_dgenlisp_tool.sh` installs the tool before staging the toolchain.**
+  `$DEST_BIN` (a committed file) is overwritten before archive validation runs,
+  so under `set -e` a missing archive, a lock-hash divergence without
+  `--update-lock`, or a missing required file leaves a new DGenLisp paired with
+  the old-or-absent toolchain stage — the exact drift the lock file exists to
+  prevent, and trivially committable. Validate the archive and its hash (or
+  stage into the temp dir) before copying the tool binary, and commit both at
+  the end.
+
+- **The cache key does not fingerprint the toolchain.** Tracked as E6, but it
+  becomes reachable with the connector slices: now that `--toolchain-root`
+  selects the compiler, a re-staged archive (`--update-lock`) or a worktree
+  running against a different `ESEQ_DGEN_TOOLCHAIN_ROOT` produces an identical
+  `ToolFingerprint` for the same source, so the cache serves a dylib built by
+  the other toolchain.
+
+- **`eseq_dgen_fft_setup_create` does not null-check vDSP.**
+  `audiograph/dgen_host_services.c` returns `vDSP_create_fftsetup`'s result
+  directly; vDSP returns NULL on allocation failure or an unsupported
+  `log2_size`, generated code caches the pointer in a `static`, and the next
+  `vDSP_fft_zip` dereferences NULL inside the audio callback with no recovery.
+  The reference host behaves the same way, so this is a deliberate gap to close
+  rather than a drift from the reference.
+
+- **`DGEN_PREWARM_FRAMES` is a fixed 2048, not derived from the dylib's hops.**
+  Builtin lisp tops out at `@hop 512`, so the warm-up covers four hop
+  boundaries. A user-authored `@hop 2048` reaches its first boundary only at the
+  very end of the render and `@hop 4096` never does — the FFT setup is then
+  created on the audio thread anyway, silently. Either derive the bound from the
+  manifest/generated code or raise it once a hop that large is reachable.
+
 ## Follow-Up Work After v0.1
 
 - Intel or universal app/toolchain support.

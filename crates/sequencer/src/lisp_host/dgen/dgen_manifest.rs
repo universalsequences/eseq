@@ -659,30 +659,71 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
     }
 }
 
-/// Load a compiled DGen dylib and run a short warm-up render on a scratch
-/// state span from the calling (control) thread. Generated spectral code
-/// creates its FFT setups lazily via `host->fft_setup_create_fn` on the first
-/// hop boundary it crosses — an allocation that would otherwise happen inside
-/// the audio callback. The manifest carries no "uses spectral ops" signal, so
-/// the warm-up runs unconditionally; it touches only its own scratch memory
-/// (plus the dylib's internal per-call scratch), never live node state.
+/// Load a compiled DGen dylib and, when it needs one, run a short warm-up
+/// render on a scratch state span from the calling (control) thread. Generated
+/// spectral code creates its FFT setups lazily via `host->fft_setup_create_fn`
+/// on the first hop boundary it crosses — an allocation that would otherwise
+/// happen inside the audio callback. Only dylibs that actually call that hook
+/// are warmed (see `generated_code_uses_host_fft`): the render costs a full
+/// state allocation plus 2048 frames, and every load — including cache hits on
+/// the project/scene-load path — would otherwise pay it. The warm-up touches
+/// only its own scratch memory (plus the dylib's internal per-call scratch),
+/// never live node state.
 pub fn load_dylib_prewarmed(manifest: &DGenManifest) -> Result<LoadedDGenLib, String> {
     let lib = load_dylib(&manifest.dylib_path)?;
-    prewarm_dgen_process(manifest, &lib);
+    if generated_code_uses_host_fft(&manifest.dylib_path) {
+        prewarm_dgen_process(manifest, &lib);
+    }
     Ok(lib)
 }
 
-/// Frames of warm-up rendered by `load_dylib_prewarmed`. Must cover the
-/// largest STFT hop generated code uses (spectral density ceiling is 1024
-/// bins today) so every lazily-created FFT setup exists before the node goes
-/// live.
+/// Does this dylib's generated code call the host FFT-setup hook? DGenLisp
+/// leaves the C it compiled next to the dylib (same stem) in both the cache
+/// artifact dir and the scratch output dir, and a `host->fft_setup_create_fn`
+/// call site is an exact signal — the manifest carries no "uses spectral ops"
+/// flag. A missing or unreadable `.c` falls back to warming up, so the cost is
+/// paid only when the answer is unknown.
+pub(in crate::lisp_host) fn generated_code_uses_host_fft(dylib_path: &Path) -> bool {
+    let c_path = dylib_path.with_extension("c");
+    match std::fs::read(&c_path) {
+        Ok(bytes) => bytes
+            .windows(DGEN_FFT_SETUP_HOOK.len())
+            .any(|window| window == DGEN_FFT_SETUP_HOOK),
+        Err(_) => true,
+    }
+}
+
+const DGEN_FFT_SETUP_HOOK: &[u8] = b"fft_setup_create_fn";
+
+/// Frames of warm-up rendered by `load_dylib_prewarmed`. Covers the largest
+/// STFT hop builtin generated code uses (`@hop 512`, spectral density ceiling
+/// 1024 bins) so every lazily-created FFT setup exists before the node goes
+/// live. A user-authored `@hop 2048` or larger crosses no boundary inside the
+/// warm-up and still creates its setup on the audio thread — known gap, see
+/// the impl spec.
 const DGEN_PREWARM_FRAMES: usize = 2048;
 const DGEN_PREWARM_BLOCK: usize = 256;
 
-pub(in crate::lisp_host) fn prewarm_dgen_process(manifest: &DGenManifest, lib: &LoadedDGenLib) {
+/// Runs the warm-up and returns the scratch memory span it rendered into (the
+/// span is otherwise dropped; tests use it to assert the seeded init state).
+pub(in crate::lisp_host) fn prewarm_dgen_process(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+) -> Vec<f32> {
     let n_inputs = manifest.n_inputs.max(4);
     let n_outputs = manifest.n_outputs.max(2);
     let mut memory = vec![0.0f32; manifest.total_memory_slots + DGEN_STATE_REDZONE_SLOTS];
+    // Seed the scratch span the way `dgenlisp_init` seeds a live node's. An
+    // all-zero span both hides the spectral branch behind param gates that
+    // default non-zero (mix/mode/enabled) — defeating the warm-up — and turns
+    // legitimately non-zero cells into zero divisors, whose NaN/Inf results
+    // reach the unguarded `memory[base + (int)expr]` sites in generated code
+    // as saturated indices far outside the redzone.
+    for (idx, value) in init_state_entries(manifest) {
+        if idx < manifest.total_memory_slots {
+            memory[idx] = value;
+        }
+    }
     let input_buffers = vec![vec![0.0f32; DGEN_PREWARM_BLOCK]; n_inputs];
     let mut output_buffers = vec![vec![0.0f32; DGEN_PREWARM_BLOCK]; n_outputs];
     let input_ptrs: Vec<*const f32> = input_buffers
@@ -708,20 +749,17 @@ pub(in crate::lisp_host) fn prewarm_dgen_process(manifest: &DGenManifest, lib: &
         }
         frames_done += DGEN_PREWARM_BLOCK;
     }
+    memory
 }
 
 // ── Build initial state message (compact) ──
 
-/// Build a compact init message:
-/// [slot_id, total_memory_slots, canary, declared_input_count, enabled,
-///  process_fn_chunk0..3, num_entries, idx0, val0, ...]
-/// The engine zeroes state; init only needs to set non-zero values.
-pub(in crate::lisp_host) fn build_init_message(
-    slot_id: usize,
-    manifest: &DGenManifest,
-    process_fn: Option<DGenProcessFn>,
-) -> Vec<f32> {
-    // Collect all non-zero index/value pairs
+/// Non-zero (memory index, value) pairs a fresh node's memory span starts
+/// from: param defaults and tensor init payloads. Shared by the init-message
+/// builders (which ship them to the audio thread as sparse pairs) and by the
+/// warm-up render (which writes them straight into its scratch span), so a
+/// warmed-up dylib sees the same state a live node does.
+pub(in crate::lisp_host) fn init_state_entries(manifest: &DGenManifest) -> Vec<(usize, f32)> {
     let mut entries: Vec<(usize, f32)> = Vec::new();
 
     for param in &manifest.params {
@@ -743,6 +781,20 @@ pub(in crate::lisp_host) fn build_init_message(
             }
         }
     }
+
+    entries
+}
+
+/// Build a compact init message:
+/// [slot_id, total_memory_slots, canary, declared_input_count, enabled,
+///  process_fn_chunk0..3, num_entries, idx0, val0, ...]
+/// The engine zeroes state; init only needs to set non-zero values.
+pub(in crate::lisp_host) fn build_init_message(
+    slot_id: usize,
+    manifest: &DGenManifest,
+    process_fn: Option<DGenProcessFn>,
+) -> Vec<f32> {
+    let entries = init_state_entries(manifest);
 
     // Header (10) + pairs (2 * N)
     let mut msg = Vec::with_capacity(10 + entries.len() * 2);

@@ -11977,6 +11977,74 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn prewarm_gate_follows_generated_code_fft_usage() {
+        // The load-time warm-up exists only to create FFT setups off the audio
+        // thread, and it costs a full state allocation plus 2048 rendered
+        // frames — so it must run for spectral dylibs and not for the rest.
+        let spectral = r#"
+            (def dry_l (in 1 @name Left))
+            (def impulse (tensor @shape [16] @data [1 0 0 0 0 0 0 0 0.25 0 0 0 0 0 0 0]))
+            (out (partitioned-convolve dry_l impulse @N 16 @hop 8 @gain 0.5) 1 @name Left)
+            (out dry_l 2 @name Right)
+        "#;
+        let plain = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (param gain @default 0.5 @min 0.0 @max 1.0)
+            (out (* dry_l gain) 1 @name Left)
+            (out (* dry_r gain) 2 @name Right)
+        "#;
+
+        let spectral = super::compile_and_load(spectral, 48_000)
+            .expect("spectral effect should compile and load");
+        assert!(
+            super::generated_code_uses_host_fft(&spectral.manifest.dylib_path),
+            "spectral generated code calls the host FFT hook and must be warmed up"
+        );
+
+        let plain =
+            super::compile_and_load(plain, 48_000).expect("plain effect should compile and load");
+        assert!(
+            !super::generated_code_uses_host_fft(&plain.manifest.dylib_path),
+            "non-spectral generated code must not pay for the warm-up render"
+        );
+    }
+
+    #[test]
+    fn prewarm_renders_against_seeded_init_state() {
+        // Regression: the warm-up used to render against an all-zero span, so
+        // any DSP gated behind a param that defaults non-zero never reached its
+        // FFT setup (and zero-valued divisors produced NaN indices).
+        let source = r#"
+            (def dry_l (in 1 @name Left))
+            (def dry_r (in 2 @name Right))
+            (param gain @default 0.75 @min 0.0 @max 1.0)
+            (out (* dry_l gain) 1 @name Left)
+            (out (* dry_r gain) 2 @name Right)
+        "#;
+
+        let compiled =
+            super::compile_and_load(source, 48_000).expect("effect should compile and load");
+        let param = compiled
+            .manifest
+            .params
+            .iter()
+            .find(|param| param.name == "gain")
+            .expect("manifest should expose the gain param");
+        assert_eq!(param.default, 0.75);
+
+        let state = super::prewarm_dgen_process(&compiled.manifest, &compiled.lib);
+        assert_eq!(
+            state[param.cell_id], 0.75,
+            "warm-up scratch span must carry the param defaults a live node inits with"
+        );
+        assert!(
+            state.iter().all(|value| value.is_finite()),
+            "warm-up must not leave NaN/Inf in the state span"
+        );
+    }
+
+    #[test]
     fn custom_effect_mod_input_changes_mod_accessor_output_when_active() {
         let source = r#"
             (def input_l (in 1 @name Left))

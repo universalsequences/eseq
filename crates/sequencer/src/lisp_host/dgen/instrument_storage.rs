@@ -518,27 +518,7 @@ pub fn build_init_message_for_voice(
     manifest: &DGenManifest,
     voice_index: usize,
 ) -> Vec<f32> {
-    let mut entries: Vec<(usize, f32)> = Vec::new();
-
-    for param in &manifest.params {
-        if param.cell_id < manifest.total_memory_slots && param.default != 0.0 {
-            for lane in 0..param.cell_span {
-                let idx = param.cell_id + lane;
-                if idx < manifest.total_memory_slots {
-                    entries.push((idx, param.default));
-                }
-            }
-        }
-    }
-
-    for tensor in &manifest.tensor_init_data {
-        for (i, &val) in tensor.data.iter().enumerate() {
-            let idx = tensor.offset + i;
-            if idx < manifest.total_memory_slots && val != 0.0 {
-                entries.push((idx, val));
-            }
-        }
-    }
+    let mut entries = init_state_entries(manifest);
 
     // Set voice cell to voice_index
     if let Some(cell) = manifest.voice_cell_id {
