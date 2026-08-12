@@ -584,6 +584,25 @@ stays as-is; real macro hygiene is out of scope for this spec.
      upside is that `:material` macro calls are late-bound: they resolve at
      render time, so they are exempt from the step-0 load-order gate.
 
+  i. **Globals that Rust *generates lisp to write* stay in `eseq.vanilla`.**
+     The stage-3 heal is read-side only: it repairs an *empty* slot, and a
+     `StoreGlobal` fills one. So a pre-conversion **writer** is not rescued
+     the way a pre-conversion reader is — it keeps storing into the stale
+     `eseq.vanilla/` slot while later-compiled readers follow the alias to
+     the module's slot, and the two silently diverge (no error, just a value
+     frozen at its `def` initializer). This fired converting
+     `ui/effects/state.lisp`: `crates/sequencer/src/ui/custom_ui.rs` emits
+     `(def custom-synth-ui-… (inst) (do (set! synth-ui-current-inst inst) …))`
+     into a generated unit whose compile time is not ordered against the
+     file, and 23 `metal_seq` custom-UI layout tests eval that generated
+     source *before* `ui/effects.lisp`. Fix: leave such names in the implicit
+     module with the §3 cross-module def escape hatch
+     (`(def eseq.vanilla/synth-ui-current-inst false)`) and mint no alias for
+     them — they are a host→script protocol, not the module's API, and they
+     fold in only when the Rust codegen is taught to emit qualified names.
+     Rule of thumb: a name that Rust writes by bare spelling is not yours to
+     move; a name Rust only *reads* by bare spelling is (aliases cover reads).
+
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
   tests that load the converted file's family. Consumers stay untouched;
