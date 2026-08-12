@@ -3892,13 +3892,21 @@ impl VM {
             return Some(*node_id);
         }
         let module = self.current_module_name();
-        if module != crate::modules::IMPLICIT_MODULE && !crate::modules::is_qualified(name) {
-            return self
+        if module != crate::modules::IMPLICIT_MODULE
+            && !crate::modules::is_qualified(name)
+            && let Some(node_id) = self
                 .state_bindings
                 .get(&crate::modules::qualify(module, name))
-                .copied();
+        {
+            return Some(*node_id);
         }
-        None
+        // Migration compat alias (spec §10 slice 3): a converted `defstate`
+        // keeps answering to its old flat name for by-name readers/writers,
+        // mirroring `Compiler::state_binding_for`.
+        self.compat_aliases
+            .get(name)
+            .and_then(|target| self.state_bindings.get(target))
+            .copied()
     }
 
     pub fn read_tracked_state_value(&mut self, name: &str) -> Option<Value> {
@@ -6348,6 +6356,67 @@ counter
             .expect("module eval");
         let result = vm.eval_str("(stale-legacy)").expect("aliased call");
         assert_eq!(result, Some(Value::Number(2.0)));
+    }
+
+    /// Aliases are forward-looking only: a caller compiled BEFORE the alias
+    /// exists has already interned (and emitted an index for) the flat
+    /// `eseq.vanilla/…` slot, and nothing retrofits that slot afterwards.
+    /// This is the ordering constraint slice-3 conversions live under — a
+    /// module must be evaluated before its consumers compile (see the
+    /// conversion recipe in docs/module-system-spec.md §10). Because
+    /// `(load …)` runs at the *runtime* of the loading file, "consumer.lisp
+    /// loads dep.lisp at its top" is NOT early enough; the manifest above it
+    /// has to load the dep first.
+    #[test]
+    fn compat_alias_does_not_retrofit_an_earlier_compiled_caller() {
+        let mut vm = module_test_vm();
+        // Caller compiled first, while `pending-name` is undefined: the
+        // reference interns as eseq.vanilla/pending-name.
+        vm.eval_str("(def caller () (pending-name))")
+            .expect("caller def");
+        vm.eval_module_source(
+            temp_lisp_path("compat-late"),
+            "(module test.latemod)\n(def home () 5)\n(module-compat-alias pending-name home)",
+            1,
+        )
+        .expect("module eval");
+        // By-name resolution (host reads, string handlers, fresh compiles)
+        // follows the alias …
+        assert_eq!(vm.eval_str("(pending-name)"), Ok(Some(Value::Number(5.0))));
+        // … but the already-compiled caller still points at the empty slot.
+        assert!(
+            vm.eval_str("(caller)").is_err(),
+            "pre-alias compiled reference must not silently resolve"
+        );
+    }
+
+    /// `defstate` is a second keyspace, so the alias has to be honoured by
+    /// the state-binding ladders too — otherwise an unconverted
+    /// `(set! old-name v)` resolves the global through the alias but misses
+    /// the binding and stores over the NodeRef slot (IncorrectType).
+    #[test]
+    fn compat_alias_covers_the_defstate_keyspace() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("compat-state"),
+            "(module test.statealias)\n(defstate flag false)\n\
+             (module-compat-alias legacy-flag flag)\n(def read-flag () flag)",
+            1,
+        )
+        .expect("module eval");
+        // Unconverted caller writes through the old flat name …
+        vm.eval_str("(set! legacy-flag true)").expect("aliased set!");
+        assert_eq!(vm.eval_str("legacy-flag"), Ok(Some(Value::Bool(true))));
+        // … and the module's own bare reads see the same reactive source.
+        assert_eq!(
+            vm.eval_str("(test.statealias/read-flag)"),
+            Ok(Some(Value::Bool(true)))
+        );
+        // Runtime by-name path (host reads, string handlers) too.
+        assert_eq!(
+            vm.read_tracked_state_value("legacy-flag"),
+            Some(Value::Bool(true))
+        );
     }
 
     #[test]

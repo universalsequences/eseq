@@ -1384,9 +1384,21 @@ impl Compiler {
         {
             return Some(*id);
         }
-        self.refers
+        if let Some(id) = self
+            .refers
             .get(name)
             .and_then(|qualified| self.state_bindings.get(qualified))
+        {
+            return Some(*id);
+        }
+        // Migration compat alias (spec §10 slice 3): `defstate` keys are a
+        // second keyspace, so a converted state's old flat name has to follow
+        // the alias here too. Without this an unconverted `(set! old-name v)`
+        // resolves the *global* through the alias but misses the state
+        // binding, emitting StoreGlobal over the slot holding the NodeRef.
+        self.compat_aliases
+            .get(name)
+            .and_then(|target| self.state_bindings.get(target))
             .copied()
     }
 
