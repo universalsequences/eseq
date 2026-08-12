@@ -264,6 +264,19 @@ impl DylibCacheManager {
             }
         };
 
+        // Rust binary audit (impl spec, slice E5) on the exact bytes about to
+        // be published. The subprocess ran with --skip-inline-audit, so this
+        // is the only audit on the production path; failure publishes
+        // nothing.
+        if let Err(error) =
+            crate::lisp_host::dgen::dgen_audit::audit_dylib(&staging_dir.join(format!(
+                "{dylib_name}.dylib"
+            )))
+        {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(error);
+        }
+
         let metadata = CacheMetadata {
             schema_version: CACHE_SCHEMA_VERSION,
             key: request.key.clone(),

@@ -5,6 +5,7 @@ instrument/effect storage. Everything is surfaced through the
 `lisp_host` façade re-exports; nothing imports these modules directly.
 */
 
+pub mod dgen_audit;
 pub mod dgen_ffi;
 pub mod dgen_manifest;
 pub mod dylib_cache;

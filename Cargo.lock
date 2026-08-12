@@ -2606,6 +2606,7 @@ dependencies = [
  "hound",
  "libc",
  "notify",
+ "object",
  "reqwest",
  "rusqlite",
  "serde",

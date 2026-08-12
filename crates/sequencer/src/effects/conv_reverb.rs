@@ -440,6 +440,11 @@ fn partition_channel(samples: &[f32], host_sr: u32) -> Result<ChannelIr, String>
         .args(["--sample-rate", &host_sr.to_string()])
         .arg("--toolchain-root")
         .arg(&toolchain_root)
+        // Skip DGenLisp's inline shell audit (nm/otool, a Command Line Tools
+        // dependency). No Rust audit replaces it here: only the manifest's
+        // tensorInitData is consumed — the dylib byproduct is deleted below,
+        // never loaded.
+        .arg("--skip-inline-audit")
         .output()
         .map_err(|e| format!("run DGenLisp for IR prep: {e}"))?;
     if !output.status.success() {

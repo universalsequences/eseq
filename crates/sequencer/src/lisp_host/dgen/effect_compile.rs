@@ -113,6 +113,9 @@ pub fn compile_and_load_uncached_with_asset_base(
 ) -> Result<CompileResult, String> {
     let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
+    // Uncached path: the subprocess skipped its inline audit, so audit here
+    // before the dylib is loaded (impl spec, slice E5).
+    crate::lisp_host::dgen::dgen_audit::audit_dylib(&manifest.dylib_path)?;
     let lib = load_dylib_prewarmed(&manifest)?;
     Ok(CompileResult {
         manifest,
@@ -436,7 +439,11 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         .args(["--name", dylib_name])
         .args(["--sample-rate", &sample_rate.to_string()])
         .arg("--toolchain-root")
-        .arg(&toolchain_root);
+        .arg(&toolchain_root)
+        // The host audits the artifact itself (dgen_audit.rs); DGenLisp's
+        // inline shell audit would reintroduce the nm/otool (Command Line
+        // Tools) dependency this path must not have.
+        .arg("--skip-inline-audit");
     if kind == DGenCompileKind::Instrument {
         command.args(["--voices", "12"]);
     }
