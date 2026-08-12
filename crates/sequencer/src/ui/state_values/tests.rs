@@ -20682,15 +20682,15 @@
         let layout = editor.widget_layout().expect("sound palette layout");
         let panel = find_layout_node_by_debug_name(&layout, "sound-palette-panel")
             .expect("palette panel should render");
-        let header = find_layout_node_by_stable_key(&layout, "sound-palette-header-label")
+        let header = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/header-label")
             .expect("palette header should render");
-        let base_row = find_layout_node_by_stable_key(&layout, "sound-palette-entry-0")
+        let base_row = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/entry-0")
             .expect("gray base entry should render");
-        let current_row = find_layout_node_by_stable_key(&layout, "sound-palette-entry-3")
+        let current_row = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/entry-3")
             .expect("current entry should render");
-        let source = find_layout_node_by_stable_key(&layout, "sound-palette-source-3")
+        let source = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/source-3")
             .expect("preset/sample source label should render");
-        let diff_up = find_layout_node_by_stable_key(&layout, "sound-palette-diff-up-0")
+        let diff_up = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/diff-up-0")
             .expect("diff badge should render");
         assert_finite_nonzero_rect(panel, "sound palette panel");
         assert_finite_nonzero_rect(base_row, "gray base entry");
@@ -20702,12 +20702,12 @@
         // :track-sound renders the TRK chip inside its card; unflagged
         // entries render none. (Asserted before the source-label containment
         // check below, which is a known pre-existing card-height overflow.)
-        let trk_chip = find_layout_node_by_stable_key(&layout, "sound-palette-trk-3")
+        let trk_chip = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/trk-3")
             .expect("the track-sound entry renders its TRK chip");
         assert_finite_nonzero_rect(trk_chip, "TRK chip");
         assert_layout_inside(trk_chip, current_row, "TRK chip");
         assert!(
-            find_layout_node_by_stable_key(&layout, "sound-palette-trk-0").is_none(),
+            find_layout_node_by_stable_key(&layout, "eseq.sound-palette/trk-0").is_none(),
             "an entry that is not the track sound renders no TRK chip"
         );
         assert_layout_inside(source, current_row, "preset/sample source label");
@@ -20715,7 +20715,7 @@
 
         // Sound-glyph spec P2: each box carries the plant glyph as its
         // center region, fed by the host-published frame key.
-        let glyph = find_layout_node_by_stable_key(&layout, "sound-palette-glyph-3")
+        let glyph = find_layout_node_by_stable_key(&layout, "eseq.sound-palette/glyph-3")
             .expect("sound glyph widget should render");
         assert_eq!(glyph.widget_type, "sound-glyph");
         assert_finite_nonzero_rect(glyph, "sound glyph");
@@ -20735,7 +20735,7 @@
         editor.refresh_visible_layouts_for_buffer_named("*sound-palette-test*");
         let layout = editor.widget_layout().expect("closed palette layout");
         assert!(
-            find_layout_node_by_stable_key(&layout, "sound-palette-entry-3").is_none(),
+            find_layout_node_by_stable_key(&layout, "eseq.sound-palette/entry-3").is_none(),
             "a closed palette renders no entries"
         );
     }
