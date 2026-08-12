@@ -403,7 +403,20 @@ stays as-is; real macro hygiene is out of scope for this spec.
   `eseq.mixer/pattern-cell-selected-binding`). A compat alias table (old
   flat name → qualified) keeps unconverted callers working mid-migration
   and is deleted at the end. Registry auto-qualification (§5) lands here,
-  per-file with its module header.
+  per-file with its module header. **Stage 1 (BUILT 2026-08-12):** the
+  infrastructure — auto-qualification gated on declared modules (vanilla
+  files keep flat keys, so no serialized identity shifts until a file
+  converts), chunk-level module provenance (`Chunk::source_module`,
+  `VM::current_module_name`) for late-bound registration natives, and the
+  alias mechanism: a converted file declares
+  `(module-compat-alias old-flat-name new-name)` (top level; `new-name`
+  qualifies against the current module when bare). Aliases live in
+  `VM::compat_aliases` (snapshot-aware), are consulted by both resolution
+  ladders on a bare name — ahead of the implicit-module/flat entries so a
+  stale pre-conversion `eseq.vanilla/` slot cannot shadow the new home,
+  behind a declared module's own entry and `:refer`s — and apply to reads
+  and writes (an unconverted redefiner keeps last-writer-wins against the
+  new home). Deleting the table and the form ends the migration.
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
   add `~/.eseq.d/init.lisp` loaded last. `override` (§6.1) lands here — it
