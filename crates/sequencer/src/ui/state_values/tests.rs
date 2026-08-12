@@ -15020,7 +15020,10 @@
         // Closed: zero footprint, so the picker contributes no layout node.
         let layout = editor.widget_layout().expect("patcher layout");
         assert!(
-            find_layout_node_by_stable_key(&layout, "choose-model-dropdown").is_none(),
+            // `:key`s auto-qualify inside a declared module (module-system
+            // spec §5): ui/choose-model.lisp is `(module eseq.choose-model)`,
+            // so its bare `:key "dropdown"` hashes qualified.
+            find_layout_node_by_stable_key(&layout, "eseq.choose-model/dropdown").is_none(),
             "picker must not render while closed"
         );
 
@@ -15033,7 +15036,7 @@
 
         let layout = editor.widget_layout().expect("patcher layout with picker");
         assert_finite_layout_tree(&layout);
-        let dropdown = find_layout_node_by_stable_key(&layout, "choose-model-dropdown")
+        let dropdown = find_layout_node_by_stable_key(&layout, "eseq.choose-model/dropdown")
             .expect("model dropdown should render once the picker is open");
         assert!(
             dropdown.rect.width > 0.0 && dropdown.rect.height > 0.0,
