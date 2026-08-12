@@ -558,7 +558,12 @@ impl<'a> ScopeEmitter<'a> {
                     };
                     format!("(def {binding} ({label}))")
                 }
-                NodeRole::History => format!("(make-history {binding})"),
+                // `(make-history h @shape [2 2])` is a tensor history; the
+                // label is the attribute carrier (see lisp.rs node_label).
+                NodeRole::History => format!(
+                    "(make-history {binding}{})",
+                    label_attributes_suffix(&node.label)
+                ),
                 _ => continue,
             };
             lines.push(line);
@@ -679,7 +684,11 @@ impl<'a> ScopeEmitter<'a> {
 
     fn emit_value_def(&mut self, node: &'a PatchNode) -> Result<String, String> {
         if self.roles.get(node.id.as_str()) == Some(&NodeRole::History) {
-            return Ok(format!("(make-history {})", self.names[&node.id]));
+            return Ok(format!(
+                "(make-history {}{})",
+                self.names[&node.id],
+                label_attributes_suffix(&node.label)
+            ));
         }
         let binding = self.names[&node.id].clone();
         let value = match node.kind {

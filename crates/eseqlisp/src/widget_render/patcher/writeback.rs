@@ -5,9 +5,9 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::display::{node_display_input_slots, node_display_label};
 use super::lisp::{
-    attribute_item_mask, attribute_span_len, is_attribute_key, node_kind_for_op,
-    normalize_editor_node_text, parse_patch_source, parse_patch_source_with_library,
-    positional_args, symbol_at,
+    attribute_item_mask, attribute_span_len, format_patch_literal, is_attribute_key,
+    label_attributes_suffix, node_kind_for_op, normalize_editor_node_text, parse_patch_source,
+    parse_patch_source_with_library, positional_args, symbol_at,
 };
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
@@ -1369,8 +1369,33 @@ fn patch_node<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a PatchNode> {
     patch.nodes.iter().find(|node| node.id == node_id)
 }
 
+/// A created node typed as `history`, optionally carrying attribute runs —
+/// `history @shape [2 2]` declares a tensor history. Anything with positional
+/// arguments is a value edit, not a history declaration.
 fn created_history_edit(edit: &super::state::PatcherNodeEdit) -> bool {
-    edit.text.trim() == "history"
+    let trimmed = edit.text.trim();
+    if trimmed == "history" {
+        return true;
+    }
+    let Some(items) = created_history_items(trimmed) else {
+        return false;
+    };
+    symbol_at(&items, 0) == Some("history") && positional_args(&items, 1).is_empty()
+}
+
+fn created_history_items(text: &str) -> Option<Vec<Expression>> {
+    let source = format!("({})", normalize_editor_node_text(text));
+    match parse_single_expression(&source) {
+        Ok(Expression::List(items)) => Some(items),
+        _ => None,
+    }
+}
+
+/// The ` @key value...` suffix a created history edit carries after the
+/// `history` head, rendered with the same canonical formatting the label
+/// round trip uses (`label_attributes_suffix`).
+fn created_history_attributes_suffix(edit: &super::state::PatcherNodeEdit) -> String {
+    label_attributes_suffix(edit.text.trim())
 }
 
 fn created_value_edit(edit: &super::state::PatcherNodeEdit) -> bool {
@@ -1777,7 +1802,7 @@ impl GeneratedBindings {
 struct HistoryBindings {
     names: HashMap<(String, String), String>,
     created_names: HashMap<(String, String), String>,
-    pending_make_forms: Vec<(SourceScopeId, String)>,
+    pending_make_forms: Vec<(SourceScopeId, String, String)>,
 }
 
 impl HistoryBindings {
@@ -1831,19 +1856,21 @@ fn resolve_history_bindings(
         {
             bindings.insert(&view_key, &node.id, node.id.clone());
         }
-        let mut created_history_ids = interaction_state
+        let mut created_histories = interaction_state
             .edit_state
             .nodes
             .values()
             .filter(|edit| edit.view_key == view_key)
             .filter(|edit| created_history_edit(edit))
-            .map(|edit| edit.id.clone())
+            .map(|edit| (edit.id.clone(), created_history_attributes_suffix(edit)))
             .collect::<Vec<_>>();
-        created_history_ids.sort();
-        for node_id in created_history_ids {
+        created_histories.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (node_id, attributes) in created_histories {
             let name = allocator.allocate(&scope);
             bindings.insert_created(&view_key, &node_id, name.clone());
-            bindings.pending_make_forms.push((scope.clone(), name));
+            bindings
+                .pending_make_forms
+                .push((scope.clone(), name, attributes));
         }
     }
     bindings
@@ -3521,7 +3548,8 @@ fn macro_body_side_effect_form(expr: &Expression) -> bool {
     };
     matches!(
         symbol_at(items, 0),
-        Some("def" | "make-history" | "write-history")
+        Some("def" | "make-history" | "write-history" | "make-tensor-history"
+            | "write-tensor-history")
     )
 }
 
@@ -4419,14 +4447,15 @@ fn apply_history_writeback(
         }
     }
 
-    for (scope, name) in history_bindings.pending_make_forms.iter().rev() {
-        document.prepend_form(
-            scope,
-            Expression::List(vec![
-                Expression::Symbol("make-history".to_string()),
-                Expression::Symbol(name.clone()),
-            ]),
-        )?;
+    for (scope, name, attributes) in history_bindings.pending_make_forms.iter().rev() {
+        let form = parse_single_expression(&format!("(make-history {name}{attributes})"))
+            .unwrap_or_else(|_| {
+                Expression::List(vec![
+                    Expression::Symbol("make-history".to_string()),
+                    Expression::Symbol(name.clone()),
+                ])
+            });
+        document.prepend_form(scope, form)?;
     }
     for (scope, name, value) in pending_write_forms {
         document.insert_history_write(&scope, name.to_string(), value)?;
@@ -7178,6 +7207,9 @@ impl SourceDocument {
                 | "make-history"
                 | "read-history"
                 | "write-history"
+                | "make-tensor-history"
+                | "read-tensor-history"
+                | "write-tensor-history"
         ) || dgenlisp_operator_names().contains(operator)
             || self.macros.contains_key(operator)
             || self.external_macros.contains(operator)
@@ -7386,29 +7418,54 @@ fn format_writeback_expression(expr: &Expression) -> String {
 }
 
 fn format_writeback_list(items: &[Expression]) -> String {
-    let inner = items
-        .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            if idx > 0
-                && matches!(items.get(idx - 1), Some(Expression::Symbol(attr)) if attr == "@modulator")
-                && let Expression::Number(value) = item
-                && value.fract() == 0.0
-                && *value > 0.0
-            {
-                return format!("{value:.0}");
+    // `[` / `]` are not lexer delimiters, so a bracketed attribute array lexes
+    // as a run of symbol/number tokens (`[2`, `2`, `]`). Render those tokens
+    // the way the label round trip does (integral numbers without the `.0`,
+    // no space before a closing bracket) or `@shape [2 2]` re-emits as
+    // `[2 2.0 ]`. Single-token attribute values (`@default 5.0`) keep the
+    // plain expression formatting.
+    let mut bracket_run_items = vec![false; items.len()];
+    let mut idx = 1;
+    while idx < items.len() {
+        if is_attribute_key(&items[idx]) {
+            let span = attribute_span_len(items, idx);
+            if span > 2 {
+                for flag in bracket_run_items.iter_mut().skip(idx + 1).take(span - 1) {
+                    *flag = true;
+                }
             }
-            if expression_slot_requires_integer_token(items, idx)
-                && let Expression::Number(value) = item
-                && value.fract() == 0.0
-                && *value > 0.0
-            {
-                return format!("{value:.0}");
-            }
+            idx += span;
+            continue;
+        }
+        idx += 1;
+    }
+    let mut out = String::from("(");
+    for (idx, item) in items.iter().enumerate() {
+        let text = if idx > 0
+            && matches!(items.get(idx - 1), Some(Expression::Symbol(attr)) if attr == "@modulator")
+            && let Expression::Number(value) = item
+            && value.fract() == 0.0
+            && *value > 0.0
+        {
+            format!("{value:.0}")
+        } else if expression_slot_requires_integer_token(items, idx)
+            && let Expression::Number(value) = item
+            && value.fract() == 0.0
+            && *value > 0.0
+        {
+            format!("{value:.0}")
+        } else if bracket_run_items[idx] {
+            format_patch_literal(item)
+        } else {
             format_writeback_expression(item)
-        })
-        .collect::<Vec<_>>();
-    format!("({})", inner.join(" "))
+        };
+        if idx > 0 && !text.starts_with(']') {
+            out.push(' ');
+        }
+        out.push_str(&text);
+    }
+    out.push(')');
+    out
 }
 
 fn expression_slot_requires_integer_token(items: &[Expression], idx: usize) -> bool {
@@ -7549,7 +7606,14 @@ fn collect_history_suffixes(expr: &Expression, max_suffix: &mut usize) {
         Expression::List(items) => {
             if matches!(
                 symbol_at(items, 0),
-                Some("make-history" | "read-history" | "write-history")
+                Some(
+                    "make-history"
+                        | "read-history"
+                        | "write-history"
+                        | "make-tensor-history"
+                        | "read-tensor-history"
+                        | "write-tensor-history"
+                )
             ) && let Some(name) = symbol_at(items, 1)
                 && let Some(suffix) = name.strip_prefix("history").and_then(|s| s.parse().ok())
             {
@@ -7589,7 +7653,7 @@ fn collect_scope_binding_names(expr: &Expression, names: &mut HashSet<String>) {
             }
             _ => {}
         },
-        Some("param" | "make-history") => {
+        Some("param" | "make-history" | "make-tensor-history") => {
             if let Some(name) = symbol_at(items, 1) {
                 names.insert(name.to_string());
             }
@@ -7676,7 +7740,11 @@ fn collect_scope_value_references(expr: &Expression, references: &mut HashSet<St
             for (idx, item) in items.iter().enumerate() {
                 if idx == 0
                     || attribute_items[idx]
-                    || (idx == 1 && matches!(head, Some("def" | "param" | "make-history")))
+                    || (idx == 1
+                        && matches!(
+                            head,
+                            Some("def" | "param" | "make-history" | "make-tensor-history")
+                        ))
                 {
                     continue;
                 }

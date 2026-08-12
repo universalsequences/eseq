@@ -7846,23 +7846,26 @@
       {
         "name": "make-history",
         "signatures": [
-          "(make-history name)"
+          "(make-history name)",
+          "(make-history name @shape [d1 d2 ...])",
+          "(make-history name @shape [d1 d2 ...] @hop N)",
+          "(make-history name @shape [d1 d2 ...] @data [...])"
         ],
-        "summary": "Create a history cell for feedback."
+        "summary": "Create a history cell for feedback. With @shape it is a tensor history; read-history/write-history dispatch on the cell's shape."
       },
       {
         "name": "read-history",
         "signatures": [
           "(read-history name)"
         ],
-        "summary": "Read the previous frame from a history cell."
+        "summary": "Read the previous frame from a history cell. Returns a tensor when the cell was declared with @shape."
       },
       {
         "name": "write-history",
         "signatures": [
           "(write-history name expr)"
         ],
-        "summary": "Write the current frame to a history cell and return the written signal."
+        "summary": "Write the current frame to a history cell and return the written signal. Accepts a tensor when the cell was declared with @shape."
       },
       {
         "name": "make-tensor-history",

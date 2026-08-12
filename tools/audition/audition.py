@@ -33,7 +33,9 @@ import wave
 import numpy as np
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-LISP_HOST = os.path.join(REPO_ROOT, "crates", "sequencer", "src", "lisp_host.rs")
+LISP_HOST = os.path.join(
+    REPO_ROOT, "crates", "sequencer", "src", "lisp_host", "dgen",
+    "instrument_compile.rs")
 DGEN_ROOT = os.environ.get("DGEN_ROOT", os.path.expanduser("~/code/swift/dgen"))
 CACHE_ROOT = os.environ.get(
     "AUDITION_CACHE", os.path.expanduser("~/.cache/eseq-audition"))

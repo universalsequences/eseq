@@ -294,7 +294,8 @@ pub(super) fn node_kind_for_op(op: &str, macros: &HashSet<String>) -> NodeKind {
         "in" => NodeKind::In,
         "out" => NodeKind::Out,
         "param" => NodeKind::Param,
-        "history" | "make-history" | "read-history" | "write-history" => NodeKind::History,
+        "history" | "make-history" | "read-history" | "write-history" | "make-tensor-history"
+        | "read-tensor-history" | "write-tensor-history" => NodeKind::History,
         _ if dgenlisp_constant_names().contains(op) || is_numeric_literal(op) => NodeKind::Constant,
         _ if macros.contains(op) => NodeKind::MacroInstance,
         _ => NodeKind::Builtin,
@@ -315,9 +316,9 @@ pub(super) fn is_unsupported_call_head(op: &str) -> bool {
 pub(super) fn call_input_args<'a>(op: &str, items: &'a [Expression]) -> Vec<&'a Expression> {
     match op {
         "in" => positional_args(items, 1).into_iter().take(1).collect(),
-        "param" | "make-history" => Vec::new(),
+        "param" | "make-history" | "make-tensor-history" => Vec::new(),
         "out" => positional_args(items, 1).into_iter().take(2).collect(),
-        "write-history" => positional_args(items, 1)
+        "write-history" | "write-tensor-history" => positional_args(items, 1)
             .into_iter()
             .nth(1)
             .into_iter()
@@ -526,7 +527,7 @@ pub(super) fn normalize_editor_node_text(text: &str) -> String {
 }
 
 pub(super) fn connection_kind_for_op(op: &str) -> ConnectionKind {
-    if op == "write-history" {
+    if op == "write-history" || op == "write-tensor-history" {
         ConnectionKind::Feedback
     } else {
         ConnectionKind::Forward
@@ -538,7 +539,12 @@ pub(super) fn node_label(op: &str, items: &[Expression], def_name: Option<&str>)
         "in" => in_label(items),
         "out" => out_label(items),
         "param" => param_label(items),
-        "history" | "make-history" => "history".to_string(),
+        // The attribute suffix is what keeps `@shape`/`@hop` alive across the
+        // round trip: `(make-history h @shape [2 2])` is a tensor history and
+        // the generator rebuilds the call from this label alone.
+        "history" | "make-history" | "make-tensor-history" => {
+            format!("history{}", attributes_suffix(items))
+        }
         _ => {
             let mut label = def_name
                 .map(|name| format!("{op} {name}"))
@@ -641,7 +647,8 @@ pub(super) fn format_patch_literal(expr: &Expression) -> String {
 
 pub(super) fn default_outputs(op: &str) -> Vec<String> {
     match op {
-        "out" | "write-history" | "make-history" => Vec::new(),
+        "out" | "write-history" | "make-history" | "write-tensor-history"
+        | "make-tensor-history" => Vec::new(),
         _ => vec!["out".to_string()],
     }
 }

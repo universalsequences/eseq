@@ -139,20 +139,23 @@ fn patcher_history_documentation() -> OperatorDocumentation {
     OperatorDocumentation {
         category: Some("patcher".to_string()),
         summary: Some(
-            "One-sample feedback cell. The outlet reads the previous frame and the inlet writes the current frame."
+            "One-sample feedback cell. The outlet reads the previous frame and the inlet writes the current frame. With @shape it holds a tensor and reads/writes whole tensors per frame."
                 .to_string(),
         ),
-        signatures: vec!["(history)".to_string()],
+        signatures: vec![
+            "(history)".to_string(),
+            "(history @shape [d1 d2 ...])".to_string(),
+        ],
         inputs: vec![OperatorPortDocumentation {
             name: Some("write".to_string()),
-            kind: Some("signal".to_string()),
+            kind: Some("signal|tensor".to_string()),
             required: Some(false),
             index: Some(0),
             summary: Some("Value stored for the next frame.".to_string()),
         }],
         outputs: vec![OperatorPortDocumentation {
             name: Some("previous".to_string()),
-            kind: Some("signal".to_string()),
+            kind: Some("signal|tensor".to_string()),
             required: Some(true),
             index: Some(0),
             summary: Some("Value stored by the preceding frame.".to_string()),

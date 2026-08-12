@@ -123,8 +123,10 @@ impl Projector {
                     self.patch.imports.push(name.to_string());
                 }
             }
-            "make-history" => self.project_make_history(items, expr, source_expr),
-            "write-history" => {
+            "make-history" | "make-tensor-history" => {
+                self.project_make_history(items, expr, source_expr)
+            }
+            "write-history" | "write-tensor-history" => {
                 let _ = self.project_write_history(items, expr, source_expr);
             }
             "out" => {
@@ -209,7 +211,7 @@ impl Projector {
             id,
             op: "make-history".to_string(),
             kind: NodeKind::History,
-            label: "history".to_string(),
+            label: node_label("make-history", items, None),
             args: Vec::new(),
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
@@ -459,7 +461,14 @@ impl Projector {
             && symbol_at(items, 0).is_some_and(|head| {
                 matches!(
                     head,
-                    "def" | "defmacro" | "param" | "out" | "make-history" | "write-history"
+                    "def"
+                        | "defmacro"
+                        | "param"
+                        | "out"
+                        | "make-history"
+                        | "write-history"
+                        | "make-tensor-history"
+                        | "write-tensor-history"
                 )
             })
         {
@@ -764,10 +773,10 @@ impl Projector {
             return None;
         }
         let original = Expression::List(items.to_vec());
-        if op == "read-history" {
+        if op == "read-history" || op == "read-tensor-history" {
             return self.project_read_history(items, &original, source_expr);
         }
-        if op == "write-history" {
+        if op == "write-history" || op == "write-tensor-history" {
             return self
                 .project_write_history(items, &original, source_expr)
                 .map(|(node_id, _)| node_id);
@@ -1011,9 +1020,11 @@ impl Projector {
         let positional = self.positional_arg_sources(call, items, 1);
         match op {
             "in" => positional.into_iter().take(1).collect(),
-            "param" | "make-history" => Vec::new(),
+            "param" | "make-history" | "make-tensor-history" => Vec::new(),
             "out" => positional.into_iter().take(2).collect(),
-            "write-history" => positional.into_iter().nth(1).into_iter().collect(),
+            "write-history" | "write-tensor-history" => {
+                positional.into_iter().nth(1).into_iter().collect()
+            }
             _ => positional,
         }
     }
@@ -1104,7 +1115,15 @@ impl Projector {
                 return name;
             }
         }
-        if op == "make-history" || op == "read-history" || op == "write-history" {
+        if matches!(
+            op,
+            "make-history"
+                | "read-history"
+                | "write-history"
+                | "make-tensor-history"
+                | "read-tensor-history"
+                | "write-tensor-history"
+        ) {
             if let Some(name) = symbol_at(items, 1) {
                 return name.to_string();
             }
