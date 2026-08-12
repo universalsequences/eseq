@@ -2714,6 +2714,9 @@ impl Runtime {
             .iter()
             .map(|name| crate::modules::strip_implicit(name).to_string())
             .collect::<Vec<_>>();
+        // Compat-alias old names are what users still type during the
+        // migration (spec §10 slice 3): keep them completable and M-x-able.
+        symbols.extend(self.vm.compat_aliases.keys().cloned());
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
                 let display = crate::modules::strip_implicit(global);

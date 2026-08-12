@@ -12927,3 +12927,168 @@ fn vanilla_bind_key_records_stay_flat() {
             .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "flat-ran"))
     );
 }
+
+#[test]
+fn mx_command_defined_in_a_declared_module_opens_via_typed_bare_name() {
+    // Mirrors the S3 batch-1 choose-model conversion: an M-x command
+    // defined inside a declared module, reachable by its typed bare name
+    // through the candidate filter and through the compat alias.
+    let runtime = Runtime::with_init_source("");
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_source_at_path(
+            std::env::temp_dir().join("mx-module-test.lisp"),
+            r#"
+(module test.mxmod)
+(module-compat-alias mx-probe-command probe-command)
+(defstate probe-open? false)
+(def probe-command () (set! probe-open? true))
+"#,
+        )
+        .expect("module eval");
+
+    // The candidate list carries the qualified name and the typed bare
+    // name substring-matches it.
+    let candidates = editor.collect_mx_candidates();
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c == "test.mxmod/probe-command"),
+        "qualified command should be an M-x candidate"
+    );
+    let filtered = super::filter_candidates(&candidates, "mx-probe-command");
+    assert!(
+        !filtered.is_empty(),
+        "typed old name should still match something (alias-era candidates: {:?})",
+        candidates
+            .iter()
+            .filter(|c| c.contains("probe"))
+            .collect::<Vec<_>>()
+    );
+
+    // Executing by the qualified candidate works…
+    editor.execute_mx_command("test.mxmod/probe-command");
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.mxmod/probe-open?").unwrap(),
+        Some(Value::Bool(true)),
+        "qualified M-x execution should run the command"
+    );
+
+    // …and executing by the typed flat name resolves through the alias.
+    editor
+        .runtime_mut()
+        .eval_str("(set! test.mxmod/probe-open? false)")
+        .unwrap();
+    editor.execute_mx_command("mx-probe-command");
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.mxmod/probe-open?").unwrap(),
+        Some(Value::Bool(true)),
+        "aliased flat-name M-x execution should run the command"
+    );
+}
+
+/// The S3 batch-1 choose-model shape end-to-end: a modal + dropdown declared
+/// inside a module, the row click dispatching an on-change that calls a
+/// module-local fn writing module defstates. Covers the full pointer
+/// pipeline (overlay hit-test → Custom event → closure) with qualified
+/// widget keys and state bindings.
+#[cfg(target_os = "macos")]
+#[test]
+fn module_dropdown_row_click_applies_selection_and_closes_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_source_at_path(
+            std::env::temp_dir().join("module-picker-test.lisp"),
+            r#"
+(module test.picker)
+(defstate picker-open? true)
+(defstate picked "plate")
+(def choose (v)
+  (do
+    (set! picked v)
+    (set! picker-open? false)))
+(def panel ()
+  (modal :is-open picker-open?
+         :on-close (lambda () (set! picker-open? false))
+    (v-stack
+      (dropdown
+        :key "dropdown"
+        :width 12
+        :height 1.4
+        :options '("plate" "hall" "quad")
+        :value picked
+        :on-change (lambda (v) (choose v))))))
+"#,
+        )
+        .expect("module picker source");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*panel*" (test.picker/panel))
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 18
+                :on-click (lambda (event) true)))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*panel*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#,
+        )
+        .expect("mount panel");
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    open_dropdown_inside_modal(&mut editor);
+
+    // Click the "hall" row (index 1) inside the open menu overlay.
+    // Mirrors dropdown.rs MENU_PADDING_V=0.3 / MENU_ROW_HEIGHT=1.4.
+    let menu = crate::widget_render::get_overlay_rect().expect("open dropdown menu rect");
+    let row = menu.row + 0.3 + 1.4 * 1.0 + 0.7;
+    let col = menu.col + menu.width * 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col.floor() as u16,
+            row.floor() as u16,
+        ),
+        col,
+        row,
+        0,
+    );
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.picker/picked").unwrap(),
+        Some(Value::String("hall".to_string())),
+        "row click should dispatch on-change through the module fn"
+    );
+    assert_eq!(
+        editor
+            .runtime_mut()
+            .eval_str("test.picker/picker-open?")
+            .unwrap(),
+        Some(Value::Bool(false)),
+        "the module fn should close the modal"
+    );
+}
