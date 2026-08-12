@@ -14678,6 +14678,19 @@
             .runtime_mut()
             .eval_str("(do (defstate selected-bus -1) (defstate cursor-step 0) (def page-size 16))")
             .expect("install standalone sequencer globals");
+        // ui/browser.lisp owns `sbrowser-loading-instrument-name` and is not
+        // loaded in this stub harness.  Now that ui/sequencer.lisp is
+        // `(module eseq.sequencer)`, the `(set! sbrowser-loading-instrument-name
+        // …)` in its `drop-new-track` resolves against whatever exists at
+        // compile time and otherwise lands in the module's own namespace,
+        // instead of creating the flat global the way a vanilla `set!` used to
+        // (module spec §10 hazard j).  Declared up front, exactly as in
+        // production where ui/browser.lisp loads at main.lisp:17 and
+        // ui/sequencer.lisp at :57.
+        editor
+            .runtime_mut()
+            .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
+            .expect("install browser-owned loading-instrument state");
         apply_sequencer_perf_pattern(&mut editor, track_count, step_count, 0);
         editor
             .runtime_mut()
@@ -14716,7 +14729,7 @@
                 panic!("sequencer perf fixture layout status: {status}");
             }
         }
-        let step_cell_count = count_stable_key_prefix(&layout, "seqv-step-cell-");
+        let step_cell_count = count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-");
         assert_eq!(
             step_cell_count,
             track_count * step_count,
@@ -17812,7 +17825,7 @@
             lanes.iter().map(|lane| lane.rect).collect::<Vec<_>>()
         );
         let kick_step =
-            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-0-0")
+            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-lane-step-0-0-0")
                 .expect("the Kick lane should expose its own first step");
         assert_finite_nonzero_rect(kick_step, "Kick lane first step");
         for handler in ["on-mouse-down", "on-drag", "on-mouse-up", "on-double-click"] {
@@ -17840,11 +17853,11 @@
             "lane duration visualization must use a reactive per-pad binding"
         );
         let snare_step =
-            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-12-4")
+            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-lane-step-0-12-4")
                 .expect("the Snare lane should expose its own fifth step");
         assert_finite_nonzero_rect(snare_step, "Snare lane fifth step");
         let kick_label =
-            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-label-0-0")
+            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-lane-label-0-0")
                 .expect("the Kick lane should have a slot label on its right");
         assert_finite_nonzero_rect(kick_label, "Kick lane label");
         assert_eq!(
@@ -17855,7 +17868,7 @@
             kick_label.rect.col + kick_label.rect.width <= kick_step.rect.col,
             "the slot label should be placed to the left of the steps"
         );
-        let kick_mute = find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-mute-0-0")
+        let kick_mute = find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-slot-mute-0-0")
             .expect("the Kick lane should expose a per-slot mute toggle");
         assert_finite_nonzero_rect(kick_mute, "Kick lane mute toggle");
         assert_eq!(
@@ -17882,7 +17895,7 @@
             "the per-slot mute toggle should sit before the slot name"
         );
         let kick_volume =
-            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-volume-0-0")
+            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-slot-volume-0-0")
                 .expect("the Kick lane should expose a per-slot volume control");
         assert_finite_nonzero_rect(kick_volume, "Kick lane volume control");
         assert!(
@@ -17900,7 +17913,7 @@
             find_layout_node_by_text(&layout, "sound").is_some(),
             "the expanded rack tab should replace tpose with sound"
         );
-        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-sound-slider-0-0")
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-sound-slider-0-0")
             .expect("drum-rack Sound mode should render a discrete sound slider");
         assert_finite_nonzero_rect(slider, "drum-rack sound slider");
         assert_eq!(layout_prop_number(slider, "min"), Some(0.0));
@@ -18204,7 +18217,7 @@
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("drum lane gesture layout");
         let callback = |step: usize, name: &str| {
-            find_layout_node_by_stable_key(&layout, &format!("seqv-drum-lane-step-0-12-{step}"))
+            find_layout_node_by_stable_key_suffix(&layout, &format!("/drum-lane-step-0-12-{step}"))
                 .unwrap_or_else(|| panic!("drum lane step {step}"))
                 .props
                 .get(name)
@@ -18391,9 +18404,9 @@
         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
 
         let layout = editor.widget_layout().expect("sequencer layout");
-        let inactive_track_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-0")
+        let inactive_track_cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-0-0")
             .expect("inactive track step cell");
-        let current_track_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-1-0")
+        let current_track_cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-1-0")
             .expect("current track step cell");
 
         assert!(
@@ -18462,7 +18475,7 @@
             .current_widget_tree()
             .expect("sequencer widget tree");
 
-        let root = find_widget_map_by_key(&tree, "sequencer-new-track-drop-zone")
+        let root = find_widget_map_by_key(&tree, "new-track-drop-zone")
             .expect("sequencer root drop zone");
         assert!(
             root.contains_key("on-drop"),
@@ -18473,7 +18486,7 @@
         assert!(value_contains_string(&root_drop_types, "instrument"));
 
         let row =
-            find_widget_map_by_key(&tree, "sequencer-track-drop-0").expect("sequencer track row");
+            find_widget_map_by_key(&tree, "track-drop-0").expect("sequencer track row");
         assert!(
             row.contains_key("on-drop"),
             "sequencer track row should expose an on-drop callback"
@@ -18485,7 +18498,7 @@
             "custom instrument rows should accept saved-instrument replacement"
         );
 
-        let sampler_row = find_widget_map_by_key(&tree, "sequencer-track-drop-1")
+        let sampler_row = find_widget_map_by_key(&tree, "track-drop-1")
             .expect("sampler sequencer track row");
         let sampler_drop_types = sampler_row
             .get("drop-types")
@@ -18496,7 +18509,7 @@
             "sampler rows should accept conversion to a saved instrument"
         );
 
-        let rack_row = find_widget_map_by_key(&tree, "sequencer-track-drop-2")
+        let rack_row = find_widget_map_by_key(&tree, "track-drop-2")
             .expect("rack sequencer track row");
         let rack_drop_types = rack_row
             .get("drop-types")
@@ -18893,7 +18906,7 @@
                 .widget_layout
                 .as_ref()
                 .expect("sequencer tile should have widget layout");
-            let expand = find_layout_node_by_stable_key(layout, "seqv-expand-0")
+            let expand = find_layout_node_by_stable_key_suffix(layout, "/expand-0")
                 .expect("sequencer expand button should be present");
             let viewport_width = editor
                 .tile_root
@@ -25700,7 +25713,7 @@
             .expect("sequencer layout should build");
 
         assert_eq!(
-            count_stable_key_prefix(&layout, "seqv-step-cell-"),
+            count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
             16,
             "sequencer buffer should render one cell per visible step"
         );
@@ -25712,7 +25725,7 @@
             "collapsed sequencer rows should not render the removed right-side timebase dropdown: {layout_summaries:#?}"
         );
 
-        let badge = find_layout_node_by_stable_key(&layout, "seqv-color-badge-0")
+        let badge = find_layout_node_by_stable_key_suffix(&layout, "/color-badge-0")
             .unwrap_or_else(|| panic!("sequencer row color badge missing: {layout_summaries:#?}"));
         assert_finite_nonzero_rect(badge, "sequencer row color badge");
         assert_eq!(
@@ -25730,7 +25743,7 @@
             }) if namespace == "SEQ" && field == "track-color-r-effective"
         ));
 
-        let track_name = find_layout_node_by_stable_key(&layout, "seqv-track-name-label-0")
+        let track_name = find_layout_node_by_stable_key_suffix(&layout, "/track-name-label-0")
             .unwrap_or_else(|| {
                 panic!("sequencer row track name label missing: {layout_summaries:#?}")
             });
@@ -25747,7 +25760,7 @@
             "instrument track names should reuse the sidebar piano icon"
         );
 
-        let volume_control = find_layout_node_by_stable_key(&layout, "seqv-track-volume-control-0")
+        let volume_control = find_layout_node_by_stable_key_suffix(&layout, "/track-volume-control-0")
             .unwrap_or_else(|| {
                 panic!("sequencer row volume control missing: {layout_summaries:#?}")
             });
@@ -25775,7 +25788,7 @@
         ));
 
         let expand =
-            find_layout_node_by_stable_key(&layout, "seqv-expand-0").unwrap_or_else(|| {
+            find_layout_node_by_stable_key_suffix(&layout, "/expand-0").unwrap_or_else(|| {
                 panic!("sequencer row expand button missing: {layout_summaries:#?}")
             });
         assert_eq!(expand.widget_type, "box");
@@ -25816,13 +25829,13 @@
             .expect("eight-step sequencer layout should build");
 
         assert_eq!(
-            count_stable_key_prefix(&layout, "seqv-step-cell-"),
+            count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
             16,
             "short patterns should preserve the fixed-width step grid"
         );
 
         for step in 0..16 {
-            let cell = find_layout_node_by_stable_key(&layout, &format!("seqv-step-cell-0-{step}"))
+            let cell = find_layout_node_by_stable_key_suffix(&layout, &format!("/step-cell-0-{step}"))
                 .unwrap_or_else(|| panic!("step cell {step} should exist"));
             assert_finite_nonzero_rect(cell, &format!("step cell {step}"));
             let expected_hide = Value::Number(if step < 8 { 0.0 } else { 1.0 });
@@ -25900,7 +25913,7 @@
         editor.set_active_buffer(sequencer_id);
         editor.set_layout_viewport(140, 20);
         let layout = editor.widget_layout().expect("sequencer layout should build");
-        let cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-4")
+        let cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-0-4")
             .expect("selected step cell should exist");
         let shell = compact_step_shell(cell);
         assert!(eseqlisp::widget_render::get_bool_prop(
@@ -25963,7 +25976,7 @@
             .widget_layout()
             .expect("sequencer layout should build");
 
-        let track_name_hit = find_layout_node_by_stable_key(&layout, "seqv-select-0")
+        let track_name_hit = find_layout_node_by_stable_key_suffix(&layout, "/select-0")
             .expect("track name hit target should exist");
         let show_fx = track_name_hit
             .props
@@ -25971,24 +25984,27 @@
             .cloned()
             .expect("track name hit target should expose FX-mode double-click");
 
+        // "sequencer-track-0" is a `(subtree :key …)` and never qualifies, so it
+        // matches as its own exact suffix; the rest are widget keys that now
+        // hash as "eseq.sequencer/<key>" (module spec §10 hazards a and e).
         for key in [
             "sequencer-track-0",
-            "seqv-color-badge-0",
-            "seqv-arm-0",
-            "seqv-mute-0",
-            "seqv-solo-0",
-            "seqv-track-name-label-0",
-            "seqv-track-volume-control-0",
-            "seqv-expand-0",
+            "/color-badge-0",
+            "/arm-0",
+            "/mute-0",
+            "/solo-0",
+            "/track-name-label-0",
+            "/track-volume-control-0",
+            "/expand-0",
         ] {
-            let node = find_layout_node_by_stable_key(&layout, key)
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
                 .unwrap_or_else(|| panic!("expected sequencer node {key}"));
             assert!(
                 !node.props.contains_key("on-double-click"),
                 "{key} should not open the piano roll on double-click"
             );
         }
-        let step_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-0")
+        let step_cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-0-0")
             .expect("first step cell should exist");
         let step_double_click = step_cell
             .props
@@ -26360,6 +26376,8 @@
                   (load "ui/materials.lisp")
                   (load "ui/track-collapse.lisp")
                   (defstate selected-bus -1)
+                  ;; browser.lisp owns this; see the hazard-j note above.
+                  (defstate sbrowser-loading-instrument-name "")
                   (load "ui/mixer.lisp")
                   (load "ui/sequencer.lisp")
                 "#,
@@ -26451,7 +26469,7 @@
         assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-0").is_some());
         assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-2").is_some());
         assert_eq!(
-            count_stable_key_prefix(&sequencer_layout, "seqv-step-cell-"),
+            count_stable_key_prefix(&sequencer_layout, "eseq.sequencer/step-cell-"),
             32,
             "sequencer should render step cells only for visible tracks"
         );
@@ -26479,12 +26497,12 @@
                 .rect
                 .height;
         assert_eq!(
-            count_stable_key_prefix(&initial_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(&initial_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "collapsed sequencer rows should not render expanded metal sliders"
         );
 
-        let expand = find_layout_node_by_stable_key(&initial_layout, "seqv-expand-0")
+        let expand = find_layout_node_by_stable_key_suffix(&initial_layout, "/expand-0")
             .expect("sequencer row expand button should render");
         let callback = expand
             .props
@@ -26518,24 +26536,24 @@
             .widget_layout()
             .expect("expanded sequencer layout should build");
         assert_eq!(
-            count_stable_key_prefix(&expanded_layout, "seqv-step-cell-"),
+            count_stable_key_prefix(&expanded_layout, "eseq.sequencer/step-cell-"),
             0,
             "expanded rows should replace the compact dot grid"
         );
         assert_eq!(
-            count_stable_key_prefix(&expanded_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(&expanded_layout, "eseq.sequencer/expanded-step-slider-"),
             16,
             "expanded row should render the metal-style step sliders"
         );
         assert_eq!(
-            count_stable_key_prefix(&expanded_layout, "seqv-expanded-step-toggle-"),
+            count_stable_key_prefix(&expanded_layout, "eseq.sequencer/expanded-step-toggle-"),
             16,
             "expanded row should render the metal-style step toggles"
         );
         let expanded_row = find_layout_node_by_stable_key(&expanded_layout, "sequencer-track-0")
             .expect("expanded sequencer row should render");
         let expanded_column =
-            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-step-column-0-0")
+            find_layout_node_by_stable_key_suffix(&expanded_layout, "/expanded-step-column-0-0")
                 .expect("expanded sequencer step column should render");
         assert!(
             expanded_row.rect.row + expanded_row.rect.height
@@ -26546,19 +26564,19 @@
             expanded_column.rect
         );
         for key in [
-            "seqv-expanded-param-tab-0-0",
-            "seqv-expanded-timebase-0",
-            "seqv-expanded-param-number-picker-0",
-            "seqv-expanded-half-0",
-            "seqv-expanded-double-0",
-            "seqv-expanded-page-0-0",
+            "/expanded-param-tab-0-0",
+            "/expanded-timebase-0",
+            "/expanded-param-number-picker-0",
+            "/expanded-half-0",
+            "/expanded-double-0",
+            "/expanded-page-0-0",
         ] {
-            let node = find_layout_node_by_stable_key(&expanded_layout, key)
+            let node = find_layout_node_by_stable_key_suffix(&expanded_layout, key)
                 .unwrap_or_else(|| panic!("missing expanded control {key}"));
             assert_finite_nonzero_rect(node, key);
         }
         assert!(
-            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-param-tab-0-2")
+            find_layout_node_by_stable_key_suffix(&expanded_layout, "/expanded-param-tab-0-2")
                 .is_none(),
             "aux_a should not render as an expanded sequencer param tab"
         );
@@ -26572,16 +26590,16 @@
         );
 
         let first_tab =
-            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-param-tab-0-0")
+            find_layout_node_by_stable_key_suffix(&expanded_layout, "/expanded-param-tab-0-0")
                 .expect("expanded first tab should render");
-        let track_name = find_layout_node_by_stable_key(&expanded_layout, "seqv-select-0")
+        let track_name = find_layout_node_by_stable_key_suffix(&expanded_layout, "/select-0")
             .expect("expanded row track-name block should render");
         assert!(
             first_tab.rect.col < track_name.rect.col,
             "expanded editor should start from the row's left edge, not after the track header"
         );
 
-        let collapse = find_layout_node_by_stable_key(&expanded_layout, "seqv-expand-0")
+        let collapse = find_layout_node_by_stable_key_suffix(&expanded_layout, "/expand-0")
             .and_then(|node| node.props.get("on-click"))
             .cloned()
             .expect("expanded sequencer row collapse callback");
@@ -26873,11 +26891,11 @@
             .widget_layout()
             .expect("expanded sequencer layout should build");
         assert!(
-            find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-7").is_none(),
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-tab-0-7").is_none(),
             "process lanes should not consume direct step-param tab slots"
         );
         let process_selector =
-            find_layout_node_by_stable_key(&layout, "seqv-expanded-process-lane-selector-0")
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-process-lane-selector-0")
                 .expect("process lane selector should render");
         assert_finite_nonzero_rect(process_selector, "process lane selector");
         assert_eq!(
@@ -26895,7 +26913,7 @@
             ),
             "process selector should offer a no-process-lane option"
         );
-        let summary = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-summary-0")
+        let summary = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-summary-0")
             .expect("process lane summary should render");
         assert!(
             summary.rect.width >= 13.0,
@@ -27880,7 +27898,7 @@
         let layout = editor
             .widget_layout()
             .expect("expanded sequencer layout should build");
-        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0")
             .expect("process lane slider should render");
         assert_eq!(
             layout_prop_number(slider, "origin"),
@@ -27971,7 +27989,7 @@
             .expect("expanded sequencer layout should build");
 
         let selector =
-            find_layout_node_by_stable_key(&layout, "seqv-expanded-process-lane-selector-0")
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-process-lane-selector-0")
                 .expect("process lane selector should render");
         assert_finite_nonzero_rect(selector, "multi-lane process selector");
         assert_eq!(
@@ -27980,15 +27998,15 @@
         );
         for mode in 7..11 {
             assert!(
-                find_layout_node_by_stable_key(
+                find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-expanded-param-tab-0-{mode}")
+                    &format!("/expanded-param-tab-0-{mode}")
                 )
                 .is_none(),
                 "process lane mode {mode} should be represented by the selector, not a tab"
             );
         }
-        let timebase = find_layout_node_by_stable_key(&layout, "seqv-expanded-timebase-0")
+        let timebase = find_layout_node_by_stable_key_suffix(&layout, "/expanded-timebase-0")
             .expect("timebase dropdown should still fit after process selector");
         assert!(
             timebase.rect.col + timebase.rect.width <= 132.0,
@@ -28048,7 +28066,7 @@
             find_layout_node_by_text(&layout, "sparse-transpose / amount").is_some(),
             "expanded track 0 header should use track 0 process-lane metadata, not current track 1"
         );
-        let picker = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-number-picker-0")
+        let picker = find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-number-picker-0")
             .expect("expanded process lane picker should render");
         assert_eq!(
             layout_prop_number(picker, "min"),
@@ -28130,7 +28148,7 @@
         let layout = editor
             .widget_layout()
             .expect("expanded sequencer layout should build");
-        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0")
             .expect("process lane slider should render");
         editor
             .runtime_mut()
@@ -28206,7 +28224,7 @@
             .expect("sequencer layout should build");
         assert!(
             editor.focus_widget_by_stable_key(
-                "seqv-expanded-param-number-picker-0",
+                "eseq.sequencer/expanded-param-number-picker-0",
                 Some("number-picker")
             ),
             "process lane number picker should be focusable"
@@ -28399,7 +28417,7 @@
             .as_ref()
             .expect("initial sequencer layout should build");
         assert_eq!(
-            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(initial_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "fixture should start with compact sequencer rows"
         );
@@ -28427,7 +28445,7 @@
             .as_ref()
             .expect("expanded sequencer layout should build");
         assert_eq!(
-            count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(expanded_layout, "eseq.sequencer/expanded-step-slider-"),
             PAGE_SIZE,
             "expanded-track command should affect the next frame without another reactive pass"
         );
@@ -28449,7 +28467,7 @@
             .as_ref()
             .expect("collapsed sequencer layout should build");
         assert_eq!(
-            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(collapsed_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "collapse command should affect the next frame without another reactive pass"
         );
@@ -28502,7 +28520,7 @@
             .as_ref()
             .expect("expanded sequencer layout should build");
         assert!(
-            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-2-0")
+            find_layout_node_by_stable_key_suffix(expanded_layout, "/expanded-step-slider-2-0")
                 .is_some(),
             "third row should be expanded"
         );
@@ -28663,7 +28681,7 @@
             .expect("initial row should render");
         let initial_row_height = initial_row.rect.height;
         assert_eq!(
-            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(initial_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "fixture should start with compact sequencer rows"
         );
@@ -28701,16 +28719,16 @@
         let expanded_row_id = expanded_row.widget_id;
         let expanded_row_height = expanded_row.rect.height;
         let expanded_column =
-            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-column-0-0")
+            find_layout_node_by_stable_key_suffix(expanded_layout, "/expanded-step-column-0-0")
                 .expect("expanded row should render a step column");
         let expanded_row_bottom = expanded_row.rect.row + expanded_row.rect.height;
         let expanded_column_bottom = expanded_column.rect.row + expanded_column.rect.height;
         let removed_slider_id =
-            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-0-0")
+            find_layout_node_by_stable_key_suffix(expanded_layout, "/expanded-step-slider-0-0")
                 .expect("expanded row should render a step slider")
                 .widget_id;
         let removed_toggle_id =
-            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-toggle-0-0")
+            find_layout_node_by_stable_key_suffix(expanded_layout, "/expanded-step-toggle-0-0")
                 .expect("expanded row should render a step toggle")
                 .widget_id;
         assert!(
@@ -28750,7 +28768,7 @@
             .expect("collapsed row should render");
 
         assert_eq!(
-            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(collapsed_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "collapse should remove expanded step sliders from the layout"
         );
@@ -28850,7 +28868,7 @@
             .expect("expanded tiled row should render");
         let expanded_row_id = expanded_row.widget_id;
         assert!(
-            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-0-0")
+            find_layout_node_by_stable_key_suffix(expanded_layout, "/expanded-step-slider-0-0")
                 .is_some(),
             "expanded tiled row should render a step slider"
         );
@@ -28965,7 +28983,7 @@
             expanded_row.rect.height
         );
         assert!(
-            find_layout_node_by_stable_key(expanded_layout, "seqv-expanded-step-slider-0-0")
+            find_layout_node_by_stable_key_suffix(expanded_layout, "/expanded-step-slider-0-0")
                 .is_some(),
             "inactive expanded row should render expanded step controls"
         );
@@ -28993,7 +29011,7 @@
             collapsed_row.rect.height
         );
         assert_eq!(
-            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(collapsed_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "inactive collapse should remove expanded step sliders"
         );
@@ -29024,10 +29042,10 @@
 
         let row_bottom_gap = |layout: &eseqlisp::layout::LayoutNode, track: usize| -> f32 {
             let row_key = format!("sequencer-track-{track}");
-            let column_key = format!("seqv-expanded-step-column-{track}-0");
+            let column_key = format!("/expanded-step-column-{track}-0");
             let row = find_layout_node_by_stable_key(layout, &row_key)
                 .unwrap_or_else(|| panic!("{row_key} should render"));
-            let column = find_layout_node_by_stable_key(layout, &column_key)
+            let column = find_layout_node_by_stable_key_suffix(layout, &column_key)
                 .unwrap_or_else(|| panic!("{column_key} should render"));
             row.rect.row + row.rect.height - (column.rect.row + column.rect.height)
         };
@@ -29139,7 +29157,7 @@
             collapsed_row.rect.height
         );
         assert_eq!(
-            count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(collapsed_layout, "eseq.sequencer/expanded-step-slider-"),
             0,
             "single-track collapse should remove expanded sliders from the rendered frame"
         );
@@ -29218,7 +29236,7 @@
         let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
             .expect("collapsed tall track");
         let drop_zone =
-            find_layout_node_by_stable_key(collapsed_layout, "sequencer-new-track-drop-zone")
+            find_layout_node_by_stable_key_suffix(collapsed_layout, "/new-track-drop-zone")
                 .expect("new-track drop zone");
 
         assert!(
@@ -29355,8 +29373,8 @@
                 .as_ref()
                 .expect("expanded-track command should keep sequencer layout renderable");
             assert!(
-                count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == 0
-                    || count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == PAGE_SIZE,
+                count_stable_key_prefix(layout, "eseq.sequencer/expanded-step-slider-") == 0
+                    || count_stable_key_prefix(layout, "eseq.sequencer/expanded-step-slider-") == PAGE_SIZE,
                 "command should collapse to zero sliders or expand exactly one page of sliders"
             );
 
@@ -29458,14 +29476,14 @@
             .widget_layout()
             .expect("expanded two-track sequencer layout should build");
         assert_eq!(
-            count_stable_key_prefix(&layout, "seqv-expanded-step-slider-"),
+            count_stable_key_prefix(&layout, "eseq.sequencer/expanded-step-slider-"),
             32,
             "two expanded rows should render independent metal-style slider grids"
         );
 
-        let tab_track_0 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-3")
+        let tab_track_0 = find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-tab-0-3")
             .expect("track 0 transpose tab");
-        let tab_track_1 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-1-4")
+        let tab_track_1 = find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-tab-1-4")
             .expect("track 1 pan tab");
         editor
             .runtime_mut()
@@ -29508,7 +29526,7 @@
             .widget_layout()
             .expect("expanded sequencer layout should rebuild after tab clicks");
         let track_0_page_1 =
-            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-page-0-1")
+            find_layout_node_by_stable_key_suffix(&paged_layout, "/expanded-page-0-1")
                 .expect("track 0 page 2");
         editor
             .runtime_mut()
@@ -29598,7 +29616,7 @@
             .widget_layout()
             .expect("expanded two-track sequencer layout should build");
         let current_track_cursor =
-            find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-1-3")
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-column-1-3")
                 .expect("current track cursor column should render");
         assert_eq!(
             current_track_cursor.props.get("background"),
@@ -29617,7 +29635,7 @@
         );
 
         let inactive_track_cursor =
-            find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-0-6")
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-column-0-6")
                 .expect("inactive track cursor column should render");
         assert_eq!(
             layout_prop_bool(inactive_track_cursor, "active"),
@@ -29802,7 +29820,7 @@
         let layout = editor
             .widget_layout()
             .expect("expanded second-row sequencer layout should build");
-        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-1-0")
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-1-0")
             .expect("second row first step slider");
         editor
             .runtime_mut()
@@ -29822,7 +29840,7 @@
         );
 
         calls.lock().unwrap().clear();
-        let double_button = find_layout_node_by_stable_key(&layout, "seqv-expanded-double-1")
+        let double_button = find_layout_node_by_stable_key_suffix(&layout, "/expanded-double-1")
             .expect("second row double button");
         editor
             .runtime_mut()
@@ -29842,7 +29860,7 @@
         );
 
         calls.lock().unwrap().clear();
-        let half_button = find_layout_node_by_stable_key(&layout, "seqv-expanded-half-1")
+        let half_button = find_layout_node_by_stable_key_suffix(&layout, "/expanded-half-1")
             .expect("second row half button");
         editor
             .runtime_mut()
@@ -29896,7 +29914,7 @@
         let layout = editor
             .widget_layout()
             .expect("sequencer layout should build");
-        let arm = find_layout_node_by_stable_key(&layout, "seqv-arm-1")
+        let arm = find_layout_node_by_stable_key_suffix(&layout, "/arm-1")
             .expect("second sequencer row record-arm control");
         editor
             .runtime_mut()
@@ -29920,7 +29938,7 @@
         );
 
         calls.lock().unwrap().clear();
-        let volume = find_layout_node_by_stable_key(&layout, "seqv-track-volume-control-1")
+        let volume = find_layout_node_by_stable_key_suffix(&layout, "/track-volume-control-1")
             .expect("second sequencer row volume control");
         editor
             .runtime_mut()
@@ -29991,7 +30009,7 @@
         let layout = editor
             .widget_layout()
             .expect("expanded current-row sequencer layout should build");
-        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0")
             .expect("current row selected step slider");
         editor
             .runtime_mut()
@@ -30123,8 +30141,8 @@
                     format!(
                         "full target={:?} expanded-row={} collapsed-row={} playhead-probe={} tree={preview}",
                         tree.target,
-                        value_contains_string(&tree.tree, "seqv-expanded-step-slider-"),
-                        value_contains_string(&tree.tree, "seqv-playhead-row-"),
+                        value_contains_string(&tree.tree, "expanded-step-slider-"),
+                        value_contains_string(&tree.tree, "playhead-row-"),
                         value_contains_string(&tree.tree, "seqv-expanded-step-playhead-probe-")
                     )
                 }
@@ -30138,8 +30156,8 @@
                     let preview = tree_debug.chars().take(160).collect::<String>();
                     format!(
                         "subtree#{subtree_root_id} target={target:?} expanded-row={} collapsed-row={} playhead-probe={} tree={preview}",
-                        value_contains_string(tree, "seqv-expanded-step-slider-"),
-                        value_contains_string(tree, "seqv-playhead-row-"),
+                        value_contains_string(tree, "expanded-step-slider-"),
+                        value_contains_string(tree, "playhead-row-"),
                         value_contains_string(tree, "seqv-expanded-step-playhead-probe-")
                     )
                 }
@@ -30183,7 +30201,7 @@
             .widget_layout()
             .expect("expanded current-row sequencer layout should build");
         let slot_0_label =
-            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+            find_layout_node_by_stable_key_suffix(&initial_layout, "/expanded-step-label-0-0")
                 .expect("initial slot 0 label");
         assert_eq!(
             slot_0_label.props.get("color"),
@@ -30216,7 +30234,7 @@
             .widget_layout()
             .expect("expanded current-row sequencer layout should still exist");
         let slot_0_label =
-            find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-label-0-0")
+            find_layout_node_by_stable_key_suffix(&selected_layout, "/expanded-step-label-0-0")
                 .expect("selected slot 0 label");
         assert_eq!(
             layout_prop_bool(slot_0_label, "active"),
@@ -30229,7 +30247,7 @@
             "active selected labels should render with the selected color"
         );
         let slot_0_toggle =
-            find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-toggle-0-0")
+            find_layout_node_by_stable_key_suffix(&selected_layout, "/expanded-step-toggle-0-0")
                 .expect("selected slot 0 toggle");
         assert!(
             layout_tree_has_bool_prop(slot_0_toggle, "selected", true),
@@ -30260,13 +30278,13 @@
         let row_id = find_layout_node_by_stable_key(&layout, "sequencer-track-0")
             .expect("expanded row")
             .widget_id;
-        let slider_id = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+        let slider_id = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0")
             .expect("expanded step slider")
             .widget_id;
-        let toggle_id = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-toggle-0-0")
+        let toggle_id = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-toggle-0-0")
             .expect("expanded step toggle")
             .widget_id;
-        let label_id = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-label-0-0")
+        let label_id = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-label-0-0")
             .expect("expanded step label")
             .widget_id;
         let _ = editor.take_dirty_widget_ids();
@@ -30364,13 +30382,13 @@
         let layout = editor
             .widget_layout()
             .expect("expanded two-row sequencer layout should build");
-        let down = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-toggle-0-0")
+        let down = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-toggle-0-0")
             .expect("drag start toggle")
             .props
             .get("on-mouse-down")
             .cloned()
             .expect("drag start callback");
-        let drag = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-toggle-0-4")
+        let drag = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-toggle-0-4")
             .expect("drag target toggle")
             .props
             .get("on-drag")
@@ -30437,13 +30455,13 @@
             .widget_layout()
             .expect("expanded two-row sequencer layout should build");
         assert_eq!(
-            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+            find_layout_node_by_stable_key_suffix(&initial_layout, "/expanded-step-label-0-0")
                 .and_then(|node| layout_prop_number(node, "value")),
             Some(1.0),
             "slot 0 should initially show absolute step 1"
         );
         assert_eq!(
-            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+            find_layout_node_by_stable_key_suffix(&initial_layout, "/expanded-step-label-0-0")
                 .and_then(|node| node.props.get("h-align")),
             Some(&Value::Keyword("center".to_string())),
             "fixed-width step labels should center their text under the toggle"
@@ -30482,7 +30500,7 @@
             .widget_layout()
             .expect("paged expanded sequencer layout should still exist");
         let slot_0_label =
-            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-step-label-0-0")
+            find_layout_node_by_stable_key_suffix(&paged_layout, "/expanded-step-label-0-0")
                 .expect("track 0 slot 0 label after page flip");
         assert_finite_nonzero_rect(slot_0_label, "track 0 slot 0 label after page flip");
         assert_eq!(
@@ -30591,7 +30609,7 @@
             find_layout_node_by_stable_key(&layout, "seqv-timebase-0").is_none(),
             "collapsed-row timebase dropdown should stay removed"
         );
-        let timebase = find_layout_node_by_stable_key(&layout, "seqv-expanded-timebase-0")
+        let timebase = find_layout_node_by_stable_key_suffix(&layout, "/expanded-timebase-0")
             .expect("expanded sequencer row timebase should render");
         let callback = timebase
             .props
@@ -30630,7 +30648,7 @@
         let initial_layout = editor
             .widget_layout()
             .expect("initial sequencer layout should build");
-        let initial_step = find_layout_node_by_stable_key(&initial_layout, "seqv-step-cell-0-0")
+        let initial_step = find_layout_node_by_stable_key_suffix(&initial_layout, "/step-cell-0-0")
             .expect("initial step cell should render");
         assert_eq!(
             layout_prop_bool(compact_step_shell(initial_step), "active"),
@@ -30649,11 +30667,11 @@
             .widget_layout()
             .expect("switched sequencer layout should build");
         assert_eq!(
-            count_stable_key_prefix(&switched_layout, "seqv-step-cell-"),
+            count_stable_key_prefix(&switched_layout, "eseq.sequencer/step-cell-"),
             track_count * 48,
             "pattern switch should render the new pattern length"
         );
-        let switched_step = find_layout_node_by_stable_key(&switched_layout, "seqv-step-cell-0-0")
+        let switched_step = find_layout_node_by_stable_key_suffix(&switched_layout, "/step-cell-0-0")
             .expect("existing keyed step cell should still render after switch");
         assert_eq!(
             layout_prop_bool(compact_step_shell(switched_step), "active"),
@@ -30753,10 +30771,10 @@
             .widget_layout
             .as_deref()
             .expect("sequencer selection perf layout should build");
-        let start = find_layout_node_by_stable_key(layout, "seqv-step-cell-0-0")
+        let start = find_layout_node_by_stable_key_suffix(layout, "/step-cell-0-0")
             .expect("selection start step");
         let end =
-            find_layout_node_by_stable_key(layout, &format!("seqv-step-cell-0-{drag_end_step}"))
+            find_layout_node_by_stable_key_suffix(layout, &format!("/step-cell-0-{drag_end_step}"))
                 .expect("selection end step");
         let down_callback = start
             .props
@@ -31295,7 +31313,7 @@
                 .as_ref()
                 .expect("sequencer pattern switch layout should build");
             assert_eq!(
-                count_stable_key_prefix(layout, "seqv-step-cell-"),
+                count_stable_key_prefix(layout, "eseq.sequencer/step-cell-"),
                 track_count * step_count,
                 "pattern switch should keep every sequencer cell rendered"
             );

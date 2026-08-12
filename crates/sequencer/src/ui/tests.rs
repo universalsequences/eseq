@@ -2828,9 +2828,9 @@
             let step_clipboard = Arc::new(Mutex::new(None));
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
-                let cell = find_layout_node_by_stable_key(
+                let cell = find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                    &format!("/step-cell-{TRACK}-{step}"),
                 )
                 .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
                 (
@@ -3966,9 +3966,9 @@
 
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
-                let cell = find_layout_node_by_stable_key(
+                let cell = find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                    &format!("/step-cell-{TRACK}-{step}"),
                 )
                 .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
                 (
@@ -5324,9 +5324,9 @@
             {
                 let (col, row, width, height) = {
                     let layout = editor.widget_layout().expect("sequencer layout");
-                    let cell = find_layout_node_by_stable_key(
+                    let cell = find_layout_node_by_stable_key_suffix(
                         &layout,
-                        &format!("seqv-step-cell-{TRACK}-{CURSOR_STEP}"),
+                        &format!("/step-cell-{TRACK}-{CURSOR_STEP}"),
                     )
                     .unwrap_or_else(|| panic!("visible sequencer step cell {CURSOR_STEP}"));
                     (
@@ -7173,9 +7173,9 @@
                 let layout = editor.widget_layout().expect("sequencer layout");
                 for step in [0, 8, 15, 16, 31, 32, 47, 48, 63] {
                     assert!(
-                        find_layout_node_by_stable_key(
+                        find_layout_node_by_stable_key_suffix(
                             &layout,
-                            &format!("seqv-step-cell-{TRACK}-{step}"),
+                            &format!("/step-cell-{TRACK}-{step}"),
                         )
                         .is_some(),
                         "step cell {step} must be present in the sequencer tile layout at {vp_cols}x{vp_rows}",
@@ -7748,9 +7748,9 @@
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
-                let cell = find_layout_node_by_stable_key(
+                let cell = find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                    &format!("/step-cell-{TRACK}-{step}"),
                 )
                 .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
                 (

@@ -111,6 +111,18 @@
 (def step-drag-anchor nil)
 (def step-click-pending nil)
 (def step-move-last nil)
+
+;; Owner-side setter for the three drag-state globals above, so a *module* can
+;; reset them (module spec §10 hazard m).  A converted module's bare
+;; `(set! step-click-pending nil)` interns its own `<module>/step-click-pending`
+;; slot and never reaches these, silently leaving a stale click pending; routing
+;; the write through a vanilla function keeps it on the owner's slot.
+;; ui/sequencer.lisp's grid pointer-down handlers are the callers.
+(def step-clear-drag-state ()
+  (do
+    (set! step-click-pending nil)
+    (set! step-drag-anchor nil)
+    (set! step-move-last nil)))
 (def step-toggle-drag-value nil)
 (def step-click-was-active nil)
 (def step-press-ms nil)

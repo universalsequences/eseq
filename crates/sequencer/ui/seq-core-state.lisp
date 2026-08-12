@@ -26,6 +26,16 @@
 ;; before loading render roots.
 (def cursor-step 0)
 
+;; Owner-side reader for the mutable global above (module spec §10 hazard m).
+;; A converted module's bare `cursor-step` interns its own
+;; `<module>/cursor-step` slot; the late-binding heal aliases that slot to this
+;; cell on first read, but the very next `(set! cursor-step …)` below is a
+;; StoreGlobal that replaces the owner's slot and unlinks the alias, freezing
+;; the module's view at whatever the value was when it first read.  Reading
+;; through a function is immune: function slots are written once, by their
+;; `def`, so the heal never gets unlinked.  ui/sequencer.lisp is the caller.
+(def cursor-step-value () cursor-step)
+
 (def set-cursor-step-value (step)
   (let ((parameter-step
           (if (> (or SEQ.fx-step-selection-count 0) 0)

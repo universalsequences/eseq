@@ -2,123 +2,163 @@
 ;; Renders to *sequencer* buffer. Shows every track's step grid laid out
 ;; vertically. Loaded by ui/main.lisp.
 
+(module eseq.sequencer)
+
+;; Migration aliases (module spec §10 step 2) for the names unconverted callers
+;; still spell flat.  Nine are lisp-side — arrangement.lisp reuses the track
+;; header and its selection binding, mixer.lisp opens the piano roll,
+;; seq-panels.lisp toggles the expanded lane, seq-grid-mode.lisp routes the
+;; *sequencer* keymap (both the `(seqv-handle-key …)` call and the "C-h"
+;; `mode-bind-key` handler string, which dispatches through `invoke_global` and
+;; therefore through the alias rung), and the drum-rack capture fixture drives
+;; the track menu and param mode.  The rest are entry points src/ui/input.rs and
+;; the Rust state_values / ui tests drive by name.  Deleted as each consumer
+;; converts.
+(module-compat-alias seqv-collapse-all-tracks collapse-all-tracks)
+(module-compat-alias seqv-cursor-step track-cursor)
+(module-compat-alias seqv-current-number-picker-key current-number-picker-key)
+(module-compat-alias seqv-current-page track-current-page)
+(module-compat-alias seqv-current-param-mode current-param-mode)
+(module-compat-alias seqv-current-selected-step current-selected-step)
+(module-compat-alias seqv-current-step track-current-step)
+(module-compat-alias seqv-drop-new-track drop-new-track)
+(module-compat-alias seqv-drop-on-track drop-on-track)
+(module-compat-alias seqv-drop-sample-on-track drop-sample-on-track)
+(module-compat-alias seqv-expanded-track-ids expanded-track-ids)
+(module-compat-alias seqv-handle-key handle-key)
+(module-compat-alias seqv-open-piano-roll-for-track open-piano-roll-for-track)
+(module-compat-alias seqv-param-mode track-param-mode)
+(module-compat-alias seqv-param-mode-for-key param-mode-for-key)
+(module-compat-alias seqv-select-all-current-track-steps select-all-current-track-steps)
+(module-compat-alias seqv-select-process-lane-option select-process-lane-option)
+(module-compat-alias seqv-select-track-for-edit select-track-for-edit)
+(module-compat-alias seqv-set-cursor-step set-track-cursor)
+(module-compat-alias seqv-set-param-mode set-track-param-mode)
+(module-compat-alias seqv-set-track-expanded set-track-expanded)
+(module-compat-alias seqv-step-pointer-down grid-step-pointer-down)
+(module-compat-alias seqv-step-pointer-up grid-step-pointer-up)
+(module-compat-alias seqv-toggle-current-track-expanded toggle-current-track-expanded)
+(module-compat-alias seqv-track-header track-header)
+(module-compat-alias seqv-track-menu-click track-menu-click)
+(module-compat-alias seqv-track-selected-binding track-selected-binding)
+
 (load "@/ui/track-collapse.lisp")
 
-(def seqv-track-peak (i)
+(def %track-peak (i)
   (bind-seq (str "track-peak-" i)))
 
-(def seqv-track-volume-field (track)
+(def %track-volume-field (track)
   (str "track-" track "-volume"))
 
-(def seqv-track-volume-binding (track)
-  (bind-seq (seqv-track-volume-field track)))
+(def %track-volume-binding (track)
+  (bind-seq (%track-volume-field track)))
 
-(def seqv-track-volume-value (track)
+(def %track-volume-value (track)
   (if (< track (len SEQ.track-volumes))
     (nth SEQ.track-volumes track)
     1.0))
 
-(def seqv-track-volume-from-event (track event)
+(def %track-volume-from-event (track event)
   (let ((sx (get event :sx)))
     (if (= sx nil)
-      (seqv-track-volume-value track)
+      (%track-volume-value track)
       (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0)))))))
 
-(def seqv-set-track-volume-from-event (track event)
+(def %set-track-volume-from-event (track event)
   (do
-    (seqv-activate-track-for-edit track)
-    (seq-set-track-volume track (seqv-track-volume-from-event track event))))
+    (%activate-track-for-edit track)
+    (seq-set-track-volume track (%track-volume-from-event track event))))
 
-(def seqv-track-color-r-binding (track)
+(def %track-color-r-binding (track)
   (bind-seq-nth "track-color-r-effective" track))
 
-(def seqv-track-color-g-binding (track)
+(def %track-color-g-binding (track)
   (bind-seq-nth "track-color-g-effective" track))
 
-(def seqv-track-color-b-binding (track)
+(def %track-color-b-binding (track)
   (bind-seq-nth "track-color-b-effective" track))
 
-(def seqv-track-name-max-chars 9)
+(def %track-name-max-chars 9)
 
-(def seqv-track-name-display (name)
-  (if (> (len name) seqv-track-name-max-chars)
-    (str (substring name 0 (- seqv-track-name-max-chars 2)) "..")
+(def %track-name-display (name)
+  (if (> (len name) %track-name-max-chars)
+    (str (substring name 0 (- %track-name-max-chars 2)) "..")
     name))
 
-(def seqv-muted? (i)
+(def %muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
-(def seqv-track-selected-binding (i)
+(def track-selected-binding (i)
   (if (< selected-bus 0)
     (bind-seq (str "track-selected-" i))
     0))
 
-(def seqv-track-color (i)
+(def %track-color (i)
   (if (< i (len SEQ.track-colors))
     (nth SEQ.track-colors i)
     (list 0.34 0.48 0.98)))
 
-(def seqv-track-color-r (i muted)
-  (let ((r (nth (seqv-track-color i) 0)))
+(def %track-color-r (i muted)
+  (let ((r (nth (%track-color i) 0)))
     (if muted (+ (* r 0.34) (* 0.10 0.66)) r)))
 
-(def seqv-track-color-g (i muted)
-  (let ((g (nth (seqv-track-color i) 1)))
+(def %track-color-g (i muted)
+  (let ((g (nth (%track-color i) 1)))
     (if muted (+ (* g 0.34) (* 0.10 0.66)) g)))
 
-(def seqv-track-color-b (i muted)
-  (let ((b (nth (seqv-track-color i) 2)))
+(def %track-color-b (i muted)
+  (let ((b (nth (%track-color i) 2)))
     (if muted (+ (* b 0.34) (* 0.11 0.66)) b)))
 
-(def seqv-row-bg (selected muted)
+(def %row-bg (selected muted)
   (if selected
     :mixer-strip-selected-bg
     (if muted
       :mixer-strip-muted-bg
       :buffer-bg)))
 
-(def seqv-row-border (selected)
+(def %row-border (selected)
   (if selected
     :mixer-strip-selected-border
     :mixer-strip-border))
 
-(def seqv-timebase-options
+(def %timebase-options
   '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 
-(def seqv-track-timebase (i)
+(def %track-timebase (i)
   (if (< i (len SEQ.track-timebases))
     (nth SEQ.track-timebases i)
     "16"))
 
-(def seqv-set-row-timebase (track label)
+(def %set-row-timebase (track label)
   (let ((plock-selected
       (and (< selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
     (do
-      (seqv-activate-track-for-edit track)
+      (%activate-track-for-edit track)
       (cool-off-follow)
       (if plock-selected
         (seq-plock-timebase label)
         (seq-set-timebase label)))))
 
-(defstate seqv-expanded-track-ids '())
+(defstate expanded-track-ids '())
 
-(defstate seqv-track-editor-state '())
+(defstate %track-editor-state '())
 
-(def seqv-list-contains? (xs item)
+(def %list-contains? (xs item)
   (> (len (filter (lambda (x) (= x item)) xs)) 0))
 
-(def seqv-list-remove (xs item)
+(def %list-remove (xs item)
   (filter (lambda (x) (not (= x item))) xs))
 
-(def seqv-expanded-track-field (track-id)
+(def %expanded-track-field (track-id)
   (str "track-expanded-" track-id))
 
-(def seqv-track-id (track)
+(def %track-id-at (track)
   (if (< track (len SEQ.track-ids))
     (nth SEQ.track-ids track)
     track))
 
-(def seqv-track-index-for-id (track-id)
+(def %track-index-for-id (track-id)
   (let ((matches
       (filter
         (lambda (i) (= (nth SEQ.track-ids i) track-id))
@@ -127,120 +167,122 @@
       (nth matches 0)
       -1)))
 
-(def seqv-project-cursor-step (track step)
-  (mod step (max 1 (seqv-track-num-steps track))))
+(def %project-cursor-step (track step)
+  (mod step (max 1 (%track-num-steps track))))
 
-(def seqv-global-cursor-step-for-track (track)
-  (seqv-project-cursor-step track cursor-step))
+;; `cursor-step` is a mutable vanilla global; a module must read it through its
+;; owner's accessor or the late-binding heal freezes the value (§10 hazard m).
+(def %global-cursor-step-for-track (track)
+  (%project-cursor-step track (cursor-step-value)))
 
-(def seqv-sync-track-cursor-to-global (track)
+(def %sync-track-cursor-to-global (track)
   (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (seqv-set-cursor-step
-      (seqv-track-id track)
-      cursor-step)
+    (set-track-cursor
+      (%track-id-at track)
+      (cursor-step-value))
     nil))
 
-(def seqv-sync-all-track-cursors-to-global ()
+(def %sync-all-track-cursors-to-global ()
   (for-each
-    (lambda (track) (seqv-sync-track-cursor-to-global track))
+    (lambda (track) (%sync-track-cursor-to-global track))
     (range 0 (len SEQ.track-ids))))
 
 ;; Selecting an edit target must not change workspace layout. Opening FX is an
-;; explicit gesture owned by seqv-show-fx-for-track (track-name double-click).
-(def seqv-select-track-for-edit (track)
+;; explicit gesture owned by show-fx-for-track (track-name double-click).
+(def select-track-for-edit (track)
   (do
     (set! selected-bus -1)
     (if (= SEQ.current-track track) nil (seq-clear-selection))
     (seq-set-track track)
-    (seqv-sync-track-cursor-to-global track)))
+    (%sync-track-cursor-to-global track)))
 
-(def seqv-activate-track-for-edit (track)
-  (seqv-select-track-for-edit track))
+(def %activate-track-for-edit (track)
+  (select-track-for-edit track))
 
-(def seqv-open-piano-roll-for-track (track)
+(def open-piano-roll-for-track (track)
   (if (and (= lower-panel-buffer "*piano-roll*") (= SEQ.current-track track))
     (seq-show-fx-lower-panel)
     (do
-      (seqv-activate-track-for-edit track)
+      (%activate-track-for-edit track)
       (seq-open-piano-roll-bottom-for-track track))))
 
-(def seqv-show-fx-for-track (track)
+(def %show-fx-for-track (track)
   (do
-    (seqv-select-track-for-edit track)
+    (select-track-for-edit track)
     (seq-show-fx-lower-panel)))
 
-(def seqv-track-expanded? (track-id)
-  (reactive-get "SEQV" (seqv-expanded-track-field track-id)))
+(def %track-expanded? (track-id)
+  (reactive-get "SEQV" (%expanded-track-field track-id)))
 
-(def seqv-set-track-expanded (track-id expanded)
+(def set-track-expanded (track-id expanded)
   (do
-    (reactive-set "SEQV" (seqv-expanded-track-field track-id) expanded)
+    (reactive-set "SEQV" (%expanded-track-field track-id) expanded)
     (if expanded
-      (let ((track (seqv-track-index-for-id track-id)))
+      (let ((track (%track-index-for-id track-id)))
         (if (>= track 0)
-          (seqv-sync-expanded-step-slots-for track track-id)
+          (%sync-expanded-step-slots-for track track-id)
           nil))
       (seqv-clear-expanded-step-slots track-id))
-    (set! seqv-expanded-track-ids
+    (set! expanded-track-ids
       (if expanded
-        (if (seqv-list-contains? seqv-expanded-track-ids track-id)
-          seqv-expanded-track-ids
-          (append seqv-expanded-track-ids (list track-id)))
-        (seqv-list-remove seqv-expanded-track-ids track-id)))))
+        (if (%list-contains? expanded-track-ids track-id)
+          expanded-track-ids
+          (append expanded-track-ids (list track-id)))
+        (%list-remove expanded-track-ids track-id)))))
 
-(def seqv-editor-state-for (track-id)
+(def %editor-state-for (track-id)
   (let ((matches (filter
       (lambda (state) (= (get state :id) track-id))
-      seqv-track-editor-state)))
+      %track-editor-state)))
     (if (> (len matches) 0)
       (nth matches 0)
       (dict :id track-id :param-mode 0 :cursor-step nil))))
 
-(def seqv-upsert-editor-state (track-id next-state)
-  (if (seqv-list-contains? (map (lambda (state) (get state :id)) seqv-track-editor-state) track-id)
-    (set! seqv-track-editor-state
+(def %upsert-editor-state (track-id next-state)
+  (if (%list-contains? (map (lambda (state) (get state :id)) %track-editor-state) track-id)
+    (set! %track-editor-state
       (map
         (lambda (state)
           (if (= (get state :id) track-id) next-state state))
-        seqv-track-editor-state))
-    (set! seqv-track-editor-state (append seqv-track-editor-state (list next-state)))))
+        %track-editor-state))
+    (set! %track-editor-state (append %track-editor-state (list next-state)))))
 
-(def seqv-param-mode (track-id)
-  (get (seqv-editor-state-for track-id) :param-mode))
+(def track-param-mode (track-id)
+  (get (%editor-state-for track-id) :param-mode))
 
-(def seqv-set-param-mode (track-id mode)
+(def set-track-param-mode (track-id mode)
   (do
-    (seqv-upsert-editor-state track-id
-      (merge (seqv-editor-state-for track-id) :param-mode mode))
-    (let ((track (seqv-track-index-for-id track-id)))
+    (%upsert-editor-state track-id
+      (merge (%editor-state-for track-id) :param-mode mode))
+    (let ((track (%track-index-for-id track-id)))
       (if (>= track 0)
-        (seqv-sync-expanded-step-slots-for track track-id)
+        (%sync-expanded-step-slots-for track track-id)
         nil))))
 
-(def seqv-cursor-step (track-id)
-  (let ((track (seqv-track-index-for-id track-id)))
+(def track-cursor (track-id)
+  (let ((track (%track-index-for-id track-id)))
     (if (>= track 0)
       (let ((stored-step (reactive-get "SEQV" (str "cursor-step-" track-id))))
         (if (= stored-step nil)
-          (seqv-global-cursor-step-for-track track)
-          (seqv-project-cursor-step track stored-step)))
+          (%global-cursor-step-for-track track)
+          (%project-cursor-step track stored-step)))
       0)))
 
-(def seqv-cursor-highlight-field (track step)
+(def %cursor-highlight-field (track step)
   (str "seqv-track-cursor-" track "-" step))
 
-(def seqv-cursor-highlight-binding (track step)
-  (bind "SEQV" (seqv-cursor-highlight-field track step)))
+(def %cursor-highlight-binding (track step)
+  (bind "SEQV" (%cursor-highlight-field track step)))
 
 ;; Clearing must target the exact field set last time. Recomputing it from the
 ;; stored step goes stale when num-steps or the id->index mapping changed in
 ;; between, leaving ghost cursor highlights behind.
-(def seqv-set-cursor-step (track-id step)
-  (let ((track (seqv-track-index-for-id track-id)))
+(def set-track-cursor (track-id step)
+  (let ((track (%track-index-for-id track-id)))
     (if (>= track 0)
       (let ((previous-field (reactive-get "SEQV" (str "cursor-field-" track-id)))
-          (next-field (seqv-cursor-highlight-field track (seqv-project-cursor-step track step)))
-          (projected-step (seqv-project-cursor-step track step)))
+          (next-field (%cursor-highlight-field track (%project-cursor-step track step)))
+          (projected-step (%project-cursor-step track step)))
         (do
           (reactive-set "SEQV" (str "cursor-step-" track-id) projected-step)
           (if (or (= previous-field nil) (= previous-field next-field))
@@ -248,35 +290,54 @@
             (reactive-set "SEQV" previous-field false))
           (reactive-set "SEQV" next-field true)
           (reactive-set "SEQV" (str "cursor-field-" track-id) next-field)
-          (if (seqv-track-expanded? track-id)
-            (seqv-sync-expanded-step-slots-for track track-id)
+          (if (%track-expanded? track-id)
+            (%sync-expanded-step-slots-for track track-id)
             nil)))
       nil)))
 
-(def sequencer-cursor-step-changed (track step)
+(def cursor-step-changed (track step)
   (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (seqv-set-cursor-step (seqv-track-id track) step)
+    (set-track-cursor (%track-id-at track) step)
     nil))
 
-(def seqv-current-track-id ()
-  (seqv-track-id SEQ.current-track))
+;; Stub-then-override, kept working across the conversion (module spec §10
+;; hazard i, applied to a lisp→lisp protocol).  ui/step-grid-interactions.lisp
+;; defines a nil `sequencer-cursor-step-changed` stub and calls it from
+;; `set-track-cursor-step`; this file's later def is what makes the cursor
+;; actually move.  A compat alias cannot rescue that caller: it compiled at
+;; main.lisp:46, before this file's aliases existed at :57, and the late-binding
+;; heal only repairs an *empty* slot — the stub already filled it.  So the flat
+;; name stays flat via the §3 cross-module def escape hatch and forwards into
+;; the module.  It gets no `module-compat-alias` for the same reason
+;; `eseq.vanilla` names never do.  This pair is the S4 `defhook` candidate.
+(def eseq.vanilla/sequencer-cursor-step-changed (track step)
+  (eseq.sequencer/cursor-step-changed track step))
 
-(def seqv-current-track-expanded? ()
-  (seqv-track-expanded? (seqv-current-track-id)))
+(def %current-track-id ()
+  (%track-id-at SEQ.current-track))
 
-(def seqv-current-selected-step ()
-  (seqv-cursor-step (seqv-current-track-id)))
+(def %current-track-expanded? ()
+  (%track-expanded? (%current-track-id)))
 
-(def seqv-current-param-mode ()
-  (seqv-param-mode (seqv-current-track-id)))
+(def current-selected-step ()
+  (track-cursor (%current-track-id)))
 
-(def seqv-current-number-picker-key ()
-  (str "seqv-expanded-param-number-picker-" (seqv-current-track-id)))
+(def current-param-mode ()
+  (track-param-mode (%current-track-id)))
 
-(def seqv-select-current-param-mode (mode)
-  (seqv-set-param-mode (seqv-current-track-id) mode))
+;; Returns a widget stable key for Rust to look up verbatim
+;; (`current_step_param_number_picker_key`, src/ui/input.rs:762, feeds
+;; `layout_node_by_stable_key`, an exact match).  Widget `:key`s in a declared
+;; module hash as `<module>/<key>`, so a lisp helper that hands a key *out* to
+;; Rust has to emit the qualified spelling itself — the module name is part of
+;; the value, not just of the def.
+(def current-number-picker-key ()
+  (str "eseq.sequencer/expanded-param-number-picker-" (%current-track-id)))
 
-(def seqv-param-mode-for-key (key)
+(def %select-current-param-mode (mode)
+  (set-track-param-mode (%current-track-id) mode))
+
+(def param-mode-for-key (key)
   (if (not (= (len key) 1))
     -1
     (if (or (= key "v") (= key "V"))
@@ -293,81 +354,81 @@
                 (if (> (len SEQ.process-lanes) 0) seqv-process-lane-mode-offset -1)
                 -1))))))))
 
-(def seqv-selected-drum-sound (track)
+(def %selected-drum-sound (track)
   (let ((selected
           (filter
             (lambda (sound)
-              (> (reactive-value (seqv-drum-slot-selected-binding sound)) 0.5))
+              (> (reactive-value (%drum-slot-selected-binding sound)) 0.5))
             (seqv-track-drum-sounds track))))
     (if (> (len selected) 0) (nth selected 0) nil)))
 
-(def seqv-select-all-current-track-steps ()
+(def select-all-current-track-steps ()
   (let ((track SEQ.current-track))
     (do
       (set! selected-bus -1)
       (if (seqv-track-drum-rack? track)
-        (let ((sound (seqv-selected-drum-sound track)))
+        (let ((sound (%selected-drum-sound track)))
           (if sound
             (seq-select-all-drum-rack-steps (get sound :transpose))
             nil))
         (select-all-steps)))))
 
-(def seqv-collapse-all-tracks ()
+(def collapse-all-tracks ()
   (do
     (for-each
-      (lambda (track-id) (seqv-set-track-expanded track-id false))
-      seqv-expanded-track-ids)
-    (set! seqv-expanded-track-ids '())))
+      (lambda (track-id) (set-track-expanded track-id false))
+      expanded-track-ids)
+    (set! expanded-track-ids '())))
 
-(def seqv-toggle-current-track-expanded ()
-  (let ((track-id (seqv-current-track-id)))
+(def toggle-current-track-expanded ()
+  (let ((track-id (%current-track-id)))
     (do
       (set! selected-bus -1)
-      (seqv-set-track-expanded track-id (not (seqv-track-expanded? track-id))))))
+      (set-track-expanded track-id (not (%track-expanded? track-id))))))
 
-(def seqv-handle-key (key text)
-  (let ((mode (seqv-param-mode-for-key key)))
+(def handle-key (key text)
+  (let ((mode (param-mode-for-key key)))
     (if (>= mode 0)
-      (do (seqv-select-current-param-mode mode) true)
+      (do (%select-current-param-mode mode) true)
       (if (= key "LEFT")
         (do (cursor-left) true)
         (if (= key "RIGHT")
           (do (cursor-right) true)
           (if (= key "C-a")
-            (do (seqv-select-all-current-track-steps) true)
+            (do (select-all-current-track-steps) true)
             (if (or (= key "C-h") (= key "C-H"))
-              (do (seqv-collapse-all-tracks) true)
+              (do (collapse-all-tracks) true)
               (if (or (= key "BS") (= key "Delete"))
                 (do (delete-selected-steps) true)
                 (if (= key "RET")
                   (do (cursor-toggle) true)
                   false)))))))))
 
-(def seqv-track-menu-click (track)
-  (let ((track-id (seqv-track-id track)))
+(def track-menu-click (track)
+  (let ((track-id (%track-id-at track)))
     (do
-      (seqv-activate-track-for-edit track)
-      (seqv-set-track-expanded track-id (not (seqv-track-expanded? track-id))))))
+      (%activate-track-for-edit track)
+      (set-track-expanded track-id (not (%track-expanded? track-id))))))
 
-(def seqv-drop-sample-on-track (event)
+(def drop-sample-on-track (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((path (get payload :path))
           (track (get target :track)))
       (if path
         (do
-          (seqv-activate-track-for-edit track)
+          (%activate-track-for-edit track)
           (sbrowser-drop-sample-on-track event))
         (status "Drop a sample file, not a folder")))))
 
-(def seqv-drop-on-track (event)
+(def drop-on-track (event)
   (if (= (get event :drag-type) "sound")
     (sbrowser-drop-sound-on-track event)
     (if (= (get event :drag-type) "instrument")
       (sbrowser-drop-instrument-on-track event)
-      (seqv-drop-sample-on-track event))))
+      (drop-sample-on-track event))))
 
-(def seqv-drop-new-track (event)
+(def drop-new-track (event)
   (let ((payload (get event :payload)))
     (let ((path (get payload :path))
           (name (get payload :name)))
@@ -520,7 +581,15 @@
         (sdf/circle 0.12))
       (material :color (rgba 0.60 0.62 0.68 1.0)))))
 
-(defmacro seqv-aqua-slider-track-material ()
+;; Module spec §10 hazard (h): the two `:material` props that call this expand
+;; much later, at shader-compile time, in a throwaway *implicit-module*
+;; compiler, so "current module" there is `eseq.vanilla` and a bare call would
+;; not find this macro.  Both call sites spell it `eseq.sequencer/…`.
+;; Renamed off `seqv-aqua-slider-track-material` rather than mechanically
+;; stripped: bare `aqua-slider-track-material` is ui/materials.lisp's compat
+;; alias for `eseq.materials/slider-track-material`, and in that same
+;; implicit-module expansion the alias rung would have won.
+(defmacro step-slider-track-material ()
   `(material
      :lighting (lighting :edge-min -0.215 :edge-max 0.8413
        :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
@@ -673,12 +742,12 @@
 ;; take-governed (dimmed steps + non-interactive grid + lit Back-to-Song
 ;; play button), 2 = a take lane the performer manually latched away
 ;; (editable again; the grey play button returns it to the song).
-(def seqv-track-take-state (i)
+(def %track-take-state (i)
   (let ((state (nth SEQ.song-track-governed i)))
     (if (= state nil) 0 state)))
 
-(def seqv-track-song-governed? (i)
-  (= (seqv-track-take-state i) 1))
+(def %track-song-governed? (i)
+  (= (%track-take-state i) 1))
 
 ;; Per-track take-lane indicator / Back-to-Song button: a play triangle that
 ;; sits lit green while a take governs the lane and grey while the lane is
@@ -740,12 +809,12 @@
                  (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
                  (rgba track-r track-g track-b 1.0)))))))))
 
-(def seqv-mute-bg (active)
+(def %mute-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)
          (rgba 0.95 0.48 0.18 1.0)))
 
-(def seqv-solo-bg (active)
+(def %solo-bg (active)
   (if active
     (rgba 0.72 0.10 0.10 1.0)
     (rgba 0.08 0.09 0.10 1.0)))
@@ -754,66 +823,66 @@
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
 ;; The header lives in its own subtree so name/mute/solo/arm changes rerun
 ;; only this header instead of the whole track row (incl. its step grid).
-(def seqv-track-header (i)
+(def track-header (i)
   (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
-    (seqv-track-header-body i)))
+    (%track-header-body i)))
 
-(def seqv-track-volume-control (i)
+(def %track-volume-control (i)
   (v-stack (box :height 0.13 )
     (box
-      :key (str "seqv-track-volume-control-" i)
+      :key (str "track-volume-control-" i)
       :width 8.2 :height 1.25
       :background "seqv-track-volume-meter"
-      :level (seqv-track-peak i)
-      :volume (seqv-track-volume-binding i)
-      :track-r (seqv-track-color-r-binding i)
-      :track-g (seqv-track-color-g-binding i)
-      :track-b (seqv-track-color-b-binding i)
-      :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
-      :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+      :level (%track-peak i)
+      :volume (%track-volume-binding i)
+      :track-r (%track-color-r-binding i)
+      :track-g (%track-color-g-binding i)
+      :track-b (%track-color-b-binding i)
+      :on-click (lambda (event) (%set-track-volume-from-event i event))
+      :on-drag (lambda (event) (%set-track-volume-from-event i event))))
   )
 
-(def seqv-track-header-body (i)
+(def %track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.1
       
-      :on-click |x y r| (seqv-select-track-for-edit i)
+      :on-click |x y r| (select-track-for-edit i)
       (h-stack :gap 0.4 :align :center
         (box
-          :key (str "seqv-color-badge-" i)
+          :key (str "color-badge-" i)
           :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
-          :track-r (seqv-track-color-r-binding i)
-          :track-g (seqv-track-color-g-binding i)
-          :track-b (seqv-track-color-b-binding i)
-          :on-click |x y r| (seqv-select-track-for-edit i))
+          :track-r (%track-color-r-binding i)
+          :track-g (%track-color-g-binding i)
+          :track-b (%track-color-b-binding i)
+          :on-click |x y r| (select-track-for-edit i))
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
-          :key (str "seqv-arm-" i)
+          :key (str "arm-" i)
           :active (if (nth SEQ.record-armed i) 1 0)
-          :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-record-arm i)))
+          :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-record-arm i)))
         (button (str (+ i 1))
-          :key (str "seqv-mute-" i)
+          :key (str "mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :background-color (seqv-mute-bg (nth SEQ.track-mutes i))
+          :background-color (%mute-bg (nth SEQ.track-mutes i))
           :color (if (nth SEQ.track-mutes i) :gray :black)
-          :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-track-mute i)))
+          :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-track-mute i)))
         (button "S"
-          :key (str "seqv-solo-" i)
+          :key (str "solo-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :background-color (seqv-solo-bg (nth SEQ.track-solos i))
+          :background-color (%solo-bg (nth SEQ.track-solos i))
           :color (if (nth SEQ.track-solos i) :white :gray)
-          :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-track-solo i)))
+          :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-track-solo i)))
         (box :width 8.6 :height 1
-          :key (str "seqv-select-" i)
+          :key (str "select-" i)
           :background-color :transparent
-          :on-click |x y r| (seqv-select-track-for-edit i)
+          :on-click |x y r| (select-track-for-edit i)
           ;; Arrangement/step track headers are device-view gestures:
           ;; double-click always enters FX mode rather than toggling.
-          :on-double-click (lambda (evt) (seqv-show-fx-for-track i))
-          (badge (seqv-track-name-display name)
-            :key (str "seqv-track-name-label-" i)
+          :on-double-click (lambda (evt) (%show-fx-for-track i))
+          (badge (%track-name-display name)
+            :key (str "track-name-label-" i)
             :icon (seq-track-type-icon i)
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
@@ -825,7 +894,7 @@
               (rgba 0.4 0.4 0.4 0.6)
               :dim)
             :bg :transparent))
-        (seqv-track-volume-control i)
+        (%track-volume-control i)
         ;; Take-lane indicator (takes spec 10 UX): green = a take governs
         ;; the lane (steps dim, grid read-only); grey = the performer
         ;; latched the lane away — click returns it to the song; invisible
@@ -836,71 +905,71 @@
           :take-state (bind-seq-nth "song-track-governed" i)
           (box :width 2 :height 1.5
             :background "seqv-back-to-song-icon"
-            :key (str "seqv-back-to-song-" i)
+            :key (str "back-to-song-" i)
             :take-state (bind-seq-nth "song-track-governed" i)
             :on-click |x y r|
-            (if (> (seqv-track-take-state i) 0)
+            (if (> (%track-take-state i) 0)
               (seq-song-back-to-song-track i)
               nil)))))))
 
-(def seqv-track-actions (i)
+(def %track-actions (i)
   (h-stack :gap 0.35 :padding 0.85
     (box
-      :key (str "seqv-expand-" i)
+      :key (str "expand-" i)
       :width 3.5 :height 1.0
       :background "seqv-ellipsis-button"
-      :expanded (if (seqv-track-expanded? (nth SEQ.track-ids i)) 1 0)
-      :on-click |x y r| (seqv-track-menu-click i))
+      :expanded (if (%track-expanded? (nth SEQ.track-ids i)) 1 0)
+      :on-click |x y r| (track-menu-click i))
     (box :width 0.1 :height 0.0)
     ))
 
-(def sequencer-row-width 16)
+(def %row-width 16)
 
 ;; The expanded step editor is a fixed-format 16-column control grid. Keeping
 ;; the dimensions named here lets the grid use an explicit row height without
 ;; duplicating geometry across the widget tree.
-(def seqv-expanded-step-column-padding 0.25)
-(def seqv-expanded-step-column-gap 0.5)
-(def seqv-expanded-step-slider-height 4)
-(def seqv-expanded-step-toggle-height 1.5)
-(def seqv-expanded-step-label-height 1)
-(def seqv-expanded-step-playhead-height 0.7)
-(def seqv-expanded-step-row-height
-  (+ (* 2 seqv-expanded-step-column-padding)
-    seqv-expanded-step-slider-height
-    seqv-expanded-step-toggle-height
-    seqv-expanded-step-label-height
-    seqv-expanded-step-playhead-height
-    (* 3 seqv-expanded-step-column-gap)))
+(def %expanded-step-column-padding 0.25)
+(def %expanded-step-column-gap 0.5)
+(def %expanded-step-slider-height 4)
+(def %expanded-step-toggle-height 1.5)
+(def %expanded-step-label-height 1)
+(def %expanded-step-playhead-height 0.7)
+(def %expanded-step-row-height
+  (+ (* 2 %expanded-step-column-padding)
+    %expanded-step-slider-height
+    %expanded-step-toggle-height
+    %expanded-step-label-height
+    %expanded-step-playhead-height
+    (* 3 %expanded-step-column-gap)))
 
-(def seqv-drag-track nil)
-(def seqv-duration-drag-source nil)
-(def seqv-drum-drag-pad nil)
+(def %drag-track nil)
+(def %duration-drag-source nil)
+(def %drum-drag-pad nil)
 
-(def seqv-duration-edge? (evt)
+(def %duration-edge? (evt)
   (let ((sx (get evt :sx)))
     (and (not (= sx nil)) (> sx 0.48))))
 
-(def seqv-set-duration-from-drag (track source step)
+(def %set-duration-from-drag (track source step)
   (do
     (seq-set-track track)
     (seq-set-step-param source :duration (max 1 (min 32 (+ (- step source) 1))))))
 
-(def seqv-step-select-drag-start (track step evt)
-  (if (seqv-track-song-governed? track)
+(def %grid-step-select-drag-start (track step evt)
+  (if (%track-song-governed? track)
     nil
     (do
       (set! selected-bus -1)
       (seq-set-track track)
-      (set! seqv-drag-track track)
+      (set! %drag-track track)
       (step-select-drag-start step evt))))
 
-(def seqv-step-select-drag-over (track step evt)
-  (if (seqv-track-song-governed? track)
+(def %grid-step-select-drag-over (track step evt)
+  (if (%track-song-governed? track)
     nil
-    (if (and (= seqv-drag-track track) (not (= seqv-duration-drag-source nil)))
-      (seqv-set-duration-from-drag track seqv-duration-drag-source step)
-      (if (= seqv-drag-track track)
+    (if (and (= %drag-track track) (not (= %duration-drag-source nil)))
+      (%set-duration-from-drag track %duration-drag-source step)
+      (if (= %drag-track track)
         (do
           (seq-set-track track)
           (step-select-drag-over-for-track track step evt))
@@ -910,45 +979,43 @@
 ;; arrangement holds launch authority the Seq grid is a dimmed read-only view
 ;; of the session pattern — edits would silently target a pattern the lane is
 ;; not playing.
-(def seqv-step-pointer-down (track step evt)
-  (if (seqv-track-song-governed? track)
+(def grid-step-pointer-down (track step evt)
+  (if (%track-song-governed? track)
     nil
     (let ((use-selection (= SEQ.current-track track)))
       (do
         (set! selected-bus -1)
         (seq-set-track track)
-        (set! seqv-drag-track track)
-        (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (seqv-duration-edge? evt))
+        (set! %drag-track track)
+        (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (%duration-edge? evt))
           (do
-            (set! seqv-duration-drag-source step)
-            (set! step-click-pending nil)
-            (set! step-drag-anchor nil)
-            (set! step-move-last nil)
+            (set! %duration-drag-source step)
+            (step-clear-drag-state)
             (cool-off-follow)
             (set-track-cursor-step step)
-            (seqv-set-duration-from-drag track step step))
+            (%set-duration-from-drag track step step))
           (step-pointer-down-for-track track step evt use-selection))))))
 
-(def seqv-step-double-click (track step evt)
-  (if (seqv-track-song-governed? track)
+(def %grid-step-double-click (track step evt)
+  (if (%track-song-governed? track)
     nil
     (do
       (seq-set-track track)
       (step-double-click-for-track track step evt))))
 
-(def seqv-step-pointer-up (track step evt)
+(def grid-step-pointer-up (track step evt)
   (do
-    (if (and (= seqv-drag-track track)
-          (= seqv-duration-drag-source nil)
-          (not (seqv-track-song-governed? track)))
+    (if (and (= %drag-track track)
+          (= %duration-drag-source nil)
+          (not (%track-song-governed? track)))
       (do
         (seq-set-track track)
         (step-pointer-up step evt))
       nil)
-    (set! seqv-drag-track nil)
-    (set! seqv-duration-drag-source nil)))
+    (set! %drag-track nil)
+    (set! %duration-drag-source nil)))
 
-(def seqv-set-drum-duration-from-drag (track pad-note source step)
+(def %set-drum-duration-from-drag (track pad-note source step)
   (do
     (seq-set-track track)
     (seq-set-drum-lane-step-duration
@@ -957,73 +1024,71 @@
       source
       (max 1 (min 32 (+ (- step source) 1))))))
 
-(def seqv-drum-step-select-drag-over (track pad-note step evt)
-  (if (seqv-track-song-governed? track)
+(def %grid-drum-step-select-drag-over (track pad-note step evt)
+  (if (%track-song-governed? track)
     nil
-    (if (and (= seqv-drag-track track)
-          (= seqv-drum-drag-pad pad-note)
-          (not (= seqv-duration-drag-source nil)))
-      (seqv-set-drum-duration-from-drag
-        track pad-note seqv-duration-drag-source step)
-      (if (and (= seqv-drag-track track) (= seqv-drum-drag-pad pad-note))
+    (if (and (= %drag-track track)
+          (= %drum-drag-pad pad-note)
+          (not (= %duration-drag-source nil)))
+      (%set-drum-duration-from-drag
+        track pad-note %duration-drag-source step)
+      (if (and (= %drag-track track) (= %drum-drag-pad pad-note))
         (drum-step-select-drag-over track pad-note step evt)
         nil))))
 
-(def seqv-drum-step-pointer-down (track slot-idx pad-note step evt)
-  (if (seqv-track-song-governed? track)
+(def %grid-drum-step-pointer-down (track slot-idx pad-note step evt)
+  (if (%track-song-governed? track)
     nil
     (do
-      (seqv-select-drum-slot-index track slot-idx)
+      (%select-drum-slot-index track slot-idx)
       (set! selected-bus -1)
       (seq-set-track track)
-      (set! seqv-drag-track track)
-      (set! seqv-drum-drag-pad pad-note)
+      (set! %drag-track track)
+      (set! %drum-drag-pad pad-note)
       (if (and (seq-drum-lane-step-active? track pad-note step)
             (not (selection-click? evt))
-            (seqv-duration-edge? evt))
+            (%duration-edge? evt))
         (do
-          (set! seqv-duration-drag-source step)
-          (set! step-click-pending nil)
-          (set! step-drag-anchor nil)
-          (set! step-move-last nil)
+          (set! %duration-drag-source step)
+          (step-clear-drag-state)
           (cool-off-follow)
           (drum-step-set-cursor track pad-note step)
-          (seqv-set-drum-duration-from-drag track pad-note step step))
+          (%set-drum-duration-from-drag track pad-note step step))
         (drum-step-pointer-down track pad-note step evt)))))
 
-(def seqv-drum-step-pointer-up (track pad-note step evt)
+(def %grid-drum-step-pointer-up (track pad-note step evt)
   (do
-    (if (and (= seqv-drag-track track)
-          (= seqv-drum-drag-pad pad-note)
-          (= seqv-duration-drag-source nil)
-          (not (seqv-track-song-governed? track)))
+    (if (and (= %drag-track track)
+          (= %drum-drag-pad pad-note)
+          (= %duration-drag-source nil)
+          (not (%track-song-governed? track)))
       (drum-step-pointer-up track pad-note step evt)
       nil)
-    (set! seqv-drag-track nil)
-    (set! seqv-drum-drag-pad nil)
-    (set! seqv-duration-drag-source nil)))
+    (set! %drag-track nil)
+    (set! %drum-drag-pad nil)
+    (set! %duration-drag-source nil)))
 
-(def seqv-drum-step-double-click (track slot-idx pad-note step evt)
-  (if (seqv-track-song-governed? track)
+(def %grid-drum-step-double-click (track slot-idx pad-note step evt)
+  (if (%track-song-governed? track)
     nil
     (do
-      (seqv-select-drum-slot-index track slot-idx)
+      (%select-drum-slot-index track slot-idx)
       (seq-set-track track)
       (drum-step-double-click track pad-note step evt))))
 
 ;; Single tight step button (no slider, no number).
-(def seqv-track-step-value (lists track step fallback)
+(def %track-step-value (lists track step fallback)
   (let ((track-list (if (< track (len lists)) (nth lists track) '())))
     (if (< step (len track-list))
       (nth track-list step)
       fallback)))
 
-(def seqv-step-odd (step)
+(def %step-odd (step)
   (let ((odd1 (mod (floor (/ step 4)) 2))
       (odd2 (mod (floor (/ step 32)) 2)))
     (if (= odd2 1) (if (= odd1 1) 0 1) odd1)))
 
-(def seqv-step-cell (track step visible)
+(def %step-cell (track step visible)
   ;; Step cells use the step-color channels: same as the track color but
   ;; additionally dimmed while the lane is take-governed. Muting is passed
   ;; separately so the shader can replace colored layers with opaque neutral
@@ -1038,25 +1103,25 @@
       (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
     (box
       :width 3.05 :height 1.55
-      :key (str "seqv-step-cell-" track "-" step)
+      :key (str "step-cell-" track "-" step)
       :on-mouse-down (lambda (evt)
         (if visible
-          (seqv-step-pointer-down track step evt)
+          (grid-step-pointer-down track step evt)
           nil))
       :on-drag (lambda (evt)
         (if visible
-          (seqv-step-select-drag-over track step evt)
+          (%grid-step-select-drag-over track step evt)
           nil))
       :on-mouse-up (lambda (evt)
         (if visible
-          (seqv-step-pointer-up track step evt)
+          (grid-step-pointer-up track step evt)
           nil))
       :on-double-click (lambda (evt)
         (if visible
-          (seqv-step-double-click track step evt)
+          (%grid-step-double-click track step evt)
           nil))
-      :active (seqv-cursor-highlight-binding track step)
-      :selected (seqv-track-selected-binding track)
+      :active (%cursor-highlight-binding track step)
+      :selected (track-selected-binding track)
       :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
@@ -1072,12 +1137,12 @@
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
         :color :sequencer-step-border
         :selected-color :sequencer-step-selected-border
-        :off-fill (if (= (seqv-step-odd step) 1)
+        :off-fill (if (= (%step-odd step) 1)
           :sequencer-step-off-fill-alt
           :sequencer-step-off-fill)
         :background "seqv-step-shell"))))
 
-(def seqv-drum-lane-step-cell (track slot-idx pad-note step visible)
+(def %drum-lane-step-cell (track slot-idx pad-note step visible)
   (let ((track-r (bind-seq-nth "step-color-r-effective" track))
       (track-g (bind-seq-nth "step-color-g-effective" track))
       (track-b (bind-seq-nth "step-color-b-effective" track))
@@ -1088,29 +1153,29 @@
       (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
     (box
       :width 3.05 :height 1.55
-      :key (str "seqv-drum-lane-step-" track "-" pad-note "-" step)
+      :key (str "drum-lane-step-" track "-" pad-note "-" step)
       :debug-name "seqv-drum-lane-step"
       :on-mouse-down (lambda (evt)
         (if visible
-          (seqv-drum-step-pointer-down track slot-idx pad-note step evt)
+          (%grid-drum-step-pointer-down track slot-idx pad-note step evt)
           nil))
       :on-drag (lambda (evt)
         (if visible
-          (seqv-drum-step-select-drag-over track pad-note step evt)
+          (%grid-drum-step-select-drag-over track pad-note step evt)
           nil))
       :on-mouse-up (lambda (evt)
         (if visible
-          (seqv-drum-step-pointer-up track pad-note step evt)
+          (%grid-drum-step-pointer-up track pad-note step evt)
           nil))
       :on-double-click (lambda (evt)
         (if visible
-          (seqv-drum-step-double-click track slot-idx pad-note step evt)
+          (%grid-drum-step-double-click track slot-idx pad-note step evt)
           nil))
       :active (if (and (= drum-step-cursor-track track)
                     (= drum-step-cursor-pad pad-note))
-        (seqv-cursor-highlight-binding track step)
+        (%cursor-highlight-binding track step)
         0)
-      :selected (seqv-track-selected-binding track)
+      :selected (track-selected-binding track)
       :hide (if visible 0 1)
       :background "cursor-highlight"
       (box
@@ -1128,236 +1193,236 @@
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
         :color :sequencer-step-border
         :selected-color :sequencer-step-selected-border
-        :off-fill (if (= (seqv-step-odd step) 1)
+        :off-fill (if (= (%step-odd step) 1)
           :sequencer-step-off-fill-alt
           :sequencer-step-off-fill)
         :background "seqv-step-shell"))))
 
-(def seqv-playhead-row (track track-id row)
+(def %playhead-row (track track-id row)
   (box
-    :key (str "seqv-playhead-row-" track-id "-" row)
+    :key (str "playhead-row-" track-id "-" row)
     :width 48.8 :height 0.24
     :background "seqv-playhead-row-bar"
     :col (bind-seq (str "track-playhead-row-" track "-" row))))
 
-(def seqv-track-num-steps (track)
+(def %track-num-steps (track)
   (if (< track (len SEQ.track-num-steps))
     (nth SEQ.track-num-steps track)
     16))
 
-(def seqv-expanded-track-color-r (track)
-  (nth (seqv-track-color track) 0))
+(def %expanded-track-color-r (track)
+  (nth (%track-color track) 0))
 
-(def seqv-expanded-track-color-g (track)
-  (nth (seqv-track-color track) 1))
+(def %expanded-track-color-g (track)
+  (nth (%track-color track) 1))
 
-(def seqv-expanded-track-color-b (track)
-  (nth (seqv-track-color track) 2))
+(def %expanded-track-color-b (track)
+  (nth (%track-color track) 2))
 
-(def seqv-expanded-slider-fill (track)
-  (rgba (seqv-expanded-track-color-r track) (seqv-expanded-track-color-g track) (seqv-expanded-track-color-b track) 1.0))
+(def %expanded-slider-fill (track)
+  (rgba (%expanded-track-color-r track) (%expanded-track-color-g track) (%expanded-track-color-b track) 1.0))
 
-(def seqv-expanded-slider-muted-fill (track)
+(def %expanded-slider-muted-fill (track)
   (rgba
-    (+ (* (seqv-expanded-track-color-r track) 0.30) (* 0.08 0.70))
-    (+ (* (seqv-expanded-track-color-g track) 0.30) (* 0.08 0.70))
-    (+ (* (seqv-expanded-track-color-b track) 0.30) (* 0.12 0.70))
+    (+ (* (%expanded-track-color-r track) 0.30) (* 0.08 0.70))
+    (+ (* (%expanded-track-color-g track) 0.30) (* 0.08 0.70))
+    (+ (* (%expanded-track-color-b track) 0.30) (* 0.12 0.70))
     0.50))
 
-(def seqv-expanded-slider-muted-dot (track)
+(def %expanded-slider-muted-dot (track)
   (rgba
-    (+ (* (seqv-expanded-track-color-r track) 0.28) (* 0.25 0.72))
-    (+ (* (seqv-expanded-track-color-g track) 0.28) (* 0.25 0.72))
-    (+ (* (seqv-expanded-track-color-b track) 0.28) (* 0.30 0.72))
+    (+ (* (%expanded-track-color-r track) 0.28) (* 0.25 0.72))
+    (+ (* (%expanded-track-color-g track) 0.28) (* 0.25 0.72))
+    (+ (* (%expanded-track-color-b track) 0.28) (* 0.30 0.72))
     0.55))
 
-(def seqv-current-step (track track-id)
-  (seqv-cursor-step track-id))
+(def track-current-step (track track-id)
+  (track-cursor track-id))
 
-(def seqv-page-count (track)
-  (max 1 (floor (/ (+ (seqv-track-num-steps track) (- page-size 1)) page-size))))
+(def %page-count (track)
+  (max 1 (floor (/ (+ (%track-num-steps track) (- page-size 1)) page-size))))
 
-(def seqv-current-page (track track-id)
-  (min (floor (/ (seqv-current-step track track-id) page-size)) (- (seqv-page-count track) 1)))
+(def track-current-page (track track-id)
+  (min (floor (/ (track-current-step track track-id) page-size)) (- (%page-count track) 1)))
 
-(def seqv-playhead-page (track)
+(def %playhead-page (track)
   (let ((page (reactive-get "SEQ" (str "track-playhead-page-" track))))
     (min
       (if page page 0)
-      (- (seqv-page-count track) 1))))
+      (- (%page-count track) 1))))
 
-(def seqv-visible-page (track track-id)
+(def %visible-page (track track-id)
   (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
-    (seqv-playhead-page track)
-    (seqv-current-page track track-id)))
+    (%playhead-page track)
+    (track-current-page track track-id)))
 
-(def seqv-page-offset (track track-id)
-  (* (seqv-visible-page track track-id) page-size))
+(def %page-offset (track track-id)
+  (* (%visible-page track track-id) page-size))
 
-(def seqv-expanded-step-index (track track-id i)
-  (+ (seqv-page-offset track track-id) i))
+(def %expanded-step-index (track track-id i)
+  (+ (%page-offset track track-id) i))
 
-(def seqv-expanded-step-visible? (track track-id i)
-  (< (seqv-expanded-step-index track track-id i) (seqv-track-num-steps track)))
+(def %expanded-step-visible? (track track-id i)
+  (< (%expanded-step-index track track-id i) (%track-num-steps track)))
 
-(def seqv-sync-expanded-step-slots-for (track track-id)
+(def %sync-expanded-step-slots-for (track track-id)
   (seqv-sync-expanded-step-slots
     track
     track-id
-    (seqv-visible-page track track-id)
-    (seqv-param-mode track-id)
-    (seqv-current-step track track-id)))
+    (%visible-page track track-id)
+    (track-param-mode track-id)
+    (track-current-step track track-id)))
 
-(def seqv-slot-field (name track-id slot)
+(def %slot-field (name track-id slot)
   (str "seqv-slot-" name "-" track-id "-" slot))
 
-(def seqv-slot-param-field (kind track-id mode slot)
+(def %slot-param-field (kind track-id mode slot)
   (str "seqv-slot-param-" kind "-" track-id "-" mode "-" slot))
 
-(def seqv-slot-page-active-field (track-id page)
+(def %slot-page-active-field (track-id page)
   (str "seqv-page-active-" track-id "-" page))
 
-(def seqv-slot-step-index-binding (track-id slot)
-  (bind-seq (seqv-slot-field "step-index" track-id slot)))
+(def %slot-step-index-binding (track-id slot)
+  (bind-seq (%slot-field "step-index" track-id slot)))
 
-(def seqv-slot-step-index-value (track-id slot)
-  (reactive-value (seqv-slot-step-index-binding track-id slot)))
+(def %slot-step-index-value (track-id slot)
+  (reactive-value (%slot-step-index-binding track-id slot)))
 
-(def seqv-slot-visible-binding (track-id slot)
-  (bind-seq (seqv-slot-field "visible" track-id slot)))
+(def %slot-visible-binding (track-id slot)
+  (bind-seq (%slot-field "visible" track-id slot)))
 
-(def seqv-slot-visible? (track-id slot)
-  (> (reactive-value (seqv-slot-visible-binding track-id slot)) 0.5))
+(def %slot-visible? (track-id slot)
+  (> (reactive-value (%slot-visible-binding track-id slot)) 0.5))
 
-(def seqv-slot-label-binding (track-id slot)
-  (bind-seq (seqv-slot-field "step-label" track-id slot)))
+(def %slot-label-binding (track-id slot)
+  (bind-seq (%slot-field "step-label" track-id slot)))
 
-(def seqv-slot-active-binding (track-id slot)
-  (bind-seq (seqv-slot-field "active" track-id slot)))
+(def %slot-active-binding (track-id slot)
+  (bind-seq (%slot-field "active" track-id slot)))
 
-(def seqv-slot-plocked-binding (track-id slot)
-  (bind-seq (seqv-slot-field "plocked" track-id slot)))
+(def %slot-plocked-binding (track-id slot)
+  (bind-seq (%slot-field "plocked" track-id slot)))
 
-(def seqv-slot-selected-binding (track-id slot)
-  (bind-seq (seqv-slot-field "selected" track-id slot)))
+(def %slot-selected-binding (track-id slot)
+  (bind-seq (%slot-field "selected" track-id slot)))
 
-(def seqv-slot-playhead-binding (track-id slot)
-  (bind-seq (seqv-slot-field "playhead-active" track-id slot)))
+(def %slot-playhead-binding (track-id slot)
+  (bind-seq (%slot-field "playhead-active" track-id slot)))
 
-(def seqv-slot-cursor-binding (track-id slot)
-  (bind-seq (seqv-slot-field "cursor-active" track-id slot)))
+(def %slot-cursor-binding (track-id slot)
+  (bind-seq (%slot-field "cursor-active" track-id slot)))
 
-(def seqv-slot-param-slider-binding (track-id mode slot)
-  (bind-seq (seqv-slot-param-field "slider" track-id mode slot)))
+(def %slot-param-slider-binding (track-id mode slot)
+  (bind-seq (%slot-param-field "slider" track-id mode slot)))
 
-(def seqv-slot-param-haptic-binding (track-id mode slot)
-  (bind-seq (seqv-slot-param-field "haptic" track-id mode slot)))
+(def %slot-param-haptic-binding (track-id mode slot)
+  (bind-seq (%slot-param-field "haptic" track-id mode slot)))
 
-(def seqv-page-active-binding (track-id page)
-  (bind-seq (seqv-slot-page-active-field track-id page)))
+(def %page-active-binding (track-id page)
+  (bind-seq (%slot-page-active-field track-id page)))
 
-(def seqv-step-active-binding (track step)
+(def %step-active-binding (track step)
   (bind-seq (str "seq-track-step-active-" track "-" step)))
 
-(def seqv-step-plocked-binding (track step)
+(def %step-plocked-binding (track step)
   (bind-seq (str "seq-track-step-plocked-" track "-" step)))
 
-(def seqv-step-selected-binding (track step)
+(def %step-selected-binding (track step)
   (bind-seq (str "seq-track-step-selected-" track "-" step)))
 
-(def seqv-step-param-slider-binding (track mode step)
+(def %step-param-slider-binding (track mode step)
   (bind-seq (str "seq-track-step-param-slider-" track "-" mode "-" step)))
 
-(def seqv-step-param-haptic-binding (track mode step)
+(def %step-param-haptic-binding (track mode step)
   (bind-seq (str "seq-track-step-param-haptic-" track "-" mode "-" step)))
 
-(def seqv-expanded-sync-current-label (track track-id)
+(def %expanded-sync-current-label (track track-id)
   (nth SEQ.sync-labels
-    (floor (+ 0.5 (seqv-param-value-at track 5 (seqv-current-step track track-id))))))
+    (floor (+ 0.5 (seqv-param-value-at track 5 (track-current-step track track-id))))))
 
-(def seqv-set-expanded-cursor (track track-id step)
+(def %set-expanded-cursor (track track-id step)
   (do
     (set-track-cursor-step step)))
 
-(def seqv-expanded-step-click (track track-id step evt)
-  (if (seqv-expanded-step-visible? track track-id (- step (seqv-page-offset track track-id)))
+(def %expanded-step-click (track track-id step evt)
+  (if (%expanded-step-visible? track track-id (- step (%page-offset track track-id)))
     (do
-      (seqv-activate-track-for-edit track)
+      (%activate-track-for-edit track)
       (cool-off-follow)
-      (seqv-set-expanded-cursor track track-id step)
+      (%set-expanded-cursor track track-id step)
       (if (selection-click? evt)
         (step-select-drag-start step evt)
         (seq-clear-selection)))
     nil))
 
-(def seqv-expanded-step-drag (track track-id step evt)
+(def %expanded-step-drag (track track-id step evt)
   (do
     (step-select-drag-over-for-track-no-cursor track step evt)))
 
-(def seqv-expanded-step-pointer-down (track track-id step evt)
+(def %expanded-step-pointer-down (track track-id step evt)
   (let ((use-selection (= SEQ.current-track track)))
     (do
-      (seqv-activate-track-for-edit track)
-      (seqv-set-expanded-cursor track track-id step)
+      (%activate-track-for-edit track)
+      (%set-expanded-cursor track track-id step)
       (step-pointer-down-for-track track step evt use-selection))))
 
-(def seqv-expanded-step-pointer-up (track track-id step evt)
+(def %expanded-step-pointer-up (track track-id step evt)
   (do
-    (seqv-activate-track-for-edit track)
-    (seqv-set-expanded-cursor track track-id step)
+    (%activate-track-for-edit track)
+    (%set-expanded-cursor track track-id step)
     (step-pointer-up step evt)))
 
-(def seqv-expanded-slot-click (track track-id slot evt)
-  (let ((step (seqv-slot-step-index-value track-id slot)))
+(def %expanded-slot-click (track track-id slot evt)
+  (let ((step (%slot-step-index-value track-id slot)))
     (if (>= step 0)
-      (seqv-expanded-step-click track track-id step evt)
+      (%expanded-step-click track track-id step evt)
       nil)))
 
-(def seqv-expanded-slot-drag (track track-id slot evt)
-  (let ((step (seqv-slot-step-index-value track-id slot)))
+(def %expanded-slot-drag (track track-id slot evt)
+  (let ((step (%slot-step-index-value track-id slot)))
     (if (>= step 0)
-      (seqv-expanded-step-drag track track-id step evt)
+      (%expanded-step-drag track track-id step evt)
       nil)))
 
-(def seqv-expanded-slot-pointer-down (track track-id slot evt)
-  (let ((step (seqv-slot-step-index-value track-id slot)))
+(def %expanded-slot-pointer-down (track track-id slot evt)
+  (let ((step (%slot-step-index-value track-id slot)))
     (if (>= step 0)
-      (seqv-expanded-step-pointer-down track track-id step evt)
+      (%expanded-step-pointer-down track track-id step evt)
       nil)))
 
-(def seqv-expanded-slot-pointer-up (track track-id slot evt)
-  (let ((step (seqv-slot-step-index-value track-id slot)))
+(def %expanded-slot-pointer-up (track track-id slot evt)
+  (let ((step (%slot-step-index-value track-id slot)))
     (if (>= step 0)
-      (seqv-expanded-step-pointer-up track track-id step evt)
+      (%expanded-step-pointer-up track track-id step evt)
       nil)))
 
-(def seqv-expanded-step-double-click (track track-id step evt)
+(def %expanded-step-double-click (track track-id step evt)
   (do
-    (seqv-activate-track-for-edit track)
+    (%activate-track-for-edit track)
     (step-double-click-for-track track step evt)))
 
-(def seqv-expanded-slot-double-click (track track-id slot evt)
-  (let ((step (seqv-slot-step-index-value track-id slot)))
+(def %expanded-slot-double-click (track track-id slot evt)
+  (let ((step (%slot-step-index-value track-id slot)))
     (if (>= step 0)
-      (seqv-expanded-step-double-click track track-id step evt)
+      (%expanded-step-double-click track track-id step evt)
       nil)))
 
-(def seqv-set-expanded-slot-param (track track-id slot mode slider-value)
-  (let ((step (seqv-slot-step-index-value track-id slot)))
+(def %set-expanded-slot-param (track track-id slot mode slider-value)
+  (let ((step (%slot-step-index-value track-id slot)))
     (if (>= step 0)
-      (seqv-set-expanded-step-param track track-id step mode slider-value)
+      (%set-expanded-step-param track track-id step mode slider-value)
       nil)))
 
-(def seqv-set-expanded-slot-sound (track track-id slot sound-index)
-  (seqv-set-expanded-slot-param
+(def %set-expanded-slot-sound (track track-id slot sound-index)
+  (%set-expanded-slot-param
     track track-id slot 3
     (seqv-drum-sound-transpose-at-index track sound-index)))
 
-(def seqv-set-expanded-step-param (track track-id step mode slider-value)
+(def %set-expanded-step-param (track track-id step mode slider-value)
   (do
-    (seqv-activate-track-for-edit track)
+    (%activate-track-for-edit track)
     (cool-off-follow)
-    (seqv-set-expanded-cursor track track-id step)
+    (%set-expanded-cursor track track-id step)
     (if (seqv-process-lane-mode? mode)
       (seq-set-process-lane-from-step
         track
@@ -1369,112 +1434,112 @@
         (seqv-param-keyword mode)
         (seqv-step-slider-param-value mode slider-value)))))
 
-(def seqv-set-expanded-current-param (track track-id mode value)
+(def %set-expanded-current-param (track track-id mode value)
   (do
-    (seqv-activate-track-for-edit track)
+    (%activate-track-for-edit track)
     (cool-off-follow)
-    (set-track-cursor-step (seqv-current-step track track-id))
+    (set-track-cursor-step (track-current-step track track-id))
     (if (seqv-process-lane-mode? mode)
       (seq-set-process-lane-from-step
         track
         mode
-        (seqv-current-step track track-id)
+        (track-current-step track track-id)
         (seqv-track-step-param-value track mode value))
       (seq-set-step-param-from-step
-        (seqv-current-step track track-id)
+        (track-current-step track track-id)
         (seqv-param-keyword mode)
         (seqv-step-param-value mode value)))))
 
-(def seqv-set-expanded-current-sound (track track-id label)
-  (seqv-set-expanded-current-param
+(def %set-expanded-current-sound (track track-id label)
+  (%set-expanded-current-param
     track track-id 3
     (seqv-drum-sound-transpose-for-label track label)))
 
-(def seqv-set-expanded-timebase (track label)
+(def %set-expanded-timebase (track label)
   (let ((plock-selected
       (and (< selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
     (do
-      (seqv-activate-track-for-edit track)
+      (%activate-track-for-edit track)
       (cool-off-follow)
       (if plock-selected
         (seq-plock-timebase label)
         (seq-set-timebase label)))))
 
-(def seqv-goto-page (track track-id page)
-  (let ((step (min (* page page-size) (- (max 1 (seqv-track-num-steps track)) 1))))
+(def %goto-page (track track-id page)
+  (let ((step (min (* page page-size) (- (max 1 (%track-num-steps track)) 1))))
     (do
-      (seqv-activate-track-for-edit track)
+      (%activate-track-for-edit track)
       (cool-off-follow)
       (set-track-cursor-step step))))
 
-(def seqv-double-track-pattern (track track-id)
+(def %double-track-pattern (track track-id)
   (do
-    (seqv-activate-track-for-edit track)
+    (%activate-track-for-edit track)
     (cool-off-follow)
     (seq-double-track-pattern)
-    (seqv-sync-all-track-cursors-to-global)))
+    (%sync-all-track-cursors-to-global)))
 
-(def seqv-halve-track-pattern (track track-id)
+(def %halve-track-pattern (track track-id)
   (do
-    (seqv-activate-track-for-edit track)
+    (%activate-track-for-edit track)
     (cool-off-follow)
     (seq-halve-track-pattern)
-    (seqv-sync-all-track-cursors-to-global)))
+    (%sync-all-track-cursors-to-global)))
 
-(def seqv-param-tab-width (mode)
+(def %param-tab-width (mode)
   7.8)
 
-(def seqv-clip-label (text max-chars)
+(def %clip-label (text max-chars)
   (let ((s (str text)))
     (if (> (len s) max-chars)
       (str (substring s 0 (- max-chars 2)) "..")
       s)))
 
-(def seqv-param-header-name (track mode)
+(def %param-header-name (track mode)
   (if (seqv-process-lane-mode? mode)
-    (seqv-clip-label (seqv-track-param-name track mode) 28)
+    (%clip-label (seqv-track-param-name track mode) 28)
     (if (seqv-drum-sound-mode? track mode) "Sound" (seqv-param-name mode))))
 
-(def seqv-param-header-width (mode)
+(def %param-header-width (mode)
   (if (seqv-process-lane-mode? mode) 17.8 6.4))
 
-(def seqv-param-tab (track track-id mode tab-label)
-  (box :width (seqv-param-tab-width mode) :height 2
-    :key (str "seqv-expanded-param-tab-" track-id "-" mode)
-    :bg (if (= (seqv-param-mode track-id) mode) (seqv-param-color mode) :dark-gray)
-    :on-click |x y r| (do (seqv-activate-track-for-edit track) (seqv-set-param-mode track-id mode))
+(def %param-tab (track track-id mode tab-label)
+  (box :width (%param-tab-width mode) :height 2
+    :key (str "expanded-param-tab-" track-id "-" mode)
+    :bg (if (= (track-param-mode track-id) mode) (seqv-param-color mode) :dark-gray)
+    :on-click |x y r| (do (%activate-track-for-edit track) (set-track-param-mode track-id mode))
     (label tab-label :font-size 12
-      :color (if (= (seqv-param-mode track-id) mode) :primary :dim)
+      :color (if (= (track-param-mode track-id) mode) :primary :dim)
       :bg :transparent)))
 
-(def seqv-process-lane-option-label (track lane-idx)
+(def %process-lane-option-label (track lane-idx)
   (let ((lane (nth (seqv-track-process-lanes track) lane-idx)))
     (str (+ lane-idx 1) " " (get lane :short-label))))
 
-(def seqv-process-lane-options (track)
+(def %process-lane-options (track)
   (append
     (list "none")
     (map
-      (lambda (lane-idx) (seqv-process-lane-option-label track lane-idx))
+      (lambda (lane-idx) (%process-lane-option-label track lane-idx))
       (range 0 (len (seqv-track-process-lanes track))))))
 
-(def seqv-process-lane-selector-value (track mode)
+(def %process-lane-selector-value (track mode)
   (if (seqv-process-lane-mode? mode)
     (let ((lane-idx (seqv-process-lane-index mode)))
       (if (and (>= lane-idx 0) (< lane-idx (len (seqv-track-process-lanes track))))
-        (seqv-process-lane-option-label track lane-idx)
+        (%process-lane-option-label track lane-idx)
         "none"))
     "none"))
 
-(def seqv-process-lane-selector-index (track label)
+(def %process-lane-selector-index (track label)
   (if (= label "none")
     -1
     (reduce |acc lane-idx|
-      (if (= label (seqv-process-lane-option-label track lane-idx)) lane-idx acc)
+      (if (= label (%process-lane-option-label track lane-idx)) lane-idx acc)
       -1
       (range 0 (len (seqv-track-process-lanes track))))))
 
-(def seqv-selected-process-lane (track mode)
+(def %selected-process-lane (track mode)
   (if (seqv-process-lane-mode? mode)
     (let ((lane-idx (seqv-process-lane-index mode)))
       (if (and (>= lane-idx 0) (< lane-idx (len (seqv-track-process-lanes track))))
@@ -1482,93 +1547,93 @@
         nil))
     nil))
 
-(def seqv-select-process-lane-option (track track-id label)
-  (let ((lane-idx (seqv-process-lane-selector-index track label)))
+(def select-process-lane-option (track track-id label)
+  (let ((lane-idx (%process-lane-selector-index track label)))
     (do
-      (seqv-activate-track-for-edit track)
+      (%activate-track-for-edit track)
       (if (>= lane-idx 0)
-        (seqv-set-param-mode track-id (+ seqv-process-lane-mode-offset lane-idx))
-        (if (seqv-process-lane-mode? (seqv-param-mode track-id))
-          (seqv-set-param-mode track-id 3)
+        (set-track-param-mode track-id (+ seqv-process-lane-mode-offset lane-idx))
+        (if (seqv-process-lane-mode? (track-param-mode track-id))
+          (set-track-param-mode track-id 3)
           nil)))))
 
-(def seqv-process-lane-selector (track track-id mode)
+(def %process-lane-selector (track track-id mode)
   (dropdown
-    :value (seqv-process-lane-selector-value track mode)
-    :key (str "seqv-expanded-process-lane-selector-" track-id)
-    :options (seqv-process-lane-options track)
-    :on-change (lambda (v) (seqv-select-process-lane-option track track-id v))
+    :value (%process-lane-selector-value track mode)
+    :key (str "expanded-process-lane-selector-" track-id)
+    :options (%process-lane-options track)
+    :on-change (lambda (v) (select-process-lane-option track track-id v))
     :width 14.8 :height 1.45 :font-size 10))
 
-(def seqv-expanded-track-quick-controls (track track-id)
-  (let ((mode (seqv-param-mode track-id)))
+(def %expanded-track-quick-controls (track track-id)
+  (let ((mode (track-param-mode track-id)))
     (v-stack 
       (box :height 0.4 :width 1)
       (h-stack :gap 0.55 :align :center
-        (box :width (seqv-param-header-width mode) :height 1.3
-          :key (str "seqv-expanded-step-summary-" track-id)
-          (label (seqv-param-header-name track mode)
-            :font-size 11 :width (seqv-param-header-width mode) :color :white :bg :transparent))
+        (box :width (%param-header-width mode) :height 1.3
+          :key (str "expanded-step-summary-" track-id)
+          (label (%param-header-name track mode)
+            :font-size 11 :width (%param-header-width mode) :color :white :bg :transparent))
         (if (= mode 5)
           (box :width 8 :height 1.3
-            :key (str "seqv-expanded-sync-label-" track-id)
-            (label (seqv-expanded-sync-current-label track track-id)
+            :key (str "expanded-sync-label-" track-id)
+            (label (%expanded-sync-current-label track track-id)
               :font-size 11 :color :white :bg :transparent))
           (if (seqv-drum-sound-mode? track mode)
             (if (> (seqv-drum-sound-count track) 0)
-              (dropdown :key (str "seqv-expanded-sound-picker-" track-id)
+              (dropdown :key (str "expanded-sound-picker-" track-id)
                 :value (seqv-drum-sound-label-for-transpose track
-                  (seqv-param-value-at track mode (seqv-current-step track track-id)))
+                  (seqv-param-value-at track mode (track-current-step track track-id)))
                 :options (seqv-drum-sound-labels track)
-                :on-change (lambda (label) (seqv-set-expanded-current-sound track track-id label))
+                :on-change (lambda (label) (%set-expanded-current-sound track track-id label))
                 :width 13 :height 1.3 :font-size 9)
               (box :width 13 :height 1.3
-                :key (str "seqv-expanded-no-sounds-" track-id)
+                :key (str "expanded-no-sounds-" track-id)
                 (label "No drum pads" :font-size 9 :color :dim :bg :transparent)))
-            (number-picker :key (str "seqv-expanded-param-number-picker-" track-id)
+            (number-picker :key (str "expanded-param-number-picker-" track-id)
               :border-color :white
-              :value (seqv-param-value-at track mode (seqv-current-step track track-id))
+              :value (seqv-param-value-at track mode (track-current-step track track-id))
               :min (seqv-track-param-min track mode) :max (seqv-track-param-max track mode) :decimals (seqv-track-param-decimals track mode)
-              :on-change (lambda (v) (seqv-set-expanded-current-param track track-id mode v))
+              :on-change (lambda (v) (%set-expanded-current-param track track-id mode v))
               :width 8 :height 1.3 :font-size 11)))
         (h-stack :gap 0.4 :align :center
           (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-            :key (str "seqv-expanded-half-" track-id)
-            :on-click |x y r| (seqv-halve-track-pattern track track-id)
+            :key (str "expanded-half-" track-id)
+            :on-click |x y r| (%halve-track-pattern track track-id)
             (v-stack :align :center
               (label "-"
                 :font-size 12
                 :color :white
                 :bg :transparent)))
           (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-            :key (str "seqv-expanded-double-" track-id)
-            :on-click |x y r| (seqv-double-track-pattern track track-id)
+            :key (str "expanded-double-" track-id)
+            :on-click |x y r| (%double-track-pattern track track-id)
             (v-stack :align :center
               (label "+"
                 :font-size 12
                 :color :white
                 :bg :transparent)))
           (box :background "transport-btn-bg" :padding 0.2 :height 1.4
-            :key (str "seqv-expanded-pages-" track-id)
+            :key (str "expanded-pages-" track-id)
             (h-stack :gap 0.1 :align :center
-              (each (range 0 (seqv-page-count track)) |page|
+              (each (range 0 (%page-count track)) |page|
                 (box :width page-button-width :height 1.1
-                  :key (str "seqv-expanded-page-" track-id "-" page)
+                  :key (str "expanded-page-" track-id "-" page)
                   :background "pattern-pill-bg"
-                  :active (seqv-page-active-binding track-id page)
+                  :active (%page-active-binding track-id page)
                   :style pattern-control-style
-                  :on-click |x y r| (seqv-goto-page track track-id page)
+                  :on-click |x y r| (%goto-page track track-id page)
                   (v-stack :align :center
                     (label (fmt " {} " (+ page 1))
                       :font-size 11
-                      :active (seqv-page-active-binding track-id page)
+                      :active (%page-active-binding track-id page)
                       :active-color :white
                       :color :dim
                       :bg :transparent)))))))))))
 
-(def seqv-expanded-track-editor (track track-id)
-  (let ((mode (seqv-param-mode track-id))
-        (sound-mode (seqv-drum-sound-mode? track (seqv-param-mode track-id)))
+(def %expanded-track-editor (track track-id)
+  (let ((mode (track-param-mode track-id))
+        (sound-mode (seqv-drum-sound-mode? track (track-param-mode track-id)))
         (sound-count (seqv-drum-sound-count track)))
     (box :padding 0.25
       (box 
@@ -1576,79 +1641,79 @@
         (v-stack :width :fill :padding 0.35 :gap 0.1
           (h-stack :gap 0.5
             (box :width 1)
-            (seqv-param-tab track track-id 0 "vel")
-            (seqv-param-tab track track-id 1 "dur")
-            (seqv-param-tab track track-id 3 (if (seqv-track-drum-rack? track) "sound" "tpose"))
-            (seqv-param-tab track track-id 4 "pan")
-            (seqv-param-tab track track-id 5 "sync")
-            (seqv-param-tab track track-id 6 "delay")
-            (seqv-process-lane-selector track track-id mode)
+            (%param-tab track track-id 0 "vel")
+            (%param-tab track track-id 1 "dur")
+            (%param-tab track track-id 3 (if (seqv-track-drum-rack? track) "sound" "tpose"))
+            (%param-tab track track-id 4 "pan")
+            (%param-tab track track-id 5 "sync")
+            (%param-tab track track-id 6 "delay")
+            (%process-lane-selector track track-id mode)
             (h-stack :align :center :gap 0.35
-              (dropdown :value (seqv-track-timebase track)
-                :key (str "seqv-expanded-timebase-" track-id)
-                :options seqv-timebase-options
-                :on-change (lambda (v) (seqv-set-expanded-timebase track v))
+              (dropdown :value (%track-timebase track)
+                :key (str "expanded-timebase-" track-id)
+                :options %timebase-options
+                :on-change (lambda (v) (%set-expanded-timebase track v))
                 :width 6 :height 1.45 :font-size 10)))
           
           (grid
             :cols 16
             :col-width 4
-            :row-height seqv-expanded-step-row-height
+            :row-height %expanded-step-row-height
             :align :stretch
             (each (range 0 page-size) |i|
-              (box :padding seqv-expanded-step-column-padding
-                :key (str "seqv-expanded-step-column-" track-id "-" i)
+              (box :padding %expanded-step-column-padding
+                :key (str "expanded-step-column-" track-id "-" i)
                 :background "cursor-highlight"
-                :active (seqv-slot-cursor-binding track-id i)
-                :selected (seqv-track-selected-binding track)
+                :active (%slot-cursor-binding track-id i)
+                :selected (track-selected-binding track)
                 :on-click (lambda (evt)
-                  (seqv-expanded-slot-click track track-id i evt))
+                  (%expanded-slot-click track track-id i evt))
                 :on-drag (lambda (evt)
-                  (seqv-expanded-slot-drag track track-id i evt))
-                (v-stack :align :center :gap seqv-expanded-step-column-gap
-                  (let ((active-ref (seqv-slot-active-binding track-id i))
-                      (plocked-ref (seqv-slot-plocked-binding track-id i))
-                      (selected-ref (seqv-slot-selected-binding track-id i))
-                      (track-r (seqv-expanded-track-color-r track))
-                      (track-g (seqv-expanded-track-color-g track))
-                      (track-b (seqv-expanded-track-color-b track)))
+                  (%expanded-slot-drag track track-id i evt))
+                (v-stack :align :center :gap %expanded-step-column-gap
+                  (let ((active-ref (%slot-active-binding track-id i))
+                      (plocked-ref (%slot-plocked-binding track-id i))
+                      (selected-ref (%slot-selected-binding track-id i))
+                      (track-r (%expanded-track-color-r track))
+                      (track-g (%expanded-track-color-g track))
+                      (track-b (%expanded-track-color-b track)))
                     (list
                       (if sound-mode
                         (if (> sound-count 0)
-                          (vslider :height seqv-expanded-step-slider-height
-                            :key (str "seqv-expanded-step-sound-slider-" track-id "-" i)
+                          (vslider :height %expanded-step-slider-height
+                            :key (str "expanded-step-sound-slider-" track-id "-" i)
                             :width 1
                             :min 0 :max (- sound-count 1)
                             :origin 0
                             :value (seqv-drum-sound-index-for-transpose track
-                              (reactive-value (seqv-slot-param-slider-binding track-id mode i)))
+                              (reactive-value (%slot-param-slider-binding track-id mode i)))
                             :haptic-value (seqv-drum-sound-index-for-transpose track
-                              (reactive-value (seqv-slot-param-haptic-binding track-id mode i)))
+                              (reactive-value (%slot-param-haptic-binding track-id mode i)))
                             :haptic-min 0 :haptic-max (- sound-count 1)
                             :haptic-pivot-position 1 :haptic-pivot-value (- sound-count 1)
                             :haptic-exponent 1
                             :items (seqv-drum-sound-short-labels track)
                             :font-size 11
                             :color :white
-                            :fill (seqv-expanded-slider-fill track)
+                            :fill (%expanded-slider-fill track)
                             :dot-color :dark-gray
                             :active active-ref
                             :track-r track-r
                             :track-g track-g
                             :track-b track-b
-                            :material (seqv-aqua-slider-track-material)
+                            :material (eseq.sequencer/step-slider-track-material)
                             :on-change (lambda (v)
-                              (seqv-set-expanded-slot-sound track track-id i v)))
-                          (box :height seqv-expanded-step-slider-height :width 3
-                            :key (str "seqv-expanded-step-no-sound-" track-id "-" i)
+                              (%set-expanded-slot-sound track track-id i v)))
+                          (box :height %expanded-step-slider-height :width 3
+                            :key (str "expanded-step-no-sound-" track-id "-" i)
                             (label "No pad" :font-size 8 :color :dim :bg :transparent)))
-                        (vslider :height seqv-expanded-step-slider-height
-                          :key (str "seqv-expanded-step-slider-" track-id "-" i)
+                        (vslider :height %expanded-step-slider-height
+                          :key (str "expanded-step-slider-" track-id "-" i)
                           :width (if (= mode 5) 2 1)
                           :min (seqv-track-param-slider-min track mode) :max (seqv-track-param-slider-max track mode)
                           :origin (seqv-track-param-origin track mode)
-                          :value (seqv-slot-param-slider-binding track-id mode i)
-                          :haptic-value (seqv-slot-param-haptic-binding track-id mode i)
+                          :value (%slot-param-slider-binding track-id mode i)
+                          :haptic-value (%slot-param-haptic-binding track-id mode i)
                           :haptic-min (seqv-track-param-min track mode)
                           :haptic-max (seqv-track-param-max track mode)
                           :haptic-pivot-position (seqv-param-haptic-pivot-position mode)
@@ -1657,30 +1722,30 @@
                           :items (if (= mode 5) SEQ.sync-labels '())
                           :font-size 11
                           :color :white
-                          :fill (seqv-expanded-slider-fill track)
+                          :fill (%expanded-slider-fill track)
                           :dot-color :dark-gray
                           :active active-ref
                           :track-r track-r
                           :track-g track-g
                           :track-b track-b
-                          :material (seqv-aqua-slider-track-material)
+                          :material (eseq.sequencer/step-slider-track-material)
                           :on-change (lambda (v)
-                            (seqv-set-expanded-slot-param track track-id i mode v))))
+                            (%set-expanded-slot-param track track-id i mode v))))
                       (box
-                        :key (str "seqv-expanded-step-toggle-" track-id "-" i)
+                        :key (str "expanded-step-toggle-" track-id "-" i)
                         :active active-ref
                         :plocked plocked-ref
                         :selected selected-ref
                         :background "aqua-button"
-                        :align :center :width 3 :height seqv-expanded-step-toggle-height
+                        :align :center :width 3 :height %expanded-step-toggle-height
                         :on-mouse-down (lambda (evt)
-                          (seqv-expanded-slot-pointer-down track track-id i evt))
+                          (%expanded-slot-pointer-down track track-id i evt))
                         :on-drag (lambda (evt)
-                          (seqv-expanded-slot-drag track track-id i evt))
+                          (%expanded-slot-drag track track-id i evt))
                         :on-mouse-up (lambda (evt)
-                          (seqv-expanded-slot-pointer-up track track-id i evt))
+                          (%expanded-slot-pointer-up track track-id i evt))
                         :on-double-click (lambda (evt)
-                          (seqv-expanded-slot-double-click track track-id i evt))
+                          (%expanded-slot-double-click track track-id i evt))
                         (metal-track-tick
                           :active active-ref
                           :plocked plocked-ref
@@ -1689,26 +1754,26 @@
                           :track-g track-g
                           :track-b track-b))))
                   (number-label
-                    :key (str "seqv-expanded-step-label-" track-id "-" i)
-                    :value (seqv-slot-label-binding track-id i)
-                    :active (seqv-slot-selected-binding track-id i)
+                    :key (str "expanded-step-label-" track-id "-" i)
+                    :value (%slot-label-binding track-id i)
+                    :active (%slot-selected-binding track-id i)
                     :active-color :yellow
                     :decimals 0
                     :width 2.8
-                    :height seqv-expanded-step-label-height
+                    :height %expanded-step-label-height
                     :h-align :center
                     :font-size 10 :bg :transparent
                     :color :dim)
                   (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                     (step-playhead-dot
-                      :active (seqv-slot-playhead-binding track-id i)))))))))
+                      :active (%slot-playhead-binding track-id i)))))))))
     )
   )
 )
 
-(def seqv-track-grid (track-idx)
+(def %track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
-      (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width)))))
+      (rows (max 1 (floor (/ (+ num-steps (- %row-width 1)) %row-width)))))
     (box :padding 0.15
       (box :background-color :buffer-bg
         (v-stack :gap -0.04
@@ -1728,57 +1793,57 @@
                     :width 0.1 :bg :transparent :font-size 8)
                   )
                 (h-stack :gap 0.0
-                  (each (range 0 sequencer-row-width) |col|
-                    (let ((step (+ (* row sequencer-row-width) col)))
-                      (seqv-step-cell
+                  (each (range 0 %row-width) |col|
+                    (let ((step (+ (* row %row-width) col)))
+                      (%step-cell
                         track-idx
                         step
                         (< step num-steps))))))
               (h-stack (box :width 1)
-                (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
+                (%playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
     )
   )
 
-(def seqv-drum-slot-name-max-chars 14)
+(def %drum-slot-name-max-chars 14)
 
-(def seqv-drum-slot-name-display (name)
-  (if (> (len name) seqv-drum-slot-name-max-chars)
-    (str (substring name 0 (- seqv-drum-slot-name-max-chars 2)) "..")
+(def %drum-slot-name-display (name)
+  (if (> (len name) %drum-slot-name-max-chars)
+    (str (substring name 0 (- %drum-slot-name-max-chars 2)) "..")
     name))
 
 ;; Slot gain spans 0..2 (unity at 1), so the meter shows gain/2 and drags map
 ;; the widget's -1..1 sx straight onto the gain range.
-(def seqv-drum-slot-gain-max 2.0)
+(def %drum-slot-gain-max 2.0)
 
-(def seqv-drum-slot-set-gain-from-event (track-idx sound event)
+(def %drum-slot-set-gain-from-event (track-idx sound event)
   (let ((sx (get event :sx)))
     (if (= sx nil)
       nil
       (host-command "set-rack-slot-gain"
         (dict :track track-idx
           :slot (get sound :slot-idx)
-          :value (max 0.0 (min seqv-drum-slot-gain-max (+ sx 1.0))))))))
+          :value (max 0.0 (min %drum-slot-gain-max (+ sx 1.0))))))))
 
 ;; bind-seq is a float binding: Bool publishes arrive as 1.0/0.0 and `not`
 ;; doesn't negate numbers, so compare against 0.5 to get a real boolean.
-(def seqv-drum-slot-flag (sound field-key)
+(def %drum-slot-flag (sound field-key)
   (let ((field (get sound field-key)))
     (if field (> (reactive-value (bind-seq field)) 0.5) false)))
 
-(def seqv-drum-slot-selected-binding (sound)
+(def %drum-slot-selected-binding (sound)
   (bind-seq (get sound :selected-field)))
 
-(def seqv-select-drum-slot-index (track-idx slot-idx)
+(def %select-drum-slot-index (track-idx slot-idx)
   (do
-    (seqv-select-track-for-edit track-idx)
+    (select-track-for-edit track-idx)
     (host-command "select-rack-slot" (dict :track track-idx :slot slot-idx))))
 
-(def seqv-select-drum-slot (track-idx sound)
-  (seqv-select-drum-slot-index track-idx (get sound :slot-idx)))
+(def %select-drum-slot (track-idx sound)
+  (%select-drum-slot-index track-idx (get sound :slot-idx)))
 
-(def seqv-drum-slot-toggle (label-text track-idx sound param command active)
+(def %drum-slot-toggle (label-text track-idx sound param command active)
   (button label-text
-    :key (str "seqv-drum-slot-" param "-" track-idx "-" (get sound :slot-idx))
+    :key (str "drum-slot-" param "-" track-idx "-" (get sound :slot-idx))
     
     :width 1.55 :height 1.2    
     :padding 0 :font-size 10
@@ -1786,66 +1851,66 @@
     :background-color (if active (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
     :color (if active :black :dim)
     :on-click |x y r| (do
-      (seqv-select-drum-slot track-idx sound)
+      (%select-drum-slot track-idx sound)
       (host-command command
         (dict :track track-idx :slot (get sound :slot-idx) :value (not active))))))
 
 ;; A drum pad's note is its identity in the sequencer, just as a regular
 ;; track's number is its identity. Its enabled state means the pad is audible,
 ;; so the visual state intentionally inverts the underlying mute flag.
-(def seqv-drum-slot-mute-button (track-idx sound muted)
+(def %drum-slot-mute-button (track-idx sound muted)
   (button (get sound :pad-label)
-    :key (str "seqv-drum-slot-mute-" track-idx "-" (get sound :slot-idx))
+    :key (str "drum-slot-mute-" track-idx "-" (get sound :slot-idx))
     :width 1.9 :height 1.2
     :padding 0 :font-size 10
-    :background-color (seqv-mute-bg muted)
+    :background-color (%mute-bg muted)
     :color (if muted :gray :black)
     :on-click |x y r| (do
-      (seqv-select-drum-slot track-idx sound)
+      (%select-drum-slot track-idx sound)
       (host-command "set-rack-slot-mute"
         (dict :track track-idx :slot (get sound :slot-idx) :value (not muted))))))
 
-(def seqv-drum-slot-volume-control (track-idx sound)
+(def %drum-slot-volume-control (track-idx sound)
   (let ((gain-field (get sound :gain-field))
       (peak-field (get sound :peak-field))
       (gain (if gain-field (reactive-value (bind-seq gain-field)) 1.0)))
     (box
-      :key (str "seqv-drum-slot-volume-" track-idx "-" (get sound :slot-idx))
+      :key (str "drum-slot-volume-" track-idx "-" (get sound :slot-idx))
       :width 8.2 :height 1.1
       :background "seqv-track-volume-meter"
       :level (if peak-field (bind-seq peak-field) 0)
       :volume (* 0.5 gain)
-      :track-r (seqv-track-color-r-binding track-idx)
-      :track-g (seqv-track-color-g-binding track-idx)
-      :track-b (seqv-track-color-b-binding track-idx)
+      :track-r (%track-color-r-binding track-idx)
+      :track-g (%track-color-g-binding track-idx)
+      :track-b (%track-color-b-binding track-idx)
       :on-click (lambda (event) (do
-        (seqv-select-drum-slot track-idx sound)
-        (seqv-drum-slot-set-gain-from-event track-idx sound event)))
+        (%select-drum-slot track-idx sound)
+        (%drum-slot-set-gain-from-event track-idx sound event)))
       :on-drag (lambda (event) (do
-        (seqv-select-drum-slot track-idx sound)
-        (seqv-drum-slot-set-gain-from-event track-idx sound event))))))
+        (%select-drum-slot track-idx sound)
+        (%drum-slot-set-gain-from-event track-idx sound event))))))
 
-(def seqv-drum-track-grid (track-idx)
+(def %drum-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
-      (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width))))
+      (rows (max 1 (floor (/ (+ num-steps (- %row-width 1)) %row-width))))
       (sounds (seqv-track-drum-sounds track-idx)))
     (box :padding 0.15
       (box :background-color :buffer-bg
         (v-stack :gap 0.5
           (each sounds |sound|
             (let ((pad-note (get sound :transpose))
-                (muted (seqv-drum-slot-flag sound :mute-field))
-                (soloed (seqv-drum-slot-flag sound :solo-field)))
+                (muted (%drum-slot-flag sound :mute-field))
+                (soloed (%drum-slot-flag sound :solo-field)))
               (box
-                :key (str "seqv-drum-lane-" track-idx "-" pad-note)
+                :key (str "drum-lane-" track-idx "-" pad-note)
                 :debug-name "seqv-drum-slot-lane"
-                :selected (seqv-drum-slot-selected-binding sound)
+                :selected (%drum-slot-selected-binding sound)
                 :background-color :transparent
                 :selected-background-color (rgba 0.12 0.17 0.20 0.55)
                 :border-width 1
                 :border-color :transparent
                 :selected-border-color (rgba 0.30 0.74 0.88 0.62)
-                :on-click |x y r| (seqv-select-drum-slot track-idx sound)
+                :on-click |x y r| (%select-drum-slot track-idx sound)
                 (h-stack
                   :padding 0.5
                   :gap 0.45
@@ -1854,11 +1919,11 @@
                 ;; name, volume. The note control is bright while its pad is audible.
                 (box :width 2.65)
                 (h-stack :align :baseline :gap 0.45
-                  (seqv-drum-slot-mute-button track-idx sound muted)
-                  (seqv-drum-slot-toggle "S" track-idx sound "solo" "set-rack-slot-solo" soloed)
+                  (%drum-slot-mute-button track-idx sound muted)
+                  (%drum-slot-toggle "S" track-idx sound "solo" "set-rack-slot-solo" soloed)
                   (label
-                    (seqv-drum-slot-name-display (get sound :name))
-                    :key (str "seqv-drum-lane-label-" track-idx "-" pad-note)
+                    (%drum-slot-name-display (get sound :name))
+                    :key (str "drum-lane-label-" track-idx "-" pad-note)
                     :debug-name "seqv-drum-slot-label"
                     :width 8.6
                     ;:height 1.55
@@ -1866,21 +1931,21 @@
                     :font-size 10
                     :h-align :left
                     :color (if muted :dark-gray :dim))
-                  (seqv-drum-slot-volume-control track-idx sound)
+                  (%drum-slot-volume-control track-idx sound)
                   (box :width 0.3))
                 (v-stack :gap -0.04
                   (each (range 0 rows) |row|
                     (v-stack :gap -0.16
                       (h-stack :gap 0.0
-                        (each (range 0 sequencer-row-width) |col|
-                          (let ((step (+ (* row sequencer-row-width) col)))
-                            (seqv-drum-lane-step-cell
+                        (each (range 0 %row-width) |col|
+                          (let ((step (+ (* row %row-width) col)))
+                            (%drum-lane-step-cell
                               track-idx
                               (get sound :slot-idx)
                               pad-note
                               step
                               (< step num-steps)))))
-                      (seqv-playhead-row
+                      (%playhead-row
                         track-idx
                         (nth SEQ.track-ids track-idx)
                         row))))))))))))
@@ -1893,8 +1958,8 @@
         ;; :muted is a binding (not a value read) so mute/solo changes update
         ;; the row chrome without rerunning this subtree.
         (box :width :fill
-          :key (str "sequencer-track-drop-" i)
-          :selected (seqv-track-selected-binding i)
+          :key (str "track-drop-" i)
+          :selected (track-selected-binding i)
           :muted (bind-seq-nth "track-muted-effective" i)
           :background-color :buffer-bg
           :selected-background-color :mixer-strip-selected-bg
@@ -1909,35 +1974,35 @@
             (list "sample" "instrument" "sound")
             (if (seq-track-sound-replaceable? i) (list "sample" "sound") (list "sample")))
           :drop-meta (dict :kind "track" :track i)
-          :on-drop (lambda (event) (seqv-drop-on-track event))
+          :on-drop (lambda (event) (drop-on-track event))
           :padding 0.0145
-          :on-click |x y r| (seqv-select-track-for-edit i)
-          (if (seqv-track-expanded? (nth SEQ.track-ids i))
+          :on-click |x y r| (select-track-for-edit i)
+          (if (%track-expanded? (nth SEQ.track-ids i))
             (v-stack 
               :width :fill :gap 0.2
               (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (seqv-track-header i)
-                (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
+                (track-header i)
+                (%expanded-track-quick-controls i (nth SEQ.track-ids i))
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (seqv-track-actions i))
-              (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
+                (%track-actions i))
+              (%expanded-track-editor i (nth SEQ.track-ids i)))
             (if (seqv-track-drum-rack? i)
               ;; Drum racks put the rack header on its own row so the slot
               ;; lanes get the full width for their per-slot gutters.
               (v-stack :width :fill :gap 0.2
                 (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                  (seqv-track-header i)
+                  (track-header i)
                   (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                  (seqv-track-actions i))
-                (seqv-drum-track-grid i))
+                  (%track-actions i))
+                (%drum-track-grid i))
               (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
                 (v-stack (box :height 0.1)
-                  (seqv-track-header i))
-                (seqv-track-grid i)
+                  (track-header i))
+                (%track-grid i)
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (seqv-track-actions i)))))))
+                (%track-actions i)))))))
    
-     (box :key "sequencer-new-track-drop-zone"
+     (box :key "new-track-drop-zone"
       :width :fill :height 2.4 :flex 1
       :background-color :transparent
       :drop-hover-background-color :mixer-control-bg
@@ -1947,7 +2012,7 @@
       :corner-radius 10
       :drop-types (list "sample" "instrument" "sound")
       :drop-meta (dict :kind "new-sample-track")
-      :on-drop (lambda (event) (seqv-drop-new-track event))
+      :on-drop (lambda (event) (drop-new-track event))
       (label ""
         :font-size 1
         :color :transparent
@@ -1956,4 +2021,4 @@
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")
 
-(sequencer-cursor-step-changed SEQ.current-track cursor-step)
+(cursor-step-changed SEQ.current-track (cursor-step-value))
