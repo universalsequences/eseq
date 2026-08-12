@@ -3423,6 +3423,41 @@ impl VM {
             .unwrap_or(crate::modules::IMPLICIT_MODULE)
     }
 
+    /// Registry auto-qualification for widget `:key` strings (spec §5):
+    /// inside a declared module the stable key is prefixed with the module
+    /// BEFORE it feeds any identity hash — `:key (str "cell-glyph-" i)`
+    /// in `eseq.mixer` becomes `"eseq.mixer/cell-glyph-3"` — by writing
+    /// the qualified form into `__stable-key` (the raw `:key` prop stays
+    /// as authored). Every downstream identity reader (stable widget
+    /// hashing here, layout's FNV `stable_key_to_widget_id`) prefers
+    /// `__stable-key`. Vanilla chunks change nothing, which keeps
+    /// serialized layout/p-lock identity stable until a file converts.
+    pub fn qualify_widget_stable_key(&self, widget: &mut Value) {
+        let module = self.current_module_name();
+        if module == crate::modules::IMPLICIT_MODULE {
+            return;
+        }
+        let module = module.to_string();
+        let Value::Map(map) = widget else {
+            return;
+        };
+        if map.contains_key(STABLE_KEY_PROP) {
+            return;
+        }
+        let Some(key) = stable_key_value(map) else {
+            return;
+        };
+        if crate::modules::is_qualified(&key) {
+            return;
+        }
+        map.insert(
+            STABLE_KEY_PROP.to_string(),
+            Rc::new(RefCell::new(Value::String(crate::modules::qualify(
+                &module, &key,
+            )))),
+        );
+    }
+
     pub fn current_source_file(&self) -> Option<std::path::PathBuf> {
         self.chunks
             .get(self.current_chunk)
@@ -5935,8 +5970,8 @@ mod tests {
     use super::{
         EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
         ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
-        SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
-        debug_assert_cell_not_frozen, freeze_widget_tree,
+        SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
+        Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
 
     fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
@@ -6222,6 +6257,49 @@ counter
         assert_eq!(
             vm.eval_str("plain-state").expect("state read"),
             Some(Value::Number(7.0))
+        );
+    }
+
+    #[test]
+    fn module_widget_key_qualifies_stable_key_prop() {
+        let mut vm = module_test_vm();
+        crate::widgets::register_widget_natives(&mut vm);
+        let source = r#"
+(module test.widgetmod)
+(def make-panel () (v-stack :key "panel"))
+"#;
+        vm.eval_module_source(temp_lisp_path("widget-key"), source, 1)
+            .expect("module eval");
+        // Constructed from the declared module's chunk (even when called
+        // from a headerless unit): the identity key is module-prefixed.
+        let widget = vm
+            .eval_str("(test.widgetmod/make-panel)")
+            .expect("widget call")
+            .expect("widget value");
+        let Value::Map(map) = &widget else {
+            panic!("expected widget map, got {widget:?}");
+        };
+        assert_eq!(
+            map.get(STABLE_KEY_PROP).map(|v| v.borrow().clone()),
+            Some(Value::String("test.widgetmod/panel".to_string())),
+            "declared-module widget :key should qualify into __stable-key"
+        );
+        // The authored :key prop is untouched.
+        assert_eq!(
+            map.get("key").map(|v| v.borrow().clone()),
+            Some(Value::String("panel".to_string()))
+        );
+        // Vanilla construction stays exactly as today: no __stable-key.
+        let vanilla = vm
+            .eval_str(r#"(v-stack :key "panel")"#)
+            .expect("vanilla widget")
+            .expect("widget value");
+        let Value::Map(map) = &vanilla else {
+            panic!("expected widget map");
+        };
+        assert!(
+            !map.contains_key(STABLE_KEY_PROP),
+            "vanilla widget keys must not gain __stable-key at construction"
         );
     }
 

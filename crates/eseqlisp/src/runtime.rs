@@ -1374,6 +1374,7 @@ impl Runtime {
                 let state_uniforms = compiled.state_symbols;
                 vm.register_native_with_vm(&name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
+                    vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
                         for state_name in &state_uniforms {
                             let explicit_value =
@@ -1404,6 +1405,7 @@ impl Runtime {
                 .vm
                 .register_native_with_vm(widget_name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&wtype, args);
+                    vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
