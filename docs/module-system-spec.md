@@ -535,20 +535,26 @@ stays as-is; real macro hygiene is out of scope for this spec.
   the only edits outside the converted file should be requalified test
   expectations (hazard a).
 
-  **Open blocker found while validating batch 1.** On this branch the whole
-  "load `ui/main.lisp`" test family (`full_grid_editor_for_scroll_tests` and
-  everything built on it, ~170 tests in the `metal_seq` bin) fails with
-  `ui/piano-roll.lisp: eval error: IncorrectType`. Bisected to **S0**
-  (`1f02c2e8`, implicit-`eseq.vanilla` interning) — it passes at `3e85f3a4`
-  and fails at `1f02c2e8` — so it predates every slice-3 change. It stayed
-  invisible because those tests overflow the default 8 MB test stack and
-  abort the binary before reporting; they only reach the failure under
-  `RUST_MIN_STACK=16777216`. The failing ops are comparisons with a `nil`
-  left operand, i.e. a global/state that resolved to an empty-or-Nil slot —
-  the same resolve-ladder mismatch class as hazard (b). Until it is fixed,
-  end-to-end proof of a converted file is limited to test harnesses that
-  load a subset of the UI rather than the full manifest; fix it first in
-  batch 2.
+  **Blocker found while validating batch 1 — FIXED.** The whole "load
+  `ui/main.lisp`" test family (~170 tests in the `metal_seq` bin) was
+  failing with `ui/piano-roll.lisp: eval error: IncorrectType`, bisected to
+  **S0** (`1f02c2e8`, implicit-`eseq.vanilla` interning) and invisible
+  because those tests overflow the default 8 MB test stack and abort the
+  binary before reporting. `cff706ec` fixed the three resolution-ladder gaps
+  behind it (module def-sites always intern qualified, runtime late-binding
+  heal for empty qualified slots, reactive-namespace exemption). Standing
+  rule from it: **run `RUST_MIN_STACK=16777216 cargo test -p sequencer --bin
+  metal_seq` per conversion** — 585 passed / 2 pre-existing failures is the
+  baseline, and it is the gate that actually catches conversion regressions.
+
+  **Step 0 addendum (batch 2).** The load-order gate applies to Rust test
+  harnesses that evaluate a consumer's *source* directly
+  (`eval_str(&read_to_string("ui/mixer.lisp"))`), not just to production
+  manifests: the consumer's own top-of-file `(load "@/ui/dep.lisp")` is as
+  late there as it is in production, so each such harness needs a separate,
+  earlier eval of the dep. Six of them needed one for `track-collapse`.
+  Exception: macros reached only through auto-quoted `:shader`/`:material`
+  values are late-bound (hazard h) and exempt from the gate entirely.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
