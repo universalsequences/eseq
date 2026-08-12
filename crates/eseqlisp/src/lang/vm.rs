@@ -1,4 +1,4 @@
-use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
+use crate::compiler::{Chunk, Compiler, CompilerError, MacroDef, OpCode};
 use crate::host::BufferId;
 use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
 use crate::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
@@ -1856,6 +1856,10 @@ pub struct VM {
     /// listeners. Re-adding with an existing key replaces that entry in place,
     /// so re-evaluating a module never duplicates its listeners.
     pub extension_hooks: HashMap<String, Vec<(String, Value)>>,
+    /// Modules declared via `(module NAME)` → the file that declared them
+    /// (None for include_str!-style sources with no path). `import`
+    /// consults this for load-once semantics (spec §4).
+    pub declared_modules: HashMap<String, Option<std::path::PathBuf>>,
 }
 
 pub struct VmStateSnapshot {
@@ -1890,6 +1894,7 @@ pub struct VmStateSnapshot {
     source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
+    declared_modules: HashMap<String, Option<std::path::PathBuf>>,
 }
 
 fn clone_globals_for_snapshot(
@@ -2317,6 +2322,69 @@ pub fn register_core_natives(vm: &mut VM) {
             }
         }
         Value::Nil
+    });
+
+    // Module system (spec §2/§4). (module NAME) compiles to a
+    // __module-declare call so the runtime knows the module is loaded and
+    // which file declared it; (import NAME …) compiles to __import-module,
+    // which resolves the name to a file and evaluates it exactly once.
+    vm.register_native_with_vm("__module-declare", |args, vm| {
+        let Some(Value::String(name)) = args.first() else {
+            log_native_misuse("__module-declare", "expects a module name string");
+            return Value::Nil;
+        };
+        let path = vm.current_source_file();
+        vm.declared_modules.insert(name.clone(), path);
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("__import-module", |args, vm| {
+        let Some(Value::String(name)) = args.first() else {
+            log_native_misuse("__import-module", "expects a module name string");
+            return Value::Nil;
+        };
+        if vm.declared_modules.contains_key(name)
+            || crate::modules::CORE_NAMESPACES.contains(&name.as_str())
+            || name == crate::modules::IMPLICIT_MODULE
+        {
+            return Value::Nil; // load-once: already evaluated (or built in)
+        }
+        let mut errors = Vec::new();
+        for candidate in crate::modules::module_file_candidates(name) {
+            match vm.source_manager.load_source(&candidate) {
+                Ok(loaded) => {
+                    let path_display = loaded.path.display().to_string();
+                    return match vm.eval_module_source(
+                        loaded.path,
+                        &loaded.text,
+                        loaded.revision,
+                    ) {
+                        Ok(_) => {
+                            if !vm.declared_modules.contains_key(name) {
+                                vm.source_load_errors.push(format!(
+                                    "import {name}: {path_display} did not declare \
+                                     (module {name})"
+                                ));
+                            }
+                            Value::Nil
+                        }
+                        Err(e) => {
+                            let message =
+                                format!("import {name}: {path_display}: eval error: {e:?}");
+                            vm.source_load_errors.push(message.clone());
+                            Value::String(message)
+                        }
+                    };
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        let message = format!(
+            "import {name}: no module file found ({})",
+            errors.join("; ")
+        );
+        vm.source_load_errors.push(message.clone());
+        Value::String(message)
     });
 
     // Emacs-style extension hooks. (defhook "name") declares a hook and
@@ -3274,6 +3342,7 @@ impl VM {
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
+            declared_modules: HashMap::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
         };
@@ -3303,6 +3372,20 @@ impl VM {
             self.globals.resize(idx + 1, None);
         }
         self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
+    }
+
+    /// Register a native under a namespace (spec §3 "Core namespaces"):
+    /// `register_native_in_namespace("sdf", "layer", …)` interns
+    /// `sdf/layer`. Blessed namespaces (`sdf`, `eseq.core`) need no import
+    /// at the call site.
+    pub fn register_native_in_namespace(
+        &mut self,
+        namespace: &str,
+        name: &str,
+        f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static,
+    ) {
+        let qualified = crate::modules::qualify(namespace, name);
+        self.register_native_with_vm(&qualified, f);
     }
 
     pub fn add_global_store_hook(&mut self, hook: GlobalStoreHook) {
@@ -3394,9 +3477,15 @@ impl VM {
                 // taking it wholesale keeps every existing macro and merges
                 // any new definitions.
                 self.macros = compiler.take_macros();
+                for warning in compiler.take_warnings() {
+                    self.source_manager.push_diagnostic(warning);
+                }
                 self.execute_from(entry_idx)
             }
-            Err(_) => {
+            Err(error) => {
+                if let CompilerError::Message(message) = &error {
+                    self.source_load_errors.push(message.clone());
+                }
                 let mut chunks = compiler.take_chunks();
                 chunks.truncate(entry_idx);
                 self.chunks = chunks;
@@ -3506,6 +3595,7 @@ impl VM {
                     )
                 })
                 .collect(),
+            declared_modules: self.declared_modules.clone(),
         }
     }
 
@@ -3541,6 +3631,7 @@ impl VM {
         self.source_load_errors = snapshot.source_load_errors;
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
+        self.declared_modules = snapshot.declared_modules;
     }
 
     pub fn take_pending_reactive_sets(&mut self) -> Vec<(String, String, Value)> {
@@ -3610,8 +3701,14 @@ impl VM {
                 self.state_bindings = compiler.take_state_bindings();
                 self.dag.next_id = compiler.next_node_id();
                 self.macros = compiler.take_macros();
+                for warning in compiler.take_warnings() {
+                    self.source_manager.push_diagnostic(warning);
+                }
             }
-            Err(_) => {
+            Err(error) => {
+                if let CompilerError::Message(message) = &error {
+                    self.source_load_errors.push(message.clone());
+                }
                 let mut chunks = compiler.take_chunks();
                 chunks.truncate(entry_idx);
                 self.chunks = chunks;
@@ -3646,7 +3743,20 @@ impl VM {
     /// host-registered globals). Keep the two in sync.
     fn resolve_global_read_index(&self, name: &str) -> Option<usize> {
         if crate::modules::is_qualified(name) {
-            return self.global_names.iter().position(|n| n == name);
+            let exact = self.global_names.iter().position(|n| n == name);
+            if exact.is_some() {
+                return exact;
+            }
+            // Core namespaces resolve bare or qualified without import
+            // (spec §3): `eseq.core/label` falls back to the flat native.
+            if let Some((ns, base)) = crate::modules::split_qualified(name) {
+                if crate::modules::CORE_NAMESPACES.contains(&ns)
+                    || ns == crate::modules::IMPLICIT_MODULE
+                {
+                    return self.global_names.iter().position(|n| n == base);
+                }
+            }
+            return None;
         }
         let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
         self.global_names
@@ -5846,6 +5956,188 @@ mod tests {
 "#;
         vm.eval_module_source(path, source, 1).expect("module eval");
         assert_eq!(*calls.borrow(), vec![7.0, 9.0]);
+    }
+
+    fn module_test_vm() -> VM {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm
+    }
+
+    fn temp_lisp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "eseqlisp-modules-{tag}-{}.lisp",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn module_form_switches_interning_namespace() {
+        let mut vm = module_test_vm();
+        let path = temp_lisp_path("switch");
+        let source = r#"
+(module test.mod)
+(def foo () 42)
+(foo)
+"#;
+        let result = vm.eval_module_source(path, source, 1).expect("module eval");
+        assert_eq!(result, Some(Value::Number(42.0)));
+        assert!(
+            vm.global_names().iter().any(|n| n == "test.mod/foo"),
+            "def inside (module test.mod) should intern qualified"
+        );
+        assert!(vm.declared_modules.contains_key("test.mod"));
+        // A later headerless unit reaches it only qualified.
+        let qualified = vm.eval_str("(test.mod/foo)").expect("qualified call");
+        assert_eq!(qualified, Some(Value::Number(42.0)));
+    }
+
+    #[test]
+    fn module_form_resets_per_compile_unit() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(temp_lisp_path("reset-a"), "(module test.reset)\n(def a () 1)", 1)
+            .expect("module eval");
+        // Headerless unit: defs go back to the implicit module.
+        vm.eval_str("(def b () 2)").expect("headerless eval");
+        assert!(vm.global_names().iter().any(|n| n == "test.reset/a"));
+        assert!(vm.global_names().iter().any(|n| n == "eseq.vanilla/b"));
+    }
+
+    #[test]
+    fn duplicate_module_form_is_a_compile_error() {
+        let mut vm = module_test_vm();
+        let result =
+            vm.eval_str("(module test.dup)\n(module test.other)\n(def x () 1)");
+        assert!(matches!(result, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|e| e.contains("duplicate (module")),
+            "expected duplicate-module error message"
+        );
+    }
+
+    #[test]
+    fn import_registers_alias_and_loads_once() {
+        let mut vm = module_test_vm();
+        let helper_path = temp_lisp_path("alias-helper");
+        std::fs::write(
+            &helper_path,
+            "(module test.alias-helper)\n(def helper-val () 5)\n(def %secret () 6)",
+        )
+        .expect("write helper");
+        let main_path = helper_path.with_file_name(format!(
+            "eseqlisp-modules-alias-main-{}.lisp",
+            std::process::id()
+        ));
+        let source = format!(
+            "(import {} :as th)\n(th/helper-val)",
+            "test.alias-helper"
+        );
+        // Candidate resolution is relative to the importing file, so give
+        // the helper the name the module convention expects.
+        let conventional = helper_path.with_file_name("test.alias-helper.lisp");
+        std::fs::rename(&helper_path, &conventional).expect("rename helper");
+        let result = vm
+            .eval_module_source(main_path.clone(), &source, 1)
+            .expect("import eval");
+        assert_eq!(result, Some(Value::Number(5.0)));
+        assert!(vm.declared_modules.contains_key("test.alias-helper"));
+        // Load-once: importing again evaluates nothing new (same result).
+        let again = vm
+            .eval_module_source(main_path, &source, 2)
+            .expect("second import eval");
+        assert_eq!(again, Some(Value::Number(5.0)));
+        let _ = std::fs::remove_file(conventional);
+    }
+
+    #[test]
+    fn import_refer_binds_bare_symbols() {
+        let mut vm = module_test_vm();
+        let helper = std::env::temp_dir().join(format!(
+            "test.refer-helper-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(&helper, format!("(module test.refer-helper-{})\n(def refer-val () 11)", std::process::id()))
+            .expect("write helper");
+        let main_path = helper.with_file_name(format!(
+            "eseqlisp-modules-refer-main-{}.lisp",
+            std::process::id()
+        ));
+        let source = format!(
+            "(import test.refer-helper-{} :refer (refer-val))\n(refer-val)",
+            std::process::id()
+        );
+        let result = vm
+            .eval_module_source(main_path, &source, 1)
+            .expect("refer eval");
+        assert_eq!(result, Some(Value::Number(11.0)));
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn unknown_alias_is_a_compile_error() {
+        let mut vm = module_test_vm();
+        let result = vm.eval_str("(zz9/nothing 1)");
+        assert!(matches!(result, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|e| e.contains("unknown alias or namespace 'zz9'")),
+            "expected unknown-alias error message"
+        );
+    }
+
+    #[test]
+    fn private_reference_from_outside_warns_but_resolves() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("privacy"),
+            "(module test.privacy)\n(def %secret () 6)",
+            1,
+        )
+        .expect("module eval");
+        let result = vm.eval_str("(test.privacy/%secret)").expect("private call");
+        assert_eq!(result, Some(Value::Number(6.0)));
+        let diagnostics = vm.source_manager.diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("%secret") && d.contains("internal")),
+            "expected %-privacy warning, got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn macros_defined_in_module_are_namespace_aware() {
+        let mut vm = module_test_vm();
+        let result = vm
+            .eval_module_source(
+                temp_lisp_path("macros"),
+                "(module test.mac)\n(defmacro twice (x) `(+ ,x ,x))\n(twice 3)",
+                1,
+            )
+            .expect("module eval");
+        // Bare lookup inside the defining module.
+        assert_eq!(result, Some(Value::Number(6.0)));
+        // Qualified lookup from a headerless unit.
+        let qualified = vm.eval_str("(test.mac/twice 4)").expect("qualified macro");
+        assert_eq!(qualified, Some(Value::Number(8.0)));
+        assert!(vm.macros.contains_key("test.mac/twice"));
+    }
+
+    #[test]
+    fn namespaced_natives_resolve_qualified_without_import() {
+        let mut vm = module_test_vm();
+        vm.register_native_in_namespace("sdf", "answer", |_args, _vm| Value::Number(41.0));
+        let result = vm.eval_str("(sdf/answer)").expect("namespaced native");
+        assert_eq!(result, Some(Value::Number(41.0)));
+        // Blessed core namespace falls back to flat natives when qualified.
+        vm.register_native("flat-answer", |_args| Value::Number(40.0));
+        let core = vm
+            .eval_str("(eseq.core/flat-answer)")
+            .expect("core-qualified native");
+        assert_eq!(core, Some(Value::Number(40.0)));
     }
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {

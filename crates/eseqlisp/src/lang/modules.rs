@@ -13,6 +13,54 @@
 /// The module every headerless file belongs to (spec §10, slice 0).
 pub const IMPLICIT_MODULE: &str = "eseq.vanilla";
 
+/// Blessed always-resolvable namespaces (spec §3 "Core namespaces"):
+/// referencing them, bare or qualified, needs no `import`.
+pub const CORE_NAMESPACES: &[&str] = &["sdf", "eseq.core"];
+
+/// Split a qualified name at the first `/` into (namespace, base name).
+/// Returns None for unqualified names (see `is_qualified`).
+pub fn split_qualified(name: &str) -> Option<(&str, &str)> {
+    if !is_qualified(name) {
+        return None;
+    }
+    name.split_once('/')
+}
+
+/// Valid module name: one or more non-empty dot-separated segments, no
+/// `/` anywhere (spec §2: `eseq.mixer`, `sdf`, `alec.acid-tools.riffs`).
+pub fn is_valid_module_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && name.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '*' || c == '%')
+        })
+}
+
+/// True if a base name is marked internal by the `%` privacy convention
+/// (spec §2 decision 4).
+pub fn is_private_name(base: &str) -> bool {
+    base.starts_with('%')
+}
+
+/// Candidate load paths for a module name (spec §7): `eseq.track-collapse`
+/// → `track-collapse.lisp` under a load-path root (`@/` = the source
+/// manager cwd, the ui root in production, then relative to the importing
+/// file). Dots in the remainder map to directory separators.
+pub fn module_file_candidates(name: &str) -> Vec<String> {
+    let stripped = name.strip_prefix("eseq.").unwrap_or(name);
+    let flat = format!("{stripped}.lisp");
+    let nested = format!("{}.lisp", stripped.replace('.', "/"));
+    let mut candidates = vec![format!("@/{flat}"), flat.clone()];
+    if nested != flat {
+        candidates.push(format!("@/{nested}"));
+        candidates.push(nested);
+    }
+    candidates
+}
+
 /// True if `name` is already module-qualified (`module/name`). The first
 /// `/` splits; a bare `/` (division), a leading `/`, or a trailing `/`
 /// does not qualify. Pre-existing flat names that hand-rolled the
@@ -51,6 +99,28 @@ mod tests {
         assert!(!is_qualified("/leading"));
         assert!(!is_qualified("trailing/"));
         assert!(!is_qualified("*step*"));
+    }
+
+    #[test]
+    fn module_name_validation() {
+        assert!(is_valid_module_name("sdf"));
+        assert!(is_valid_module_name("eseq.mixer"));
+        assert!(is_valid_module_name("alec.acid-tools.riffs"));
+        assert!(!is_valid_module_name(""));
+        assert!(!is_valid_module_name("eseq..mixer"));
+        assert!(!is_valid_module_name("eseq/mixer"));
+        assert!(!is_valid_module_name(".mixer"));
+    }
+
+    #[test]
+    fn split_qualified_names() {
+        assert_eq!(split_qualified("sdf/circle"), Some(("sdf", "circle")));
+        assert_eq!(
+            split_qualified("eseq.mixer/track-strip"),
+            Some(("eseq.mixer", "track-strip"))
+        );
+        assert_eq!(split_qualified("foo"), None);
+        assert_eq!(split_qualified("/"), None);
     }
 
     #[test]

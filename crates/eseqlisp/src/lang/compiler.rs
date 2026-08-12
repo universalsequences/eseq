@@ -29,6 +29,9 @@ struct Scope {
 pub enum CompilerError {
     UnknownOperator,
     InvalidArg,
+    /// A resolution error with a human-readable message (unknown import
+    /// alias/namespace, malformed `module`/`import` forms).
+    Message(String),
 }
 
 #[derive(Debug, Clone)]
@@ -108,9 +111,27 @@ pub struct Compiler {
     next_node_id: u32,
     next_temp_id: u32,
     source_file: Option<PathBuf>,
-    /// The module bare global names qualify under (spec slice 0: always
-    /// the implicit `eseq.vanilla` until `(module …)` headers land).
+    /// The module bare global names qualify under: the implicit
+    /// `eseq.vanilla` until a `(module …)` header switches it (spec §2).
     current_module: String,
+    /// Whether this compile unit has seen a `(module …)` form (one per
+    /// file, spec §2 decision 1).
+    module_declared: bool,
+    /// `(import NAME :as ALIAS)` bindings, per compile unit (spec §2
+    /// decision 2): alias → full module name.
+    import_aliases: HashMap<String, String>,
+    /// `(import NAME :refer (sym …))` bindings: bare symbol → qualified
+    /// name it resolves to (spec §3 resolution order).
+    refers: HashMap<String, String>,
+    /// Namespaces made known by qualified `def` targets in this unit (the
+    /// §3 escape hatch may define into a module before it exists).
+    known_namespaces: std::collections::HashSet<String>,
+    /// Non-fatal compile diagnostics (`%`-privacy references, escape-hatch
+    /// defs). Drained by the VM into the diagnostics channel.
+    warnings: Vec<String>,
+    /// Fatal resolution errors (unknown alias/namespace, malformed module
+    /// forms) recorded mid-compile and reported when `compile` finishes.
+    errors: Vec<String>,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -246,6 +267,12 @@ impl Compiler {
             next_temp_id: 0,
             source_file: None,
             current_module: super::modules::IMPLICIT_MODULE.to_string(),
+            module_declared: false,
+            import_aliases: HashMap::new(),
+            refers: HashMap::new(),
+            known_namespaces: std::collections::HashSet::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
             macros: HashMap::new(),
         }
     }
@@ -276,8 +303,18 @@ impl Compiler {
             next_temp_id: 0,
             source_file,
             current_module: super::modules::IMPLICIT_MODULE.to_string(),
+            module_declared: false,
+            import_aliases: HashMap::new(),
+            refers: HashMap::new(),
+            known_namespaces: std::collections::HashSet::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
             macros,
         }
+    }
+
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     pub fn macros(&self) -> &HashMap<String, MacroDef> {
@@ -290,6 +327,33 @@ impl Compiler {
         symbol
     }
 
+    /// Namespace-aware macro lookup (spec §3): qualified names rewrite
+    /// through import aliases then hit the table exactly (with a flat
+    /// fallback for legacy hand-rolled keys); bare names prefer the
+    /// current module, then `:refer`s, then the flat table (all macros
+    /// defined in headerless files stay flat-keyed until slice 3).
+    pub fn lookup_macro(&self, name: &str) -> Option<&MacroDef> {
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .map(String::as_str)
+                .unwrap_or(ns);
+            return self
+                .macros
+                .get(&super::modules::qualify(full_ns, base))
+                .or_else(|| self.macros.get(name));
+        }
+        self.macros
+            .get(&super::modules::qualify(&self.current_module, name))
+            .or_else(|| {
+                self.refers
+                    .get(name)
+                    .and_then(|qualified| self.macros.get(qualified))
+            })
+            .or_else(|| self.macros.get(name))
+    }
+
     pub fn expand_macros(&self, expr: &Expression, depth: usize) -> Expression {
         if depth > 100 {
             return expr.clone();
@@ -297,7 +361,7 @@ impl Compiler {
         match expr {
             Expression::List(items) if !items.is_empty() => {
                 if let Expression::Symbol(name) = &items[0] {
-                    if let Some(mac) = self.macros.get(name) {
+                    if let Some(mac) = self.lookup_macro(name) {
                         if items.len() - 1 == mac.params.len() {
                             // Build parameter bindings: expand macro args first
                             let mut bindings = HashMap::new();
@@ -645,7 +709,11 @@ impl Compiler {
     ) -> Result<(), CompilerError> {
         match target {
             Expression::Symbol(name) => {
-                let parts = name.splitn(2, '.').collect::<Vec<_>>();
+                let parts = if super::modules::is_qualified(name) {
+                    vec![name.as_str()]
+                } else {
+                    name.splitn(2, '.').collect::<Vec<_>>()
+                };
                 if parts.len() == 2 && self.reactive_namespaces.contains(parts[0]) {
                     self.compile_expression(value)?;
                     if parts[1].contains('.') {
@@ -1136,24 +1204,105 @@ impl Compiler {
         idx
     }
 
-    /// Resolution ladder for bare global names (module-system spec §3,
-    /// slice 0): a qualified name (or reactive namespace) resolves as-is;
-    /// otherwise prefer the current module's qualified entry, fall back to
-    /// the flat entry (Rust natives and host-registered globals stay
-    /// unqualified), and intern new names qualified. Mirrored at runtime by
+    /// Resolution ladder for global names (module-system spec §3).
+    /// Qualified `X/name`: `X` resolves as an import alias first, then as a
+    /// namespace (current module, blessed core, implicit, or one with
+    /// existing definitions); unknown alias/namespace is a compile error.
+    /// Bare names: current module → `:refer`red symbols → flat entry (Rust
+    /// natives and host-registered globals stay unqualified) → intern new
+    /// names under the current module. Mirrored at runtime by
     /// `VM::resolve_global_read_index` — keep the two in sync.
-    fn resolve_global_name(&self, name: &str) -> String {
-        if super::modules::is_qualified(name) || self.reactive_namespaces.contains(name) {
+    fn resolve_global_name(&mut self, name: &str) -> String {
+        if self.reactive_namespaces.contains(name) {
             return name.to_string();
+        }
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .cloned()
+                .unwrap_or_else(|| ns.to_string());
+            if super::modules::is_private_name(base) && full_ns != self.current_module {
+                self.warn_once(format!(
+                    "warning: {full_ns}/{base} is internal to {full_ns} (%-private, spec §2); \
+                     referencing it from {} may break on update",
+                    self.current_module
+                ));
+            }
+            if !self.namespace_is_known(&full_ns) {
+                if full_ns.contains('.') {
+                    // Dotted = full module name: the §3 escape hatch may
+                    // define into or reference a module before it loads, so
+                    // this warns instead of erroring and the namespace
+                    // becomes known for the rest of the unit.
+                    self.warn_once(format!(
+                        "warning: namespace '{full_ns}' in '{name}' has no import and no \
+                         definitions yet (cross-module escape hatch, or a load-order gap)"
+                    ));
+                    self.known_namespaces.insert(full_ns.clone());
+                } else {
+                    // Undotted = alias-shaped: a typo'd or missing import.
+                    self.errors.push(format!(
+                        "unknown alias or namespace '{ns}' in reference '{name}' \
+                         (no import in scope and no module of that name)"
+                    ));
+                }
+            }
+            let resolved = super::modules::qualify(&full_ns, base);
+            // Core namespaces resolve without import, and their natives
+            // may still be registered flat: `eseq.core/label` (or an
+            // explicit `eseq.vanilla/x`) falls back to the flat entry when
+            // no qualified one exists (mirrors VM::resolve_global_read_index).
+            if (super::modules::CORE_NAMESPACES.contains(&full_ns.as_str())
+                || full_ns == super::modules::IMPLICIT_MODULE)
+                && !self.global_symbols.iter().any(|s| *s == resolved)
+                && self.global_symbols.iter().any(|s| s == base)
+            {
+                return base.to_string();
+            }
+            return resolved;
         }
         let qualified = super::modules::qualify(&self.current_module, name);
         if self.global_symbols.iter().any(|s| *s == qualified) {
             return qualified;
         }
+        if let Some(target) = self.refers.get(name) {
+            return target.clone();
+        }
         if self.global_symbols.iter().any(|s| *s == name) {
             return name.to_string();
         }
         qualified
+    }
+
+    /// A namespace is known if it is the current module, the implicit
+    /// module, a blessed core namespace, an imported module, one a
+    /// qualified `def` in this unit targets, or one with existing
+    /// definitions in the global or macro tables (covers hand-rolled
+    /// legacy names and modules loaded earlier).
+    fn namespace_is_known(&self, ns: &str) -> bool {
+        if ns == self.current_module
+            || ns == super::modules::IMPLICIT_MODULE
+            || super::modules::CORE_NAMESPACES.contains(&ns)
+            || self.known_namespaces.contains(ns)
+            || self.import_aliases.values().any(|full| full == ns)
+        {
+            return true;
+        }
+        let prefix_len = ns.len();
+        let has_prefix = |key: &str| {
+            key.len() > prefix_len + 1
+                && key.as_bytes()[prefix_len] == b'/'
+                && key.starts_with(ns)
+        };
+        self.global_symbols.iter().any(|s| has_prefix(s))
+            || self.macros.keys().any(|k| has_prefix(k))
+    }
+
+    fn warn_once(&mut self, message: String) {
+        if !self.warnings.contains(&message) {
+            self.warnings.push(message);
+        }
     }
 
     pub fn new_chunk(&mut self, chunk: Chunk) -> (usize, usize) {
@@ -1385,7 +1534,7 @@ impl Compiler {
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         // Macro expansion: if the head is a macro name, expand and compile the result
         if let Some(Expression::Symbol(name)) = list.first() {
-            if let Some(mac) = self.macros.get(name) {
+            if let Some(mac) = self.lookup_macro(name) {
                 if list.len() - 1 != mac.params.len() {
                     return Err(CompilerError::InvalidArg);
                 }
@@ -1507,6 +1656,104 @@ impl Compiler {
         }
 
         if let Some(Expression::Symbol(s)) = list.first() {
+            // (module NAME) — top-level declaration (spec §2 decision 1):
+            // everything after it in this compile unit belongs to NAME.
+            if s == "module" {
+                if self.scopes.len() > 1 {
+                    self.errors
+                        .push("(module …) must appear at top level".to_string());
+                } else if let (Some(Expression::Symbol(name)), 2) = (list.get(1), list.len()) {
+                    if !super::modules::is_valid_module_name(name) {
+                        self.errors.push(format!(
+                            "invalid module name '{name}' (dotted segments, no '/')"
+                        ));
+                    } else if self.module_declared {
+                        self.errors.push(format!(
+                            "duplicate (module {name}) — one module form per file"
+                        ));
+                    } else {
+                        self.module_declared = true;
+                        self.current_module = name.clone();
+                        // Register the declaration at runtime so `import`
+                        // can treat the module as loaded (load-once).
+                        let declare = Expression::List(vec![
+                            Expression::Symbol("__module-declare".to_string()),
+                            Expression::String(name.clone()),
+                        ]);
+                        return self.compile_expression(&declare);
+                    }
+                } else {
+                    self.errors
+                        .push("(module …) expects exactly one symbol name".to_string());
+                }
+                self.emit(OpCode::PushNil);
+                return Ok(());
+            }
+            // (import NAME :as ALIAS) / (import NAME :refer (sym …)) —
+            // load-once + alias/refer registration (spec §2 decision 2, §4).
+            if s == "import" {
+                if self.scopes.len() > 1 {
+                    self.errors
+                        .push("(import …) must appear at top level, not inside a function".to_string());
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let Some(Expression::Symbol(module_name)) = list.get(1) else {
+                    self.errors
+                        .push("(import …) expects a module name symbol".to_string());
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                if !super::modules::is_valid_module_name(module_name) {
+                    self.errors
+                        .push(format!("invalid module name '{module_name}' in import"));
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let mut i = 2;
+                while i < list.len() {
+                    match (&list[i], list.get(i + 1)) {
+                        (Expression::Keyword(k), Some(Expression::Symbol(alias)))
+                            if k == "as" =>
+                        {
+                            self.import_aliases
+                                .insert(alias.clone(), module_name.clone());
+                            i += 2;
+                        }
+                        (Expression::Keyword(k), Some(Expression::List(syms)))
+                            if k == "refer" =>
+                        {
+                            for sym in syms {
+                                let Expression::Symbol(sym) = sym else {
+                                    self.errors.push(format!(
+                                        "import {module_name}: :refer expects symbols"
+                                    ));
+                                    continue;
+                                };
+                                self.refers.insert(
+                                    sym.clone(),
+                                    super::modules::qualify(module_name, sym),
+                                );
+                            }
+                            i += 2;
+                        }
+                        _ => {
+                            self.errors.push(format!(
+                                "import {module_name}: expected :as ALIAS or :refer (sym …)"
+                            ));
+                            break;
+                        }
+                    }
+                }
+                self.known_namespaces.insert(module_name.clone());
+                // Runtime half: resolve the name to a file and evaluate it
+                // if and only if it has not been evaluated (spec §4).
+                let load = Expression::List(vec![
+                    Expression::Symbol("__import-module".to_string()),
+                    Expression::String(module_name.clone()),
+                ]);
+                return self.compile_expression(&load);
+            }
             if s == "defmacro" && list.len() == 4 {
                 let Expression::Symbol(name) = &list[1] else {
                     return Err(CompilerError::InvalidArg);
@@ -1521,8 +1768,19 @@ impl Compiler {
                         _ => Err(CompilerError::InvalidArg),
                     })
                     .collect::<Result<_, _>>()?;
+                // Inside a declared module, bare macro names intern
+                // qualified (`sdf/circle`); headerless (eseq.vanilla)
+                // files keep flat keys until slice 3 so the patcher's
+                // textual defmacro machinery is untouched.
+                let key = if !super::modules::is_qualified(name)
+                    && self.current_module != super::modules::IMPLICIT_MODULE
+                {
+                    super::modules::qualify(&self.current_module, name)
+                } else {
+                    name.clone()
+                };
                 self.macros.insert(
-                    name.clone(),
+                    key,
                     MacroDef {
                         params,
                         body: list[3].clone(),
@@ -1785,8 +2043,14 @@ impl Compiler {
                 }
                 // Dot syntax: person.age  →  load person, GetField("age")
                 // person.address.city  →  load person, GetField("address"), GetField("city")
+                // Module-qualified symbols (`test.mod/foo`) are exempt: the
+                // `/` split wins and dots before it are module segments.
                 let parts: Vec<&str> = s.splitn(2, '.').collect();
-                if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                if parts.len() == 2
+                    && !super::modules::is_qualified(s)
+                    && !parts[0].is_empty()
+                    && !parts[1].is_empty()
+                {
                     let fields = parts[1].split('.').collect::<Vec<_>>();
                     if self.reactive_namespaces.contains(parts[0]) {
                         let ns_idx = self.use_string_constant(parts[0]);
@@ -1853,6 +2117,9 @@ impl Compiler {
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
             self.compile_expression(expression)?;
+        }
+        if !self.errors.is_empty() {
+            return Err(CompilerError::Message(self.errors.join("; ")));
         }
         Ok(std::mem::take(&mut self.chunks))
     }
