@@ -2,6 +2,6 @@
 # tools/dgen-toolchain/, which is gitignored). This lock file is committed
 # and is the reviewable record of which toolchain archive is vendored.
 archive dgen-toolchain-20.1.8-arm64.tar.gz
-archive_sha256 daeaf899289462e4132cd661802c115a1c5b223671bb73520844aad44b0a4dd0
+archive_sha256 3f5a813d50294df2fd55bf6e63562f491b7e0c3d4cf52c762995dc03f036d5ca
 llvm_version 20.1.8
 dgen_abi_version 1
