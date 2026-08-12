@@ -3569,6 +3569,22 @@ impl VM {
             .or_else(|| self.source_manager.current_source_file())
     }
 
+    /// Names that may head a macro call in source about to be compiled:
+    /// the macro table's keys plus the migration compat aliases whose
+    /// target is a macro (spec §10 slice 3). The source-annotation pass
+    /// uses this to keep widget-provenance props off macro calls, so an
+    /// aliased old flat name must count exactly like the real key.
+    fn macro_call_names(&self) -> HashSet<String> {
+        let mut names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        names.extend(
+            self.compat_aliases
+                .iter()
+                .filter(|(_, target)| self.macros.contains_key(*target))
+                .map(|(old, _)| old.clone()),
+        );
+        names
+    }
+
     /// Compile and run `code` in this VM's existing context (globals persist).
     pub fn eval_str(&mut self, code: &str) -> Result<Option<Value>, VMError> {
         let tokens = Parser::new(code.to_string())
@@ -3581,7 +3597,7 @@ impl VM {
             .source_manager
             .current_revision()
             .unwrap_or_else(|| crate::hot_reload::hash_source(code));
-        let existing_macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let existing_macro_names = self.macro_call_names();
         let exprs = convert_source_exprs_with_origins(
             &spanned_exprs,
             source_revision,
@@ -3812,7 +3828,7 @@ impl VM {
             .source_manager
             .current_revision()
             .unwrap_or_else(|| crate::hot_reload::hash_source(code));
-        let existing_macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let existing_macro_names = self.macro_call_names();
         let exprs = convert_source_exprs_with_origins(
             &spanned_exprs,
             source_revision,
@@ -6605,6 +6621,69 @@ counter
         assert_eq!(
             vm.read_tracked_state_value("legacy-flag"),
             Some(Value::Bool(true))
+        );
+    }
+
+    /// The macro table is a third flat keyspace (globals, `defstate` keys,
+    /// macros), so a converted module's renamed macros need the same alias
+    /// step or every unconverted caller's old flat spelling strands. This
+    /// is what blocked `ui/materials.lisp` in S3 batch 1.
+    #[test]
+    fn compat_alias_covers_the_macro_table() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("compat-macro"),
+            "(module test.macalias)\n(defmacro twice (x) `(+ ,x ,x))\n\
+             (module-compat-alias legacy-twice twice)",
+            1,
+        )
+        .expect("module eval");
+        // Unconverted caller compiled AFTER the module: the old flat macro
+        // name expands through the alias.
+        assert_eq!(vm.eval_str("(legacy-twice 5)"), Ok(Some(Value::Number(10.0))));
+    }
+
+    /// A stale flat macro left in the table from before a conversion (the
+    /// hot-reload case) must not shadow the alias — same ladder position as
+    /// `compat_alias_beats_stale_flat_slot` for globals.
+    #[test]
+    fn compat_alias_macro_beats_stale_flat_macro() {
+        let mut vm = module_test_vm();
+        vm.eval_str("(defmacro stale-mac (x) `(* ,x 100))")
+            .expect("legacy macro");
+        vm.eval_module_source(
+            temp_lisp_path("compat-macro-stale"),
+            "(module test.macalias2)\n(defmacro fresh (x) `(* ,x 2))\n\
+             (module-compat-alias stale-mac fresh)",
+            1,
+        )
+        .expect("module eval");
+        assert_eq!(vm.eval_str("(stale-mac 3)"), Ok(Some(Value::Number(6.0))));
+    }
+
+    /// Macro aliases inherit the global aliases' forward-only constraint:
+    /// a caller compiled before the alias exists already expanded (or
+    /// failed to expand) against the table it saw. Nothing retrofits it.
+    #[test]
+    fn compat_alias_macro_does_not_retrofit_an_earlier_compiled_caller() {
+        let mut vm = module_test_vm();
+        // Compiled while `pending-mac` is not a macro: it compiles as an
+        // ordinary call to an undefined global.
+        vm.eval_str("(def early-caller () (pending-mac 4))")
+            .expect("caller def");
+        vm.eval_module_source(
+            temp_lisp_path("compat-macro-late"),
+            "(module test.maclate)\n(defmacro home-mac (x) `(+ ,x 1))\n\
+             (module-compat-alias pending-mac home-mac)",
+            1,
+        )
+        .expect("module eval");
+        // A fresh compile expands through the alias …
+        assert_eq!(vm.eval_str("(pending-mac 4)"), Ok(Some(Value::Number(5.0))));
+        // … the earlier-compiled caller stays broken.
+        assert!(
+            vm.eval_str("(early-caller)").is_err(),
+            "pre-alias compiled macro call must not silently start working"
         );
     }
 

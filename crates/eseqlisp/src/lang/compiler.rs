@@ -351,8 +351,17 @@ impl Compiler {
     /// Namespace-aware macro lookup (spec §3): qualified names rewrite
     /// through import aliases then hit the table exactly (with a flat
     /// fallback for legacy hand-rolled keys); bare names prefer the
-    /// current module, then `:refer`s, then the flat table (all macros
-    /// defined in headerless files stay flat-keyed until slice 3).
+    /// current module, then `:refer`s, then migration compat aliases, then
+    /// the flat table (all macros defined in headerless files stay
+    /// flat-keyed until slice 3).
+    ///
+    /// The alias step (spec §10 slice 3) mirrors `resolve_global_name`:
+    /// `Compiler::macros` is a third flat keyspace next to the globals and
+    /// the `defstate` bindings, so a converted file's renamed macros would
+    /// otherwise strand every unconverted caller's old flat spelling. It
+    /// sits ahead of the flat entry for the same reason it does there — a
+    /// stale pre-conversion flat `MacroDef`, still in the table after a hot
+    /// reload, must not shadow the macro's new qualified home.
     pub fn lookup_macro(&self, name: &str) -> Option<&MacroDef> {
         if let Some((ns, base)) = super::modules::split_qualified(name) {
             let full_ns = self
@@ -371,6 +380,11 @@ impl Compiler {
                 self.refers
                     .get(name)
                     .and_then(|qualified| self.macros.get(qualified))
+            })
+            .or_else(|| {
+                self.compat_aliases
+                    .get(name)
+                    .and_then(|target| self.macros.get(target))
             })
             .or_else(|| self.macros.get(name))
     }

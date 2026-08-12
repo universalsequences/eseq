@@ -444,8 +444,9 @@ fn summarize_reactive_value(value: Option<&Value>) -> String {
 fn expand_sdf_expression(
     expr: &crate::parser::Expression,
     macros: &HashMap<String, crate::compiler::MacroDef>,
+    compat_aliases: &HashMap<String, String>,
 ) -> crate::parser::Expression {
-    crate::compiler::Compiler::new_repl(
+    let mut compiler = crate::compiler::Compiler::new_repl(
         vec![],
         vec![],
         vec![],
@@ -455,8 +456,15 @@ fn expand_sdf_expression(
         0,
         macros.clone(),
         None,
-    )
-    .expand_macros(expr, 0)
+    );
+    // Shader bodies expand in a throwaway compiler with no module header, so
+    // bare macro names here only ever hit the flat table or a migration
+    // compat alias (spec §10 slice 3) — a module's own shader body must
+    // reference its macros qualified. Seeding the alias table keeps an
+    // unconverted caller's old flat spelling working inside `:shader` and
+    // `:material` bodies, exactly as it does on the ordinary compile path.
+    compiler.set_compat_aliases(compat_aliases.clone());
+    compiler.expand_macros(expr, 0)
 }
 
 struct SdfCompileResult {
@@ -468,10 +476,11 @@ struct SdfCompileResult {
 fn compile_sdf_value(
     value: &Value,
     macros: &HashMap<String, crate::compiler::MacroDef>,
+    compat_aliases: &HashMap<String, String>,
     state_bindings: &std::collections::HashSet<String>,
 ) -> Result<SdfCompileResult, String> {
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
-    let expanded = expand_sdf_expression(&expr, macros);
+    let expanded = expand_sdf_expression(&expr, macros, compat_aliases);
     let mut state_symbols =
         crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
@@ -615,6 +624,7 @@ fn compile_widget_material(
     widget_type: &str,
     material_val: &Value,
     macros: &HashMap<String, crate::compiler::MacroDef>,
+    compat_aliases: &HashMap<String, String>,
     state_binding_keys: &[String],
     prop_binding_keys: &[String],
 ) -> Result<String, String> {
@@ -630,7 +640,7 @@ fn compile_widget_material(
     if widget_type == "vslider" {
         bindings.insert("origin_t".to_string());
     }
-    let expanded = expand_sdf_expression(&shader_expr, macros);
+    let expanded = expand_sdf_expression(&shader_expr, macros, compat_aliases);
     let mut hasher = DefaultHasher::new();
     widget_type.hash(&mut hasher);
     expr_to_source(&expanded).hash(&mut hasher);
@@ -1295,7 +1305,12 @@ impl Runtime {
             let Some(val) = args.first() else {
                 return Value::String("error: sdf->metal requires 1 argument".into());
             };
-            match compile_sdf_value(val, &sdf_macros, &std::collections::HashSet::new()) {
+            match compile_sdf_value(
+                val,
+                &sdf_macros,
+                &HashMap::new(),
+                &std::collections::HashSet::new(),
+            ) {
                 Ok(result) => Value::String(result.output.shader_source),
                 Err(e) => Value::String(format!("error: {}", e)),
             }
@@ -1388,7 +1403,12 @@ impl Runtime {
                 for name in &widget_state_names {
                     state_bindings.insert(name.clone());
                 }
-                let compiled = match compile_sdf_value(&shader_val, &vm.macros, &state_bindings) {
+                let compiled = match compile_sdf_value(
+                    &shader_val,
+                    &vm.macros,
+                    &vm.compat_aliases,
+                    &state_bindings,
+                ) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
                 };
@@ -1457,6 +1477,7 @@ impl Runtime {
                                     &wtype,
                                     &material_val,
                                     &vm.macros,
+                                    &vm.compat_aliases,
                                     &keys,
                                     &prop_keys,
                                 ) {

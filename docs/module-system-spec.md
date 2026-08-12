@@ -418,6 +418,22 @@ stays as-is; real macro hygiene is out of scope for this spec.
   and writes (an unconverted redefiner keeps last-writer-wins against the
   new home). Deleting the table and the form ends the migration.
 
+  **Stage 2 (BUILT 2026-08-12, batch 2):** `module-compat-alias` covers the
+  **macro table** as well, no new form — `Compiler::lookup_macro` gained the
+  same alias rung in the same ladder position (current module → `:refer` →
+  alias → flat), because macros are a third flat keyspace and a converted
+  file's renamed macros would otherwise strand every unconverted caller.
+  Macro *definition* sites do NOT follow the alias (unlike global writes,
+  which do): several standalone demos and Rust test fixtures define their own
+  flat `aqua-color`/`aqua-slider-material`, and write-through would let those
+  clobber a converted module's macro. The consequence is that a vanilla
+  redefinition of an aliased macro name is silently ignored in a VM where the
+  alias exists — acceptable because the alias table is migration-only, but it
+  means an alias should not be minted for a name that unconverted files
+  redefine on purpose. Shader/material bodies expand in a throwaway
+  implicit-module compiler (`runtime::expand_sdf_expression`), which is now
+  seeded with the alias table too.
+
   ### Slice 3 conversion recipe (validated by batch 1, 2026-08-12)
 
   Batch 1 converted `ui/macro-state.lisp` → `eseq.macro-state`,
