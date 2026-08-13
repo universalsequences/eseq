@@ -1255,4 +1255,65 @@ mod tests {
         );
         assert!(badge.contains("Take"), "unexpected badge: {badge}");
     }
+
+    /// P0 regression (eseq-md9): **Apply is never destructive.** A re-link on
+    /// the current scene's lane leaves the live mirror holding the OUTGOING
+    /// patch's device state; the next save-back writes the mirror into
+    /// whatever the cell resolves to NOW, i.e. straight over the incoming
+    /// pool Patch. Auditioning sounds from the palette therefore converged
+    /// every entry onto the first one's content ("all the glyphs look the
+    /// same"). The repoint must load the incoming patch into the mirror, so
+    /// the save-back that follows is a no-op on the pool.
+    #[test]
+    fn apply_never_writes_the_outgoing_sound_over_the_incoming_patch() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        // Seq view: the Cell target is the scene's cell (§2.2.2), which is
+        // how the palette is used from the mixer.
+        app.arrangement_view_visible = false;
+        app.state.set_arrangement_context(false);
+        // Sound A, written through the real edit path so mirror and cell agree.
+        crate::app::edit::try_apply_command(
+            &mut app,
+            crate::app::command::AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.125,
+            },
+        )
+        .expect("device edit applies");
+        let (donor, donor_refs) = distinctive_pattern(&app);
+        let outgoing = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_pools[0].refs(scene_pattern))
+            .expect("scene refs");
+        assert_ne!(outgoing.patch, donor_refs.patch);
+
+        app.palette_apply(0, PaletteTarget::Cell, donor_refs.patch, None)
+            .expect("apply succeeds");
+        // Any later save-back — a scene switch, a save, or simply the next
+        // palette gesture's history capture.
+        app.capture_synchronized_scene_structure_state()
+            .expect("the save-back synchronizes");
+
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(donor)
+                    .expect("donor pattern")
+                    .instrument_slot
+                    .defaults[0],
+                0.875,
+                "the incoming Patch keeps its own content"
+            );
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(scene_pattern)
+                    .expect("scene pattern")
+                    .instrument_slot
+                    .defaults[0],
+                0.875,
+                "the cell now sounds like the sound it selected"
+            );
+        });
+    }
 }

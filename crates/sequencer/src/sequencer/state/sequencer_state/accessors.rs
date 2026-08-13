@@ -776,6 +776,26 @@ impl SequencerState {
         }
     }
 
+    /// Load the lane's OWNER cell (track override first, then the scene
+    /// cell) into the live mirror — the Seq-context counterpart of
+    /// `restore_track_sound_to_mirror`, and the same repaint the borrow
+    /// release performs for a lane that was on loan.
+    ///
+    /// A repoint of a cell-owned lane has to run this: the mirror still
+    /// holds the OUTGOING patch's device state, and the mirror is what the
+    /// next save-back stores into whatever the cell resolves to now — i.e.
+    /// straight over the incoming pool Patch (eseq-md9).
+    pub fn restore_effective_cell_sound_to_mirror(&self, track: usize) -> bool {
+        let data = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            scenes.effective_track_pattern(track)
+        };
+        match data {
+            Some(data) => data.restore_device_state_to(self, track),
+            None => false,
+        }
+    }
+
     /// Entering-arrangement-view half of the view-switch seam (track-sound
     /// spec §2.9 step 2): install the TRACK SOUND into the mirror on every
     /// lane rules 1/2 do not claim. Only the device half moves — note content

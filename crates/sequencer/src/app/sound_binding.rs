@@ -786,6 +786,17 @@ impl App {
         let track_owned = track < 64 && self.state.track_owned_lane_mask() >> track & 1 == 1;
         if track_owned || self.state.effective_track_pattern_id(track).is_none() {
             self.state.restore_track_sound_to_mirror(track);
+        } else {
+            // Cell-owned lane (Seq context, §2.2 rule 3): the repoint moved
+            // the cell onto a DIFFERENT Patch and nothing else repaints the
+            // mirror — the release above only restores a lane that was
+            // actually borrowed. Leaving the outgoing sound in the mirror
+            // makes the next save-back (`capture_synchronized_scene_
+            // structure_state`, a scene switch, a save) write it into
+            // whatever the cell resolves to NOW, clobbering the incoming
+            // pool Patch: the palette-Apply data loss of eseq-md9, where
+            // auditioning entries converged every sound onto one content.
+            self.state.restore_effective_cell_sound_to_mirror(track);
         }
         self.sync_track_sound_bindings();
         // §3.6: re-route every restored default through the effective layer —
