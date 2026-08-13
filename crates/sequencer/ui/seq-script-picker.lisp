@@ -1,38 +1,106 @@
 ;; Script sequencer picker + the script-buffer-name/script-init-fn host contract stubs.
-;; Extracted from ui/main.lisp (module-system spec slice S2). Headerless on
-;; purpose: implicit eseq.vanilla until per-file (module …) headers land in S3.
+;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
+;;
+;; Two keyspaces meet in this file and they convert differently:
+;;
+;;  1. The **host→script contract** (`script-buffer-name`, `script-tab-label`,
+;;     `script-sequencer-name`, `script-source-tab-label`,
+;;     `script-source-tab-requested`, `script-source-tab-opened`,
+;;     `script-init-fn`) is NOT this module's API — it is a protocol spoken by
+;;     arbitrary user scripts under `crates/sequencer/scripts/**` (and by
+;;     script files Rust generates in `ui/edit_sessions.rs` /
+;;     `ui/host_commands/scripts.rs`).  Those scripts are headerless and
+;;     *re-def* the names: `(def script-buffer-name "*16x16*")`,
+;;     `(def script-init-fn () …)`.  That is hazard (i)/(m)'s codegen-re-def
+;;     variant, so all seven stay flat through the §3 escape hatch
+;;     (`(def eseq.vanilla/<name> …)`) and get **no** compat alias.  Every
+;;     in-file reference must use the `eseq.vanilla/` spelling — a bare
+;;     reference here would intern this module's own slot, a different cell,
+;;     and the divergence is silent.
+;;
+;;  2. The picker itself converts as a normal module.  Its two mutable plain
+;;     defs (`seq-script-picker-current-dir`, `seq-script-picker-source-buffer`)
+;;     are also pinned: `src/ui/state_values/tests.rs` drives the picker with
+;;     headerless `(set! seq-script-picker-current-dir …)` /
+;;     `(set! seq-script-picker-source-buffer …)` evals, and wave 7's rule is
+;;     that a mutable plain `def` is pinned, never aliased.  The remaining
+;;     public names are functions, so identity compat aliases are safe
+;;     (a function slot is written once by its `def`).
+;;
+;; The mode name qualifies to `eseq.seq-script-picker/seq-script-picker-mode`
+;; and needs no alias: the only `set-buffer-mode` caller is in this file (and
+;; it qualifies against this same module), and no other lisp or Rust file
+;; names the mode.  Likewise the four `mode-bind-key` handlers and the
+;; `bind-key "C-c s"` handler are all defined here, so their qualified
+;; registration strings are exact hits.
+(module eseq.seq-script-picker)
+
+;; Identity aliases (hazard-free: every one is a function).  Why each:
+;;   seq-register-script-source-tab  — called by 11 headerless user scripts in
+;;       crates/sequencer/scripts/**, by the new-script template Rust emits
+;;       (src/ui/edit_sessions.rs:848, src/ui/host_commands/scripts.rs:178),
+;;       and stubbed/evaled flat by src/lisp_host/tests.rs.
+;;   seq-script-load-file            — production Rust evals it by flat name
+;;       (src/ui/host_commands/scripts.rs:208).
+;;   seq-delete-script-sequencer-by-buffer — ui/seq-step-tabs.lisp (headerless)
+;;       calls it from the step-tab :on-close lambda.
+;;   seq-delete-script-sequencer, seq-script-default-dir,
+;;   seq-script-entry-visible?, seq-script-scratch-entry,
+;;   seq-script-append-to-scratch, seq-script-picker — driven by flat name from
+;;       src/ui/state_values/tests.rs.
+;;   seq-script-remember-source-buffer — ui/browser.lisp (module eseq.browser).
+;; That last one is a converted→converted edge, which §10 step 2 would normally
+;; retire with an import.  It stays an identity alias deliberately: `import`
+;; EVALUATES its target, and this module registers a mode, four mode keys and a
+;; global `bind-key` at top level, so importing it into a UI root would pull all
+;; of that into every test VM that touches ui/browser.lisp AND would evaluate
+;; this file at main.lisp:17 instead of its declared slot at :42.  Per the
+;; wave-7 identity-alias rule the alias serves both rungs: eseq.browser's bare
+;; reference qualifies against itself, misses, and lands on the base-name alias.
+(module-compat-alias seq-register-script-source-tab seq-register-script-source-tab)
+(module-compat-alias seq-script-remember-source-buffer seq-script-remember-source-buffer)
+(module-compat-alias seq-script-default-dir seq-script-default-dir)
+(module-compat-alias seq-script-entry-visible? seq-script-entry-visible?)
+(module-compat-alias seq-script-scratch-entry seq-script-scratch-entry)
+(module-compat-alias seq-script-append-to-scratch seq-script-append-to-scratch)
+(module-compat-alias seq-script-load-file seq-script-load-file)
+(module-compat-alias seq-delete-script-sequencer seq-delete-script-sequencer)
+(module-compat-alias seq-delete-script-sequencer-by-buffer seq-delete-script-sequencer-by-buffer)
+(module-compat-alias seq-script-picker seq-script-picker)
 
 
 ;; ── Script picker ──────────────────────────────────────────────────────────
 ;; Scripts can expose this lightweight contract. The picker resets it before each
 ;; load, then calls script-init-fn once after a successful load. Scripts that
 ;; don't register a UI tab are opened as source tabs by default.
-(def script-buffer-name "")
-(def script-tab-label "")
-(def script-sequencer-name "")
-(def script-source-tab-label "")
-(def script-source-tab-requested false)
-(def script-source-tab-opened false)
-(def script-init-fn () false)
+;;
+;; All seven are PINNED to eseq.vanilla — see the header note (1).
+(def eseq.vanilla/script-buffer-name "")
+(def eseq.vanilla/script-tab-label "")
+(def eseq.vanilla/script-sequencer-name "")
+(def eseq.vanilla/script-source-tab-label "")
+(def eseq.vanilla/script-source-tab-requested false)
+(def eseq.vanilla/script-source-tab-opened false)
+(def eseq.vanilla/script-init-fn () false)
 
 (def seq-script-reset-contract ()
   (do
-    (set! script-buffer-name "")
-    (set! script-tab-label "")
-    (set! script-sequencer-name "")
-    (set! script-source-tab-label "")
-    (set! script-source-tab-requested false)
-    (set! script-source-tab-opened false)
-    (def script-init-fn () false)))
+    (set! eseq.vanilla/script-buffer-name "")
+    (set! eseq.vanilla/script-tab-label "")
+    (set! eseq.vanilla/script-sequencer-name "")
+    (set! eseq.vanilla/script-source-tab-label "")
+    (set! eseq.vanilla/script-source-tab-requested false)
+    (set! eseq.vanilla/script-source-tab-opened false)
+    (def eseq.vanilla/script-init-fn () false)))
 
 (def seq-register-script-source-tab (label)
   (do
-    (set! script-source-tab-label label)
-    (set! script-source-tab-requested true)
+    (set! eseq.vanilla/script-source-tab-label label)
+    (set! eseq.vanilla/script-source-tab-requested true)
     (let ((path (current-source-path)))
       (if (not (= path ""))
         (do
-          (set! script-source-tab-opened true)
+          (set! eseq.vanilla/script-source-tab-opened true)
           (host-command "open-script-source-tab"
             (dict
               :path path
@@ -46,11 +114,15 @@
       "crates/sequencer/scripts"
       "scripts")))
 
-(def seq-script-picker-current-dir (seq-script-default-dir))
-(def seq-script-picker-entries '())
-(def seq-script-picker-source-buffer "")
+;; PINNED (mutable plain defs, written by headerless Rust test evals — see
+;; header note (2)).  Every in-file reference uses the `eseq.vanilla/` spelling.
+(def eseq.vanilla/seq-script-picker-current-dir (seq-script-default-dir))
+(def eseq.vanilla/seq-script-picker-source-buffer "")
 
-(def seq-switch-or-create-buffer (name)
+;; Module-private: no reference anywhere outside this file.
+(def %picker-entries '())
+
+(def %switch-or-create-buffer (name)
   (let ((bufs (buffer-list))
         (exists (reduce |acc b| (if (= b name) true acc) false bufs)))
     (if exists
@@ -67,57 +139,57 @@
   (or (get entry :directory)
     (string-ends-with? (get entry :name) ".lisp")))
 
-(def seq-script-picker-styles ()
+(def %picker-styles ()
   (append
     (list
       (style-bg-current-line :widget-focus-bg)
       (style-bold-fg 0 0 8 :status-accent)
       (style-bold-fg 0 9 200 :blue))
     (dired-row-styles 2 true)
-    (dired-entry-styles seq-script-picker-entries 3)))
+    (dired-entry-styles %picker-entries 3)))
 
-(def seq-script-picker-current-entry ()
+(def %picker-current-entry ()
   (let ((line (current-line-number)))
     (if (= line 3)
       :parent
       (if (>= line 4)
-        (nth seq-script-picker-entries (- line 4))
+        (nth %picker-entries (- line 4))
         nil))))
 
 (def seq-script-picker-refresh ()
-  (if (not (directory? seq-script-picker-current-dir))
+  (if (not (directory? eseq.vanilla/seq-script-picker-current-dir))
     (do
-      (set! seq-script-picker-entries '())
+      (set! %picker-entries '())
       (render-widget nil)
       (set-buffer-lines
-        (list (str "Scripts > " seq-script-picker-current-dir)
+        (list (str "Scripts > " eseq.vanilla/seq-script-picker-current-dir)
           ""
           "script directory not found"))
-      (status (fmt "Script directory not found: {}" seq-script-picker-current-dir)))
-    (let ((entries (filter (lambda (entry) (seq-script-entry-visible? entry)) (list-directory seq-script-picker-current-dir)))
+      (status (fmt "Script directory not found: {}" eseq.vanilla/seq-script-picker-current-dir)))
+    (let ((entries (filter (lambda (entry) (seq-script-entry-visible? entry)) (list-directory eseq.vanilla/seq-script-picker-current-dir)))
           (dirs (filter |e| (get e :directory) entries))
           (files (filter |e| (not (get e :directory)) entries)))
-      (set! seq-script-picker-entries (append dirs files))
+      (set! %picker-entries (append dirs files))
       (render-widget nil)
       (set-buffer-lines
         (append
-          (list (str "Scripts > " seq-script-picker-current-dir)
+          (list (str "Scripts > " eseq.vanilla/seq-script-picker-current-dir)
             ""
             "drwxr-xr-x  1      0            .. ../")
-          (map dired-format-entry seq-script-picker-entries)))
-      (set-buffer-styles (seq-script-picker-styles))
+          (map dired-format-entry %picker-entries)))
+      (set-buffer-styles (%picker-styles))
       (goto-line 3)
       (status (fmt "{} scripts" (len files))))))
 
 (def seq-script-picker-up ()
-  (let ((parent (path-parent seq-script-picker-current-dir)))
+  (let ((parent (path-parent eseq.vanilla/seq-script-picker-current-dir)))
     (if (= parent nil)
       (status "Already at root")
       (do
-        (set! seq-script-picker-current-dir parent)
+        (set! eseq.vanilla/seq-script-picker-current-dir parent)
         (seq-script-picker-refresh)))))
 
-(def seq-script-scratch-path (path)
+(def %scratch-path (path)
   (if (string-starts-with? path "crates/sequencer/")
     path
     (if (string-starts-with? path "scripts/")
@@ -127,7 +199,7 @@
         (str "crates/sequencer/" path)))))
 
 (def seq-script-scratch-entry (path)
-  (list (source (list 'load (seq-script-scratch-path path)))))
+  (list (source (list 'load (%scratch-path path)))))
 
 (def seq-script-append-to-scratch (path)
   (append-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
@@ -137,38 +209,50 @@
     (remove-buffer-lines-for "*scratch*" (seq-script-scratch-entry path))
     (host-command "remove-project-script-from-scratch" (dict :path path))))
 
+;; `seq-register-script-step-sequencer-tab`, `seq-registered-step-tabs` and the
+;; `seq-step-tab-*` accessors live in ui/seq-step-tabs.lisp, still headerless:
+;; referenced bare (the stage-3 late-binding heal covers the function reads, and
+;; `seq-registered-step-tabs` is a `defstate`, which resolves through the
+;; state-bindings ladder rather than the global one — hazard (m) does not apply).
 (def seq-script-register-loaded-tab ()
-  (if (not (= script-buffer-name ""))
+  (if (not (= eseq.vanilla/script-buffer-name ""))
     (seq-register-script-step-sequencer-tab
-      (if (= script-tab-label "") script-buffer-name script-tab-label)
-      script-buffer-name
-      script-sequencer-name
+      (if (= eseq.vanilla/script-tab-label "")
+        eseq.vanilla/script-buffer-name
+        eseq.vanilla/script-tab-label)
+      eseq.vanilla/script-buffer-name
+      eseq.vanilla/script-sequencer-name
       "")
     false))
 
 (def seq-script-register-loaded-tab-from-path (path)
-  (if (not (= script-buffer-name ""))
+  (if (not (= eseq.vanilla/script-buffer-name ""))
     (seq-register-script-step-sequencer-tab
-      (if (= script-tab-label "") script-buffer-name script-tab-label)
-      script-buffer-name
-      script-sequencer-name
+      (if (= eseq.vanilla/script-tab-label "")
+        eseq.vanilla/script-buffer-name
+        eseq.vanilla/script-tab-label)
+      eseq.vanilla/script-buffer-name
+      eseq.vanilla/script-sequencer-name
       path)
     false))
 
 (def seq-script-register-source-tab-from-path (path)
-  (if (and (not script-source-tab-opened)
-        (or script-source-tab-requested (= script-buffer-name "")))
+  (if (and (not eseq.vanilla/script-source-tab-opened)
+        (or eseq.vanilla/script-source-tab-requested
+          (= eseq.vanilla/script-buffer-name "")))
     (host-command "open-script-source-tab"
       (dict
         :path path
-        :label (if (= script-source-tab-label "") (path-filename path) script-source-tab-label)))
+        :label (if (= eseq.vanilla/script-source-tab-label "")
+                 (path-filename path)
+                 eseq.vanilla/script-source-tab-label)))
     false))
 
-(def seq-script-tab-matches-sequencer? (tab name)
+(def %tab-matches-sequencer? (tab name)
   (= (seq-step-tab-sequencer-name tab) name))
 
-(def seq-script-tab-for-sequencer (name)
-  (let ((hits (filter (lambda (tab) (seq-script-tab-matches-sequencer? tab name))
+(def %tab-for-sequencer (name)
+  (let ((hits (filter (lambda (tab) (%tab-matches-sequencer? tab name))
                 seq-registered-step-tabs)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
@@ -191,7 +275,7 @@
       false)))
 
 (def seq-delete-script-sequencer (name)
-  (let ((tab (seq-script-tab-for-sequencer name)))
+  (let ((tab (%tab-for-sequencer name)))
     (do
       (seq-unpublish-sequencer name)
       (if tab
@@ -219,18 +303,16 @@
       (status (fmt "Deleted sequencer {}" name))
       true)))
 
-;; Owner-side accessor for `seq-script-picker-source-buffer` (module spec §10
-;; hazard m).  A converted module's bare `(set! seq-script-picker-source-buffer
-;; …)` interns the *module's* global and never reaches this file's slot, so the
-;; return-to-source path would silently stop working.  ui/browser.lisp (module
-;; eseq.browser) calls this instead; a function slot is written once by its def,
-;; so the late-binding heal that reaches it survives.
+;; Owner-side accessor for the pinned `seq-script-picker-source-buffer` (module
+;; spec §10 hazard m).  ui/browser.lisp (module eseq.browser) calls this rather
+;; than writing the global, so the write lands in exactly one cell no matter
+;; which module the caller lives in.
 (def seq-script-remember-source-buffer ()
-  (set! seq-script-picker-source-buffer (current-buffer-name)))
+  (set! eseq.vanilla/seq-script-picker-source-buffer (current-buffer-name)))
 
 (def seq-script-return-to-source-buffer ()
-  (if (not (= seq-script-picker-source-buffer ""))
-    (switch-to-buffer seq-script-picker-source-buffer)
+  (if (not (= eseq.vanilla/seq-script-picker-source-buffer ""))
+    (switch-to-buffer eseq.vanilla/seq-script-picker-source-buffer)
     (switch-to-buffer "*sequencer*")))
 
 (def seq-script-load-file (path)
@@ -241,39 +323,40 @@
         (status (str load-result))
         (do
           (seq-script-append-to-scratch path)
-          (script-init-fn)
+          (eseq.vanilla/script-init-fn)
           (seq-script-register-loaded-tab-from-path path)
           (seq-script-register-source-tab-from-path path)
           (seq-script-return-to-source-buffer)
           (status (fmt "Loaded script {}" (path-filename path))))))))
 
-(def seq-script-picker-open-entry (entry)
+(def %picker-open-entry (entry)
   (let ((name (get entry :name))
         (is-dir (get entry :directory)))
     (if is-dir
       (do
-        (set! seq-script-picker-current-dir (path-join seq-script-picker-current-dir name))
+        (set! eseq.vanilla/seq-script-picker-current-dir
+          (path-join eseq.vanilla/seq-script-picker-current-dir name))
         (seq-script-picker-refresh))
-      (seq-script-load-file (path-join seq-script-picker-current-dir name)))))
+      (seq-script-load-file (path-join eseq.vanilla/seq-script-picker-current-dir name)))))
 
 (def seq-script-picker-open-at-point ()
-  (let ((entry (seq-script-picker-current-entry)))
+  (let ((entry (%picker-current-entry)))
     (if (= entry :parent)
       (seq-script-picker-up)
       (if entry
-        (seq-script-picker-open-entry entry)
+        (%picker-open-entry entry)
         (status "No script on this line")))))
 
 (def seq-script-picker-quit ()
-  (if (not (= seq-script-picker-source-buffer ""))
-    (switch-to-buffer seq-script-picker-source-buffer)
+  (if (not (= eseq.vanilla/seq-script-picker-source-buffer ""))
+    (switch-to-buffer eseq.vanilla/seq-script-picker-source-buffer)
     (switch-to-buffer "*sequencer*")))
 
 (def seq-script-picker ()
   (do
-    (set! seq-script-picker-source-buffer (current-buffer-name))
-    (set! seq-script-picker-current-dir (seq-script-default-dir))
-    (seq-switch-or-create-buffer "*scripts*")
+    (set! eseq.vanilla/seq-script-picker-source-buffer (current-buffer-name))
+    (set! eseq.vanilla/seq-script-picker-current-dir (seq-script-default-dir))
+    (%switch-or-create-buffer "*scripts*")
     (set-view-mode "text")
     (set-buffer-mode "seq-script-picker-mode")
     (seq-script-picker-refresh)))

@@ -1016,8 +1016,10 @@
         // the step-grid-interactions section file.
         let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
             .expect("read ui/step-grid-interactions.lisp");
+        // The anchor is pinned into `eseq.vanilla` (module spec §10 hazard m):
+        // ui/bus-grid.lisp is still headerless and `set!`s it flat.
         let start = src
-            .find("(def step-key-select-anchor")
+            .find("(def eseq.vanilla/step-key-select-anchor")
             .expect("keyboard step selection source should define anchor");
         let end = src
             .find("(def cursor-toggle")

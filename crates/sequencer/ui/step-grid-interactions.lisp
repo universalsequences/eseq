@@ -1,19 +1,101 @@
 ;; Step-grid pointer/cursor/selection interactions: paging, drag gestures, drum-step gestures, step param helpers.
-;; Extracted from ui/main.lisp (module-system spec slice S2). Headerless on
-;; purpose: implicit eseq.vanilla until per-file (module …) headers land in S3.
+;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
+;;
+;; This is the step-gesture hub: ui/bus-grid.lisp (still vanilla), ui/step-grid.lisp,
+;; ui/sequencer.lisp, ui/seq-grid-mode.lisp, ui/seqv-track-params.lisp and several
+;; Rust call sites reach its names by their flat spellings, so it converts with NO
+;; renames and a full set of *identity* compat aliases (the seq-core-state /
+;; custom-ui-lego precedent, spec §10 wave-7 addendum): an unconverted vanilla
+;; caller matches the alias key flat, and a converted module's bare reference
+;; qualifies against itself, misses, and lands on the same alias by base name.
+;; Every aliased name here is a function or a `defstate`, both immune to hazard (m).
+;;
+;; TWO exceptions, both hazard (m)/(i):
+;;
+;;   1. The eleven drag-state globals below are *mutable plain defs* that
+;;      ui/bus-grid.lisp — a headerless vanilla file — reads AND `set!`s by flat
+;;      spelling for the bus-lane gestures (they are genuinely one shared gesture
+;;      state: only one drag runs at a time). A compat alias cannot rescue that:
+;;      the late-binding heal repairs an *empty* slot and the next `set!` unlinks
+;;      it. They are pinned into `eseq.vanilla` with the §3 escape hatch, get no
+;;      alias, and EVERY in-file reference must use the `eseq.vanilla/` spelling —
+;;      a bare one here would intern this module's own slot, a different cell, and
+;;      the divergence is silent. They fold back in when bus-grid.lisp converts.
+;;   2. `sequencer-cursor-step-changed` is a stub-then-override protocol:
+;;      ui/sequencer.lisp pins its own `(def eseq.vanilla/sequencer-cursor-step-changed …)`
+;;      override (see its comment at :304) which must land on the same slot the
+;;      stub and the call site below use.
+;;
+;; Reads of ui/seq-core-state.lisp (a converted module) are written with its FULL
+;; dotted module spelling rather than the `core/` import alias, deliberately:
+;; `crates/sequencer/src/ui/state_values/tests.rs` evals two *slices* of this file
+;; (`load_step_gesture_source`, `load_keyboard_step_selection_source`) with no
+;; import in scope, and the compiler treats an undotted unknown alias as a hard
+;; error while a dotted module namespace only warns — the qualified slot then
+;; heals onto those harnesses' flat natives (function slots, so heal-safe).
+;; `param-mode` stays bare: it is a `defstate`, which resolves through
+;; `state_bindings` and never touches the global ladder.
+(module eseq.step-grid-interactions)
+
+(import eseq.seq-core-state :as core)
+
+(module-compat-alias page-button-width page-button-width)
+(module-compat-alias page-slot-width page-slot-width)
+(module-compat-alias step-index step-index)
+(module-compat-alias step-visible? step-visible?)
+(module-compat-alias cursor-left cursor-left)
+(module-compat-alias cursor-right cursor-right)
+(module-compat-alias cursor-select-left cursor-select-left)
+(module-compat-alias cursor-select-right cursor-select-right)
+(module-compat-alias cursor-toggle cursor-toggle)
+(module-compat-alias selection-click? selection-click?)
+(module-compat-alias cmd-click? cmd-click?)
+(module-compat-alias set-track-cursor-step set-track-cursor-step)
+(module-compat-alias step-clear-drag-state step-clear-drag-state)
+(module-compat-alias step-shift-anchor step-shift-anchor)
+(module-compat-alias step-hold-select-maybe-engage step-hold-select-maybe-engage)
+(module-compat-alias step-selected? step-selected?)
+(module-compat-alias step-select-drag-start step-select-drag-start)
+(module-compat-alias step-select-drag-over-for-track step-select-drag-over-for-track)
+(module-compat-alias step-select-drag-over-for-track-no-cursor step-select-drag-over-for-track-no-cursor)
+(module-compat-alias step-select-drag-over step-select-drag-over)
+(module-compat-alias step-pointer-down-for-track step-pointer-down-for-track)
+(module-compat-alias step-pointer-down step-pointer-down)
+(module-compat-alias step-pointer-up step-pointer-up)
+(module-compat-alias step-double-click-for-track step-double-click-for-track)
+(module-compat-alias step-double-click step-double-click)
+(module-compat-alias drum-step-cursor-track drum-step-cursor-track)
+(module-compat-alias drum-step-cursor-pad drum-step-cursor-pad)
+(module-compat-alias drum-step-set-cursor drum-step-set-cursor)
+(module-compat-alias drum-step-select-drag-over drum-step-select-drag-over)
+(module-compat-alias drum-step-pointer-down drum-step-pointer-down)
+(module-compat-alias drum-step-pointer-up drum-step-pointer-up)
+(module-compat-alias drum-step-double-click drum-step-double-click)
+(module-compat-alias bus-step-double-click bus-step-double-click)
+(module-compat-alias seq-set-step-param-from-step seq-set-step-param-from-step)
+(module-compat-alias seq-set-process-lane-from-step seq-set-process-lane-from-step)
+(module-compat-alias select-all-steps select-all-steps)
+(module-compat-alias delete-selected-steps delete-selected-steps)
+(module-compat-alias duration-slider-position duration-slider-position)
+(module-compat-alias duration-slider-value duration-slider-value)
+(module-compat-alias step-param-value step-param-value)
+(module-compat-alias step-slider-param-value step-slider-param-value)
+(module-compat-alias param-decimals param-decimals)
 
 (def page-button-width 2.8)
 
-(def page-button-gap 0.4)
+(def %page-button-gap 0.4)
 
 (def page-slot-width ()
-  (+ page-button-width page-button-gap))
+  (+ page-button-width %page-button-gap))
 
-(def page-panel-width ()
-  (+ 0.4 (* (page-count) (page-slot-width))))
+;; Private: no caller anywhere in the app (ui/bus-grid.lisp has its own
+;; `bus-page-panel-width`); kept as the track-grid twin of that helper.
+(def %page-panel-width ()
+  (+ 0.4 (* (eseq.seq-core-state/page-count) (page-slot-width))))
 
 (def step-index (i)
-  (+ (page-offset) i))
+  (+ (eseq.seq-core-state/page-offset) i))
 
 (def step-visible? (i)
   (< (step-index i) SEQ.tp-num-steps))
@@ -21,71 +103,73 @@
 (def cursor-left ()
   (if (seq-has-selection?)
     (do
-      (cool-off-follow)
-      (set! step-key-select-anchor nil)
-      (if (seq-has-selected-bus?)
+      (eseq.seq-core-state/cool-off-follow)
+      (set! eseq.vanilla/step-key-select-anchor nil)
+      (if (eseq.seq-core-state/seq-has-selected-bus?)
         (bus-shift-selected-steps -1)
         (seq-shift-selected-steps -1)))
     (do
-      (cool-off-follow)
-      (set! step-key-select-anchor nil)
-      (let ((num-steps (max 1 (cursor-num-steps))))
+      (eseq.seq-core-state/cool-off-follow)
+      (set! eseq.vanilla/step-key-select-anchor nil)
+      (let ((num-steps (max 1 (eseq.seq-core-state/cursor-num-steps))))
         (set-track-cursor-step
-          (if (= (current-step) 0)
+          (if (= (eseq.seq-core-state/current-step) 0)
             (- num-steps 1)
-            (- (current-step) 1)))))))
+            (- (eseq.seq-core-state/current-step) 1)))))))
 
 (def cursor-right ()
   (if (seq-has-selection?)
     (do
-      (cool-off-follow)
-      (set! step-key-select-anchor nil)
-      (if (seq-has-selected-bus?)
+      (eseq.seq-core-state/cool-off-follow)
+      (set! eseq.vanilla/step-key-select-anchor nil)
+      (if (eseq.seq-core-state/seq-has-selected-bus?)
         (bus-shift-selected-steps 1)
         (seq-shift-selected-steps 1)))
     (do
-      (cool-off-follow)
-      (set! step-key-select-anchor nil)
-      (let ((num-steps (max 1 (cursor-num-steps))))
+      (eseq.seq-core-state/cool-off-follow)
+      (set! eseq.vanilla/step-key-select-anchor nil)
+      (let ((num-steps (max 1 (eseq.seq-core-state/cursor-num-steps))))
         (set-track-cursor-step
-          (if (>= (current-step) (- num-steps 1))
+          (if (>= (eseq.seq-core-state/current-step) (- num-steps 1))
             0
-            (+ (current-step) 1)))))))
+            (+ (eseq.seq-core-state/current-step) 1)))))))
 
-(def step-key-select-anchor nil)
+;; PINNED (hazard m): ui/bus-grid.lisp `set!`s this flat for the bus-lane
+;; gestures. See the file header.
+(def eseq.vanilla/step-key-select-anchor nil)
 
-(def cursor-select-step-range (start end)
-  (if (seq-has-selected-bus?)
+(def %cursor-select-step-range (start end)
+  (if (eseq.seq-core-state/seq-has-selected-bus?)
     (bus-select-step-range start end)
     (seq-select-step-range start end)))
 
-(def cursor-select-move (direction)
+(def %cursor-select-move (direction)
   (do
-    (cool-off-follow)
-    (let ((num-steps (max 1 (cursor-num-steps)))
-          (start (current-step)))
-      (let ((anchor (if (= step-key-select-anchor nil) start step-key-select-anchor))
+    (eseq.seq-core-state/cool-off-follow)
+    (let ((num-steps (max 1 (eseq.seq-core-state/cursor-num-steps)))
+          (start (eseq.seq-core-state/current-step)))
+      (let ((anchor (if (= eseq.vanilla/step-key-select-anchor nil) start eseq.vanilla/step-key-select-anchor))
             (next (if (< direction 0)
                     (if (= start 0) 0 (- start 1))
                     (if (>= start (- num-steps 1)) (- num-steps 1) (+ start 1)))))
         (do
-          (set! step-key-select-anchor anchor)
+          (set! eseq.vanilla/step-key-select-anchor anchor)
           (set-track-cursor-step next)
-          (cursor-select-step-range anchor next))))))
+          (%cursor-select-step-range anchor next))))))
 
 (def cursor-select-left ()
-  (cursor-select-move -1))
+  (%cursor-select-move -1))
 
 (def cursor-select-right ()
-  (cursor-select-move 1))
+  (%cursor-select-move 1))
 
 (def cursor-toggle ()
   (do
-    (cool-off-follow)
-    (set! step-key-select-anchor nil)
-    (if (seq-has-selected-bus?)
+    (eseq.seq-core-state/cool-off-follow)
+    (set! eseq.vanilla/step-key-select-anchor nil)
+    (if (eseq.seq-core-state/seq-has-selected-bus?)
       (bus-toggle-step (bus-current-step))
-      (seq-toggle-step (current-step)))))
+      (seq-toggle-step (eseq.seq-core-state/current-step)))))
 
 (def selection-click? (evt)
   (or (get evt :shift)
@@ -100,61 +184,68 @@
     (get evt :meta)
     (get evt :ctrl)))
 
-(def sequencer-cursor-step-changed (track step)
+;; PINNED (hazard i, lisp→lisp stub-then-override): ui/sequencer.lisp installs
+;; the real implementation over this slot with its own
+;; `(def eseq.vanilla/sequencer-cursor-step-changed …)` at :313, and the call
+;; below must reach that override — a module-local slot never would.
+(def eseq.vanilla/sequencer-cursor-step-changed (track step)
   nil)
 
 (def set-track-cursor-step (step)
   (do
-    (set-cursor-step-value step)
-    (sequencer-cursor-step-changed SEQ.current-track step)))
+    (eseq.seq-core-state/set-cursor-step-value step)
+    (eseq.vanilla/sequencer-cursor-step-changed SEQ.current-track step)))
 
-(def step-drag-anchor nil)
-(def step-click-pending nil)
-(def step-move-last nil)
+;; PINNED (hazard m): the shared drag-gesture state. ui/bus-grid.lisp reads and
+;; `set!`s all eleven flat. See the file header.
+(def eseq.vanilla/step-drag-anchor nil)
+(def eseq.vanilla/step-click-pending nil)
+(def eseq.vanilla/step-move-last nil)
 
 ;; Owner-side setter for the three drag-state globals above, so a *module* can
 ;; reset them (module spec §10 hazard m).  A converted module's bare
 ;; `(set! step-click-pending nil)` interns its own `<module>/step-click-pending`
 ;; slot and never reaches these, silently leaving a stale click pending; routing
-;; the write through a vanilla function keeps it on the owner's slot.
+;; the write through this function keeps it on the pinned vanilla slot.
 ;; ui/sequencer.lisp's grid pointer-down handlers are the callers.
 (def step-clear-drag-state ()
   (do
-    (set! step-click-pending nil)
-    (set! step-drag-anchor nil)
-    (set! step-move-last nil)))
-(def step-toggle-drag-value nil)
-(def step-click-was-active nil)
-(def step-press-ms nil)
-(def step-press-step nil)
-(def step-drag-progressed nil)
-(def step-hold-select nil)
-(def step-cmd-drag-last nil)
+    (set! eseq.vanilla/step-click-pending nil)
+    (set! eseq.vanilla/step-drag-anchor nil)
+    (set! eseq.vanilla/step-move-last nil)))
+(def eseq.vanilla/step-toggle-drag-value nil)
+(def eseq.vanilla/step-click-was-active nil)
+(def eseq.vanilla/step-press-ms nil)
+(def eseq.vanilla/step-press-step nil)
+(def eseq.vanilla/step-drag-progressed nil)
+(def eseq.vanilla/step-hold-select nil)
+(def eseq.vanilla/step-cmd-drag-last nil)
 
 ; Finder-style shift extension: anchor at the prior keyboard anchor if any,
 ; else the cursor step when a selection exists, else the clicked step.
+; `cursor-step` is pinned to eseq.vanilla by ui/seq-core-state.lisp.
 (def step-shift-anchor (step)
-  (if (not (= step-key-select-anchor nil))
-    step-key-select-anchor
-    (if (seq-has-selection?) cursor-step step)))
+  (if (not (= eseq.vanilla/step-key-select-anchor nil))
+    eseq.vanilla/step-key-select-anchor
+    (if (seq-has-selection?) eseq.vanilla/cursor-step step)))
 
-(def step-hold-select-ms 300)
+(def %step-hold-select-ms 300)
 
 ; Press-and-hold (~300ms) before dragging turns the drag into a selection
 ; sweep instead of a move/paint. Once a move or paint has already advanced
 ; past the pressed step, the hold can no longer engage.
 (def step-hold-select-maybe-engage (step evt)
-  (if (and (not step-hold-select)
+  (if (and (not eseq.vanilla/step-hold-select)
         (not (selection-click? evt))
-        (not step-drag-progressed)
-        (not (= step-press-ms nil))
-        (>= (- (now-ms) step-press-ms) step-hold-select-ms))
+        (not eseq.vanilla/step-drag-progressed)
+        (not (= eseq.vanilla/step-press-ms nil))
+        (>= (- (now-ms) eseq.vanilla/step-press-ms) %step-hold-select-ms))
     (do
-      (set! step-hold-select true)
-      (set! step-click-pending nil)
-      (set! step-move-last nil)
-      (set! step-toggle-drag-value nil)
-      (set! step-drag-anchor (if (= step-press-step nil) step step-press-step)))
+      (set! eseq.vanilla/step-hold-select true)
+      (set! eseq.vanilla/step-click-pending nil)
+      (set! eseq.vanilla/step-move-last nil)
+      (set! eseq.vanilla/step-toggle-drag-value nil)
+      (set! eseq.vanilla/step-drag-anchor (if (= eseq.vanilla/step-press-step nil) step eseq.vanilla/step-press-step)))
     nil))
 
 (def step-selected? (step)
@@ -162,77 +253,77 @@
 
 (def step-select-drag-start (step evt)
   (do
-    (cool-off-follow)
-    (set! step-click-pending nil)
-    (set! step-press-ms nil)
-    (set! step-press-step nil)
-    (set! step-drag-progressed nil)
-    (set! step-hold-select nil)
+    (eseq.seq-core-state/cool-off-follow)
+    (set! eseq.vanilla/step-click-pending nil)
+    (set! eseq.vanilla/step-press-ms nil)
+    (set! eseq.vanilla/step-press-step nil)
+    (set! eseq.vanilla/step-drag-progressed nil)
+    (set! eseq.vanilla/step-hold-select nil)
     (if (cmd-click? evt)
       (do
-        (set! step-key-select-anchor nil)
+        (set! eseq.vanilla/step-key-select-anchor nil)
         (set-track-cursor-step step)
-        (set! step-drag-anchor nil)
-        (set! step-cmd-drag-last step)
+        (set! eseq.vanilla/step-drag-anchor nil)
+        (set! eseq.vanilla/step-cmd-drag-last step)
         (seq-select-step step))
       (let ((anchor (step-shift-anchor step)))
         (do
-          (set! step-key-select-anchor anchor)
+          (set! eseq.vanilla/step-key-select-anchor anchor)
           (set-track-cursor-step step)
-          (set! step-drag-anchor anchor)
-          (set! step-cmd-drag-last nil)
+          (set! eseq.vanilla/step-drag-anchor anchor)
+          (set! eseq.vanilla/step-cmd-drag-last nil)
           (seq-select-step-range anchor step))))))
 
-(def step-set-cursor-if (update-cursor step)
+(def %step-set-cursor-if (update-cursor step)
   (if update-cursor
     (set-track-cursor-step step)
     nil))
 
-(def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
+(def %step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
   (do
     (step-hold-select-maybe-engage step evt)
-    (if (or (selection-click? evt) step-hold-select)
+    (if (or (selection-click? evt) eseq.vanilla/step-hold-select)
       (do
-        (set! step-click-pending nil)
-        (set! step-move-last nil)
-        (set! step-toggle-drag-value nil)
-        (cool-off-follow)
-        (step-set-cursor-if update-cursor step)
-        (if (and (cmd-click? evt) (not step-hold-select))
-          (if (= step step-cmd-drag-last)
+        (set! eseq.vanilla/step-click-pending nil)
+        (set! eseq.vanilla/step-move-last nil)
+        (set! eseq.vanilla/step-toggle-drag-value nil)
+        (eseq.seq-core-state/cool-off-follow)
+        (%step-set-cursor-if update-cursor step)
+        (if (and (cmd-click? evt) (not eseq.vanilla/step-hold-select))
+          (if (= step eseq.vanilla/step-cmd-drag-last)
             nil
             (do
-              (set! step-cmd-drag-last step)
+              (set! eseq.vanilla/step-cmd-drag-last step)
               (if (step-selected? step) nil (seq-select-step step))))
           (do
-            (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
-            (seq-select-step-range step-drag-anchor step))))
+            (if (= eseq.vanilla/step-drag-anchor nil) (set! eseq.vanilla/step-drag-anchor step) nil)
+            (seq-select-step-range eseq.vanilla/step-drag-anchor step))))
       (do
-        (if (= step step-press-step) nil (set! step-drag-progressed true))
-        (if (not (= step-toggle-drag-value nil))
+        (if (= step eseq.vanilla/step-press-step) nil (set! eseq.vanilla/step-drag-progressed true))
+        (if (not (= eseq.vanilla/step-toggle-drag-value nil))
           (do
-            (set! step-click-pending nil)
-            (cool-off-follow)
-            (step-set-cursor-if update-cursor step)
-            (if (= (seq-track-step-active? track step) step-toggle-drag-value)
+            (set! eseq.vanilla/step-click-pending nil)
+            (eseq.seq-core-state/cool-off-follow)
+            (%step-set-cursor-if update-cursor step)
+            (if (= (seq-track-step-active? track step) eseq.vanilla/step-toggle-drag-value)
               nil
               (seq-toggle-step step)))
-          (if (= step-move-last nil)
+          (if (= eseq.vanilla/step-move-last nil)
             nil
-            (if (= step step-move-last)
+            (if (= step eseq.vanilla/step-move-last)
               nil
               (do
-                (set! step-click-pending nil)
-                (cool-off-follow)
-                (seq-move-step-drag step-move-last step)
-                (set! step-move-last step)
-                (step-set-cursor-if update-cursor step)))))))))
+                (set! eseq.vanilla/step-click-pending nil)
+                (eseq.seq-core-state/cool-off-follow)
+                (seq-move-step-drag eseq.vanilla/step-move-last step)
+                (set! eseq.vanilla/step-move-last step)
+                (%step-set-cursor-if update-cursor step)))))))))
 
 (def step-select-drag-over-for-track (track step evt)
-  (step-select-drag-over-for-track-with-cursor track step evt true))
+  (%step-select-drag-over-for-track-with-cursor track step evt true))
 
 (def step-select-drag-over-for-track-no-cursor (track step evt)
-  (step-select-drag-over-for-track-with-cursor track step evt false))
+  (%step-select-drag-over-for-track-with-cursor track step evt false))
 
 (def step-select-drag-over (step evt)
   (step-select-drag-over-for-track SEQ.current-track step evt))
@@ -241,23 +332,23 @@
   (if (selection-click? evt)
     (step-select-drag-start step evt)
     (do
-      (cool-off-follow)
+      (eseq.seq-core-state/cool-off-follow)
       (set-track-cursor-step step)
-      (set! step-drag-anchor nil)
-      (set! step-press-ms (now-ms))
-      (set! step-press-step step)
-      (set! step-drag-progressed nil)
-      (set! step-hold-select nil)
+      (set! eseq.vanilla/step-drag-anchor nil)
+      (set! eseq.vanilla/step-press-ms (now-ms))
+      (set! eseq.vanilla/step-press-step step)
+      (set! eseq.vanilla/step-drag-progressed nil)
+      (set! eseq.vanilla/step-hold-select nil)
       (if (or (seq-track-step-active? track step) (and use-selection (step-selected? step)))
         (do
-          (set! step-move-last step)
-          (set! step-click-pending step)
-          (set! step-click-was-active (seq-track-step-active? track step))
-          (set! step-toggle-drag-value nil))
+          (set! eseq.vanilla/step-move-last step)
+          (set! eseq.vanilla/step-click-pending step)
+          (set! eseq.vanilla/step-click-was-active (seq-track-step-active? track step))
+          (set! eseq.vanilla/step-toggle-drag-value nil))
         (do
-          (set! step-move-last nil)
-          (set! step-click-pending nil)
-          (set! step-toggle-drag-value true)
+          (set! eseq.vanilla/step-move-last nil)
+          (set! eseq.vanilla/step-click-pending nil)
+          (set! eseq.vanilla/step-toggle-drag-value true)
           (step-select-drag-over-for-track track step evt))))))
 
 (def step-pointer-down (step evt)
@@ -265,21 +356,21 @@
 
 (def step-pointer-up (step evt)
   (do
-    (if (and (= step-click-pending step) (not (selection-click? evt)))
-      (if step-click-was-active
+    (if (and (= eseq.vanilla/step-click-pending step) (not (selection-click? evt)))
+      (if eseq.vanilla/step-click-was-active
         (seq-select-step-range step step)
         (seq-toggle-step step))
       nil)
-    (set! step-click-was-active nil)
-    (set! step-click-pending nil)
-    (set! step-drag-anchor nil)
-    (set! step-move-last nil)
-    (set! step-toggle-drag-value nil)
-    (set! step-press-ms nil)
-    (set! step-press-step nil)
-    (set! step-drag-progressed nil)
-    (set! step-hold-select nil)
-    (set! step-cmd-drag-last nil)))
+    (set! eseq.vanilla/step-click-was-active nil)
+    (set! eseq.vanilla/step-click-pending nil)
+    (set! eseq.vanilla/step-drag-anchor nil)
+    (set! eseq.vanilla/step-move-last nil)
+    (set! eseq.vanilla/step-toggle-drag-value nil)
+    (set! eseq.vanilla/step-press-ms nil)
+    (set! eseq.vanilla/step-press-step nil)
+    (set! eseq.vanilla/step-drag-progressed nil)
+    (set! eseq.vanilla/step-hold-select nil)
+    (set! eseq.vanilla/step-cmd-drag-last nil)))
 
 (def step-double-click-for-track (track step evt)
   (if (and (not (selection-click? evt)) (seq-track-step-active? track step))
@@ -294,7 +385,7 @@
 (defstate drum-step-cursor-track nil)
 (defstate drum-step-cursor-pad nil)
 
-(def drum-step-gesture-lane? (track pad-note)
+(def %drum-step-gesture-lane? (track pad-note)
   (and (= drum-step-gesture-track track)
     (= drum-step-gesture-pad pad-note)))
 
@@ -305,83 +396,83 @@
     (set! drum-step-cursor-pad pad-note)
     (set-track-cursor-step step)))
 
-(def drum-step-selected? (track pad-note step)
+(def %drum-step-selected? (track pad-note step)
   (seq-drum-lane-step-selected? track pad-note step))
 
-(def drum-step-shift-anchor (track pad-note step)
-  (if (and (not (= step-key-select-anchor nil))
+(def %drum-step-shift-anchor (track pad-note step)
+  (if (and (not (= eseq.vanilla/step-key-select-anchor nil))
         (seq-drum-lane-has-selection? track pad-note))
-    step-key-select-anchor
-    (if (seq-drum-lane-has-selection? track pad-note) cursor-step step)))
+    eseq.vanilla/step-key-select-anchor
+    (if (seq-drum-lane-has-selection? track pad-note) eseq.vanilla/cursor-step step)))
 
-(def drum-step-select-drag-start (track pad-note step evt)
+(def %drum-step-select-drag-start (track pad-note step evt)
   (do
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (drum-step-set-cursor track pad-note step)
     (set! drum-step-gesture-track track)
     (set! drum-step-gesture-pad pad-note)
-    (set! step-click-pending nil)
-    (set! step-press-ms nil)
-    (set! step-press-step nil)
-    (set! step-drag-progressed nil)
-    (set! step-hold-select nil)
+    (set! eseq.vanilla/step-click-pending nil)
+    (set! eseq.vanilla/step-press-ms nil)
+    (set! eseq.vanilla/step-press-step nil)
+    (set! eseq.vanilla/step-drag-progressed nil)
+    (set! eseq.vanilla/step-hold-select nil)
     (if (cmd-click? evt)
       (do
-        (set! step-key-select-anchor nil)
-        (set! step-drag-anchor nil)
-        (set! step-cmd-drag-last step)
+        (set! eseq.vanilla/step-key-select-anchor nil)
+        (set! eseq.vanilla/step-drag-anchor nil)
+        (set! eseq.vanilla/step-cmd-drag-last step)
         (seq-select-drum-lane-step track pad-note step))
-      (let ((anchor (drum-step-shift-anchor track pad-note step)))
+      (let ((anchor (%drum-step-shift-anchor track pad-note step)))
         (do
-          (set! step-key-select-anchor anchor)
-          (set! step-drag-anchor anchor)
-          (set! step-cmd-drag-last nil)
+          (set! eseq.vanilla/step-key-select-anchor anchor)
+          (set! eseq.vanilla/step-drag-anchor anchor)
+          (set! eseq.vanilla/step-cmd-drag-last nil)
           (seq-select-drum-lane-step-range track pad-note anchor step))))))
 
 (def drum-step-select-drag-over (track pad-note step evt)
-  (if (drum-step-gesture-lane? track pad-note)
+  (if (%drum-step-gesture-lane? track pad-note)
     (do
       (step-hold-select-maybe-engage step evt)
-      (if (or (selection-click? evt) step-hold-select)
+      (if (or (selection-click? evt) eseq.vanilla/step-hold-select)
         (do
-          (set! step-click-pending nil)
-          (set! step-move-last nil)
-          (set! step-toggle-drag-value nil)
-          (cool-off-follow)
+          (set! eseq.vanilla/step-click-pending nil)
+          (set! eseq.vanilla/step-move-last nil)
+          (set! eseq.vanilla/step-toggle-drag-value nil)
+          (eseq.seq-core-state/cool-off-follow)
           (drum-step-set-cursor track pad-note step)
-          (if (and (cmd-click? evt) (not step-hold-select))
-            (if (= step step-cmd-drag-last)
+          (if (and (cmd-click? evt) (not eseq.vanilla/step-hold-select))
+            (if (= step eseq.vanilla/step-cmd-drag-last)
               nil
               (do
-                (set! step-cmd-drag-last step)
-                (if (drum-step-selected? track pad-note step)
+                (set! eseq.vanilla/step-cmd-drag-last step)
+                (if (%drum-step-selected? track pad-note step)
                   nil
                   (seq-select-drum-lane-step track pad-note step))))
             (do
-              (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
+              (if (= eseq.vanilla/step-drag-anchor nil) (set! eseq.vanilla/step-drag-anchor step) nil)
               (seq-select-drum-lane-step-range
-                track pad-note step-drag-anchor step))))
+                track pad-note eseq.vanilla/step-drag-anchor step))))
         (do
-          (if (= step step-press-step) nil (set! step-drag-progressed true))
-          (if (not (= step-toggle-drag-value nil))
+          (if (= step eseq.vanilla/step-press-step) nil (set! eseq.vanilla/step-drag-progressed true))
+          (if (not (= eseq.vanilla/step-toggle-drag-value nil))
             (do
-              (set! step-click-pending nil)
-              (cool-off-follow)
+              (set! eseq.vanilla/step-click-pending nil)
+              (eseq.seq-core-state/cool-off-follow)
               (drum-step-set-cursor track pad-note step)
               (if (= (seq-drum-lane-step-active? track pad-note step)
-                    step-toggle-drag-value)
+                    eseq.vanilla/step-toggle-drag-value)
                 nil
                 (seq-toggle-drum-lane-step track pad-note step)))
-            (if (= step-move-last nil)
+            (if (= eseq.vanilla/step-move-last nil)
               nil
-              (if (= step step-move-last)
+              (if (= step eseq.vanilla/step-move-last)
                 nil
                 (do
-                  (set! step-click-pending nil)
-                  (cool-off-follow)
+                  (set! eseq.vanilla/step-click-pending nil)
+                  (eseq.seq-core-state/cool-off-follow)
                   (seq-move-drum-lane-step-drag
-                    track pad-note step-move-last step)
-                  (set! step-move-last step)
+                    track pad-note eseq.vanilla/step-move-last step)
+                  (set! eseq.vanilla/step-move-last step)
                   (drum-step-set-cursor track pad-note step))))))))
     nil))
 
@@ -390,48 +481,48 @@
     (set! drum-step-gesture-track track)
     (set! drum-step-gesture-pad pad-note)
     (if (selection-click? evt)
-      (drum-step-select-drag-start track pad-note step evt)
+      (%drum-step-select-drag-start track pad-note step evt)
       (do
-        (cool-off-follow)
+        (eseq.seq-core-state/cool-off-follow)
         (drum-step-set-cursor track pad-note step)
-        (set! step-drag-anchor nil)
-        (set! step-press-ms (now-ms))
-        (set! step-press-step step)
-        (set! step-drag-progressed nil)
-        (set! step-hold-select nil)
+        (set! eseq.vanilla/step-drag-anchor nil)
+        (set! eseq.vanilla/step-press-ms (now-ms))
+        (set! eseq.vanilla/step-press-step step)
+        (set! eseq.vanilla/step-drag-progressed nil)
+        (set! eseq.vanilla/step-hold-select nil)
         (if (or (seq-drum-lane-step-active? track pad-note step)
-              (drum-step-selected? track pad-note step))
+              (%drum-step-selected? track pad-note step))
           (do
-            (set! step-move-last step)
-            (set! step-click-pending step)
-            (set! step-click-was-active
+            (set! eseq.vanilla/step-move-last step)
+            (set! eseq.vanilla/step-click-pending step)
+            (set! eseq.vanilla/step-click-was-active
               (seq-drum-lane-step-active? track pad-note step))
-            (set! step-toggle-drag-value nil))
+            (set! eseq.vanilla/step-toggle-drag-value nil))
           (do
-            (set! step-move-last nil)
-            (set! step-click-pending nil)
-            (set! step-toggle-drag-value true)
+            (set! eseq.vanilla/step-move-last nil)
+            (set! eseq.vanilla/step-click-pending nil)
+            (set! eseq.vanilla/step-toggle-drag-value true)
             (drum-step-select-drag-over track pad-note step evt)))))))
 
 (def drum-step-pointer-up (track pad-note step evt)
   (do
-    (if (and (drum-step-gesture-lane? track pad-note)
-          (= step-click-pending step)
+    (if (and (%drum-step-gesture-lane? track pad-note)
+          (= eseq.vanilla/step-click-pending step)
           (not (selection-click? evt)))
-      (if step-click-was-active
+      (if eseq.vanilla/step-click-was-active
         (seq-select-drum-lane-step-range track pad-note step step)
         (seq-toggle-drum-lane-step track pad-note step))
       nil)
-    (set! step-click-was-active nil)
-    (set! step-click-pending nil)
-    (set! step-drag-anchor nil)
-    (set! step-move-last nil)
-    (set! step-toggle-drag-value nil)
-    (set! step-press-ms nil)
-    (set! step-press-step nil)
-    (set! step-drag-progressed nil)
-    (set! step-hold-select nil)
-    (set! step-cmd-drag-last nil)
+    (set! eseq.vanilla/step-click-was-active nil)
+    (set! eseq.vanilla/step-click-pending nil)
+    (set! eseq.vanilla/step-drag-anchor nil)
+    (set! eseq.vanilla/step-move-last nil)
+    (set! eseq.vanilla/step-toggle-drag-value nil)
+    (set! eseq.vanilla/step-press-ms nil)
+    (set! eseq.vanilla/step-press-step nil)
+    (set! eseq.vanilla/step-drag-progressed nil)
+    (set! eseq.vanilla/step-hold-select nil)
+    (set! eseq.vanilla/step-cmd-drag-last nil)
     (set! drum-step-gesture-track nil)
     (set! drum-step-gesture-pad nil)))
 
@@ -453,10 +544,10 @@
       (if (seq-has-selection?) (seq-clear-selection) nil)
       (seq-set-step-param step param value))))
 
-(def seq-selected-step-indexes ()
+(def %seq-selected-step-indexes ()
   (seq-selected-step-indexes-native))
 
-(def seq-set-process-lane-step-value (track lane step value)
+(def %seq-set-process-lane-step-value (track lane step value)
   (seq-set-process-lane-step
     track
     (get lane :instance-id)
@@ -469,16 +560,16 @@
     (if (step-selected? step)
       (for-each
         (lambda (selected-step)
-          (seq-set-process-lane-step-value track lane selected-step value))
-        (seq-selected-step-indexes))
+          (%seq-set-process-lane-step-value track lane selected-step value))
+        (%seq-selected-step-indexes))
       (do
         (if (seq-has-selection?) (seq-clear-selection) nil)
-        (seq-set-process-lane-step-value track lane step value)))))
+        (%seq-set-process-lane-step-value track lane step value)))))
 
 (def select-all-steps ()
   (do
-    (cool-off-follow)
-    (if (seq-has-selected-bus?)
+    (eseq.seq-core-state/cool-off-follow)
+    (if (eseq.seq-core-state/seq-has-selected-bus?)
       (bus-select-all-steps)
       (seq-select-all-steps))))
 
@@ -500,8 +591,8 @@
 
 (def delete-selected-steps ()
   (do
-    (cool-off-follow)
-    (if (seq-has-selected-bus?)
+    (eseq.seq-core-state/cool-off-follow)
+    (if (eseq.seq-core-state/seq-has-selected-bus?)
       (bus-delete-selected-steps)
       (seq-delete-selected-steps))))
 
@@ -517,6 +608,8 @@
       (* p 4)
       (+ 2 (* 30 (pow (* 2 (- p 0.5)) 4))))))
 
+;; `param-mode` is a `defstate` owned by eseq.seq-core-state: bare is the
+;; documented path (state_bindings, not the global ladder).
 (def step-param-value (v)
   (if (= param-mode 3)
     (round v)

@@ -766,7 +766,11 @@ fn current_soft_step_param_target(
 fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
     let buffer_name = editor.active_buffer().name.clone();
     match buffer_name.as_str() {
-        "*metal*" => Some("metal-step-param-number-picker".to_string()),
+        // ui/step-grid.lisp is `eseq.step-grid` since S3b wave 8, so its
+        // widget `:key` auto-qualifies (spec §10 hazard a/l). The *metal*
+        // buffer is not created by the live UI any more (editor_setup.rs),
+        // but the spelling has to track the lisp side regardless.
+        "*metal*" => Some("eseq.step-grid/step-param-number-picker".to_string()),
         "*sequencer*" => match editor
             .runtime_mut()
             .eval_str("(seqv-current-number-picker-key)")

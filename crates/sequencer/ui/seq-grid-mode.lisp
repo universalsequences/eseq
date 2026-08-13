@@ -8,9 +8,9 @@
 ;;   1. `define-mode` qualifies the registry key to
 ;;      `eseq.seq-grid-mode/seq-grid-mode`, so the two flat
 ;;      `(set-buffer-mode-for … "seq-grid-mode")` callers — ui/step-grid.lisp
-;;      (headerless) and ui/sequencer.lisp (a converted module, whose bare
-;;      reference qualifies against *itself*, misses, and falls to the same
-;;      base-name rung) — both reach it through the identity alias below.
+;;      and ui/sequencer.lisp (both converted modules as of S3b wave 8, whose
+;;      bare references qualify against *themselves*, miss, and fall to the
+;;      same base-name rung) — both reach it through the identity alias below.
 ;;   2. `mode-bind-key` qualifies its *handler* string against this module
 ;;      unconditionally, so the seven handlers bound below that are defined
 ;;      OUTSIDE this file (cursor-left/-right, select-all-steps,
@@ -32,26 +32,20 @@
 ;; The mode name itself. Both callers are listed in rung 1 above.
 (module-compat-alias seq-grid-mode seq-grid-mode)
 
-;; ui/step-grid.lisp (headerless, and the only consumer of the param-*
-;; family) plus src/ui/input.rs, which invokes the two pattern commands by
-;; their flat names.
-(module-compat-alias goto-page goto-page)
+;; src/ui/input.rs:1232 evals "(double-track-pattern)" / "(halve-track-pattern)"
+;; by their flat names for the pattern-length keyboard shortcut, so these two
+;; aliases are load-bearing production surface and must stay.
+;;
+;; The 14 `param-*` / `sync-current-label` aliases and `goto-page` that this
+;; block carried in wave 7 were minted for exactly one caller, the then-
+;; headerless ui/step-grid.lisp. That file became `eseq.step-grid` in wave 8
+;; and now reaches these names through `(import eseq.seq-grid-mode :as gm)`,
+;; so the aliases were retired — a whole-repo bounded grep confirms no other
+;; lisp or Rust caller spells any of them flat. (`param-color` had no caller
+;; at all; the only `param-name` hit is the `"param-name"` *map field* string
+;; in src/ui/natives.rs:272, not a global reference.)
 (module-compat-alias double-track-pattern double-track-pattern)
 (module-compat-alias halve-track-pattern halve-track-pattern)
-(module-compat-alias param-values param-values)
-(module-compat-alias param-min param-min)
-(module-compat-alias param-max param-max)
-(module-compat-alias param-slider-min param-slider-min)
-(module-compat-alias param-slider-max param-slider-max)
-(module-compat-alias param-slider-value param-slider-value)
-(module-compat-alias param-haptic-pivot-position param-haptic-pivot-position)
-(module-compat-alias param-haptic-pivot-value param-haptic-pivot-value)
-(module-compat-alias param-haptic-exponent param-haptic-exponent)
-(module-compat-alias param-keyword param-keyword)
-(module-compat-alias param-color param-color)
-(module-compat-alias param-name param-name)
-(module-compat-alias param-origin param-origin)
-(module-compat-alias sync-current-label sync-current-label)
 
 (def seq-grid-handle-key (key text)
   (if (= (current-buffer-name) "*sequencer*")
