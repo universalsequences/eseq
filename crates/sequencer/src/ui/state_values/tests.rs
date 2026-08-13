@@ -19625,6 +19625,70 @@
     }
 
     #[test]
+    fn editor_macro_action_recomputes_only_when_its_inputs_change() {
+        use crate::edit_sessions::{
+            active_instrument_editor_macro_action, editor_macro_action_fingerprint,
+            editor_macro_action_strings,
+        };
+        use eseqlisp::widget_render::patcher::open_macro_view_for_path_for_test;
+
+        let path = std::env::temp_dir().join(format!(
+            "eseq-editor-macro-action-{}/dsp.lisp",
+            std::process::id()
+        ));
+        let mut sessions = crate::loop_ctx::EditSessionState::default();
+        sessions.instrument_edit_session = Some(
+            crate::edit_sessions::InstrumentEditSession::begin_edit_existing(
+                "probe".to_string(),
+                path.clone(),
+                "*probe*".to_string(),
+                0,
+                0,
+                "(defmacro shape (x) (* x 2))\n(def input (in 1))\n(out (shape input) 1)"
+                    .to_string(),
+                sequencer::sequencer::CustomInstrumentRunMode::Instrument,
+                crate::edit_sessions::EditorSurface::Patch,
+            ),
+        );
+
+        // Root view: no macro is active, so there is no button state, and the
+        // fingerprint is stable across ticks.
+        let root_fingerprint = editor_macro_action_fingerprint(&sessions);
+        assert_eq!(root_fingerprint, editor_macro_action_fingerprint(&sessions));
+        let session = sessions.instrument_edit_session.as_ref().unwrap();
+        assert_eq!(
+            editor_macro_action_strings(active_instrument_editor_macro_action(session).as_ref()),
+            (String::new(), String::new())
+        );
+
+        // Opening the local macro's view changes the fingerprint and offers
+        // save-to-library.
+        open_macro_view_for_path_for_test(&path, Some("shape"));
+        let macro_fingerprint = editor_macro_action_fingerprint(&sessions);
+        assert_ne!(macro_fingerprint, root_fingerprint);
+        assert_eq!(macro_fingerprint, editor_macro_action_fingerprint(&sessions));
+        let session = sessions.instrument_edit_session.as_ref().unwrap();
+        assert_eq!(
+            editor_macro_action_strings(active_instrument_editor_macro_action(session).as_ref()),
+            ("shape".to_string(), "save-to-library".to_string())
+        );
+
+        // Editing the source re-fingerprints; with the local defmacro gone the
+        // button state drops back to nothing.
+        let session = sessions.instrument_edit_session.as_mut().unwrap();
+        session.last_valid_source = "(def input (in 1))\n(out input 1)".to_string();
+        let edited_fingerprint = editor_macro_action_fingerprint(&sessions);
+        assert_ne!(edited_fingerprint, macro_fingerprint);
+        let session = sessions.instrument_edit_session.as_ref().unwrap();
+        assert_eq!(
+            editor_macro_action_strings(active_instrument_editor_macro_action(session).as_ref()),
+            (String::new(), String::new())
+        );
+
+        open_macro_view_for_path_for_test(&path, None);
+    }
+
+    #[test]
     fn scan_patch_macro_source_collects_calls_and_imports() {
         let scan = crate::edit_sessions::scan_patch_macro_source(
             "(use-defmacro dcblock)\n\

@@ -159,6 +159,24 @@ fn parse_source_exprs(source: &str) -> Result<Vec<Expression>, String> {
         .map_err(|error| format!("failed to parse dsp.lisp: {error:?}"))
 }
 
+/// Names of the source's top-level `(defmacro name …)` forms — the key set of
+/// [`local_macro_signatures`], derived without projecting any macro body.
+pub(super) fn local_defmacro_names(source: &str) -> Result<Vec<String>, String> {
+    let exprs = parse_source_exprs(source)?;
+    Ok(exprs
+        .iter()
+        .filter_map(|expr| {
+            let Expression::List(items) = expr else {
+                return None;
+            };
+            if symbol_at(items, 0) != Some("defmacro") {
+                return None;
+            }
+            Some(symbol_at(items, 1)?.to_string())
+        })
+        .collect())
+}
+
 fn local_macro_signatures(exprs: &[Expression]) -> HashMap<String, MacroSignature> {
     exprs
         .iter()

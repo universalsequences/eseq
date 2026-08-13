@@ -64,6 +64,10 @@ pub(crate) struct ParamSyncRevision {
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
     pub(crate) prev_editor_macro_action: (String, String),
+    /// Hash of the macro-action query's inputs (edit-session path/source/
+    /// validity plus the patcher's open macro view); the origin lookup only
+    /// reruns when this changes.
+    pub(crate) prev_editor_macro_action_fingerprint: u64,
     /// Hash of the active edit-session source; the macro sidebar values
     /// (`editor-patch-macros` / `editor-library-macros`) republish on change.
     pub(crate) prev_editor_macro_sidebar_fingerprint: u64,

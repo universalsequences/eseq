@@ -1351,30 +1351,38 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_auto_follow = auto_follow;
             needs_reactive_cycle = true;
         }
-        let editor_macro_action = ctx.sessions.instrument_edit_session
-            .as_ref()
-            .and_then(active_instrument_editor_macro_action)
-            .or_else(|| {
-                ctx.sessions.effect_edit_session
-                    .as_ref()
-                    .and_then(active_effect_editor_macro_action)
-            });
-        let editor_macro_action = editor_macro_action_strings(editor_macro_action.as_ref());
-        if editor_macro_action != ctx.frame.prev_editor_macro_action {
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "editor-active-macro-name",
-                Value::String(editor_macro_action.0.clone()),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "editor-active-macro-action",
-                Value::String(editor_macro_action.1.clone()),
-            );
-            ctx.frame.prev_editor_macro_action = editor_macro_action;
-            refresh_visible_samples_after_cycle = true;
-            needs_reactive_cycle = true;
+        // Macro-action buttons (save-to-library / fork). The query itself reads
+        // the session source and the macro library, so it is gated on a
+        // fingerprint of those inputs; diffing only the published strings left
+        // the lookup running on every tick.
+        let editor_macro_action_fingerprint = editor_macro_action_fingerprint(ctx.sessions);
+        if editor_macro_action_fingerprint != ctx.frame.prev_editor_macro_action_fingerprint {
+            let editor_macro_action = ctx.sessions.instrument_edit_session
+                .as_ref()
+                .and_then(active_instrument_editor_macro_action)
+                .or_else(|| {
+                    ctx.sessions.effect_edit_session
+                        .as_ref()
+                        .and_then(active_effect_editor_macro_action)
+                });
+            let editor_macro_action = editor_macro_action_strings(editor_macro_action.as_ref());
+            ctx.frame.prev_editor_macro_action_fingerprint = editor_macro_action_fingerprint;
+            if editor_macro_action != ctx.frame.prev_editor_macro_action {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-active-macro-name",
+                    Value::String(editor_macro_action.0.clone()),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-active-macro-action",
+                    Value::String(editor_macro_action.1.clone()),
+                );
+                ctx.frame.prev_editor_macro_action = editor_macro_action;
+                refresh_visible_samples_after_cycle = true;
+                needs_reactive_cycle = true;
+            }
         }
         // Macro sidebar: local defmacros scanned from the active edit-session
         // source, plus the saved-macro library. Republished only when the

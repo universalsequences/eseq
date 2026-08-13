@@ -526,6 +526,36 @@ pub(super) fn editor_macro_action_strings(
     (action.macro_name.clone(), action_name.to_string())
 }
 
+/// Everything the macro-action query reads: which session is open, its last
+/// valid source (and whether that revision is usable), and the macro view the
+/// patcher has open. Diffing this gates the *query*; diffing the resulting
+/// strings only gated the publish, so the lookup ran on every reactive tick.
+pub(super) fn editor_macro_action_fingerprint(sessions: &EditSessionState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let instrument = sessions.instrument_edit_session.as_ref().map(|session| {
+        (
+            session.path.as_path(),
+            session.last_valid_source.as_str(),
+            session.visible_revision_valid,
+        )
+    });
+    let effect = sessions.effect_edit_session.as_ref().map(|session| {
+        (
+            session.path.as_path(),
+            session.last_valid_source.as_str(),
+            session.visible_revision_valid,
+        )
+    });
+    for session in [instrument, effect] {
+        session.hash(&mut hasher);
+        session
+            .map(|(path, _, _)| eseqlisp::widget_render::patcher::active_macro_view_for_path(path))
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 pub(super) fn active_instrument_editor_macro_action(
     session: &InstrumentEditSession,
 ) -> Option<eseqlisp::widget_render::patcher::ActiveMacroLibraryAction> {

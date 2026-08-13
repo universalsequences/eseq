@@ -308,7 +308,7 @@ pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: P
 pub fn active_macro_view_for_path(path: impl AsRef<std::path::Path>) -> Option<String> {
     state::patcher_keys_for_path(path.as_ref())
         .into_iter()
-        .find_map(|key| state::get_patcher_interaction_state(key).active_macro)
+        .find_map(state::active_macro_for_key)
 }
 
 /// Navigate the patcher for `path` to a macro view (or the root with None),
@@ -326,6 +326,25 @@ pub fn navigate_patcher_view_for_path(path: impl AsRef<std::path::Path>, macro_n
         state.text_edit = None;
         state::set_patcher_interaction_state(key, state);
     }
+}
+
+/// Open a macro view for `path` without a rendered patcher widget, so hosts
+/// can test the queries that key off the open view (macro-action buttons, the
+/// sidebar's selected row).
+#[cfg(any(test, feature = "patcher-test-support"))]
+pub fn open_macro_view_for_path_for_test(
+    path: impl AsRef<std::path::Path>,
+    macro_name: Option<&str>,
+) {
+    let key = state::patcher_state_key_from_parts(
+        None,
+        &HashMap::from([(
+            "path".to_string(),
+            Value::String(path.as_ref().to_string_lossy().into_owned()),
+        )]),
+    );
+    state::register_patcher_path_key(path.as_ref(), key);
+    navigate_patcher_view_for_path(path, macro_name);
 }
 
 pub fn reload_patcher_macro_view_for_path(
@@ -2485,17 +2504,26 @@ fn state_macro_library_action_kind(
     }
 }
 
+/// Which macro-library action the editor's button offers for the macro view
+/// open on `path` — save-to-library for a macro the patch defines itself, fork
+/// for one it takes from the library.
+///
+/// This resolves the origin by *name* instead of projecting the patch. The
+/// projection path answers the same question: a top-level `(defmacro name …)`
+/// always projects as [`MacroOrigin::Local`] and shadows a same-named package
+/// (see `lisp::parse_patch_source_with_library`), and every other package is
+/// appended as [`MacroOrigin::Library`]. Going through the projector to learn
+/// that meant re-reading the library from disk and laying out every library
+/// macro on every editor tick, which is pure waste for a two-string answer.
 pub fn active_macro_library_action_for_path(
     path: impl AsRef<Path>,
     source: &str,
-    intent: PatcherIntent,
+    _intent: PatcherIntent,
 ) -> Result<Option<ActiveMacroLibraryAction>, String> {
     let Some(active_macro) = active_macro_name_for_path(path.as_ref()) else {
         return Ok(None);
     };
-    let library = default_defmacro_library_for_write()?;
-    let root_patch = parse_patch_source_with_library(source, intent, &library)?;
-    let action = macro_library_action_for_macro(&root_patch, &active_macro);
+    let action = macro_library_action_kind_for_name(source, &active_macro)?;
     Ok(action.map(|kind| ActiveMacroLibraryAction {
         macro_name: active_macro,
         kind: public_macro_library_action_kind(kind),
@@ -2769,18 +2797,35 @@ fn library_macro_view_has_edits(state: &state::PatcherInteractionState, view_key
             .any(|edit| edit.view_key == view_key)
 }
 
-fn macro_library_action_for_macro(
-    root_patch: &Patch,
+/// Origin of `macro_name` as a macro-library action, resolved from names
+/// alone: no library parse, no projection, no layout — just the source's
+/// top-level defmacro names and the (mtime-cached) library package index.
+///
+/// This replaces a lookup through a fully projected `Patch` whose
+/// `MacroPatch::origin` encodes exactly the same rule.
+fn macro_library_action_kind_for_name(
+    source: &str,
     macro_name: &str,
-) -> Option<state::PatcherMacroLibraryActionKind> {
-    let macro_patch = root_patch
-        .macros
+) -> Result<Option<state::PatcherMacroLibraryActionKind>, String> {
+    let library = crate::defmacro_library::default_library_root()
+        .map(|root| cached_defmacro_library(&root).1);
+    macro_library_action_kind_in(source, macro_name, library.as_deref())
+}
+
+fn macro_library_action_kind_in(
+    source: &str,
+    macro_name: &str,
+    library: Option<&DefmacroLibrary>,
+) -> Result<Option<state::PatcherMacroLibraryActionKind>, String> {
+    if lisp::local_defmacro_names(source)?
         .iter()
-        .find(|macro_patch| macro_patch.name == macro_name)?;
-    match macro_patch.origin {
-        MacroOrigin::Local => Some(state::PatcherMacroLibraryActionKind::SaveToLibrary),
-        MacroOrigin::Library { .. } => Some(state::PatcherMacroLibraryActionKind::Fork),
+        .any(|name| name == macro_name)
+    {
+        return Ok(Some(state::PatcherMacroLibraryActionKind::SaveToLibrary));
     }
+    Ok(library
+        .and_then(|library| library.package(macro_name))
+        .map(|_| state::PatcherMacroLibraryActionKind::Fork))
 }
 
 fn default_defmacro_library_for_write() -> Result<DefmacroLibrary, String> {

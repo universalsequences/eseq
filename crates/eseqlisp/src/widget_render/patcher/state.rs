@@ -630,6 +630,13 @@ pub(super) fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState
     PATCHER_INTERACTION_STATES.with(|states| states.borrow().get(&key).cloned().unwrap_or_default())
 }
 
+/// Read just the open macro view for `key`, without cloning the whole
+/// interaction state (its edit maps make that expensive for a per-tick read).
+pub(super) fn active_macro_for_key(key: u64) -> Option<String> {
+    PATCHER_INTERACTION_STATES
+        .with(|states| states.borrow().get(&key)?.active_macro.clone())
+}
+
 pub(super) fn set_patcher_interaction_state(key: u64, mut state: PatcherInteractionState) {
     prune_closed_agentic_bubbles(&mut state);
     let changed = PATCHER_INTERACTION_STATES.with(|states| {
