@@ -1,4 +1,5 @@
 (defmacro schroeder-allpass (input delay_samples g)
+  (make-history history2)
   (make-history history1)
   (make-history feedback_hist)
   (def delayed_w (read-history feedback_hist))
@@ -6,3 +7,5 @@
   (def delay1 (delay w delay_samples))
   (write-history feedback_hist delay1)
   (- delayed_w (* g w)))
+(use-defmacro simp2)
+(use-defmacro gain2)

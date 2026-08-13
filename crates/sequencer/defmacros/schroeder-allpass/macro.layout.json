@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 3,
+  "authored": true,
   "root": {
     "nodes": {},
     "cables": {}
@@ -26,7 +27,7 @@
         },
         "feedback_hist": {
           "x": 36.669727,
-          "y": 24.0475
+          "y": 13.92
         },
         "g": {
           "x": 151.77747,
@@ -34,6 +35,10 @@
         },
         "history1": {
           "x": 91.913475,
+          "y": 24.0475
+        },
+        "history2": {
+          "x": 31.53553,
           "y": 24.0475
         },
         "input": {
@@ -65,7 +70,7 @@
         },
         "delay1:0->feedback_hist:0": {
           "segmented": true,
-          "y": 26.5275
+          "y": 16.4
         },
         "delay_samples:0->delay1:1": {
           "segmented": true,
@@ -73,11 +78,11 @@
         },
         "feedback_hist:0->*#0:1": {
           "segmented": true,
-          "y": 28.17875
+          "y": 16.880001
         },
         "feedback_hist:0->return:0": {
           "segmented": true,
-          "y": 28.17875
+          "y": 16.880001
         },
         "g:0->*#1:0": {
           "segmented": true,
@@ -104,5 +109,326 @@
         "*#0:0": "cable"
       }
     }
+  },
+  "graph": {
+    "nodes": [],
+    "connections": [],
+    "macros": [
+      {
+        "name": "schroeder-allpass",
+        "params": [
+          "input",
+          "delay_samples",
+          "g"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "local"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "delay_samples",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name delay_samples",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "delay_samples"
+                }
+              ],
+              "outputs": [
+                "delay_samples"
+              ]
+            },
+            {
+              "id": "g",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name g",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "g"
+                }
+              ],
+              "outputs": [
+                "g"
+              ]
+            },
+            {
+              "id": "history1",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "history2",
+              "op": "history",
+              "kind": "history",
+              "label": "history",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "g"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "delayed_w"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "w",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ w",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "delay1",
+              "op": "delay",
+              "kind": "builtin",
+              "label": "delay delay1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "w"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "delay_samples"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "*#1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "g"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "w"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "return",
+              "op": "-",
+              "kind": "builtin",
+              "label": "-",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "delayed_w"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "w",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "g",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "history2",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#0",
+              "fromOutput": 0,
+              "toNode": "w",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "w",
+              "fromOutput": 0,
+              "toNode": "delay1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "delay_samples",
+              "fromOutput": 0,
+              "toNode": "delay1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "delay1",
+              "fromOutput": 0,
+              "toNode": "history2",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "history2",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "g",
+              "fromOutput": 0,
+              "toNode": "*#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "w",
+              "fromOutput": 0,
+              "toNode": "*#1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#1",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      }
+    ]
   }
 }
