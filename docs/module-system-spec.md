@@ -127,12 +127,46 @@ does not warn.
 ## 4. `import` vs `load`
 
 `import` = load-once + alias registration. It resolves a module name to a
-file (§7), evaluates it if and only if it has not been evaluated, and records
-the dependency edge in the existing `ModuleGraph` (edges currently inferred
-from observed `load`s at `hot_reload.rs:282-290` become declared). This
-dissolves the hand-maintained ordering in `ui/main.lisp` (the "define before
-loading render roots" comments, and `track-collapse.lisp` being raw-loaded
-three times from `browser.lisp:5`, `mixer.lisp:4`, `sequencer.lisp:5`).
+file (§7), evaluates it if and only if it has not been evaluated *this
+import pass*, and records the dependency edge in the existing `ModuleGraph`
+(edges currently inferred from observed `load`s at `hot_reload.rs:282-290`
+become declared). This dissolves the hand-maintained ordering in
+`ui/main.lisp` (the "define before loading render roots" comments, and
+`track-collapse.lisp` being raw-loaded three times from `browser.lisp:5`,
+`mixer.lisp:4`, `sequencer.lisp:5`).
+
+**`import` has a compile-time half** (eseq-mods.12, resolving §10 hazard
+(p)): a compile unit is split at its top-level `(import …)` forms and
+compiled/executed segment by segment (`VM::eval_str`,
+`split_at_top_level_imports`). Each import therefore evaluates its target —
+through the ordinary `__import-module` per-pass ledger — *before any later
+form in the same unit compiles*, and the next segment's compiler is
+re-seeded from the VM with the target's `defstate` keyspace, macros and
+compat-alias spellings (`Compiler::new_repl` seeding), while the unit's own
+module identity (`(module …)` declaration, `:as`/`:refer` bindings) threads
+across segments via `Compiler::take_module_context`. A unit with no
+top-level imports compiles in one segment, exactly as before. Consequences:
+
+- An import supplies both runtime AND compile-time surface: the old rule
+  "compile-time dependencies are ordered by the loader" is retired — a
+  module that needs another module's `defstate`s or macros imports it.
+- Only a **literal top-level** `(import …)` form has the compile-time half;
+  quoted or nested occurrences (already a compile error inside functions)
+  stay runtime-only.
+- Load-once still holds: a target already evaluated this pass is only a
+  re-seed, not a re-eval, so a REPL `(import …)` is cheap and hot reload's
+  per-pass re-arm semantics are unchanged.
+- Failure mid-unit: a compile error in a later segment surfaces after
+  earlier segments (including their imports) executed. The transactional
+  entry points roll the whole pass back via their snapshot; a bare
+  `eval_str` keeps the earlier segments' effects, matching the precedent
+  that load-once side effects persist across a failed `load`.
+- Cycles terminate exactly like the runtime path: the importer's
+  `(module …)` declaration executes in its first segment, before its
+  imports run, so a back-import is a ledger hit. The back-importer compiles
+  against the partial surface the cycle target has executed so far —
+  declare the module before the imports (the standing convention) or a
+  cycle can double-evaluate the importer.
 
 `load` survives unchanged as the raw evaluate-this-file-here primitive.
 Themes require re-evaluation semantics (`seq-apply-theme-file` loading a
@@ -354,6 +388,13 @@ packages/alec.acid-tools/
 - `defcustom` (declared knobs: type, default, docstring, auto-qualified)
   ships with the package layer; the settings UI is generated from the
   declarations since the UI is lisp.
+- **Package exports need no loader coordination** (unlocked by import's
+  compile-time half, §4): a package module can export macros and
+  `defstate`s, and a consumer's `(import alec.acid-tools.ui)` supplies
+  them at the consumer's own compile time — no distro-root ordering, no
+  "publishers must be root entries" rule. This is what makes third-party
+  packages composable: the loader never has to know what a package
+  publishes.
 
 ## 9. The sdf pilot (slice 1 acceptance test)
 
@@ -941,9 +982,21 @@ stays as-is; real macro hygiene is out of scope for this spec.
      is: add the `import` that encodes each ordering constraint FIRST, verify,
      and only then delete the corresponding `(load …)` line.
 
-  p. **`import` is a RUNTIME form: it cannot supply anything the importing
-     file needs at COMPILE time** (found dissolving the manifest,
-     `eseq-mods.9` — the hazard that decides how far slice 4 can go).
+  p. **RESOLVED (eseq-mods.12): `import` now has a compile-time half — see
+     §4.** The hazard as found: `import` was a RUNTIME form and could not
+     supply anything the importing file needs at COMPILE time (found
+     dissolving the manifest, `eseq-mods.9` — the hazard that decided how
+     far slice 4 could go). The mechanism that resolved it: the compile
+     unit is split at top-level `(import …)` forms and compiled/executed
+     segment by segment, so each import's target is evaluated before any
+     later form compiles and the continuation compiler re-seeds its
+     `state_bindings`/macro/alias tables from the VM. The "callback into
+     the VM mid-compile" shape the original proposal sketched is not
+     structurally possible — `eval_str` MOVES the VM's chunk and
+     global-name tables into the compiler for the duration of a compile —
+     which is why the split happens at the driver level instead. The
+     original writeup follows for the record; its closing rule
+     ("compile-time dependencies are ordered by the LOADER") is retired.
 
      A file is compiled *in full* before any of it executes, so an `(import
      eseq.x)` inside file F runs after F is already compiled. It therefore
@@ -972,14 +1025,14 @@ stays as-is; real macro hygiene is out of scope for this spec.
      import fixed it; the module's evaluation was already ordered by the
      loader, which is the only thing that can order compile-time surface.
 
-     **Rule: compile-time dependencies are ordered by the LOADER, runtime
-     dependencies by `import`.** A module that publishes `defstate`s or
-     macros consumed by other modules is therefore a *root entry* — it stays
-     listed, in order, in the distro root. Everything whose exported surface
-     is functions can be dissolved into declared edges.
-
-     This is also why the shuffled-order acceptance test does not pass yet:
-     see "Slice 4 outcome" below.
+     ~~Rule: compile-time dependencies are ordered by the LOADER, runtime
+     dependencies by `import`.~~ **Retired by eseq-mods.12**: an import now
+     supplies compile-time surface too, so a module that consumes another
+     module's `defstate`s or macros simply imports it. The reproducer above
+     inverts — with the compile-time half, `(import eseq.seq-core-state)`
+     in `browser.lisp` makes the standalone-harness eval WORK (the import
+     evaluates the real module before browser's readers compile), and the
+     test above passes with the import present.
 
   **(n2) corrected.** The claim that a file evaled standalone "cannot
   `import` at all" is too strong. `module_file_candidates` resolves against
@@ -1019,25 +1072,34 @@ stays as-is; real macro hygiene is out of scope for this spec.
     position satisfies it. The `step-grid.lisp`-is-deliberately-unloaded
     comment stays: it documents an absence and a perf regression, not order.
 
-  **Order independence: NOT achieved, and now measured.** Reversing the root
-  block fails 157 `metal_seq` tests; so does merely hoisting the three
-  library anchors above the render roots. Two independent blockers, both
-  bigger than this slice:
+  **Order independence: ACHIEVED (eseq-mods.12), with one scoped rule.**
+  At slice-4 close, reversing the root block failed 157 `metal_seq` tests
+  (hazard (p) plus undeclared root-to-root edges). With import's
+  compile-time half (§4) and the follow-up unpinning, the entire import
+  block of `ui/main.lisp` — render roots included — now boots in any
+  order: the test `metal_seq_main_import_block_boots_in_reverse_order`
+  boots a fully reversed block and asserts the same buffers render and the
+  formerly order-pinned cross-module reads agree. What made it true:
 
-  1. Hazard (p) — `seq-script-picker` reads `eseq.seq-step-tabs` `defstate`s,
-     so it must *compile* after that module is evaluated, and no import it
-     can write will achieve that.
-  2. The render roots reference each other bare and a module must never
-     import a UI root (60-test failure, S3b wave 2), so their relative order
-     has no declared expression at all.
+  1. Hazard (p) resolved: consumers of `eseq.seq-core-state` and
+     `eseq.seq-step-tabs` `defstate`s/aliases now import them
+     (seq-script-picker → seq-step-tabs, browser/mixer/sequencer/transport/
+     seq-panels/seq-layout/seq-macro-mapping-hooks → seq-core-state), so
+     `eseq.materials` and `eseq.seq-core-state` are listed but no longer
+     order-pinned root entries.
+  2. The one load-time value edge INTO a render root was inverted:
+     `piano-roll-default-pane-height` moved home from `eseq.piano-roll` to
+     the layout hub `eseq.seq-step-tabs`, and piano-roll + seq-layout
+     import the hub. The **never-import-a-UI-root rule stands** (the four
+     roots plus transport/agent/patch-macros/piano-roll/effects.buffers):
+     order freedom is achieved not by declaring root→root edges but by
+     ensuring no module needs one at compile or load time — roots may
+     import library modules, never each other. Remaining root-to-root bare
+     references are event-time or import-covered render-time calls.
 
-  The infrastructure change that would fix (1) — and with it make the
-  manifest genuinely reorderable — is to give `import` a **compile-time
-  half**: evaluate the target when the compiler *compiles* the import form,
-  not when the chunk runs. The compiler already walks top-level forms in
-  order, so this is a callback into the VM at that point rather than a
-  redesign. Filed as a follow-up; slice 4 stops at "the library layer is
-  order-free, the root layer is not, and the file says which is which".
+  Scope note: `load` lines stay ordered relative to the code that uses
+  them (themes.lisp before the theme call); reorderability is a property
+  of the `(import …)` block.
 
   **Hot reload (§11 q4) — answered, and it needed a fix.**
   `reload_paths_transactional` re-evaluates a changed file's *owner root*,
