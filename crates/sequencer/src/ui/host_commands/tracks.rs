@@ -901,7 +901,7 @@ pub(super) fn handle(
                     &HashSet::new(),
                 );
                 let _ =
-                    rt.eval_str(&format!("(set! selected-bus {selected_bus_index})"));
+                    rt.eval_str(&format!("(set! eseq.seq-core-state/selected-bus {selected_bus_index})"));
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 ui_epoch.fetch_add(1, Ordering::Relaxed);

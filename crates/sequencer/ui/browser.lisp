@@ -19,52 +19,6 @@
 ;; NOT aliased, deliberately: the six names in the `eseq.vanilla/` block below
 ;; (hazard i — production Rust *writes* them by bare spelling, so they stay flat
 ;; and are a host→script protocol, not this module's API).
-(module-compat-alias sbrowser-activate-audio-effect activate-audio-effect)
-(module-compat-alias sbrowser-activate-midi-effect activate-midi-effect)
-(module-compat-alias sbrowser-activate-sample activate-sample)
-(module-compat-alias sbrowser-active-tab-panel active-tab-panel)
-(module-compat-alias sbrowser-active-tree-key active-tree-key)
-(module-compat-alias sbrowser-add-layer-rack-track add-layer-rack-track)
-(module-compat-alias sbrowser-add-rack-track add-rack-track)
-(module-compat-alias sbrowser-add-sampler-track add-sampler-track)
-(module-compat-alias sbrowser-add-selected-rack-layer add-selected-rack-layer)
-(module-compat-alias sbrowser-audition audition)
-(module-compat-alias sbrowser-build-widgets build-widgets)
-(module-compat-alias sbrowser-create-items create-items)
-(module-compat-alias sbrowser-drop-instrument-on-folder drop-instrument-on-folder)
-(module-compat-alias sbrowser-drop-instrument-on-track drop-instrument-on-track)
-(module-compat-alias sbrowser-drop-preset-on-sounds drop-preset-on-sounds)
-(module-compat-alias sbrowser-drop-sample-on-track drop-sample-on-track)
-(module-compat-alias sbrowser-drop-sound-on-track drop-sound-on-track)
-(module-compat-alias sbrowser-editor-status-row editor-status-row)
-(module-compat-alias sbrowser-enter-new-effect-editor enter-new-effect-editor)
-(module-compat-alias sbrowser-enter-new-script enter-new-script)
-(module-compat-alias sbrowser-enter-preset-save enter-preset-save)
-(module-compat-alias sbrowser-filter search-filter)
-(module-compat-alias sbrowser-focus-create-item focus-create-item)
-(module-compat-alias sbrowser-fork-selected-audio-effect fork-selected-audio-effect)
-(module-compat-alias sbrowser-fork-selected-instrument fork-selected-instrument)
-(module-compat-alias sbrowser-header search-header)
-(module-compat-alias sbrowser-list-contains? list-contains?)
-(module-compat-alias sbrowser-new-project new-project)
-(module-compat-alias sbrowser-next-tab next-tab)
-(module-compat-alias sbrowser-open-project-save open-project-save)
-(module-compat-alias sbrowser-preset-filter preset-filter)
-(module-compat-alias sbrowser-project-save-mode? project-save-mode?)
-(module-compat-alias sbrowser-refresh-buffer refresh-buffer)
-(module-compat-alias sbrowser-sample-selected-path sample-selected-path)
-(module-compat-alias sbrowser-select-audio-effect select-audio-effect)
-(module-compat-alias sbrowser-select-create-item select-create-item)
-(module-compat-alias sbrowser-select-midi-effect select-midi-effect)
-(module-compat-alias sbrowser-select-sample select-sample)
-(module-compat-alias sbrowser-select-tab select-tab)
-(module-compat-alias sbrowser-selected-audio-effect-name selected-audio-effect-name)
-(module-compat-alias sbrowser-selected-instrument-name selected-instrument-name)
-(module-compat-alias sbrowser-selected-sample selected-sample)
-(module-compat-alias sbrowser-selected-tags selected-tags)
-(module-compat-alias sbrowser-tabbed-content tabbed-content)
-(module-compat-alias sbrowser-tabs tab-rail)
-(module-compat-alias sample-browser-here sample-browser-here)
 
 (import eseq.track-collapse)
 
@@ -89,7 +43,7 @@
 (defstate %last-sidebar-sample "")
 (defstate selected-sample "")
 (defstate selected-tags (list))
-(defstate eseq.vanilla/sbrowser-auditioned-sample "")
+(defstate sbrowser-auditioned-sample "")
 (defstate eseq.vanilla/sbrowser-loading-instrument-name "")
 ;; Last instrument / custom effect highlighted in the browser tree. Fork acts on
 ;; it — the tree widget has no context menu, so the action lives in the panel
@@ -98,13 +52,13 @@
 (defstate selected-audio-effect-name "")
 
 ;; Editor state for inline instrument/effect creation
-(def eseq.vanilla/sbrowser-editor-name (state ""))
+(def sbrowser-editor-name (state ""))
 ;; Preset save state
 (defstate %preset-name "")
 (defstate %preset-save-mode "")  ;; "" or "save-preset"
 (defstate preset-filter "")
-(defstate eseq.vanilla/sbrowser-script-name "")
-(defstate eseq.vanilla/sbrowser-script-save-mode "")  ;; "" or "new-script"
+(defstate sbrowser-script-name "")
+(defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
 
 (defwidget editor-spinner
   ;; Sized to sit inside `editor-status-row`'s 1.35-row height — the
@@ -251,7 +205,7 @@
 (def %swap-track-instrument (track name)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
-    (if (seq-track-replaceable-instrument? track)
+    (if (eseq.track-collapse/replaceable-instrument? track)
       (do
         (set! sbrowser-loading-instrument-name name)
         (host-command "swap-track-instrument" (dict :track track :name name))
@@ -259,7 +213,7 @@
       (status "Saved instruments can replace sampler or custom instrument tracks"))))
 
 (def %swap-track-builtin-instrument (track name)
-  (if (and (= name "sampler") (seq-track-replaceable-instrument? track))
+  (if (and (= name "sampler") (eseq.track-collapse/replaceable-instrument? track))
     (do
       (host-command "swap-track-builtin-instrument" (dict :track track :name name))
       (set! sbrowser-tab "samples")
@@ -283,7 +237,7 @@
     (let ((path (get payload :path))
           (track (get target :track)))
       (if path
-        (if (seq-track-custom-instrument? track)
+        (if (eseq.track-collapse/custom-instrument? track)
           (host-command "convert-track-to-sampler"
             (dict :track track :path path :preserve-browser-context true))
           (host-command "load-sample-into-track"
@@ -300,7 +254,7 @@
       (drop-sample-on-track event))))
 
 (def %activate-instrument (name)
-  (if (seq-track-replaceable-instrument? SEQ.current-track)
+  (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
     (%swap-track-instrument SEQ.current-track name)
     (do
       (%add-instrument-track name)
@@ -579,14 +533,14 @@
       false
       (if (= kind "builtin-audio-effect")
         (do
-          (if (seq-has-selected-bus?)
-            (host-command "add-builtin-bus-effect" (dict :bus selected-bus :name name))
+          (if (eseq.seq-core-state/seq-has-selected-bus?)
+            (host-command "add-builtin-bus-effect" (dict :bus eseq.seq-core-state/selected-bus :name name))
             (host-command "add-builtin-effect" (dict :name name)))
           (status (str "Add built-in effect: " name)))
         (if (= kind "custom-audio-effect")
           (do
-            (if (seq-has-selected-bus?)
-              (host-command "add-bus-effect" (dict :bus selected-bus :name name))
+            (if (eseq.seq-core-state/seq-has-selected-bus?)
+              (host-command "add-bus-effect" (dict :bus eseq.seq-core-state/selected-bus :name name))
               (host-command "add-effect" (dict :name name)))
             (status (str "Add effect: " name)))
           (status "Choose an effect"))))))
@@ -651,8 +605,8 @@
         ;; this module writes eseq.browser's own slot and never reaches the
         ;; owner, so the return-to-source hop after loading a script would
         ;; silently stop working.  Go through the owner's accessor.
-        (seq-script-remember-source-buffer)
-        (seq-script-load-file path)
+        (eseq.seq-script-picker/seq-script-remember-source-buffer)
+        (eseq.seq-script-picker/seq-script-load-file path)
         (status (str "Load script: " (get item :label))))
       (status "Choose a script file"))))
 
@@ -798,7 +752,7 @@
 
 (def %activate-builtin-instrument (name)
   (if (and (= name "sampler")
-           (seq-track-replaceable-instrument? SEQ.current-track))
+           (eseq.track-collapse/replaceable-instrument? SEQ.current-track))
     (%swap-track-builtin-instrument SEQ.current-track name)
     (%add-builtin-instrument-track name)))
 

@@ -155,7 +155,7 @@ pub(super) fn handle(
                 EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
             rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
             rt.set_reactive(
                 "SEQ",
@@ -366,7 +366,7 @@ pub(super) fn handle(
             // The name field starts empty on purpose (spec 3.4): a prefilled
             // `<source>-2` is a default you Enter through, and naming the fork
             // is the moment you decide what it is.
-            let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
             rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
             rt.set_reactive(
                 "SEQ",
@@ -2314,7 +2314,7 @@ pub(super) fn handle(
                 EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
             rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
             rt.set_reactive(
                 "SEQ",
@@ -2343,7 +2343,7 @@ pub(super) fn handle(
                 ),
             );
             rt.run_reactive_cycle();
-            if let Err(error) = rt.eval_str("(sbrowser-refresh-buffer)") {
+            if let Err(error) = rt.eval_str("(eseq.browser/refresh-buffer)") {
                 let _ = app
                     .graph_controller()
                     .delete_custom_effect_slot(track, slot);
@@ -2530,7 +2530,7 @@ pub(super) fn handle(
                 surface,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
             rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
             rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
             rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
@@ -2555,7 +2555,7 @@ pub(super) fn handle(
                 ),
             );
             rt.run_reactive_cycle();
-            let _ = rt.eval_str("(sbrowser-refresh-buffer)");
+            let _ = rt.eval_str("(eseq.browser/refresh-buffer)");
             editor.refresh_runtime_side_effects();
             editor.refresh_visible_layouts_for_buffer_named("*samples*");
             editor.handle_host_event(HostEvent::Status(format!(
@@ -3336,7 +3336,7 @@ pub(super) fn handle(
                     ctx.sessions.editor_mode = Some("new-instrument".to_string());
                     let rt = editor.runtime_mut();
                     // Empty on purpose — see spec §3.4.
-                    let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+                    let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
                     rt.set_reactive(
                         "SEQ",
                         "editor-mode",
@@ -3483,7 +3483,7 @@ pub(super) fn handle(
                     ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                     ctx.sessions.editor_mode = Some("new-effect".to_string());
                     let rt = editor.runtime_mut();
-                    let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+                    let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
                     rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
                     rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
                     rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));

@@ -110,8 +110,8 @@ pub(super) fn handle(
                     let rt = editor.runtime_mut();
                     let _ = rt.eval_str(
                         r#"
-                                    (set! sbrowser-script-save-mode "new-script")
-                                    (set! sbrowser-script-name "")
+                                    (set! eseq.browser/sbrowser-script-save-mode "new-script")
+                                    (set! eseq.browser/sbrowser-script-name "")
                                     (set! sbrowser-tab "scripts")
                                     "#,
                     );
@@ -175,7 +175,7 @@ pub(super) fn handle(
             if source.trim() == NEW_SCRIPT_TEMPLATE.trim() {
                 let escaped_label = escape_lisp_string(&display_label);
                 source = format!(
-                    "; ESeqLisp script\n; Source-only scripts can still appear as sequencer tabs.\n(seq-register-script-source-tab \"{escaped_label}\")\n\n"
+                    "; ESeqLisp script\n; Source-only scripts can still appear as sequencer tabs.\n(eseq.seq-script-picker/seq-register-script-source-tab \"{escaped_label}\")\n\n"
                 );
                 editor.buffers[buffer_idx].set_text(&source);
             }
@@ -205,7 +205,7 @@ pub(super) fn handle(
 
             let target_str = target.to_string_lossy().replace('\\', "/");
             let load_form = format!(
-                "(seq-script-load-file \"{}\")",
+                "(eseq.seq-script-picker/seq-script-load-file \"{}\")",
                 escape_lisp_string(&target_str)
             );
             if let Err(error) = editor.runtime_mut().eval_str(&load_form) {
@@ -227,8 +227,8 @@ pub(super) fn handle(
             let rt = editor.runtime_mut();
             let _ = rt.eval_str(
                 r#"
-                            (set! sbrowser-script-save-mode "")
-                            (set! sbrowser-script-name "")
+                            (set! eseq.browser/sbrowser-script-save-mode "")
+                            (set! eseq.browser/sbrowser-script-name "")
                             (set! sbrowser-tab "scripts")
                             "#,
             );
@@ -242,7 +242,7 @@ pub(super) fn handle(
         "cancel-new-script" => {
             if let Some(session) = ctx.sessions.script_draft_session.take() {
                 let unregister = format!(
-                    "(seq-unregister-step-sequencer-tab \"{}\")",
+                    "(eseq.seq-step-tabs/seq-unregister-step-sequencer-tab \"{}\")",
                     escape_lisp_string(&session.buffer_name)
                 );
                 let _ = editor.runtime_mut().eval_str(&unregister);
@@ -255,8 +255,8 @@ pub(super) fn handle(
             let rt = editor.runtime_mut();
             let _ = rt.eval_str(
                 r#"
-                            (set! sbrowser-script-save-mode "")
-                            (set! sbrowser-script-name "")
+                            (set! eseq.browser/sbrowser-script-save-mode "")
+                            (set! eseq.browser/sbrowser-script-name "")
                             (set! sbrowser-tab "scripts")
                             "#,
             );
