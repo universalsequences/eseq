@@ -30,7 +30,7 @@
 ;; Re-evaluating this buffer is idempotent: it replaces track 0's process chain
 ;; for the current pattern.
 
-(seq-register-script-source-tab "Phase 4 Verdicts/Ratchets")
+(eseq.seq-script-picker/seq-register-script-source-tab "Phase 4 Verdicts/Ratchets")
 
 (def-process phase4-verdict-ratchet
   :doc "Phase 4 demo: veto base steps and spawn shaped ratchets from lanes."

@@ -536,4 +536,4 @@
           )))))
 
 (effect-buffer "*8x8-reset*" (g8r-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

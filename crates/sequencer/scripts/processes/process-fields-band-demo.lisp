@@ -19,7 +19,7 @@
 ;;   (fields-band-half-h :amount 0.25)
 ;;   (processes :track 0) ; no publisher => listeners are inert
 
-(seq-register-script-source-tab "Fields Band Demo")
+(eseq.seq-script-picker/seq-register-script-source-tab "Fields Band Demo")
 
 (def-process fields-band-publisher
   :doc "Suggest a major-triad pitch field rooted by a sequenceable lane."

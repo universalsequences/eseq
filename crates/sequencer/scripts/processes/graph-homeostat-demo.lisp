@@ -12,7 +12,7 @@
 ;; Stop/restart clears every delta; use the graph panel's commit button to promote
 ;; a useful drift into authored overrides.
 
-(seq-register-script-source-tab "Graph Homeostat")
+(eseq.seq-script-picker/seq-register-script-source-tab "Graph Homeostat")
 
 (def gh-name "neural-variable-reset-demo")
 (def gh-nodes 8)

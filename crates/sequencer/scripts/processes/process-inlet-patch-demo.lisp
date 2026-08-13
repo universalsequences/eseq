@@ -25,7 +25,7 @@
 ;;       :connect '((out (process-inlet :process-inlet-demo-repeater :times))))
 ;;     process-inlet-demo-repeater-h)
 
-(seq-register-script-source-tab "Process Inlet Patch Demo")
+(eseq.seq-script-picker/seq-register-script-source-tab "Process Inlet Patch Demo")
 
 (def-process process-inlet-demo-dice
   :doc "Roll a deterministic integer and write it to a connected process inlet."

@@ -27,7 +27,7 @@
 ;; Re-evaluating this file is idempotent for the current pattern: `processes`
 ;; replaces track 0's process chain rather than appending another instance.
 
-(seq-register-script-source-tab "Inline Code Widgets")
+(eseq.seq-script-picker/seq-register-script-source-tab "Inline Code Widgets")
 
 ;; Bare literal sites: the buffer text is the entire state model.
 (def inline-demo-free-level

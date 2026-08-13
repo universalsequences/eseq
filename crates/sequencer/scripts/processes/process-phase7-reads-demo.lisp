@@ -35,7 +35,7 @@
 ;;   (stop phase7-demo-brain)
 ;;   (start phase7-demo-brain)
 
-(seq-register-script-source-tab "Phase 7 Reads")
+(eseq.seq-script-picker/seq-register-script-source-tab "Phase 7 Reads")
 
 (def phase7-demo-density
   (defchan phase7-demo-density 0))
