@@ -1936,6 +1936,16 @@ pub struct VM {
     /// (None for include_str!-style sources with no path). `import`
     /// consults this for load-once semantics (spec §4).
     pub declared_modules: HashMap<String, Option<std::path::PathBuf>>,
+    /// Module name → the import pass that last evaluated it (spec §4, §11
+    /// q4). `import` is load-once *per pass*, not forever: hot reload
+    /// re-evaluates a changed file's owner root, and since the root reaches
+    /// its children through `import`, a permanent ledger would make that
+    /// re-eval skip every child and silently drop the edit. Bumping the
+    /// epoch (`begin_import_pass`) is what re-arms them.
+    pub imported_at_epoch: HashMap<String, u64>,
+    /// Current import pass. Starts at 1 so entries from a plain
+    /// `eval_module_source` (no transaction) still dedupe within that pass.
+    pub import_pass_epoch: u64,
     /// Migration compat aliases (spec §10 slice 3): old flat name → its
     /// new qualified home, declared via `(module-compat-alias old new)`.
     /// Consulted by both resolution ladders on a bare-name miss; the whole
@@ -1976,6 +1986,8 @@ pub struct VmStateSnapshot {
     preserve_state_on_redefinition: bool,
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
+    imported_at_epoch: HashMap<String, u64>,
+    import_pass_epoch: u64,
     compat_aliases: HashMap<String, String>,
 }
 
@@ -2417,6 +2429,11 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         let path = vm.current_source_file();
         vm.declared_modules.insert(name.clone(), path);
+        // A module evaluated by `load` counts as satisfied for this pass too,
+        // so a later `import` of it does not double-evaluate (ui/effects.lisp
+        // still `load`s files that effects/* modules import).
+        let epoch = vm.import_pass_epoch;
+        vm.imported_at_epoch.insert(name.clone(), epoch);
         Value::Nil
     });
 
@@ -2446,12 +2463,19 @@ pub fn register_core_natives(vm: &mut VM) {
             log_native_misuse("__import-module", "expects a module name string");
             return Value::Nil;
         };
-        if vm.declared_modules.contains_key(name)
-            || crate::modules::CORE_NAMESPACES.contains(&name.as_str())
+        if crate::modules::CORE_NAMESPACES.contains(&name.as_str())
             || name == crate::modules::IMPLICIT_MODULE
         {
-            return Value::Nil; // load-once: already evaluated (or built in)
+            return Value::Nil; // built in, never a file
         }
+        // Load-once *per import pass* (see `imported_at_epoch`). Recorded
+        // before the eval so an import cycle terminates on the second visit
+        // rather than recursing.
+        let epoch = vm.import_pass_epoch;
+        if vm.imported_at_epoch.get(name) == Some(&epoch) {
+            return Value::Nil;
+        }
+        vm.imported_at_epoch.insert(name.clone(), epoch);
         let mut errors = Vec::new();
         for candidate in crate::modules::module_file_candidates(name) {
             match vm.source_manager.load_source(&candidate) {
@@ -3446,6 +3470,8 @@ impl VM {
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
             declared_modules: HashMap::new(),
+            imported_at_epoch: HashMap::new(),
+            import_pass_epoch: 1,
             compat_aliases: HashMap::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
@@ -3774,6 +3800,8 @@ impl VM {
                 })
                 .collect(),
             declared_modules: self.declared_modules.clone(),
+            imported_at_epoch: self.imported_at_epoch.clone(),
+            import_pass_epoch: self.import_pass_epoch,
             compat_aliases: self.compat_aliases.clone(),
         }
     }
@@ -3811,6 +3839,8 @@ impl VM {
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
         self.declared_modules = snapshot.declared_modules;
+        self.imported_at_epoch = snapshot.imported_at_epoch;
+        self.import_pass_epoch = snapshot.import_pass_epoch;
         self.compat_aliases = snapshot.compat_aliases;
     }
 
@@ -4316,6 +4346,14 @@ impl VM {
 
     pub fn inline_widget_registration_enabled(&self) -> bool {
         self.current_effect_source_buffer_id.is_some()
+    }
+
+    /// Start a new import pass (spec §4, §11 q4). Every transactional eval
+    /// or hot reload calls this so `import` re-evaluates the modules it
+    /// reaches: without it, re-running the owner root would skip every
+    /// imported child and the edit would never land.
+    pub fn begin_import_pass(&mut self) {
+        self.import_pass_epoch = self.import_pass_epoch.wrapping_add(1);
     }
 
     pub fn begin_inline_widget_capture(&mut self) {

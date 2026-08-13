@@ -29,7 +29,7 @@
 (module-compat-alias mixer-v2-handle-key handle-key)
 (module-compat-alias seq-ctrl-g seq-ctrl-g)
 
-(load "@/ui/track-collapse.lisp")
+(import eseq.track-collapse)
 
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))

@@ -941,6 +941,119 @@ stays as-is; real macro hygiene is out of scope for this spec.
      is: add the `import` that encodes each ordering constraint FIRST, verify,
      and only then delete the corresponding `(load …)` line.
 
+  p. **`import` is a RUNTIME form: it cannot supply anything the importing
+     file needs at COMPILE time** (found dissolving the manifest,
+     `eseq-mods.9` — the hazard that decides how far slice 4 can go).
+
+     A file is compiled *in full* before any of it executes, so an `(import
+     eseq.x)` inside file F runs after F is already compiled. It therefore
+     guarantees exactly one thing: **eseq.x is evaluated before F's body
+     runs.** That is what makes it the fix for hazard (o) — render/load-time
+     *calls* resolve through the runtime heal ladder, and by then the target
+     exists.
+
+     It is *not* enough for anything the compiler resolves while compiling F:
+
+     - **`defstate` reads.** `Compiler::state_binding_for` looks the name up
+       in a `state_bindings` table seeded from the VM when F's compiler is
+       built. If the owner has not been evaluated by then, the read compiles
+       as an ordinary `LoadGlobal` instead of a state read, and a later
+       vanilla `(set! name v)` — which *does* see the binding — writes
+       somewhere the reader never looks. `:refer` does not rescue this: it is
+       consulted *by* `state_binding_for`, so it misses for the same reason.
+     - **Macros** (§10 hazard h) and **compat-alias spellings**, for the same
+       "seeded at compiler construction" reason.
+
+     Reproducer: adding `(import eseq.seq-core-state)` to `ui/browser.lisp`
+     broke `metal_seq_browser_audio_effect_activation_uses_selected_bus` even
+     though `ui/main.lisp` had already evaluated that module — the harness
+     evals browser.lisp into a bare `Runtime`, so the import was browser's
+     *only* source of the module and arrived one phase too late. Removing the
+     import fixed it; the module's evaluation was already ordered by the
+     loader, which is the only thing that can order compile-time surface.
+
+     **Rule: compile-time dependencies are ordered by the LOADER, runtime
+     dependencies by `import`.** A module that publishes `defstate`s or
+     macros consumed by other modules is therefore a *root entry* — it stays
+     listed, in order, in the distro root. Everything whose exported surface
+     is functions can be dissolved into declared edges.
+
+     This is also why the shuffled-order acceptance test does not pass yet:
+     see "Slice 4 outcome" below.
+
+  **(n2) corrected.** The claim that a file evaled standalone "cannot
+  `import` at all" is too strong. `module_file_candidates` resolves against
+  the source manager's cwd, which for the `metal_seq`/`state_values`
+  harnesses *is* `crates/sequencer`, so `ui/<name>.lisp` resolves fine and
+  the import evaluates. The real hazard is semantic, not resolution:
+  importing pulls a **real** module into a world the harness had faked (see
+  (p)'s reproducer), and it does so one phase too late to be useful. Treat
+  (n2) as "do not add imports to standalone-evaled files *because they buy
+  nothing and can change what the harness is testing*", not as "the path
+  will not resolve".
+
+  ### Slice 4 outcome — dissolving the `ui/main.lisp` manifest
+
+  `ui/main.lisp` went from **26 `(load …)` lines** to **3 loads + 15
+  imports**, and from 64 to 63 lines (the manifest shrank; a header
+  explaining the distro-root contract replaced the ordering comments).
+
+  - **Dissolved entirely (8)** — now reached only through declared `import`
+    edges: `track-collapse` (imported by browser, mixer, sequencer,
+    arrangement), `seq-step-tabs` (transport), `seq-layout`
+    (seq-macro-mapping-hooks), `seq-panels` (sequencer),
+    `step-grid-interactions` + `seqv-track-params` + `seq-grid-mode`
+    (bus-grid), `sound-palette` (arrangement).
+  - **`load` → `import`, still listed (15)**: the render roots, which nothing
+    imports because their top level *is* the side effect, plus the two
+    compile-time hubs pinned to the top by hazard (p) — `eseq.materials`
+    (macros, also consumed by the ~305 headerless content files, which
+    cannot import) and `eseq.seq-core-state` (the `defstate` hub).
+  - **Still `load` (3)**: `themes.lisp` (re-evaluation *is* applying the
+    theme), `effects.lisp` (its own nested manifest, out of scope here) and
+    `effects/step-buffer.lisp` (headerless side-effect root).
+  - **Comments deleted**: the track-collapse ordering comment (replaced by
+    four real import edges) and the choose-model one, which was stale — the
+    patcher buffers that mount `choose-model-panel` are Rust-generated lisp
+    (`edit_sessions.rs`) evaluated when a patch editor opens, so any boot
+    position satisfies it. The `step-grid.lisp`-is-deliberately-unloaded
+    comment stays: it documents an absence and a perf regression, not order.
+
+  **Order independence: NOT achieved, and now measured.** Reversing the root
+  block fails 157 `metal_seq` tests; so does merely hoisting the three
+  library anchors above the render roots. Two independent blockers, both
+  bigger than this slice:
+
+  1. Hazard (p) — `seq-script-picker` reads `eseq.seq-step-tabs` `defstate`s,
+     so it must *compile* after that module is evaluated, and no import it
+     can write will achieve that.
+  2. The render roots reference each other bare and a module must never
+     import a UI root (60-test failure, S3b wave 2), so their relative order
+     has no declared expression at all.
+
+  The infrastructure change that would fix (1) — and with it make the
+  manifest genuinely reorderable — is to give `import` a **compile-time
+  half**: evaluate the target when the compiler *compiles* the import form,
+  not when the chunk runs. The compiler already walks top-level forms in
+  order, so this is a callback into the VM at that point rather than a
+  redesign. Filed as a follow-up; slice 4 stops at "the library layer is
+  order-free, the root layer is not, and the file says which is which".
+
+  **Hot reload (§11 q4) — answered, and it needed a fix.**
+  `reload_paths_transactional` re-evaluates a changed file's *owner root*,
+  which after this slice reaches its children through `import`. Load-once
+  would therefore make that re-eval skip every child and silently drop the
+  edit — the whole `ui/` tree would stop hot-reloading. `import` is now
+  load-once **per import pass**: `VM::imported_at_epoch` + `import_pass_epoch`,
+  bumped by `begin_import_pass()` from both transactional eval entry points.
+  `(module …)` records the epoch too, so a `load`ed module is still not
+  double-evaluated by a later `import` in the same pass. Covered by
+  `hot_reload_reevaluates_imported_children_from_the_owner_root`, which fails
+  against the old permanent ledger. Import edges themselves were already
+  recorded in the `ModuleGraph` exactly like `load` edges (`__import-module`
+  goes through `SourceManager::load_source`), so the graph shape is unchanged
+  — only now it is declared rather than inferred.
+
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
   tests that load the converted file's family. Consumers stay untouched;

@@ -42,7 +42,9 @@
 (module-compat-alias seqv-track-menu-click track-menu-click)
 (module-compat-alias seqv-track-selected-binding track-selected-binding)
 
-(load "@/ui/track-collapse.lisp")
+(import eseq.track-collapse)
+
+(import eseq.seq-panels)
 
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))

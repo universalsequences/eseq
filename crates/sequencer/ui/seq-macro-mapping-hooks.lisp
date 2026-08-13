@@ -2,6 +2,8 @@
 ;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3.
 (module eseq.seq-macro-mapping-hooks)
 
+(import eseq.seq-layout)
+
 ;; No compat aliases: nothing outside this file references its state, and hook
 ;; names are strings in the flat hook keyspace (spec §6), which does not
 ;; auto-qualify. The bare references below (`samples-sidebar-visible`,

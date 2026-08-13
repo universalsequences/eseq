@@ -63,7 +63,7 @@
 (module-compat-alias sbrowser-tabs tab-rail)
 (module-compat-alias sample-browser-here sample-browser-here)
 
-(load "@/ui/track-collapse.lisp")
+(import eseq.track-collapse)
 
 ;; ── State ──
 ;; The `eseq.vanilla/` names below are the §3 cross-module def escape hatch

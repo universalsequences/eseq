@@ -50,6 +50,15 @@
 (module-compat-alias set-arrangement-cursor set-cursor)
 (module-compat-alias set-arrangement-view-start set-view-start)
 
+;; Declared dependencies (spec §4). `import` is a *runtime* form — it runs
+;; after this file is compiled — so it guarantees only that the target is
+;; evaluated before our body executes. That is exactly what the lane bodies
+;; need: they call `seq-visible-track-indices` and `sound-palette-panel`
+;; while the buffer tree is being built. These two edges are the ordering
+;; ui/main.lisp used to encode by listing those files above us.
+(import eseq.track-collapse)
+(import eseq.sound-palette)
+
 (defstate view-start 0)
 (defstate view-duration 64)
 (defstate cursor-time 0)

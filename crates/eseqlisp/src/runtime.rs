@@ -1905,6 +1905,7 @@ impl Runtime {
         self.vm.source_manager.set_overlays(overlays);
         self.vm.source_manager.begin_transaction();
         self.vm.set_preserve_state_on_redefinition(true);
+        self.vm.begin_import_pass();
         self.vm.begin_inline_widget_capture();
 
         let requested_path = path
@@ -2060,6 +2061,7 @@ impl Runtime {
     ) -> ReloadReport {
         let snapshot = self.snapshot_state();
         self.vm.set_current_effect_context(None);
+        self.vm.begin_import_pass();
         self.vm.begin_inline_widget_capture();
         self.vm.source_manager.set_overlays(overlays);
         self.vm.source_manager.begin_transaction();

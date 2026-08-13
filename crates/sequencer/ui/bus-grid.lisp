@@ -40,6 +40,8 @@
 
 (import eseq.seq-core-state :as core)
 (import eseq.step-grid-interactions :as sgi)
+(import eseq.seqv-track-params)
+(import eseq.seq-grid-mode)
 
 (module-compat-alias bus-seq-list bus-seq-list)
 (module-compat-alias bus-seq-playhead bus-seq-playhead)

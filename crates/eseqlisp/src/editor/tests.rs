@@ -427,6 +427,60 @@ fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
 }
 
 #[test]
+fn hot_reload_reevaluates_imported_children_from_the_owner_root() {
+    // Module spec §4/§11 q4. Editing a child re-evaluates its *owner root*
+    // (`reload_paths_transactional` → `owner_root_for`), and after
+    // eseq-mods.9 the root reaches its children through `import`, not
+    // `load`. Import is load-once, so without a per-reload reset the root
+    // re-eval would skip every child and the edit would silently not land —
+    // the whole ui/ tree would stop hot-reloading.
+    let dir = hot_reload_temp_dir("eseqlisp-hot-import-child");
+    let root = dir.join("root.lisp");
+    let child = dir.join("hot-import-child.lisp");
+    std::fs::write(
+        &root,
+        r#"(import hot-import-child)
+(effect-buffer "*hot-import*" (label (hot-import-child/child-label)))"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &child,
+        "(module hot-import-child)\n(def child-label () \"before\")",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new();
+    let source = std::fs::read_to_string(&root).unwrap();
+    let report = runtime.eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(
+        report.success,
+        "initial root eval failed: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        runtime.eval_str("(hot-import-child/child-label)"),
+        Ok(Some(Value::String("before".to_string())))
+    );
+
+    std::fs::write(
+        &child,
+        "(module hot-import-child)\n(def child-label () \"after\")",
+    )
+    .unwrap();
+    let report = runtime.reload_paths_transactional(vec![child.clone()], Vec::new());
+    assert!(
+        report.success,
+        "child reload failed: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        runtime.eval_str("(hot-import-child/child-label)"),
+        Ok(Some(Value::String("after".to_string()))),
+        "re-evaluating the root must re-import the edited child, not skip it"
+    );
+}
+
+#[test]
 fn hot_reload_active_named_buffer_syncs_active_tile_layout_cache() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-active-layout-sync");
     let root = dir.join("root.lisp");
