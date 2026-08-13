@@ -498,6 +498,14 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
         [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defmacro" => {
             out.insert(name.clone());
         }
+        [Expression::Symbol(form), Expression::Symbol(name), ..]
+            if form == "override" || form == "remove-override" =>
+        {
+            // Overrides change the effective value of the factory symbol even
+            // though they deliberately do not mutate its global cell. Mark it
+            // changed so transactional init/hot reload rerenders dependents.
+            out.insert(name.clone());
+        }
         [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defwidget" => {
             out.insert(name.clone());
         }
@@ -527,6 +535,17 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn override_targets_are_effective_defined_symbols_for_hot_reload() {
+        let symbols = extract_defined_symbols_from_source(
+            "(override eseq.factory/view :around (original) (original))\n\
+             (remove-override eseq.factory/other)",
+        )
+        .expect("extract symbols");
+        assert!(symbols.contains("eseq.factory/view"));
+        assert!(symbols.contains("eseq.factory/other"));
+    }
 
     #[test]
     fn explicit_cwd_relative_load_ignores_the_active_module_directory() {

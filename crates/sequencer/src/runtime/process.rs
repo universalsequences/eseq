@@ -859,6 +859,8 @@ impl ProcessLiteral {
             Value::Closure(_, _)
             | Value::Function(_)
             | Value::NativeFunction(_)
+            | Value::OverrideDispatcher(_)
+            | Value::OverrideOriginal(_)
             | Value::NodeRef(_)
             | Value::ReactiveRef { .. }
             | Value::HostHandle { .. } => Err(format!(

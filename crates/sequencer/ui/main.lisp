@@ -11,18 +11,6 @@
 ; must therefore re-run every time: themes.lisp (loading a theme file IS
 ; applying the theme), effects.lisp (its own nested manifest) and
 ; effects/step-buffer.lisp (a headerless side-effect root).
-;
-; ORDER (spec §4, hazard (p) RESOLVED by eseq-mods.12): `import` now has a
-; compile-time half — the compiler evaluates an import's target before any
-; later form in the importing unit compiles — so every module declares its
-; own compile-time deps (`defstate` keyspaces, macros, aliases) and the
-; import block below is order-free. What still binds this file:
-;   - a `load` and the calls that use it stay ordered (themes.lisp then the
-;     theme call; `load` is by design the raw evaluate-here primitive);
-;   - eseq.materials and eseq.seq-core-state stay LISTED (nothing imports
-;     materials — its macros expand flat inside :shader/:material bodies —
-;     and both serve the ~305 headerless content files Rust loads after
-;     boot, which cannot import), but their position no longer matters.
 
 (load "@/ui/themes.lisp")
 (seq-theme-mac-osx-dark)

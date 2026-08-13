@@ -162,6 +162,13 @@ pub(crate) fn watched_lisp_paths(editor: &Editor) -> Vec<PathBuf> {
         .filter(|path| !is_generated_custom_ui_source_path(path))
         .collect::<Vec<_>>();
     paths.extend(custom_ui_source_paths());
+    // A valid init is already in the module graph. Add it explicitly as well
+    // so a boot-time-erroring init remains watched and can recover live.
+    if let Some(path) = sequencer::paths::user_init_path() {
+        if path.is_file() {
+            paths.push(path);
+        }
+    }
     paths.sort();
     paths.dedup();
     paths
@@ -521,6 +528,26 @@ mod tests {
             r#"(def hot-label "unsaved")"#
         );
         assert!(editor.active_buffer().dirty);
+    }
+
+    #[test]
+    fn watched_lisp_paths_include_successful_external_user_init() {
+        let dir = temp_dir("metal-seq-hot-reload-user-init");
+        let init = dir.join("init.lisp");
+        std::fs::write(&init, "(def user-init-probe () 1)").expect("write init");
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(init.clone()),
+            &std::fs::read_to_string(&init).expect("read init"),
+            Vec::new(),
+        );
+        assert!(report.success, "init eval failed: {:?}", report.diagnostics);
+
+        let watched = watched_lisp_paths(&editor)
+            .into_iter()
+            .map(|path| watch_path(&path))
+            .collect::<BTreeSet<_>>();
+        assert!(watched.contains(&watch_path(&init)));
     }
 
     #[test]
