@@ -223,6 +223,14 @@ fn select_sequencer_tab_by_index(editor: &mut Editor, index: usize) -> bool {
     selected
 }
 
+/// `ui/browser.lisp` is `(module eseq.browser)`, so its widget `:key`s
+/// auto-qualify (module spec §10 hazard a) and the search input hashes as
+/// `eseq.browser/search-input`. The flat spelling is still live in the
+/// `live_keyboard_tests` stub browser below, which is a headerless eval, so both
+/// are tried. Drop the legacy one when that stub qualifies too.
+const BROWSER_SEARCH_INPUT_KEY: &str = "eseq.browser/search-input";
+const LEGACY_BROWSER_SEARCH_INPUT_KEY: &str = "sbrowser-search-input";
+
 fn focus_samples_browser_search(editor: &mut Editor) -> bool {
     if !editor.switch_active_tile_to_buffer_named("*samples*") {
         if let Some(callable) = editor.runtime_mut().global_value("sample-browser-here") {
@@ -238,7 +246,8 @@ fn focus_samples_browser_search(editor: &mut Editor) -> bool {
     if editor.active_buffer().name != "*samples*" {
         return false;
     }
-    editor.focus_widget_by_stable_key("sbrowser-search-input", Some("text-input"))
+    editor.focus_widget_by_stable_key(BROWSER_SEARCH_INPUT_KEY, Some("text-input"))
+        || editor.focus_widget_by_stable_key(LEGACY_BROWSER_SEARCH_INPUT_KEY, Some("text-input"))
 }
 
 fn sample_browser_active_tree_key(editor: &mut Editor) -> Option<String> {
@@ -268,7 +277,8 @@ fn focused_samples_search_should_hand_off_to_tree(
             key.code,
             crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
         )
-        && focused_widget_is(editor, "sbrowser-search-input", "text-input")
+        && (focused_widget_is(editor, BROWSER_SEARCH_INPUT_KEY, "text-input")
+            || focused_widget_is(editor, LEGACY_BROWSER_SEARCH_INPUT_KEY, "text-input"))
 }
 
 fn sample_browser_search_shortcut(key: &crossterm::event::KeyEvent) -> bool {

@@ -1366,8 +1366,22 @@ impl Compiler {
     /// (`defstate`, `def-process`, …) prefix the current module unless
     /// already qualified. Headerless (eseq.vanilla) files keep flat keys —
     /// that is what keeps serialized identity stable until a file converts.
+    ///
+    /// An explicit `eseq.vanilla/name` registration (the §3 cross-module def
+    /// escape hatch, used by hazard (i) to pin a `defstate` that Rust writes
+    /// by bare spelling) registers under the **flat** key: vanilla's registry
+    /// keyspace *is* the flat keyspace under slice 0, and neither
+    /// `Compiler::state_binding_for` nor `VM::state_binding_node` has an
+    /// implicit-module rung. Without this strip a pinned `(defstate
+    /// eseq.vanilla/sbrowser-tab …)` would key `state_bindings` as
+    /// `eseq.vanilla/sbrowser-tab` while every flat reader and writer looks up
+    /// `sbrowser-tab`, so the binding would be invisible and `(set! …)` would
+    /// StoreGlobal over the slot holding the NodeRef.
     fn qualify_registration_name(&self, name: &str) -> String {
-        if super::modules::is_qualified(name) || self.declared_module().is_none() {
+        if super::modules::is_qualified(name) {
+            return super::modules::strip_implicit(name).to_string();
+        }
+        if self.declared_module().is_none() {
             return name.to_string();
         }
         super::modules::qualify(&self.current_module, name)
@@ -1386,6 +1400,13 @@ impl Compiler {
                 .get(ns)
                 .map(String::as_str)
                 .unwrap_or(ns);
+            // `eseq.vanilla/x` registers flat (see `qualify_registration_name`),
+            // so the explicit escape-hatch spelling has to reduce to the flat
+            // key or a pinned `defstate` read qualified would compile to
+            // LoadGlobal and hand back the raw NodeRef.
+            if full_ns == super::modules::IMPLICIT_MODULE {
+                return self.state_bindings.get(base).copied();
+            }
             return self
                 .state_bindings
                 .get(&super::modules::qualify(full_ns, base))

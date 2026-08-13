@@ -2265,7 +2265,7 @@
         editor.set_layout_viewport(72, 24);
         let layout = editor.widget_layout().expect("Sounds browser layout");
         assert_finite_layout_tree(&layout);
-        let tree = find_layout_node_by_stable_key(&layout, "sounds-tab-tree")
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/sounds-tab-tree")
             .expect("Sounds tree should render");
         assert!(tree.rect.width > 0.0 && tree.rect.height > 0.0);
         let rendered = render_layout_cells(&layout, 72, 24);
@@ -2273,6 +2273,43 @@
             rendered.contains("Wide Plate"),
             "saved Sound label should be visible; rendered:\n{rendered}"
         );
+    }
+
+    /// Module spec §10 hazard (l): `sbrowser-active-tree-key` hands a widget key
+    /// *out* to Rust — `sample_browser_active_tree_key` in `src/ui/input.rs`
+    /// feeds it straight into `focus_widget_by_stable_key`, an exact match — so
+    /// since `ui/browser.lisp` became `(module eseq.browser)` the helper has to
+    /// emit the qualified spelling itself. Auto-qualification happens on the
+    /// widget, not on a string the helper builds, so nothing else would catch a
+    /// drift between the two.
+    #[test]
+    fn metal_seq_browser_active_tree_key_matches_the_rendered_tree_key() {
+        let mut editor = browser_editor_on_instrument_tab();
+        for (tab, expected) in [
+            ("samples", "eseq.browser/samples-tab-tree"),
+            ("sounds", "eseq.browser/sounds-tab-tree"),
+            ("instruments", "eseq.browser/instruments-tab-tree"),
+        ] {
+            editor
+                .runtime_mut()
+                .eval_str(&format!("(set! sbrowser-tab \"{tab}\")"))
+                .expect("select tab");
+            editor.refresh_runtime_side_effects();
+            let id = browser_id(&editor);
+            editor.set_active_buffer(id);
+            editor.set_layout_viewport(72, 40);
+
+            let reported = match editor.runtime_mut().eval_str("(sbrowser-active-tree-key)") {
+                Ok(Some(Value::String(key))) => key,
+                other => panic!("active tree key for {tab}: {other:?}"),
+            };
+            assert_eq!(reported, expected, "{tab} tab reports the qualified key");
+
+            let layout = editor.widget_layout().expect("browser layout");
+            let node = find_layout_node_by_stable_key(&layout, &reported)
+                .unwrap_or_else(|| panic!("{tab} tree should render under key {reported}"));
+            assert_eq!(node.widget_type, "tree");
+        }
     }
 
     #[test]
@@ -2405,6 +2442,26 @@
         node.children
             .iter()
             .find_map(|child| find_layout_node_by_stable_key_suffix(child, suffix))
+    }
+
+    /// `collect_layout_nodes_by_stable_key` for a module-qualified key — the
+    /// collecting twin of `find_layout_node_by_stable_key_suffix`, same
+    /// leading-`/` convention.
+    fn collect_layout_nodes_by_stable_key_suffix<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        suffix: &str,
+        out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+    ) {
+        if node
+            .stable_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(suffix))
+        {
+            out.push(node);
+        }
+        for child in &node.children {
+            collect_layout_nodes_by_stable_key_suffix(child, suffix, out);
+        }
     }
 
     fn collect_layout_nodes_by_stable_key<'a>(
@@ -2624,7 +2681,7 @@
         editor.set_layout_viewport(90, 70);
 
         let layout = editor.widget_layout().expect("browser layout");
-        let tree = find_layout_node_by_stable_key(&layout, "instruments-tab-tree")
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
             .expect("instrument tree layout");
         let rendered = render_layout_cells(&layout, 90, 70);
         assert!(
@@ -3356,9 +3413,9 @@
             editor.set_active_buffer(browser_id(editor));
             editor.set_layout_viewport(72, 60);
             let layout = editor.widget_layout().expect("browser layout");
-            let header = find_layout_node_by_stable_key(&layout, "browser-header")
+            let header = find_layout_node_by_stable_key_suffix(&layout, "/header")
                 .expect("browser header node");
-            let panel = find_layout_node_by_stable_key(&layout, "samples-browser-panel")
+            let panel = find_layout_node_by_stable_key_suffix(&layout, "/samples-browser-panel")
                 .expect("samples browser panel node");
             panel.rect.row - (header.rect.row + header.rect.height)
         }
@@ -3408,7 +3465,7 @@
 
         let layout = editor.widget_layout().expect("browser layout");
         let rendered = render_layout_cells(&layout, 72, 60);
-        let tag_filter = find_layout_node_by_stable_key(&layout, "sample-tag-filter")
+        let tag_filter = find_layout_node_by_stable_key_suffix(&layout, "/sample-tag-filter")
             .unwrap_or_else(|| panic!("sample tag filter should render; rendered:\n{rendered}"));
         let kick = find_button_with_text(tag_filter, "kick")
             .unwrap_or_else(|| panic!("kick tag chip should render; rendered:\n{rendered}"));
@@ -3578,14 +3635,14 @@
 
         let layout = editor.widget_layout().expect("browser layout");
         let rendered = render_layout_cells(&layout, 72, 60);
-        let rail = find_layout_node_by_stable_key(&layout, "browser-tabs")
+        let rail = find_layout_node_by_stable_key_suffix(&layout, "/tabs")
             .unwrap_or_else(|| panic!("browser tab rail should render; rendered:\n{rendered}"));
         let header =
-            find_layout_node_by_stable_key(&layout, "browser-header").unwrap_or_else(|| {
+            find_layout_node_by_stable_key_suffix(&layout, "/header").unwrap_or_else(|| {
                 panic!("browser search header should render; rendered:\n{rendered}")
             });
         let mut search_inputs = Vec::new();
-        collect_layout_nodes_by_stable_key(&layout, "sbrowser-search-input", &mut search_inputs);
+        collect_layout_nodes_by_stable_key_suffix(&layout, "/search-input", &mut search_inputs);
 
         assert_eq!(
             search_inputs.len(),
@@ -3858,7 +3915,7 @@
 
         let layout = editor.widget_layout().expect("browser layout");
         let rendered = render_layout_cells(&layout, 72, 60);
-        let header = find_layout_node_by_stable_key(&layout, "browser-header")
+        let header = find_layout_node_by_stable_key_suffix(&layout, "/header")
             .unwrap_or_else(|| panic!("browser header should render; rendered:\n{rendered}"));
         let input = find_widget_type(header, "text-input").unwrap_or_else(|| {
             panic!("browser header text input should render; rendered:\n{rendered}")
@@ -3900,7 +3957,7 @@
         editor.set_layout_viewport(72, 60);
 
         let layout = editor.widget_layout().expect("browser layout");
-        let input = find_layout_node_by_stable_key(&layout, "sbrowser-search-input")
+        let input = find_layout_node_by_stable_key_suffix(&layout, "/search-input")
             .expect("browser search input");
         let click_col = input.rect.col + 1.0;
         let click_row = input.rect.row + input.rect.height * 0.5;
@@ -4029,7 +4086,7 @@
             .widget_layout
             .as_deref()
             .expect("samples tile widget layout");
-        let input = find_layout_node_by_stable_key(samples_layout, "sbrowser-search-input")
+        let input = find_layout_node_by_stable_key_suffix(samples_layout, "/search-input")
             .expect("browser search input");
         let click_col = samples_tile.rect.col + input.rect.col + 1.0;
         let click_row = samples_tile.rect.row + input.rect.row + input.rect.height * 0.5;
@@ -4701,7 +4758,7 @@
         editor.set_layout_viewport(48, 24);
 
         let layout = editor.widget_layout().expect("instrument browser layout");
-        let loading_row = find_layout_node_by_stable_key(&layout, "instrument-loading-row")
+        let loading_row = find_layout_node_by_stable_key_suffix(&layout, "/instrument-loading-row")
             .expect("instrument swap should render its loading row");
         assert_finite_nonzero_rect(loading_row, "instrument loading row");
         assert!(
@@ -4988,10 +5045,10 @@
             apply_browser_body(&mut editor, body);
             editor.set_layout_viewport(220, 90);
             let layout = editor.widget_layout().expect("diagnostic browser layout");
-            let scroll = find_layout_node_by_stable_key(&layout, "instruments-tab-scroll")
+            let scroll = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-scroll")
                 .expect("instrument scroll layout node")
                 .rect;
-            let tree = find_layout_node_by_stable_key(&layout, "instruments-tab-tree")
+            let tree = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
                 .expect("instrument tree layout node")
                 .rect;
             let rendered = render_layout_cells(&layout, 220, 90);

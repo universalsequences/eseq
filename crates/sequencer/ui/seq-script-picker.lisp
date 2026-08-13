@@ -219,6 +219,15 @@
       (status (fmt "Deleted sequencer {}" name))
       true)))
 
+;; Owner-side accessor for `seq-script-picker-source-buffer` (module spec §10
+;; hazard m).  A converted module's bare `(set! seq-script-picker-source-buffer
+;; …)` interns the *module's* global and never reaches this file's slot, so the
+;; return-to-source path would silently stop working.  ui/browser.lisp (module
+;; eseq.browser) calls this instead; a function slot is written once by its def,
+;; so the late-binding heal that reaches it survives.
+(def seq-script-remember-source-buffer ()
+  (set! seq-script-picker-source-buffer (current-buffer-name)))
+
 (def seq-script-return-to-source-buffer ()
   (if (not (= seq-script-picker-source-buffer ""))
     (switch-to-buffer seq-script-picker-source-buffer)

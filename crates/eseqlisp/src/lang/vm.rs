@@ -4070,6 +4070,15 @@ impl VM {
         if let Some(node_id) = self.state_bindings.get(name) {
             return Some(*node_id);
         }
+        // `eseq.vanilla/x` registers flat (Compiler::qualify_registration_name),
+        // so the §3 escape-hatch spelling of a pinned `defstate` reduces to the
+        // flat key here too — mirrors `Compiler::state_binding_for`.
+        let stripped = crate::modules::strip_implicit(name);
+        if stripped != name
+            && let Some(node_id) = self.state_bindings.get(stripped)
+        {
+            return Some(*node_id);
+        }
         let module = self.current_module_name();
         if module != crate::modules::IMPLICIT_MODULE
             && !crate::modules::is_qualified(name)
@@ -6717,6 +6726,46 @@ counter
         assert_eq!(
             vm.read_tracked_state_value("legacy-flag"),
             Some(Value::Bool(true))
+        );
+    }
+
+    /// Hazard (i) + (b) compounding, found converting `ui/browser.lisp`: a
+    /// `defstate` that production Rust *writes* by bare spelling is pinned to
+    /// `eseq.vanilla` with the §3 escape hatch and gets no compat alias, so its
+    /// `state_bindings` key must stay **flat** — vanilla's registry keyspace is
+    /// the flat keyspace under slice 0, and neither state-binding ladder has an
+    /// implicit-module rung. Both the module's own bare reference and an
+    /// unconverted flat writer have to land on the one node.
+    #[test]
+    fn a_vanilla_pinned_defstate_registers_flat() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("compat-pin"),
+            "(module test.pinned)\n(defstate eseq.vanilla/host-tab \"samples\")\n\
+             (def read-tab () eseq.vanilla/host-tab)\n(def bare-read () host-tab)",
+            1,
+        )
+        .expect("module eval");
+        // An unconverted (headerless) writer, i.e. what Rust emits.
+        vm.eval_str("(set! host-tab \"instruments\")")
+            .expect("flat set!");
+        assert_eq!(
+            vm.eval_str("host-tab"),
+            Ok(Some(Value::String("instruments".to_string())))
+        );
+        // The module sees it through both the qualified and the bare spelling.
+        assert_eq!(
+            vm.eval_str("(test.pinned/read-tab)"),
+            Ok(Some(Value::String("instruments".to_string())))
+        );
+        assert_eq!(
+            vm.eval_str("(test.pinned/bare-read)"),
+            Ok(Some(Value::String("instruments".to_string())))
+        );
+        // And the runtime by-name path (host state reads) resolves the flat key.
+        assert_eq!(
+            vm.read_tracked_state_value("host-tab"),
+            Some(Value::String("instruments".to_string()))
         );
     }
 
