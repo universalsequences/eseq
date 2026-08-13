@@ -230,6 +230,14 @@
         ]
       },
       {
+        "name": "@max-delay",
+        "summary": "Delay circular-buffer length in samples (per lane for tensor input). Defaults to 88000 for scalar input, 48000 per lane for tensor input.",
+        "type": "int",
+        "used_by": [
+          "delay"
+        ]
+      },
+      {
         "name": "@max-frames",
         "summary": "Playback frame budget for to-signal.",
         "type": "int",
@@ -2494,8 +2502,16 @@
           "maximum": 2,
           "minimum": 2
         },
-        "attribute_docs": [],
-        "attributes": [],
+        "attribute_docs": [
+          {
+            "name": "@max-delay",
+            "summary": "Delay circular-buffer length in samples (per lane for tensor input). Defaults to 88000 for scalar input, 48000 per lane for tensor input.",
+            "type": "int"
+          }
+        ],
+        "attributes": [
+          "@max-delay"
+        ],
         "category": "effect",
         "documentation": {
           "port_docs": "curated-from-signature",
@@ -2511,16 +2527,16 @@
         },
         "inputs": [
           {
-            "kind": "signal|float",
+            "kind": "signal|float|tensor",
             "name": "signal",
             "required": true,
-            "summary": "Input signal."
+            "summary": "Input signal. A tensor gets one independent delay line per lane."
           },
           {
-            "kind": "signal|float",
+            "kind": "signal|float|tensor",
             "name": "time_in_samples",
             "required": true,
-            "summary": "Delay time in samples."
+            "summary": "Delay time in samples (clamped to [0, max-delay - 1], interpolated). A scalar broadcasts to every lane; a tensor gives per-lane delay times and requires a tensor input signal."
           }
         ],
         "name": "delay",
@@ -2531,15 +2547,17 @@
         "outputs": [
           {
             "index": 0,
-            "kind": "signal",
+            "kind": "same-as-inputs",
             "name": "out",
             "summary": "Operator result."
           }
         ],
         "signatures": [
-          "(delay signal time_in_samples)"
+          "(delay signal time_in_samples)",
+          "(delay tensor time_in_samples)",
+          "(delay tensor times_tensor @max-delay N)"
         ],
-        "summary": "Delay by a time in samples."
+        "summary": "Delay by a time in samples. Tensor input gets one independent delay line per lane; @max-delay bounds the buffer (default 88000 samples for scalars, 48000 per lane for tensors)."
       },
       {
         "aliases": [
