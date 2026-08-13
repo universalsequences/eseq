@@ -14,14 +14,15 @@
 ;; plain `def`, all three of which are immune to hazard (m) — nothing here is a
 ;; mutable plain `def`, so nothing needs pinning to eseq.vanilla.
 ;;
-;; No imports on purpose. The three converted modules whose names this file
-;; touches all load AFTER it (seq-script-picker, seq-layout) or are large render
-;; roots (piano-roll); `import` evaluates its target, so importing any of them
-;; would invert the load order / drag a UI root into every VM. Their identity
-;; compat aliases already make the bare spellings resolve:
-;;   piano-roll-default-pane-height        — eseq.piano-roll
+;; No imports on purpose. The converted modules whose names this file touches
+;; are consumers of THIS hub (seq-script-picker, seq-layout import us) or
+;; render roots (piano-roll), and every cross-module reference below is an
+;; event-time call, which the identity compat aliases resolve at dispatch:
 ;;   seq-refresh-current-layout            — eseq.seq-layout (alias → refresh-current-layout)
 ;;   seq-delete-script-sequencer-by-buffer — eseq.seq-script-picker
+;; (`piano-roll-default-pane-height` used to be a LOAD-time read of
+;; eseq.piano-roll; eseq-mods.12 moved the constant home to this hub because
+;; a render root must never be imported.)
 ;;
 ;; Hazard (n)/(n2): no Rust harness reads or slices this file's source, so
 ;; neither the fragment-eval nor the standalone-eval restriction applies.
@@ -40,6 +41,7 @@
 (module-compat-alias seq-patcher-source-buffer seq-patcher-source-buffer)
 (module-compat-alias seq-registered-step-tabs seq-registered-step-tabs)
 (module-compat-alias lower-fx-layout-height lower-fx-layout-height)
+(module-compat-alias piano-roll-default-pane-height piano-roll-default-pane-height)
 (module-compat-alias seq-step-tab-buffer seq-step-tab-buffer)
 (module-compat-alias seq-step-tab-sequencer-name seq-step-tab-sequencer-name)
 (module-compat-alias seq-step-tab-source-path seq-step-tab-source-path)
@@ -66,6 +68,10 @@
 (defstate seq-patcher-source-buffer "")
 (defstate seq-registered-step-tabs '())
 
+;; Moved home from eseq.piano-roll (eseq-mods.12): the layout hub owning
+;; this constant lets piano-roll import it instead of this hub reading a
+;; render root at load time (roots must never be imported).
+(def piano-roll-default-pane-height 11.5)
 (def lower-fx-layout-height piano-roll-default-pane-height)
 
 (def %seq-step-tab-label (tab)

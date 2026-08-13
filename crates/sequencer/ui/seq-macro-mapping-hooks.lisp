@@ -1,6 +1,9 @@
 ;; seq-shell listeners on the macro-mapping-sidebar-* hooks.
 ;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3.
 (module eseq.seq-macro-mapping-hooks)
+;; Compile-time edge (spec §4): the shared defstate keyspace + compat
+;; aliases must exist before this unit's readers compile.
+(import eseq.seq-core-state)
 
 (import eseq.seq-layout)
 

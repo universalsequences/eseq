@@ -3,6 +3,12 @@
 ;; module in S3.
 
 (module eseq.seq-layout)
+;; Compile-time edges (spec §4): the shared defstate keyspace + compat
+;; aliases must exist before this unit's readers compile, and this file
+;; reads eseq.seq-step-tabs at LOAD time (`lower-fx-layout-height` feeds a
+;; top-level def) as well as its layout defstates.
+(import eseq.seq-core-state)
+(import eseq.seq-step-tabs)
 
 (import eseq.effects.param-controls :as pc)
 

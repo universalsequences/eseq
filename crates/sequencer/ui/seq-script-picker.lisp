@@ -34,6 +34,11 @@
 ;; `bind-key "C-c s"` handler are all defined here, so their qualified
 ;; registration strings are exact hits.
 (module eseq.seq-script-picker)
+;; Compile-time edge (spec §4): this file reads eseq.seq-step-tabs
+;; `defstate`s (seq-registered-step-tabs) and its accessors; the import
+;; evaluates that module before the readers below compile. Before import's
+;; compile-time half this had to be ordered by main.lisp (hazard (p)).
+(import eseq.seq-step-tabs)
 
 ;; Identity aliases (hazard-free: every one is a function).  Why each:
 ;;   seq-register-script-source-tab  — called by 11 headerless user scripts in
@@ -210,10 +215,10 @@
     (host-command "remove-project-script-from-scratch" (dict :path path))))
 
 ;; `seq-register-script-step-sequencer-tab`, `seq-registered-step-tabs` and the
-;; `seq-step-tab-*` accessors live in ui/seq-step-tabs.lisp (eseq.seq-step-tabs):
-;; referenced bare (the stage-3 late-binding heal covers the function reads, and
-;; `seq-registered-step-tabs` is a `defstate`, which resolves through the
-;; state-bindings ladder rather than the global one — hazard (m) does not apply).
+;; `seq-step-tab-*` accessors live in ui/seq-step-tabs.lisp (eseq.seq-step-tabs),
+;; a declared import edge above: the compile-time half of that import
+;; guarantees the defstate keyspace and aliases exist before these readers
+;; compile, wherever this file sits in the load order.
 (def seq-script-register-loaded-tab ()
   (if (not (= eseq.vanilla/script-buffer-name ""))
     (seq-register-script-step-sequencer-tab

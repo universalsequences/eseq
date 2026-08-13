@@ -23,20 +23,23 @@
 ;; pinned name in full.
 (module eseq.piano-roll)
 
+;; Compile-time edge (spec §4): `piano-roll-default-pane-height` moved home
+;; to eseq.seq-step-tabs (the layout hub) so that hub stops reading a render
+;; root at load time; this import supplies the alias/def before our readers
+;; compile. Resolution in the whole-file harness VMs works per (n2): module
+;; files resolve against the source-manager cwd, which is crates/sequencer.
+(import eseq.seq-step-tabs)
+
 ;; `cool-off-follow` belongs to the converted eseq.seq-core-state. It is
-;; referenced BARE on purpose (no `import`): both Rust harnesses above eval this
-;; file into a bare `Runtime::new()` whose source manager has no `@/` root, so
-;; an `import` would fail to resolve `ui/seq-core-state.lisp` and push a load
-;; error into every one of those VMs. The bare reference reaches
-;; eseq.seq-core-state's identity alias through the base-name rung of the
-;; late-binding heal, which is exactly the rung that alias exists to serve.
+;; referenced BARE on purpose: it is an event-time call, so the base-name
+;; rung of the late-binding heal resolves it through the identity alias —
+;; no compile-time surface needed, hence no import.
 
 (module-compat-alias piano-roll-view-start piano-roll-view-start)
 (module-compat-alias piano-roll-view-duration piano-roll-view-duration)
 (module-compat-alias piano-roll-lane-scroll piano-roll-lane-scroll)
 (module-compat-alias piano-roll-lane-height piano-roll-lane-height)
 (module-compat-alias piano-roll-arrangement-mode? piano-roll-arrangement-mode?)
-(module-compat-alias piano-roll-default-pane-height piano-roll-default-pane-height)
 (module-compat-alias piano-roll-max-lane-scroll piano-roll-max-lane-scroll)
 (module-compat-alias piano-roll-request-fit-for-track piano-roll-request-fit-for-track)
 (module-compat-alias piano-roll-request-fit piano-roll-request-fit)
@@ -65,7 +68,6 @@
 
 (def %timeline-height 35)
 (def %header-height 2)
-(def piano-roll-default-pane-height 11.5)
 (def %view-padding 1)
 (def %min-view-duration 4)
 (def %max-view-duration 256)

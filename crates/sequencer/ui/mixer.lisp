@@ -2,6 +2,9 @@
 ;; Renders to *mixer* buffer. Loaded by ui/main.lisp.
 
 (module eseq.mixer)
+;; Compile-time edge (spec §4): the shared defstate keyspace + compat
+;; aliases must exist before this unit's readers compile.
+(import eseq.seq-core-state)
 
 ;; Migration aliases (module spec §10 step 2) for the names unconverted
 ;; callers still spell flat.  Five are lisp-side (effects/track-panels.lisp

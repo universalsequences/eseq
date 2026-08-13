@@ -48,6 +48,9 @@
 ;;    is an eseq.effects.effect-panels key; seq-toggle-sound-palette is an
 ;;    eseq.sound-palette key. All reachable bare via the base-name alias rung.
 (module eseq.seq-panels)
+;; Compile-time edge (spec §4): the shared defstate keyspace + compat
+;; aliases must exist before this unit's readers compile.
+(import eseq.seq-core-state)
 
 ;; Identity aliases. Grouped by what forces each:
 ;;   [rust]     production Rust invokes/evals the flat name

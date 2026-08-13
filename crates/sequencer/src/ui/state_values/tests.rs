@@ -2147,6 +2147,15 @@
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
                 ("track-instrument-types", test_list(vec![])),
+                // The real eseq.seq-core-state (imported by browser.lisp)
+                // gates seq-has-selected-bus? on the bus list length.
+                (
+                    "bus-names",
+                    test_list(vec![
+                        Value::String("Bus A".to_string()),
+                        Value::String("Bus B".to_string()),
+                    ]),
+                ),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-selected-sample", Value::String(String::new())),
@@ -2243,14 +2252,11 @@
                 };
                 Ok(build_instrument_tree_value(query, &project_engines))
             });
-        editor
-            .runtime_mut()
-            .eval_str("(defstate selected-bus -1)")
-            .expect("define browser test selected bus state");
-        editor
-            .runtime_mut()
-            .eval_str("(def seq-has-selected-bus? () (>= selected-bus 0))")
-            .expect("define browser test selected bus predicate");
+        // selected-bus and seq-has-selected-bus? used to be stubbed flat here;
+        // browser.lisp now imports eseq.seq-core-state, whose compile-time
+        // half (spec §4) evaluates the real module before browser's readers
+        // compile, so the test's bare `(set! selected-bus …)` resolves through
+        // the module's compat alias to the real binding.
         // ui/track-collapse.lisp is a module now, and its compat aliases only
         // reach callers compiled after it is evaluated — this harness evals
         // the consumer's source directly, so the dep has to be a separate,
@@ -13656,6 +13662,11 @@
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
+        let src = std::fs::read_to_string("ui/main.lisp").expect("read grid lisp");
+        full_grid_editor_with_main_source(&src)
+    }
+
+    fn full_grid_editor_with_main_source(main_source: &str) -> eseqlisp::Editor {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
             fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
@@ -13974,15 +13985,14 @@
             )
             .expect("install default custom UI dispatchers");
 
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read grid lisp");
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
             Some(std::path::PathBuf::from("ui/main.lisp")),
-            &src,
+            main_source,
             overlays,
         );
         if !report.success {
-            panic!("load grid lisp: {}", report.failure_message());
+            panic!("load grid lisp: {:#?}", report.diagnostics);
         }
         editor.process_lisp_reload_report(report);
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -14020,6 +14030,79 @@
             "full grid test fixture should activate a sequencer widget layout"
         );
         editor
+    }
+
+    /// eseq-mods.12 acceptance: with import's compile-time half (spec §4)
+    /// the distro root's import block is order-free. Reversing every
+    /// `(import …)` line in ui/main.lisp — render roots included — must
+    /// boot the same UI: same buffers, same widget trees, and the
+    /// cross-module compile-time reads that used to pin the order (hazard
+    /// (p): seq-core-state defstates, seq-step-tabs defstates) still
+    /// resolve to the same values.
+    #[test]
+    fn metal_seq_main_import_block_boots_in_reverse_order() {
+        let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
+        let import_lines: Vec<&str> = src
+            .lines()
+            .filter(|line| line.starts_with("(import "))
+            .collect();
+        assert!(
+            import_lines.len() >= 10,
+            "expected the distro root's import block, found {} lines",
+            import_lines.len()
+        );
+        let mut reversed_imports = import_lines.iter().rev();
+        let reversed = src
+            .lines()
+            .map(|line| {
+                if line.starts_with("(import ") {
+                    *reversed_imports.next().expect("import line count")
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Both boots panic inside the helper if the load fails.
+        let mut baseline = full_grid_editor_for_scroll_tests();
+        let mut reordered = full_grid_editor_with_main_source(&reversed);
+
+        let buffer_names = |editor: &eseqlisp::Editor, rendered_only: bool| {
+            let mut names = editor
+                .buffers
+                .iter()
+                .filter(|buffer| !rendered_only || buffer.widget_tree.is_some())
+                .map(|buffer| buffer.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            buffer_names(&baseline, false),
+            buffer_names(&reordered, false),
+            "reversed import order changed the booted buffer set"
+        );
+        assert_eq!(
+            buffer_names(&baseline, true),
+            buffer_names(&reordered, true),
+            "reversed import order changed which buffers rendered a widget tree"
+        );
+
+        // The compile-time cross-module reads that pinned the old order.
+        for probe in [
+            "(seq-has-selected-bus?)",
+            "seq-registered-step-tabs",
+            "(seq-arrangement-view?)",
+        ] {
+            let normal = baseline.runtime_mut().eval_str(probe);
+            let shuffled = reordered.runtime_mut().eval_str(probe);
+            assert!(
+                shuffled.is_ok(),
+                "probe {probe} failed under reversal: {shuffled:?}"
+            );
+            assert_eq!(normal, shuffled, "probe {probe} diverged under reversal");
+        }
     }
 
     fn set_full_grid_track_count(

@@ -36,6 +36,9 @@
 ;; `:as` alias below is safe (a fragment eval would need the full dotted
 ;; `eseq.seq-step-tabs/…` spelling instead).
 (module eseq.transport)
+;; Compile-time edge (spec §4): the shared defstate keyspace + compat
+;; aliases must exist before this unit's readers compile.
+(import eseq.seq-core-state)
 
 ;; The ONE import, and it is load-bearing rather than cosmetic. The two view
 ;; buttons at the right edge call `seq-arrangement-view?` at RENDER time, and

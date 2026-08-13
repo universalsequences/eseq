@@ -12,22 +12,21 @@
 ; applying the theme), effects.lisp (its own nested manifest) and
 ; effects/step-buffer.lisp (a headerless side-effect root).
 ;
-; ORDER (spec §10 hazard p): `import` is a *runtime* form — the importing
-; file is compiled in full before the import executes — so a declared edge
-; guarantees only that the target is evaluated before the importer's body
-; runs. Anything a file needs at COMPILE time (another module's `defstate`
-; keyspace, its macros, its compat-alias spellings) can only be ordered here,
-; by the loader. That is what pins the two entries below to the top; the
-; render roots that follow are likewise not freely reorderable, because they
-; reference each other bare and a module must never import a UI root.
+; ORDER (spec §4, hazard (p) RESOLVED by eseq-mods.12): `import` now has a
+; compile-time half — the compiler evaluates an import's target before any
+; later form in the importing unit compiles — so every module declares its
+; own compile-time deps (`defstate` keyspaces, macros, aliases) and the
+; import block below is order-free. What still binds this file:
+;   - a `load` and the calls that use it stay ordered (themes.lisp then the
+;     theme call; `load` is by design the raw evaluate-here primitive);
+;   - eseq.materials and eseq.seq-core-state stay LISTED (nothing imports
+;     materials — its macros expand flat inside :shader/:material bodies —
+;     and both serve the ~305 headerless content files Rust loads after
+;     boot, which cannot import), but their position no longer matters.
 
 (load "@/ui/themes.lisp")
 (seq-theme-mac-osx-dark)
-;; Macros, expanded at the compile time of every consumer — including the
-;; ~305 headerless content files Rust loads after us, which cannot import.
 (import eseq.materials)
-;; The shared-state hub. Its `defstate` keys have to exist before any reader
-;; compiles, and an import inside a reader is too late to supply them.
 (import eseq.seq-core-state)
 
 (import eseq.browser)
@@ -55,9 +54,8 @@
 
 ;; Library anchors: nothing imports these three, but each one imports the
 ;; layer below it, so they are what pulls in seq-layout, step-grid-
-;; interactions, seqv-track-params and seq-grid-mode. seq-script-picker also
-;; reads eseq.seq-step-tabs `defstate`s, so it has to stay below the import
-;; of eseq.transport (which is what evaluates seq-step-tabs).
+;; interactions, seqv-track-params and seq-grid-mode. (seq-script-picker's
+;; read of eseq.seq-step-tabs `defstate`s is now its own declared import.)
 (import eseq.seq-script-picker)
 (import eseq.seq-macro-mapping-hooks)
 (import eseq.bus-grid)
