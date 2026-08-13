@@ -84,7 +84,9 @@
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "BS" "delete-selected-steps")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "Delete" "delete-selected-steps")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RET" "cursor-toggle")
-(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-h" "seqv-collapse-all-tracks")
+;; Qualified since S4: `seqv-collapse-all-tracks` was a compat alias, not the
+;; def's base name, so the qualified→flat dispatch fallback cannot reach it.
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-h" "eseq.sequencer/collapse-all-tracks")
 
 ;; `param-mode` stays BARE, deliberately, even though eseq.seq-core-state now
 ;; owns it and is imported above: it is a `defstate`, which resolves through

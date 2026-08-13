@@ -297,5 +297,7 @@
 (bind-key "Tab" "seq-toggle-arrangement")
 ;; Sound palette overlay (takes spec 17.6): toggles on the bound clip, or
 ;; the current track's binding outside the timeline.
-(bind-key "C-x p" "seq-toggle-sound-palette")
+;; Qualified since S4 retired the compat aliases: the handler string is
+;; late-bound, and `seq-toggle-sound-palette` no longer resolves flat.
+(bind-key "C-x p" "eseq.sound-palette/toggle-open")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")

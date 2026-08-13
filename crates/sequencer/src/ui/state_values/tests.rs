@@ -21113,6 +21113,49 @@
         ])
     }
 
+    /// eseq-chk: since S4 retired the flat compat aliases, `C-x p` binds the
+    /// QUALIFIED handler string `eseq.sound-palette/toggle-open` — a flat
+    /// spelling that is not a def's base name dispatches to nothing. Prove
+    /// the chord reaches the palette-open native end to end, and pin the
+    /// defs the other requalified binding names (`C-h` collapse-all).
+    #[test]
+    fn metal_seq_cx_p_chord_opens_the_sound_palette() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut editor = full_grid_editor_for_scroll_tests();
+        // The fixture loads the UI but never syncs runtime `bind-key`
+        // registrations into the editor's dispatch table; a real session
+        // does this every frame.
+        editor.refresh_runtime_side_effects();
+        // The fixture's palette natives are silent `true` stubs; make the
+        // open native observable so the assertion sees the dispatch.
+        editor
+            .runtime_mut()
+            .register_native("seq-sound-palette-open", |_args, ctx| {
+                ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
+                    name: "palette-open-probe".to_string(),
+                    payload: Value::Nil,
+                });
+                Ok(Value::Bool(true))
+            });
+        editor.drain_host_commands();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "palette-open-probe"
+            )),
+            "C-x p should reach the seq-sound-palette-open native, got {commands:?}"
+        );
+        assert!(
+            editor
+                .runtime()
+                .has_global("eseq.sequencer/collapse-all-tracks"),
+            "the C-h mode binding names this def; renaming it orphans the key"
+        );
+    }
+
     /// Takes spec 18.3 exit criterion: the palette overlay renders — header,
     /// both entry rows (gray base + colored current), the preset/sample
     /// source line, and the param diff badges — all inside the panel;
