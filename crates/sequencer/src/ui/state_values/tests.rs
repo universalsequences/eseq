@@ -26307,6 +26307,88 @@
         );
     }
 
+    /// Does `expr` mention `symbol` anywhere?
+    fn shader_expr_mentions(expr: &Expression, symbol: &str) -> bool {
+        match expr {
+            Expression::Symbol(name) => name == symbol,
+            Expression::List(items) | Expression::QuoteList(items) => items
+                .iter()
+                .any(|item| shader_expr_mentions(item, symbol)),
+            _ => false,
+        }
+    }
+
+    /// Is `symbol` reachable in `expr` without passing through an `if` whose
+    /// condition reads `gate`? `blocked` carries that state down the tree.
+    fn shader_symbol_reachable_past_gate(
+        expr: &Expression,
+        symbol: &str,
+        gate: &str,
+        blocked: bool,
+    ) -> bool {
+        match expr {
+            Expression::Symbol(name) => name == symbol && !blocked,
+            Expression::List(items) => {
+                if let [Expression::Symbol(head), cond, then_expr, else_expr] = items.as_slice() {
+                    if head == "if" {
+                        let gated = blocked || shader_expr_mentions(cond, gate);
+                        return shader_symbol_reachable_past_gate(then_expr, symbol, gate, gated)
+                            || shader_symbol_reachable_past_gate(else_expr, symbol, gate, gated);
+                    }
+                }
+                items
+                    .iter()
+                    .any(|item| shader_symbol_reachable_past_gate(item, symbol, gate, blocked))
+            }
+            _ => false,
+        }
+    }
+
+    /// The `:color` expression of the one `material` that paints the p-lock
+    /// tick — it is the only material in the shell that reads `seqcol`.
+    fn plock_tick_color_expr(expr: &Expression) -> Option<&Expression> {
+        if let Expression::List(items) = expr {
+            if matches!(items.first(), Some(Expression::Symbol(head)) if head == "material") {
+                let color = items.windows(2).find_map(|pair| match &pair[0] {
+                    Expression::Keyword(key) if key == "color" => Some(&pair[1]),
+                    _ => None,
+                });
+                if let Some(color) = color {
+                    if shader_expr_mentions(color, "seqcol") {
+                        return Some(color);
+                    }
+                }
+            }
+            return items.iter().find_map(plock_tick_color_expr);
+        }
+        None
+    }
+
+    /// Regression (eseq-efk): off steps carrying p-locks must still paint the
+    /// p-lock tick. Performers deliberately p-lock off steps (warp bpm on a
+    /// sampler) and also hit them by accident — with the indicator gated on
+    /// `active` those locks became invisible while still moving parameters.
+    #[test]
+    fn metal_seq_step_shell_paints_the_plock_tick_on_off_steps() {
+        let _editor = full_grid_editor_for_scroll_tests();
+        let shell_def = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-shell")
+            .expect("seqv-step-shell should be registered");
+        let color = plock_tick_color_expr(&shell_def.sdf_expr)
+            .expect("seqv-step-shell should paint a p-lock tick material");
+
+        assert!(
+            shader_expr_mentions(color, "plock-kind"),
+            "the p-lock tick must key off plock-kind"
+        );
+        for tick_color in ["seqcol", "vcol"] {
+            assert!(
+                shader_symbol_reachable_past_gate(color, tick_color, "active", false),
+                "the p-lock tick color `{tick_color}` must render on off steps too — \
+                 it may not sit behind an `active` gate"
+            );
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_seq_selected_step_uses_the_themed_sdf_input_color() {

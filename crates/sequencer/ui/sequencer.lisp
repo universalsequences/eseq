@@ -672,28 +672,30 @@
           (sdf/translate 0 0.82
             (sdf/rounded-rect 0.52 0.10 0.05))
           (material
-            :color (if (= active 1)
+            ;; The tick tracks p-locks, not the gate: off steps are a
+            ;; deliberate p-lock target (warp bpm, sampler ranges) and must
+            ;; show the same indicator an on step shows. Only the muted
+            ;; neutral fill still keys off `active`.
+            :color (if (= plock-kind 0)
+              (if (= active 1)
+                (if (= muted 1)
+                  border
+                  (rgba 0 0 0 0))
+                (rgba 0 0 0 0))
               (if (= muted 1)
                 border
                 (if (= plock-kind 2)
                   vcol
-                  (if (= plock-kind 1)
-                    seqcol
-                    (rgba 0 0 0 0))))
-              (rgba 0 0 0 0))
+                  seqcol)))
             :shadow (shadow
-              :color (if (= active 1)
-                (if (= muted 1)
-                  (rgba 0 0 0 0)
-                  (if (= plock-kind 2)
-                    (rgba variant-r variant-g variant-b 0.70)
-                    (rgba 0 0 0 0)))
-                (rgba 0 0 0 0))
-              :blur (if (= active 1)
-                (if (= muted 1)
-                  0.0
-                  (if (= plock-kind 2) 0.12 0.0))
-                0.0)
+              :color (if (= muted 1)
+                (rgba 0 0 0 0)
+                (if (= plock-kind 2)
+                  (rgba variant-r variant-g variant-b 0.70)
+                  (rgba 0 0 0 0)))
+              :blur (if (= muted 1)
+                0.0
+                (if (= plock-kind 2) 0.12 0.0))
               :offset (vec2 0 0))))
         ;; toggled fill
         (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
