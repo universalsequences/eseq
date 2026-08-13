@@ -18,20 +18,20 @@
 ;; selected section's panel goes transparent (Ableton-style: the rack
 ;; background shows through); unselected panels keep their darker surface
 (def opx-warm-surface (section)
-  (ui-lego-sel-surface section :transparent (opx-surf-warm)))
+  (eseq.effects.custom-ui-lego/ui-lego-sel-surface section :transparent (opx-surf-warm)))
 (def opx-cool-surface (section)
-  (ui-lego-sel-surface section :transparent (opx-surf-cool)))
+  (eseq.effects.custom-ui-lego/ui-lego-sel-surface section :transparent (opx-surf-cool)))
 
 (def opx-bord-warm () (rgba 0.44 0.32 0.10 0.060))
 (def opx-bord-cool () (rgba 0.14 0.36 0.34 0.060))
 (def opx-bord-dark () (rgba 0.22 0.22 0.26 0.060))
 
 (def opx-panel-dense (section surface border stripe body)
-  (ui-lego-panel-x-s section (ui-lego-col-w) (ui-lego-dense-h) surface border stripe body))
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-dense-h) surface border stripe body))
 (def opx-panel-small (section surface border stripe body)
-  (ui-lego-panel-x-s section (ui-lego-col-w) (ui-lego-small-h) surface border stripe body))
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (eseq.effects.custom-ui-lego/ui-lego-col-w) (eseq.effects.custom-ui-lego/ui-lego-small-h) surface border stripe body))
 (def opx-panel-strip (section surface border stripe body)
-  (ui-lego-panel-x-s section (* 2.0 (ui-lego-strip-w)) (ui-lego-full-h) surface border stripe body))
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s section (* 2.0 (eseq.effects.custom-ui-lego/ui-lego-strip-w)) (eseq.effects.custom-ui-lego/ui-lego-full-h) surface border stripe body))
 
 (def opx-small-row (body)
   (box :width :fill :height :fill :v-align :center body))
@@ -76,11 +76,11 @@
   (opx-panel-dense section (opx-warm-surface section) (opx-bord-warm) accent
     (h-stack :width :fill :height :fill :gap 0.50 :align :center
       (box :width 1.4 :height :fill :v-align :center
-        (ui-lego-tab-s section tab-text 1.4 1.05 accent :black))
+        (eseq.effects.custom-ui-lego/ui-lego-tab-s section tab-text 1.4 1.05 accent :black))
       (h-stack :gap 0.14 :align :start
-        (ui-lego-knob-s section coarse-p "coarse" 4.2 accent 0)
-        (ui-lego-knob-s section fine-p "fine" 4.2 (opx-cream) 2))
-      (ui-lego-fader-s section level-p 2.3 1.95 accent 1 false))))
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s section coarse-p "coarse" 4.2 accent 0)
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s section fine-p "fine" 4.2 (opx-cream) 2))
+      (eseq.effects.custom-ui-lego/ui-lego-fader-s section level-p 2.3 1.95 accent 1 false))))
 
 (def opx-opa-block ()
   (opx-op-block 0 "A" (opx-gold) "opa_coarse" "opa_fine" "opa_level_db"))
@@ -96,32 +96,32 @@
   (opx-panel-small 0 (opx-surf-warm) (opx-bord-warm) (opx-gold)
     (opx-small-row
       (h-stack :gap 0.52 :align :end
-        (ui-lego-header-s 0 "FM" 2.0 (opx-gold))
-        (ui-lego-micro-option-s 0 "algorithm" "algorithm" 5.4 (opx-alg-options) (opx-gold))
-        (ui-lego-micro-num-s 0 "fm_drive_db" "drive" 3.8 1 "dB" (opx-gold))
-        (ui-lego-micro-num-s 0 "feedback" "feedbk" 3.8 2 false (opx-coral))))))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 0 "FM" 2.0 (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "algorithm" "algorithm" 5.4 (opx-alg-options) (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "fm_drive_db" "drive" 3.8 1 "dB" (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "feedback" "feedbk" 3.8 2 false (opx-coral))))))
 
 ;; per-op enables
 (def opx-ops-block ()
   (opx-panel-small 2 (opx-surf-warm) (opx-bord-warm) false
     (opx-small-row
       (h-stack :gap 0.42 :align :end
-        (ui-lego-header-s 2 "OPS" 2.6 (opx-cream))
-        (ui-lego-micro-option-s 2 "opa_on" "A" 4.0 (opx-onoff-options) (opx-gold))
-        (ui-lego-micro-option-s 2 "opb_on" "B" 4.0 (opx-onoff-options) (opx-teal))
-        (ui-lego-micro-option-s 2 "opc_on" "C" 4.0 (opx-onoff-options) (opx-coral))
-        (ui-lego-micro-option-s 2 "opd_on" "D" 4.0 (opx-onoff-options) (opx-violet))))))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 2 "OPS" 2.6 (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "opa_on" "A" 4.0 (opx-onoff-options) (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "opb_on" "B" 4.0 (opx-onoff-options) (opx-teal))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "opc_on" "C" 4.0 (opx-onoff-options) (opx-coral))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "opd_on" "D" 4.0 (opx-onoff-options) (opx-violet))))))
 
 (def opx-global-block ()
   (opx-panel-small 4 (opx-surf-cool) (opx-bord-dark) false
     (opx-small-row
       (h-stack :gap 0.22 :align :end
-        (ui-lego-header-s 4 "GLB" 2.4 (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 4 "GLB" 2.4 (opx-cream))
         (box :width 0.8)
-        (ui-lego-micro-base-note-s 4 4.0 (opx-cream))
-        (ui-lego-micro-num-s 4 "glide_ms" "glide" 3.6 0 "ms" (opx-cream))
-        (ui-lego-micro-num-s 4 "volume_db" "vol" 4.4 1 "dB" (opx-gold))
-        (ui-lego-micro-num-s 4 "tone" "tone" 3.4 2 false (opx-cream))))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 4 4.0 (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "glide_ms" "glide" 3.6 0 "ms" (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "volume_db" "vol" 4.4 1 "dB" (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "tone" "tone" 3.4 2 false (opx-cream))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Center column — mode-driven detail (selected section picks the view)
@@ -129,16 +129,16 @@
 
 ;; envelope detail: ADSR editor + value readouts, accent-tinted per mode
 (def opx-env-detail (section title accent attack decay sustain release)
-  (ui-detail-adsr-body-x-s section title accent attack decay sustain release))
+  (eseq.effects.custom-ui-lego/ui-detail-adsr-body-x-s section title accent attack decay sustain release))
 
 ;; user-drawn waveform detail: 16 packed partial faders (draw the spectrum;
 ;; select wave "user" on any operator to play it)
 (def opx-partial-fader (name)
-  (ui-lego-vfader-s 5 name 1.28 2.05 (opx-gold)))
+  (eseq.effects.custom-ui-lego/ui-lego-vfader-s 5 name 1.28 2.05 (opx-gold)))
 
 (def opx-partials-detail ()
     (v-stack :width :fill :height :fill :gap 0.10 :align :center
-      (ui-lego-header-s 5 "USER WAVE — PARTIALS 1-16" 14.0 (opx-gold))
+      (eseq.effects.custom-ui-lego/ui-lego-header-s 5 "USER WAVE — PARTIALS 1-16" 14.0 (opx-gold))
       (h-stack :gap 0.0 :align :start
         (opx-partial-fader "partial_1")
         (opx-partial-fader "partial_2")
@@ -180,36 +180,36 @@
   (box :width :fill :height 2.55
     (v-stack :width :fill :gap 0.18 :align :start
       (h-stack :gap 0.54 :align :end
-        (ui-lego-header-s section (str "OSC " letter) 3.4 accent)
+        (eseq.effects.custom-ui-lego/ui-lego-header-s section (str "OSC " letter) 3.4 accent)
 	(box :width 0.2)
-        (ui-lego-micro-option-s section wave-p "wave" 4.6 (opx-wave-options) accent)
-        (ui-lego-micro-num-s section vel-p "vel" 2.8 2 false (opx-cream)))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s section wave-p "wave" 4.6 (opx-wave-options) accent)
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section vel-p "vel" 2.8 2 false (opx-cream)))
       (h-stack :gap 0.24 :align :end
-        (ui-lego-micro-option-s section fixed-p "mode" 4.5 (opx-fixed-options) (opx-cream))
-        (ui-lego-micro-num-s section freq-p "fixed hz" 4.8 1 "Hz" (opx-cream))
-        (ui-lego-micro-option-s section envmode-p "env" 4.7 (opx-env-mode-options) accent)
-        (ui-lego-micro-num-s section "env_loop_rate_hz" "loop" 4.0 1 "Hz" (opx-teal))
-        (ui-lego-micro-option-s section "env_sync_div" "sync" 4.2 (opx-sync-div-options) (opx-teal))))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s section fixed-p "mode" 4.5 (opx-fixed-options) (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section freq-p "fixed hz" 4.8 1 "Hz" (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s section envmode-p "env" 4.7 (opx-env-mode-options) accent)
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s section "env_loop_rate_hz" "loop" 4.0 1 "Hz" (opx-teal))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s section "env_sync_div" "sync" 4.2 (opx-sync-div-options) (opx-teal))))))
 
 ;; filter-envelope sub-view: amount + mode (+ shared loop/sync clocks)
 (def opx-filterenv-sub ()
   (box :width :fill :height 2.55
     (v-stack :width :fill :gap 0.18 :align :start
       (h-stack :gap 0.24 :align :end
-        (ui-lego-header-s 4 "FILTER ENV" 6.4 (opx-ice))
-        (ui-lego-micro-num-s 4 "fenv_amt" "env amt" 3.6 1 false (opx-ice))
-        (ui-lego-micro-option-s 4 "fenv_mode" "mode" 5.3 (opx-env-mode-options) (opx-ice)))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 4 "FILTER ENV" 6.4 (opx-ice))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "fenv_amt" "env amt" 3.6 1 false (opx-ice))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 4 "fenv_mode" "mode" 5.3 (opx-env-mode-options) (opx-ice)))
       (h-stack :gap 1.54 :align :end
-        (ui-lego-micro-num-s 4 "env_loop_rate_hz" "loop" 3.4 1 "Hz" (opx-teal))
-        (ui-lego-micro-option-s 4 "env_sync_div" "sync" 4.5 (opx-sync-div-options) (opx-teal))))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "env_loop_rate_hz" "loop" 3.4 1 "Hz" (opx-teal))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 4 "env_sync_div" "sync" 4.5 (opx-sync-div-options) (opx-teal))))))
 
 ;; user-wave sub-view: normalize toggle
 (def opx-userwave-sub ()
   (box :width :fill :height 2.55
     (v-stack :width :fill :gap 0.18 :align :start
       (h-stack :gap 1.42 :align :end
-        (ui-lego-header-s 5 "USER WAVE" 6.5 (opx-gold))
-        (ui-lego-micro-option-s 5 "user_norm" "normalize" 4.0 (opx-onoff-options) (opx-gold)))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 5 "USER WAVE" 6.5 (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 5 "user_norm" "normalize" 4.0 (opx-onoff-options) (opx-gold)))
       (label "set wave 'user' on an operator to hear it" :font-size 8.0 :color :dim :bg :transparent))))
 
 (def opx-center-sub ()
@@ -227,7 +227,7 @@
 
 ;; mode tabs: filled with accent when selected (Ableton's little filled box)
 (def opx-mode-tab (section text width accent)
-  (ui-lego-mode-tab-s section text width 0.98 accent))
+  (eseq.effects.custom-ui-lego/ui-lego-mode-tab-s section text width 0.98 accent))
 
 (def opx-mode-tabs ()
   (box :width :fill :height 1.30 :v-align :center
@@ -249,19 +249,19 @@
             (opx-gold)))))))
 
 (def opx-center-height ()
-  (+ (* 2.0 (ui-lego-dense-h)) (ui-lego-small-h) (* 2.0 (ui-lego-gap))))
+  (+ (* 2.0 (eseq.effects.custom-ui-lego/ui-lego-dense-h)) (eseq.effects.custom-ui-lego/ui-lego-small-h) (* 2.0 (eseq.effects.custom-ui-lego/ui-lego-gap))))
 
 ;; one continuous center panel: detail view / context sub-view / mode tabs,
 ;; separated by hairline dividers
 (def opx-center-column ()
-  (ui-lego-panel-x-s custom-ui-selected-section
-    (ui-lego-col-w) (opx-center-height)
+  (eseq.effects.custom-ui-lego/ui-lego-panel-x-s custom-ui-selected-section
+    (eseq.effects.custom-ui-lego/ui-lego-col-w) (opx-center-height)
     (opx-surf-dark) (opx-bord-dark) (opx-center-accent)
     (v-stack :width :fill :height :fill :gap 0.16
       (box :width :fill :height 3.7 (opx-center-detail))
-      (ui-lego-divider)
+      (eseq.effects.custom-ui-lego/ui-lego-divider)
       (box :width :fill :height 2.55 (opx-center-sub))
-      (ui-lego-divider)
+      (eseq.effects.custom-ui-lego/ui-lego-divider)
       (opx-mode-tabs))))
 
 ;; ---------------------------------------------------------------------------
@@ -273,73 +273,73 @@
     (h-stack :width :fill :height :fill :gap 0.30 :align :center
       (v-stack :width 9.4 :gap 0.18 :align :start
         (h-stack :gap 0.22 :align :end
-          (ui-lego-header-s 4 "FILTER" 4.2 (opx-ice))
-          (ui-lego-micro-option-s 4 "filter_type" "type" 4.4 (opx-filter-type-options) (opx-ice)))
+          (eseq.effects.custom-ui-lego/ui-lego-header-s 4 "FILTER" 4.2 (opx-ice))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 4 "filter_type" "type" 4.4 (opx-filter-type-options) (opx-ice)))
         (h-stack :gap 0.20 :align :start
-          (ui-lego-micro-option-s 4 "filter_on" "on" 3.0 (opx-onoff-options) (opx-ice))
-          (ui-lego-micro-num-s 4 "filter_keytrack" "key" 2.9 2 false (opx-ice))
-          (ui-lego-micro-num-s 4 "filter_drive" "drv" 2.9 2 false (opx-coral))))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 4 "filter_on" "on" 3.0 (opx-onoff-options) (opx-ice))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "filter_keytrack" "key" 2.9 2 false (opx-ice))
+          (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 4 "filter_drive" "drv" 2.9 2 false (opx-coral))))
       (h-stack :gap 0.10 :align :start
-        (ui-lego-knob-s 4 "filter_freq" "freq" 3.7 (opx-ice) 0)
-        (ui-lego-knob-s 4 "filter_res" "res" 3.7 (opx-ice) 2)
-        (ui-lego-knob-s 4 "filter_morph" "morph" 3.7 (opx-cream) 2)))))
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s 4 "filter_freq" "freq" 3.7 (opx-ice) 0)
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s 4 "filter_res" "res" 3.7 (opx-ice) 2)
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s 4 "filter_morph" "morph" 3.7 (opx-cream) 2)))))
 
 (def opx-shaper-block ()
   (opx-panel-dense 4 (opx-surf-cool) (opx-bord-cool) (opx-coral)
     (h-stack :width :fill :height :fill :gap 0.30 :align :center
       (v-stack :width 9.4 :gap 0.18 :align :start
-        (ui-lego-header-s 4 "SHAPER" 4.2 (opx-coral))
-        (ui-lego-micro-option-s 4 "shaper_type" "curve" 4.4 (opx-shaper-options) (opx-coral)))
+        (eseq.effects.custom-ui-lego/ui-lego-header-s 4 "SHAPER" 4.2 (opx-coral))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 4 "shaper_type" "curve" 4.4 (opx-shaper-options) (opx-coral)))
       (h-stack :gap 0.10 :align :start
-        (ui-lego-knob-s 4 "shaper_drive_db" "drive" 3.7 (opx-coral) 1)
-        (ui-lego-knob-s 4 "shaper_wet" "wet" 3.7 (opx-coral) 2)))))
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s 4 "shaper_drive_db" "drive" 3.7 (opx-coral) 1)
+        (eseq.effects.custom-ui-lego/ui-lego-knob-s 4 "shaper_wet" "wet" 3.7 (opx-coral) 2)))))
 
 (def opx-lfo-strip ()
   (opx-panel-strip 5 (opx-surf-cool) (opx-bord-cool) (opx-violet)
     (v-stack :width :fill :gap 0.08 :align :center
-      (ui-lego-header-s 5 "LFO" 5.6 (opx-violet))
-      (ui-lego-micro-option-s 5 "lfo_wave" "wave" 5.6 (opx-lfo-wave-options) (opx-violet))
+      (eseq.effects.custom-ui-lego/ui-lego-header-s 5 "LFO" 5.6 (opx-violet))
+      (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 5 "lfo_wave" "wave" 5.6 (opx-lfo-wave-options) (opx-violet))
       (h-stack
-        (ui-lego-micro-option-s 5 "lfo_mode" "mode" 5.6 (opx-lfo-mode-options) (opx-violet))
-        (ui-lego-micro-option-s 5 "lfo_retrig" "retrig" 5.6 (opx-retrig-options) (opx-gold)))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 5 "lfo_mode" "mode" 5.6 (opx-lfo-mode-options) (opx-violet))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 5 "lfo_retrig" "retrig" 5.6 (opx-retrig-options) (opx-gold)))
       (h-stack
-        (ui-lego-micro-num-s 5 "lfo_rate_hz" "rate" 5.6 2 "Hz" (opx-violet))
-        (ui-lego-micro-num-s 5 "lfo_ratio" "ratio" 5.6 2 false (opx-violet)))
-      (ui-lego-micro-num-s 5 "lfo_amount" "amount" 5.6 2 false (opx-violet))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "lfo_rate_hz" "rate" 5.6 2 "Hz" (opx-violet))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "lfo_ratio" "ratio" 5.6 2 false (opx-violet)))
+      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "lfo_amount" "amount" 5.6 2 false (opx-violet))
       (h-stack
-        (ui-lego-micro-num-s 5 "lfo_to_pitch" "pitch" 5.6 1 "st" (opx-violet))
-        (ui-lego-micro-num-s 5 "lfo_to_filter" "filt" 5.6 1 "oct" (opx-ice))))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "lfo_to_pitch" "pitch" 5.6 1 "st" (opx-violet))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "lfo_to_filter" "filt" 5.6 1 "oct" (opx-ice))))))
 
 (def opx-pitch-strip ()
   (opx-panel-strip 5 (opx-surf-cool) (opx-bord-warm) (opx-gold)
     (v-stack :width :fill :gap 0.08 :align :center
-      (ui-lego-header-s 5 "PITCH" 5.6 (opx-gold))
+      (eseq.effects.custom-ui-lego/ui-lego-header-s 5 "PITCH" 5.6 (opx-gold))
       (h-stack
-        (ui-lego-micro-num-s 5 "penv_amount" "env amt" 5.6 1 "st" (opx-gold))
-        (ui-lego-micro-option-s 5 "penv_mode" "env mode" 5.6 (opx-env-mode-options) (opx-gold)))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "penv_amount" "env amt" 5.6 1 "st" (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 5 "penv_mode" "env mode" 5.6 (opx-env-mode-options) (opx-gold)))
       (h-stack
-        (ui-lego-micro-num-s 5 "penv_attack" "A" 5.6 0 "ms" (opx-gold))
-        (ui-lego-micro-num-s 5 "penv_decay" "D" 5.6 0 "ms" (opx-gold)))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "penv_attack" "A" 5.6 0 "ms" (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "penv_decay" "D" 5.6 0 "ms" (opx-gold)))
       (h-stack
-        (ui-lego-micro-num-s 5 "penv_sustain" "S" 5.6 2 false (opx-gold))
-        (ui-lego-micro-num-s 5 "penv_release" "R" 5.6 0 "ms" (opx-gold)))
-      (ui-lego-micro-num-s 5 "transpose" "transp" 5.6 0 "st" (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "penv_sustain" "S" 5.6 2 false (opx-gold))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "penv_release" "R" 5.6 0 "ms" (opx-gold)))
+      (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "transpose" "transp" 5.6 0 "st" (opx-cream))
       (h-stack
-        (ui-lego-micro-num-s 5 "spread" "spread" 5.6 2 false (opx-cream))
-        (ui-lego-micro-num-s 5 "voice_pan" "pan" 5.6 2 false (opx-cream))))))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "spread" "spread" 5.6 2 false (opx-cream))
+        (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 5 "voice_pan" "pan" 5.6 2 false (opx-cream))))))
 
 (defsynth-ui
   (h-stack :width :fill :gap 0.30 :align :stretch
-    (ui-lego-column
+    (eseq.effects.custom-ui-lego/ui-lego-column
       (opx-opa-block)
       (opx-opb-block)
       (opx-algo-block))
-    (ui-lego-column
+    (eseq.effects.custom-ui-lego/ui-lego-column
       (opx-opc-block)
       (opx-opd-block)
       (opx-ops-block))
     (opx-center-column)
-    (ui-lego-column
+    (eseq.effects.custom-ui-lego/ui-lego-column
       (opx-filter-block)
       (opx-shaper-block)
       (opx-global-block))

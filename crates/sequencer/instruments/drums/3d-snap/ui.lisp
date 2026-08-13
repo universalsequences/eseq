@@ -1,51 +1,51 @@
 (defsynth-ui
-  (ui-rack :breathe
+  (eseq.effects.custom-ui-lego/ui-rack :breathe
     (list
-      (ui-panel "GLOB" 0
+      (eseq.effects.custom-ui-sections/ui-panel "GLOB" 0
         (h-stack :gap 0.35
-          (base-note)
-          (ui-param-knob "gain" "gain")
-          (ui-param-knob "drive" "drive")
-          (ui-param-knob "tuning" "tune")
-          (ui-param-knob "chaos" "chaos")))
-      (ui-panel "STRIKE" 0
+          (eseq.effects.custom-ui-runtime/base-note)
+          (eseq.effects.custom-ui-controls/ui-param-knob "gain" "gain")
+          (eseq.effects.custom-ui-controls/ui-param-knob "drive" "drive")
+          (eseq.effects.custom-ui-controls/ui-param-knob "tuning" "tune")
+          (eseq.effects.custom-ui-controls/ui-param-knob "chaos" "chaos")))
+      (eseq.effects.custom-ui-sections/ui-panel "STRIKE" 0
         (h-stack :gap 0.35
-          (ui-param-knob "stick_level" "stick")
-          (ui-param-knob "rim_level" "rim")
-          (ui-param-knob "snap_level" "snap")
-          (ui-param-knob "skin_level" "skin")
-          (ui-param-knob "brightness" "bright")))
-      (ui-panel "MEMBRANE" 0
+          (eseq.effects.custom-ui-controls/ui-param-knob "stick_level" "stick")
+          (eseq.effects.custom-ui-controls/ui-param-knob "rim_level" "rim")
+          (eseq.effects.custom-ui-controls/ui-param-knob "snap_level" "snap")
+          (eseq.effects.custom-ui-controls/ui-param-knob "skin_level" "skin")
+          (eseq.effects.custom-ui-controls/ui-param-knob "brightness" "bright")))
+      (eseq.effects.custom-ui-sections/ui-panel "MEMBRANE" 0
         (h-stack :gap 0.35
-          (ui-param-knob "membrane_level" "mem")
-          (ui-param-knob "membrane_tension" "tens")
-          (ui-param-knob "membrane_damping" "damp")
-          (ui-param-knob "shell_level" "shell"))))
-    (ui-adsr "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
+          (eseq.effects.custom-ui-controls/ui-param-knob "membrane_level" "mem")
+          (eseq.effects.custom-ui-controls/ui-param-knob "membrane_tension" "tens")
+          (eseq.effects.custom-ui-controls/ui-param-knob "membrane_damping" "damp")
+          (eseq.effects.custom-ui-controls/ui-param-knob "shell_level" "shell"))))
+    (eseq.effects.custom-ui-lego/ui-adsr "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
     (list
-      (ui-panel "FLAM" 0
+      (eseq.effects.custom-ui-sections/ui-panel "FLAM" 0
         (h-stack :gap 0.35
-          (ui-param-knob "flam_amount" "amt")
-          (ui-param-knob "flam_rate" "rate")
-          (ui-param-knob "flam_density" "dens")
-          (ui-param-knob "flam_decay" "decay")))
-      (ui-panel "WIRES" 0
+          (eseq.effects.custom-ui-controls/ui-param-knob "flam_amount" "amt")
+          (eseq.effects.custom-ui-controls/ui-param-knob "flam_rate" "rate")
+          (eseq.effects.custom-ui-controls/ui-param-knob "flam_density" "dens")
+          (eseq.effects.custom-ui-controls/ui-param-knob "flam_decay" "decay")))
+      (eseq.effects.custom-ui-sections/ui-panel "WIRES" 0
         (h-stack :gap 0.35
-          (ui-param-knob "wire_level" "level")
-          (ui-param-knob "wire_tension" "tens")
-          (ui-param-knob "wire_decay" "decay")
-          (ui-param-knob "wire_rattle" "rattle")))
-      (ui-panel "DECAY" 0
+          (eseq.effects.custom-ui-controls/ui-param-knob "wire_level" "level")
+          (eseq.effects.custom-ui-controls/ui-param-knob "wire_tension" "tens")
+          (eseq.effects.custom-ui-controls/ui-param-knob "wire_decay" "decay")
+          (eseq.effects.custom-ui-controls/ui-param-knob "wire_rattle" "rattle")))
+      (eseq.effects.custom-ui-sections/ui-panel "DECAY" 0
         (h-stack :gap 0.35
-          (ui-param-knob "snap_decay" "snap")
-          (ui-param-knob "body_decay" "body")
-          (ui-param-knob "tail_decay" "tail")))
-      (ui-panel "LOW/AIR" 0
+          (eseq.effects.custom-ui-controls/ui-param-knob "snap_decay" "snap")
+          (eseq.effects.custom-ui-controls/ui-param-knob "body_decay" "body")
+          (eseq.effects.custom-ui-controls/ui-param-knob "tail_decay" "tail")))
+      (eseq.effects.custom-ui-sections/ui-panel "LOW/AIR" 0
         (h-stack :gap 0.35
-          (ui-param-knob "boom_level" "boom")
-          (ui-param-knob "air_level" "air")))
-      (ui-panel "ROOM" 0
+          (eseq.effects.custom-ui-controls/ui-param-knob "boom_level" "boom")
+          (eseq.effects.custom-ui-controls/ui-param-knob "air_level" "air")))
+      (eseq.effects.custom-ui-sections/ui-panel "ROOM" 0
         (h-stack :gap 0.35
-          (ui-param-knob "room_level" "level")
-          (ui-param-knob "room_size" "size")
-          (ui-param-knob "room_tone" "tone"))))))
+          (eseq.effects.custom-ui-controls/ui-param-knob "room_level" "level")
+          (eseq.effects.custom-ui-controls/ui-param-knob "room_size" "size")
+          (eseq.effects.custom-ui-controls/ui-param-knob "room_tone" "tone"))))))
