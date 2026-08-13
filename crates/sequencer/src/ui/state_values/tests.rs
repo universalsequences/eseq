@@ -1031,7 +1031,10 @@
             .find("(def seq-set-step-param-from-step")
             .expect("step gesture source should precede step param helpers");
         runtime
-            .eval_str(&src[start..end])
+            .eval_str(&format!(
+                "(module eseq.step-grid-interactions)\n{}",
+                &src[start..end]
+            ))
             .expect("load step gesture source");
     }
 
@@ -1050,7 +1053,10 @@
             .find("(def cursor-toggle")
             .expect("keyboard step selection source should precede cursor-toggle");
         runtime
-            .eval_str(&src[start..end])
+            .eval_str(&format!(
+                "(module eseq.step-grid-interactions)\n{}",
+                &src[start..end]
+            ))
             .expect("load keyboard step selection source");
     }
 
@@ -1064,7 +1070,7 @@
         picks: Arc<Mutex<Vec<usize>>>,
         clock: Arc<Mutex<f64>>,
     ) {
-        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("eseq.seq-core-state/cool-off-follow", |_args, _ctx| Ok(Value::Nil));
 
         {
             let clock = clock.clone();
@@ -1208,7 +1214,7 @@
         let mut runtime = Runtime::new();
         runtime
             .eval_str(
-                "(do (def cursor-step 0) (def set-cursor-step-value (step) (set! cursor-step step)))",
+                "(do (def cursor-step 0) (def eseq.seq-core-state/set-cursor-step-value (step) (set! cursor-step step)))",
             )
             .expect("define cursor step helpers");
         runtime
@@ -1255,7 +1261,7 @@
         let mut runtime = Runtime::new();
         runtime
             .eval_str(
-                "(do (def cursor-step 0) (def set-cursor-step-value (step) (set! cursor-step step)))",
+                "(do (def cursor-step 0) (def eseq.seq-core-state/set-cursor-step-value (step) (set! cursor-step step)))",
             )
             .expect("define cursor step helpers");
         runtime
@@ -1263,7 +1269,7 @@
                 "(def SEQ (dict :current-track 1 :selected-steps '(false false false false)))",
             )
             .expect("define stale SEQ test map");
-        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("eseq.seq-core-state/cool-off-follow", |_args, _ctx| Ok(Value::Nil));
         runtime.register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         runtime.register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
         runtime.register_native("seq-select-step", |_args, _ctx| Ok(Value::Nil));
@@ -1326,16 +1332,16 @@
         let mut h = step_gesture_runtime(&[false, false, false, false, false], &[false; 5]);
 
         h.runtime
-            .eval_str("(step-pointer-down 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 1 (dict))")
             .expect("pointer down");
         h.runtime
-            .eval_str("(step-select-drag-over 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 2 (dict))")
             .expect("drag over step 2");
         h.runtime
-            .eval_str("(step-select-drag-over 3 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 3 (dict))")
             .expect("drag over step 3");
         h.runtime
-            .eval_str("(step-pointer-up 3 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 3 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1351,13 +1357,13 @@
         let mut h = step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
 
         h.runtime
-            .eval_str("(step-pointer-down 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 2 (dict))")
             .expect("pointer down");
         h.runtime
-            .eval_str("(step-select-drag-over 3 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 3 (dict))")
             .expect("drag over step 3");
         h.runtime
-            .eval_str("(step-pointer-up 3 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 3 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1373,10 +1379,10 @@
         let mut h = step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
 
         h.runtime
-            .eval_str("(step-pointer-down 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 2 (dict))")
             .expect("pointer down");
         h.runtime
-            .eval_str("(step-pointer-up 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 2 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1396,10 +1402,10 @@
         );
 
         h.runtime
-            .eval_str("(step-pointer-down 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 2 (dict))")
             .expect("pointer down");
         h.runtime
-            .eval_str("(step-pointer-up 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 2 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1418,13 +1424,13 @@
         );
 
         h.runtime
-            .eval_str("(step-pointer-down 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 2 (dict))")
             .expect("pointer down");
         h.runtime
-            .eval_str("(step-select-drag-over 4 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 4 (dict))")
             .expect("drag over step 4");
         h.runtime
-            .eval_str("(step-pointer-up 4 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 4 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1443,16 +1449,16 @@
             .eval_str("(test-set-now-ms 1000)")
             .expect("set clock");
         h.runtime
-            .eval_str("(step-pointer-down 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 2 (dict))")
             .expect("pointer down");
         h.runtime
             .eval_str("(test-set-now-ms 1400)")
             .expect("advance clock past hold threshold");
         h.runtime
-            .eval_str("(step-select-drag-over 4 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 4 (dict))")
             .expect("drag over step 4 after hold");
         h.runtime
-            .eval_str("(step-pointer-up 4 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 4 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1475,22 +1481,22 @@
             .eval_str("(test-set-now-ms 1000)")
             .expect("set clock");
         h.runtime
-            .eval_str("(step-pointer-down 2 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 2 (dict))")
             .expect("pointer down");
         h.runtime
             .eval_str("(test-set-now-ms 1100)")
             .expect("advance clock a little");
         h.runtime
-            .eval_str("(step-select-drag-over 3 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 3 (dict))")
             .expect("drag before hold threshold");
         h.runtime
             .eval_str("(test-set-now-ms 1600)")
             .expect("advance clock past hold threshold");
         h.runtime
-            .eval_str("(step-select-drag-over 4 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over 4 (dict))")
             .expect("keep dragging after threshold");
         h.runtime
-            .eval_str("(step-pointer-up 4 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 4 (dict))")
             .expect("pointer up");
 
         assert_eq!(
@@ -1506,16 +1512,16 @@
         let mut h = step_gesture_runtime(&[false, true, false, false, false, true], &[false; 6]);
 
         h.runtime
-            .eval_str("(step-pointer-down 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 1 (dict))")
             .expect("plain click active step 1");
         h.runtime
-            .eval_str("(step-pointer-up 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 1 (dict))")
             .expect("release selects step 1");
         h.runtime
-            .eval_str("(step-pointer-down 5 (dict :shift true))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 5 (dict :shift true))")
             .expect("shift click step 5");
         h.runtime
-            .eval_str("(step-pointer-up 5 (dict :shift true))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 5 (dict :shift true))")
             .expect("release shift click");
 
         assert_eq!(
@@ -1531,16 +1537,16 @@
         let mut h = step_gesture_runtime(&[false, true, false, false, false, true], &[false; 6]);
 
         h.runtime
-            .eval_str("(step-pointer-down 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 1 (dict))")
             .expect("plain click active step 1");
         h.runtime
-            .eval_str("(step-pointer-up 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 1 (dict))")
             .expect("release selects step 1");
         h.runtime
-            .eval_str("(step-pointer-down 5 (dict :cmd true))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down 5 (dict :cmd true))")
             .expect("cmd click step 5");
         h.runtime
-            .eval_str("(step-pointer-up 5 (dict :cmd true))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 5 (dict :cmd true))")
             .expect("release cmd click");
 
         assert_eq!(
@@ -1561,20 +1567,20 @@
         let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
         let cursor = Arc::new(Mutex::new(2usize));
         let mut runtime = Runtime::new();
-        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
-        runtime.register_native("seq-has-selected-bus?", |_args, _ctx| {
+        runtime.register_native("eseq.seq-core-state/cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("eseq.seq-core-state/seq-has-selected-bus?", |_args, _ctx| {
             Ok(Value::Bool(false))
         });
         {
             let cursor = cursor.clone();
-            runtime.register_native("current-step", move |_args, _ctx| {
+            runtime.register_native("eseq.seq-core-state/current-step", move |_args, _ctx| {
                 Ok(Value::Number(*cursor.lock().unwrap() as f64))
             });
         }
-        runtime.register_native("cursor-num-steps", |_args, _ctx| Ok(Value::Number(8.0)));
+        runtime.register_native("eseq.seq-core-state/cursor-num-steps", |_args, _ctx| Ok(Value::Number(8.0)));
         {
             let cursor = cursor.clone();
-            runtime.register_native("set-track-cursor-step", move |args, _ctx| {
+            runtime.register_native("eseq.step-grid-interactions/set-track-cursor-step", move |args, _ctx| {
                 let Some(Value::Number(step)) = args.first() else {
                     return Err("set-track-cursor-step: expected step".into());
                 };
@@ -1600,13 +1606,13 @@
         load_keyboard_step_selection_source(&mut runtime);
 
         runtime
-            .eval_str("(cursor-select-right)")
+            .eval_str("(eseq.step-grid-interactions/cursor-select-right)")
             .expect("first shift-right");
         runtime
-            .eval_str("(cursor-select-right)")
+            .eval_str("(eseq.step-grid-interactions/cursor-select-right)")
             .expect("second shift-right");
         runtime
-            .eval_str("(cursor-select-left)")
+            .eval_str("(eseq.step-grid-interactions/cursor-select-left)")
             .expect("shift-left shrinks range");
 
         assert_eq!(*cursor.lock().unwrap(), 3);
@@ -1618,20 +1624,20 @@
         let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
         let cursor = Arc::new(Mutex::new(0usize));
         let mut runtime = Runtime::new();
-        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
-        runtime.register_native("seq-has-selected-bus?", |_args, _ctx| {
+        runtime.register_native("eseq.seq-core-state/cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("eseq.seq-core-state/seq-has-selected-bus?", |_args, _ctx| {
             Ok(Value::Bool(false))
         });
         {
             let cursor = cursor.clone();
-            runtime.register_native("current-step", move |_args, _ctx| {
+            runtime.register_native("eseq.seq-core-state/current-step", move |_args, _ctx| {
                 Ok(Value::Number(*cursor.lock().unwrap() as f64))
             });
         }
-        runtime.register_native("cursor-num-steps", |_args, _ctx| Ok(Value::Number(8.0)));
+        runtime.register_native("eseq.seq-core-state/cursor-num-steps", |_args, _ctx| Ok(Value::Number(8.0)));
         {
             let cursor = cursor.clone();
-            runtime.register_native("set-track-cursor-step", move |args, _ctx| {
+            runtime.register_native("eseq.step-grid-interactions/set-track-cursor-step", move |args, _ctx| {
                 let Some(Value::Number(step)) = args.first() else {
                     return Err("set-track-cursor-step: expected step".into());
                 };
@@ -1657,7 +1663,7 @@
         load_keyboard_step_selection_source(&mut runtime);
 
         runtime
-            .eval_str("(cursor-select-left)")
+            .eval_str("(eseq.step-grid-interactions/cursor-select-left)")
             .expect("shift-left at first step");
 
         assert_eq!(*cursor.lock().unwrap(), 0);
@@ -1672,10 +1678,10 @@
             .eval_str("(seq-set-track 0)")
             .expect("host switches to clicked track before gesture handling");
         runtime
-            .eval_str("(step-pointer-down-for-track 0 1 (dict) false)")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-down-for-track 0 1 (dict) false)")
             .expect("pointer down on active step in clicked track");
         runtime
-            .eval_str("(step-select-drag-over-for-track 0 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-select-drag-over-for-track 0 1 (dict))")
             .expect("same-step drag jitter should not enter paint-on mode");
 
         assert!(
@@ -1684,7 +1690,7 @@
         );
 
         runtime
-            .eval_str("(step-pointer-up 1 (dict))")
+            .eval_str("(eseq.step-grid-interactions/step-pointer-up 1 (dict))")
             .expect("pointer up on clicked step");
 
         assert!(
@@ -1765,7 +1771,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(agent-open)")
+            .eval_str("(eseq.agent/agent-open)")
             .expect("open agent panel");
 
         let calls = calls.lock().unwrap();
@@ -1965,11 +1971,11 @@
             .expect("load agent lisp");
         editor
             .runtime_mut()
-            .eval_str("(set! agent-current-conv 1)")
+            .eval_str("(set! eseq.agent/agent-current-conv 1)")
             .expect("select test conversation");
         editor
             .runtime_mut()
-            .eval_str("(agent-submit-current)")
+            .eval_str("(eseq.agent/agent-submit-current)")
             .expect("busy submit should cancel the active request");
         assert_eq!(
             *cancel_calls.lock().unwrap(),
@@ -2077,7 +2083,7 @@
             .expect("load agent lisp");
         editor
             .runtime_mut()
-            .eval_str("(set! agent-current-conv 1)")
+            .eval_str("(set! eseq.agent/agent-current-conv 1)")
             .expect("select test conversation");
         editor.refresh_runtime_side_effects();
 
@@ -2133,7 +2139,7 @@
             "builtin fx ui load failed: {loaded:?}"
         );
         runtime
-            .eval_str("builtin-audio-fx-ui")
+            .eval_str("eseq.effects.builtin.audio-fx/builtin-audio-fx-ui")
             .expect("builtin-audio-fx-ui should be defined");
     }
 
@@ -2336,7 +2342,7 @@
             editor.set_active_buffer(id);
             editor.set_layout_viewport(72, 40);
 
-            let reported = match editor.runtime_mut().eval_str("(sbrowser-active-tree-key)") {
+            let reported = match editor.runtime_mut().eval_str("(eseq.browser/active-tree-key)") {
                 Ok(Some(Value::String(key))) => key,
                 other => panic!("active tree key for {tab}: {other:?}"),
             };
@@ -2355,7 +2361,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-drop-preset-on-sounds
+                r#"(eseq.browser/drop-preset-on-sounds
                     (dict :drag-type "instrument-preset"
                           :payload (dict :label "Wide Rack")))"#,
             )
@@ -2702,11 +2708,11 @@
         editor.runtime_mut().run_reactive_cycle();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-refresh-buffer)")
+            .eval_str("(eseq.browser/refresh-buffer)")
             .expect("refresh browser after project engines change");
         let items = editor
             .runtime_mut()
-            .eval_str("(sbrowser-create-items)")
+            .eval_str("(eseq.browser/create-items)")
             .expect("evaluate project engine tree")
             .expect("project engine tree value");
         assert!(
@@ -2891,7 +2897,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-enter-new-effect-editor)")
+            .eval_str("(eseq.browser/enter-new-effect-editor)")
             .expect("enter new effect editor");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -2964,7 +2970,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-enter-new-script)")
+            .eval_str("(eseq.browser/enter-new-script)")
             .expect("invoke new script action");
 
         let commands = editor.drain_host_commands();
@@ -2982,7 +2988,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-script-save-mode")
+                .eval_str("eseq.browser/sbrowser-script-save-mode")
                 .expect("read script save mode"),
             Some(Value::String("new-script".to_string()))
         );
@@ -3162,15 +3168,15 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-selected-instrument-name \"core/triton\")")
+            .eval_str("(set! eseq.browser/selected-instrument-name \"core/triton\")")
             .expect("seed selected instrument");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-editor-name \"leftover\")")
+            .eval_str("(set! eseq.browser/sbrowser-editor-name \"leftover\")")
             .expect("seed stale editor name");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-fork-selected-instrument)")
+            .eval_str("(eseq.browser/fork-selected-instrument)")
             .expect("invoke fork action");
 
         let commands = editor.drain_host_commands();
@@ -3195,7 +3201,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-editor-name")
+                .eval_str("eseq.browser/sbrowser-editor-name")
                 .expect("read editor name"),
             Some(Value::String(String::new()))
         );
@@ -3206,7 +3212,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-fork-selected-audio-effect)")
+            .eval_str("(eseq.browser/fork-selected-audio-effect)")
             .expect("invoke fork action with nothing selected");
         assert!(
             editor.drain_host_commands().is_empty(),
@@ -3215,11 +3221,11 @@
 
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-selected-audio-effect-name \"lexilush\")")
+            .eval_str("(set! eseq.browser/selected-audio-effect-name \"lexilush\")")
             .expect("seed selected effect");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-fork-selected-audio-effect)")
+            .eval_str("(eseq.browser/fork-selected-audio-effect)")
             .expect("invoke fork action");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -3237,26 +3243,26 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(sbrowser-select-audio-effect (dict :kind \"custom-audio-effect\" :name \"lexilush\" :label \"lexilush\"))",
+                "(eseq.browser/select-audio-effect (dict :kind \"custom-audio-effect\" :name \"lexilush\" :label \"lexilush\"))",
             )
             .expect("select a custom effect");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-selected-audio-effect-name")
+                .eval_str("eseq.browser/selected-audio-effect-name")
                 .expect("read selection"),
             Some(Value::String("lexilush".to_string()))
         );
         editor
             .runtime_mut()
             .eval_str(
-                "(sbrowser-select-audio-effect (dict :kind \"builtin-audio-effect\" :name \"reverb\" :label \"Reverb\"))",
+                "(eseq.browser/select-audio-effect (dict :kind \"builtin-audio-effect\" :name \"reverb\" :label \"Reverb\"))",
             )
             .expect("select a builtin effect");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-selected-audio-effect-name")
+                .eval_str("eseq.browser/selected-audio-effect-name")
                 .expect("read selection"),
             Some(Value::String(String::new())),
             "builtins are Rust and have no dsp.lisp to fork"
@@ -3350,7 +3356,7 @@
             .set_reactive("SEQ", "current-track", Value::Number(2.0));
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-refresh-buffer)")
+            .eval_str("(eseq.browser/refresh-buffer)")
             .expect("explicit sidebar refresh should render the samples buffer");
         editor.refresh_runtime_side_effects();
 
@@ -3374,7 +3380,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         let tree = editor
             .runtime_mut()
-            .eval_str(r#"(sbrowser-editor-status-row "Preview compiling..." :gray)"#)
+            .eval_str(r#"(eseq.browser/editor-status-row "Preview compiling..." :gray)"#)
             .expect("build compile status row")
             .expect("compile status row should return a widget tree");
         let layout = editor
@@ -3598,11 +3604,11 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"kick\")")
+            .eval_str("(set! eseq.browser/search-filter \"kick\")")
             .expect("set sample search");
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
@@ -3610,11 +3616,11 @@
         let _ = editor.widget_layout().expect("browser layout");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("build browser widgets");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("kick".to_string()))),
             "rendering the browser should not clear the search filter as a side effect"
         );
@@ -3629,11 +3635,11 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"snare\")")
+            .eval_str("(set! eseq.browser/search-filter \"snare\")")
             .expect("set sample search");
         editor
             .runtime_mut()
@@ -3646,18 +3652,18 @@
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync switched sampler track");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String(String::new()))),
             "switching sampler tracks should clear the sample search"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len sbrowser-selected-tags)"),
+                .eval_str("(len eseq.browser/selected-tags)"),
             Ok(Some(Value::Number(2.0))),
             "switching sampler tracks should load the selected sample's tags"
         );
@@ -3713,31 +3719,31 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"kick\")")
+            .eval_str("(set! eseq.browser/search-filter \"kick\")")
             .expect("set browser search");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-preset-filter \"pad\")")
+            .eval_str("(set! eseq.browser/preset-filter \"pad\")")
             .expect("set preset search");
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-select-tab \"instruments\")")
+            .eval_str("(eseq.browser/select-tab \"instruments\")")
             .expect("select instruments tab");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String(String::new()))),
             "switching tabs should clear the shared search text"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-preset-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/preset-filter"),
             Ok(Some(Value::String(String::new()))),
             "switching tabs should clear the separate preset search text"
         );
         let destination_items = editor
             .runtime_mut()
-            .eval_str("(sbrowser-create-items)")
+            .eval_str("(eseq.browser/create-items)")
             .expect("build destination instrument tree")
             .expect("destination instrument tree should return a value");
         assert!(
@@ -3755,25 +3761,25 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"kick\")")
+            .eval_str("(set! eseq.browser/search-filter \"kick\")")
             .expect("set browser search");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-preset-filter \"pad\")")
+            .eval_str("(set! eseq.browser/preset-filter \"pad\")")
             .expect("set preset search");
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-select-tab \"samples\")")
+            .eval_str("(eseq.browser/select-tab \"samples\")")
             .expect("reselect samples tab");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("kick".to_string()))),
             "reselecting the active tab should not clear the active pane search"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-preset-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/preset-filter"),
             Ok(Some(Value::String("pad".to_string()))),
             "reselecting the active tab should not clear the separate preset search"
         );
@@ -3788,27 +3794,27 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"kick\")")
+            .eval_str("(set! eseq.browser/search-filter \"kick\")")
             .expect("set sample search");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
             .expect("seed selected tags");
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-select-tab \"instruments\")")
+            .eval_str("(eseq.browser/select-tab \"instruments\")")
             .expect("select instruments tab");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String(String::new()))),
             "switching away from samples should clear search text"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len sbrowser-selected-tags)"),
+                .eval_str("(len eseq.browser/selected-tags)"),
             Ok(Some(Value::Number(0.0))),
             "switching away from samples should clear sample-only tag filters"
         );
@@ -3823,20 +3829,20 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"break\")")
+            .eval_str("(set! eseq.browser/search-filter \"break\")")
             .expect("set sample search");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
             .expect("seed selected tags");
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-audition
+                r#"(eseq.browser/audition
                     (dict :label "audition.wav" :path "samples/audition.wav"))"#,
             )
             .expect("audition sample");
@@ -3848,25 +3854,25 @@
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync auditioned sampler sample");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("break".to_string()))),
             "auditioning a sample should preserve the active sample search"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len sbrowser-selected-tags)"),
+                .eval_str("(len eseq.browser/selected-tags)"),
             Ok(Some(Value::Number(2.0))),
             "auditioning a sample should preserve selected tag filters"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(sbrowser-list-contains? sbrowser-selected-tags \"kick\")"),
+                .eval_str("(eseq.browser/list-contains? eseq.browser/selected-tags \"kick\")"),
             Ok(Some(Value::Bool(true))),
             "auditioning a sample should not replace selected tags with that sample's tags"
         );
@@ -3881,19 +3887,19 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"break\")")
+            .eval_str("(set! eseq.browser/search-filter \"break\")")
             .expect("set sample search");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
             .expect("seed selected tags");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-auditioned-sample \"samples/new-track.wav\")")
+            .eval_str("(set! eseq.browser/sbrowser-auditioned-sample \"samples/new-track.wav\")")
             .expect("mark browser initiated sample load");
         editor
             .runtime_mut()
@@ -3906,18 +3912,18 @@
 
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync browser-created sampler track");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("break".to_string()))),
             "browser-initiated new sampler tracks should preserve sample search"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len sbrowser-selected-tags)"),
+                .eval_str("(len eseq.browser/selected-tags)"),
             Ok(Some(Value::Number(2.0))),
             "browser-initiated new sampler tracks should preserve selected tag filters"
         );
@@ -3944,7 +3950,7 @@
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
             .expect("seed selected tags");
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
@@ -3969,14 +3975,14 @@
             .expect("invoke browser search on-change");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("snare".to_string()))),
             "typing in sample search should update the search text"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len sbrowser-selected-tags)"),
+                .eval_str("(len eseq.browser/selected-tags)"),
             Ok(Some(Value::Number(0.0))),
             "typing in sample search should clear selected tag filters"
         );
@@ -4077,7 +4083,7 @@
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 72, 60);
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("pi".to_string()))),
             "browser search should accept consecutive keypresses"
         );
@@ -4097,7 +4103,7 @@
             crossterm::event::KeyModifiers::NONE,
         ));
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("pia".to_string()))),
             "browser search should keep accepting text after delayed refresh"
         );
@@ -4178,7 +4184,7 @@
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
 
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("pi".to_string()))),
             "tiled browser search should accept consecutive keypresses"
         );
@@ -4198,7 +4204,7 @@
             crossterm::event::KeyModifiers::NONE,
         ));
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-filter"),
+            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
             Ok(Some(Value::String("pia".to_string()))),
             "tiled browser search should keep accepting text after delayed refresh"
         );
@@ -4209,7 +4215,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-new-project)")
+            .eval_str("(eseq.browser/new-project)")
             .expect("invoke new project action");
 
         let commands = editor.drain_host_commands();
@@ -4247,7 +4253,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-sample
+                r#"(eseq.browser/select-sample
                     (dict :label "kick.wav" :path "samples/kick.wav"))"#,
             )
             .expect("select sample");
@@ -4259,7 +4265,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-selected-sample")
+                .eval_str("eseq.browser/selected-sample")
                 .expect("read selected sample"),
             Some(Value::String("samples/kick.wav".to_string()))
         );
@@ -4287,12 +4293,12 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler sample");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-selected-sample")
+                .eval_str("eseq.browser/selected-sample")
                 .expect("read selected sample"),
             Some(Value::String("samples/loaded-a.wav".to_string()))
         );
@@ -4300,18 +4306,18 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-sample
+                r#"(eseq.browser/select-sample
                     (dict :label "browse.wav" :path "samples/browse.wav"))"#,
             )
             .expect("select browsed sample");
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("render without host sample change");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-selected-sample")
+                .eval_str("eseq.browser/selected-sample")
                 .expect("read browsed sample"),
             Some(Value::String("samples/browse.wav".to_string())),
             "local browsing selection should survive renders until the loaded sample changes"
@@ -4327,12 +4333,12 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-build-widgets)")
+            .eval_str("(eseq.browser/build-widgets)")
             .expect("sync switched sampler sample");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sbrowser-selected-sample")
+                .eval_str("eseq.browser/selected-sample")
                 .expect("read switched selected sample"),
             Some(Value::String("samples/loaded-b.wav".to_string()))
         );
@@ -4352,7 +4358,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-activate-sample
+                r#"(eseq.browser/activate-sample
                     (dict :label "kick.wav" :path "samples/kick.wav"))"#,
             )
             .expect("activate sample from instrument context");
@@ -4381,7 +4387,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-activate-sample
+                r#"(eseq.browser/activate-sample
                     (dict :label "kick.wav" :path "samples/kick.wav"))"#,
             )
             .expect("activate sample on sampler track");
@@ -4408,7 +4414,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-add-sampler-track)")
+            .eval_str("(eseq.browser/add-sampler-track)")
             .expect("invoke sampler add action");
 
         let commands = editor.drain_host_commands();
@@ -4437,7 +4443,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-add-rack-track)")
+            .eval_str("(eseq.browser/add-rack-track)")
             .expect("invoke rack add action");
 
         let commands = editor.drain_host_commands();
@@ -4471,7 +4477,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-add-rack-track)")
+            .eval_str("(eseq.browser/add-rack-track)")
             .expect("invoke rack add action");
 
         let commands = editor.drain_host_commands();
@@ -4496,7 +4502,7 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-add-layer-rack-track)")
+            .eval_str("(eseq.browser/add-layer-rack-track)")
             .expect("invoke layer rack add action");
 
         let commands = editor.drain_host_commands();
@@ -4539,7 +4545,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(sbrowser-add-layer-rack-track)")
+            .eval_str("(eseq.browser/add-layer-rack-track)")
             .expect("invoke layer rack add action");
 
         let commands = editor.drain_host_commands();
@@ -4575,7 +4581,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-create-item
+                r#"(eseq.browser/select-create-item
                     (dict :kind "instrument" :name "emulations/digitone" :label "digitone"))"#,
             )
             .expect("select instrument");
@@ -4623,7 +4629,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-create-item
+                r#"(eseq.browser/select-create-item
                     (dict :kind "instrument" :name "emulations/digitone" :label "digitone"))"#,
             )
             .expect("activate instrument on a custom track");
@@ -4676,7 +4682,7 @@
             editor
                 .runtime_mut()
                 .eval_str(
-                    r#"(sbrowser-select-create-item
+                    r#"(eseq.browser/select-create-item
                         (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
                 )
                 .unwrap_or_else(|error| panic!("activate from {track_type} track: {error:?}"));
@@ -4713,7 +4719,7 @@
             editor
                 .runtime_mut()
                 .eval_str(
-                    r#"(sbrowser-select-create-item
+                    r#"(eseq.browser/select-create-item
                         (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
                 )
                 .unwrap_or_else(|error| {
@@ -4751,7 +4757,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-create-item
+                r#"(eseq.browser/select-create-item
                     (dict :kind "builtin-instrument" :name "sampler" :label "Sampler"))"#,
             )
             .expect("activate builtin sampler from a custom track");
@@ -4784,7 +4790,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-drop-instrument-on-track
+                r#"(eseq.browser/drop-instrument-on-track
                     (dict :drag-type "instrument"
                           :payload (dict :kind "instrument" :name "core/triton")
                           :target (dict :kind "track" :track 0)))"#,
@@ -4810,7 +4816,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-create-item
+                r#"(eseq.browser/select-create-item
                     (dict :kind "builtin-instrument" :name "rack" :label "Drum Rack"))"#,
             )
             .expect("select drum rack");
@@ -4835,7 +4841,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-create-item
+                r#"(eseq.browser/select-create-item
                     (dict :kind "builtin-instrument" :name "layer-rack" :label "Instrument Rack"))"#,
             )
             .expect("select instrument rack");
@@ -4864,7 +4870,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-focus-create-item
+                r#"(eseq.browser/focus-create-item
                     (dict :kind "instrument" :name "emulations/digitone" :label "digitone"))"#,
             )
             .expect("focus instrument");
@@ -4888,7 +4894,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-drop-instrument-on-folder
+                r#"(eseq.browser/drop-instrument-on-folder
                     (dict :payload (dict :kind "instrument"
                                            :name "emulations/digitone"
                                            :label "digitone")
@@ -4925,7 +4931,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-audio-effect
+                r#"(eseq.browser/select-audio-effect
                     (dict :kind "builtin-audio-effect" :name "Filter" :label "Filter"))"#,
             )
             .expect("select built-in audio effect");
@@ -4945,12 +4951,12 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(set! selected-bus 1)")
+            .eval_str("(set! eseq.seq-core-state/selected-bus 1)")
             .expect("select bus");
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-activate-audio-effect
+                r#"(eseq.browser/activate-audio-effect
                     (dict :kind "builtin-audio-effect" :name "Filter" :label "Filter"))"#,
             )
             .expect("activate built-in audio effect for bus");
@@ -4981,12 +4987,12 @@
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(set! selected-bus -1)")
+            .eval_str("(set! eseq.seq-core-state/selected-bus -1)")
             .expect("clear selected bus");
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-activate-audio-effect
+                r#"(eseq.browser/activate-audio-effect
                     (dict :kind "custom-audio-effect" :name "my-effect" :label "my-effect"))"#,
             )
             .expect("activate custom audio effect for track");
@@ -5014,7 +5020,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-midi-effect
+                r#"(eseq.browser/select-midi-effect
                     (dict :kind "midi-effect" :name "Arp" :label "Arp"))"#,
             )
             .expect("select MIDI effect");
@@ -5035,7 +5041,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-activate-midi-effect
+                r#"(eseq.browser/activate-midi-effect
                     (dict :kind "midi-effect" :name "Arp" :label "Arp"))"#,
             )
             .expect("activate MIDI effect");
@@ -5096,32 +5102,32 @@
 
         let good_body = r#"
           (list
-            (sbrowser-tabbed-content))
+            (eseq.browser/tabbed-content))
         "#;
         let side_by_side_body = r#"
           (list
             (h-stack :key "diagnostic-side-by-side" :width :fill :gap 0.5 :flex 1
-              (sbrowser-tabs)
+              (eseq.browser/tab-rail)
               (v-stack :key "diagnostic-active-tab-column" :width :fill :gap 0.45 :flex 1
-                (sbrowser-header)
-                (sbrowser-active-tab-panel))))
+                (eseq.browser/search-header)
+                (eseq.browser/active-tab-panel))))
         "#;
         let stretched_side_by_side_body = r#"
           (list
             (h-stack :key "diagnostic-side-by-side-stretched" :width :fill :gap 0.5 :flex 1 :align :stretch
-              (sbrowser-tabs)
+              (eseq.browser/tab-rail)
               (v-stack :key "diagnostic-active-tab-column" :width :fill :gap 0.45 :flex 1
-                (sbrowser-header)
-                (sbrowser-active-tab-panel))))
+                (eseq.browser/search-header)
+                (eseq.browser/active-tab-panel))))
         "#;
         let fixed_side_by_side_body = r#"
           (list
             (h-stack :key "diagnostic-side-by-side-fixed" :width :fill :gap 0.5 :flex 1 :align :stretch
-              (sbrowser-tabs)
+              (eseq.browser/tab-rail)
               (box :key "diagnostic-active-tab-panel" :width 0 :flex 1 :padding 0
                 (v-stack :key "diagnostic-active-tab-column" :width :fill :height :fill :gap 0.45 :flex 1
-                  (sbrowser-header)
-                  (sbrowser-active-tab-panel)))))
+                  (eseq.browser/search-header)
+                  (eseq.browser/active-tab-panel)))))
         "#;
 
         let (good_scroll, good_tree, good_rows, _) = snapshot(good_body);
@@ -5990,7 +5996,7 @@
                 r#"
                 (def seq-has-selection? () false)
                 (def fx-clear-selected-effect () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (load "ui/macro-state.lisp")
                 (load "ui/effects/state.lisp")
                 (def visible-params (params)
@@ -6013,7 +6019,7 @@
         load_param_grid_test_lisp(&mut editor);
         editor
             .runtime_mut()
-            .eval_str(r#"(effect-buffer "*param-grid-test*" (fx-param-grid TEST.params TEST.fx))"#)
+            .eval_str(r#"(effect-buffer "*param-grid-test*" (eseq.effects.param-grid/fx-param-grid TEST.params TEST.fx))"#)
             .expect("create param grid test buffer");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -6056,7 +6062,7 @@
                 (def custom-audio-fx-ui (fx) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-instrument-synth-ui (inst) false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (load "ui/macro-state.lisp")
                 (load "ui/effects/state.lisp")
                 (def visible-params (params)
@@ -6066,7 +6072,7 @@
                 (load "ui/effects/builtin/audio-fx.lisp")
                 (load "ui/effects/panel-bodies.lisp")
                 (effect-buffer "*custom-audio-fx-body-test*"
-                  (audio-fx-panel-body TEST.fx (get TEST.fx :params)))
+                  (eseq.effects.panel-bodies/audio-fx-panel-body TEST.fx (get TEST.fx :params)))
                 "#,
             )
             .expect("load custom audio effect body test lisp");
@@ -6972,15 +6978,15 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (def cool-off-follow () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.seq-core-state/cool-off-follow () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install keys tab test helpers");
@@ -6988,12 +6994,12 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-panel-tab 1) (set! instrument-key-lock-selected-notes (list 69)))")
+            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 1) (set! eseq.effects.state/instrument-key-lock-selected-notes (list 69)))")
             .expect("select key");
 
         editor
             .runtime_mut()
-            .eval_str("(instrument-key-select-note 72)")
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 72)")
             .expect("select key for audition");
         let audition_commands = editor.drain_host_commands();
         assert_eq!(
@@ -7016,11 +7022,11 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(set! instrument-key-lock-selected-notes (list 69))")
+            .eval_str("(set! eseq.effects.state/instrument-key-lock-selected-notes (list 69))")
             .expect("restore selected key");
         editor
             .runtime_mut()
-            .eval_str("(instrument-key-select-note 69)")
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 69)")
             .expect("deselect the last selected key");
         let commands = editor.drain_host_commands();
         assert!(
@@ -7029,29 +7035,29 @@
         );
         let selected_count = editor
             .runtime_mut()
-            .eval_str("(len instrument-key-lock-selected-notes)")
+            .eval_str("(len eseq.effects.state/instrument-key-lock-selected-notes)")
             .expect("read selected key count");
         assert_eq!(selected_count, Some(Value::Number(0.0)));
         let default_chip_current = editor
             .runtime_mut()
             .eval_str(
-                "(instrument-key-lock-chip-current?
+                "(eseq.effects.panel-bodies/instrument-key-lock-chip-current?
                    (nth SEQ.instrument-panel 0)
-                   (nth (instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 0))",
+                   (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 0))",
             )
             .expect("read default key-lock chip current state");
         assert_eq!(default_chip_current, Some(Value::Bool(true)));
         let default_value = editor
             .runtime_mut()
             .eval_str(
-                "(fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+                "(eseq.effects.param-controls/fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
             )
             .expect("read default value with no key selected");
         assert_eq!(default_value, Some(Value::Number(0.5)));
         editor
             .runtime_mut()
             .eval_str(
-                "(param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.7)",
+                "(eseq.effects.param-controls/param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.7)",
             )
             .expect("write default value with no key selected");
         let commands = editor.drain_host_commands();
@@ -7075,7 +7081,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(set! instrument-key-lock-selected-notes (list 69))")
+            .eval_str("(set! eseq.effects.state/instrument-key-lock-selected-notes (list 69))")
             .expect("restore selected key");
 
         editor.refresh_runtime_side_effects();
@@ -7196,7 +7202,7 @@
         let variant_label = editor
             .runtime_mut()
             .eval_str(
-                "(get (instrument-key-note-variant-row (nth SEQ.instrument-panel 0) 69) :label)",
+                "(get (eseq.effects.panel-bodies/instrument-key-note-variant-row (nth SEQ.instrument-panel 0) 69) :label)",
             )
             .expect("read key-lock note variant label");
         assert_eq!(variant_label, Some(Value::String("A".to_string())));
@@ -7204,7 +7210,7 @@
         let value = editor
             .runtime_mut()
             .eval_str(
-                "(fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
+                "(eseq.effects.param-controls/fx-param-value-for false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))",
             )
             .expect("read key lock value");
         assert_eq!(value, Some(Value::Number(0.8)));
@@ -7212,7 +7218,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.9)",
+                "(eseq.effects.param-controls/param-set-control-value false (nth (get (nth SEQ.instrument-panel 0) :synth) 0) 0.9)",
             )
             .expect("write key lock value");
         let commands = editor.drain_host_commands();
@@ -7247,9 +7253,9 @@
             .runtime_mut()
             .eval_str(
                 "(do
-                   (set! instrument-key-lock-selected-notes (list 69 72))
-                   (instrument-key-lock-chip-click
-                     (nth (instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 1)))",
+                   (set! eseq.effects.state/instrument-key-lock-selected-notes (list 69 72))
+                   (eseq.effects.panel-bodies/instrument-key-lock-chip-click
+                     (nth (eseq.effects.panel-bodies/instrument-key-lock-variant-items (nth SEQ.instrument-panel 0)) 1)))",
             )
             .expect("stamp selected keys with variant chip");
         let commands = editor.drain_host_commands();
@@ -9387,7 +9393,7 @@
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(do (set! macro-mapping-open true) (set! macro-mapping-selected {id}))"
+                "(do (set! eseq.macro-state/mapping-open true) (set! eseq.macro-state/mapping-selected {id}))"
             ))
             .expect("arm mapping");
         editor.runtime_mut().run_reactive_cycle();
@@ -9527,7 +9533,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(do (set! macro-mapping-open false) (set! rack-macro-mapping-selected 0))")
+            .eval_str("(do (set! eseq.macro-state/mapping-open false) (set! eseq.macro-state/rack-mapping-selected 0))")
             .expect("arm rack macro mapping");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -9626,7 +9632,7 @@
         editor
             .runtime_mut()
             .eval_str(&format!(
-                "(effect-buffer \"*scene-macro-test*\" (scene-macro-controls :macro {id}))"
+                "(effect-buffer \"*scene-macro-test*\" (eseq.macros/scene-macro-controls :macro {id}))"
             ))
             .expect("create scene macro controls");
         editor.runtime_mut().run_reactive_cycle();
@@ -9713,7 +9719,7 @@
             .eval_str(
                 r#"
                 (effect-buffer "*macro-editor-test*"
-                  (macro-mapping-editor :macro :player/delay-push))
+                  (eseq.macros/macro-mapping-editor :macro :player/delay-push))
                 "#,
             )
             .expect("create scoped macro mapping editor");
@@ -9773,7 +9779,7 @@
             .expect("load macro controls");
 
         assert_eq!(
-            runtime.eval_str("(macro-id-for-key :delay-push)"),
+            runtime.eval_str("(eseq.macros/macro-id-for-key :delay-push)"),
             Ok(Some(Value::Number(-1.0)))
         );
 
@@ -9789,7 +9795,7 @@
         runtime.run_reactive_cycle();
 
         assert_eq!(
-            runtime.eval_str("(macro-id-for-key :delay-push)"),
+            runtime.eval_str("(eseq.macros/macro-id-for-key :delay-push)"),
             Ok(Some(Value::Number(id as f64))),
             "the UI epoch refresh must publish engine macros before map controls can arm"
         );
@@ -9906,12 +9912,12 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(macro-id-for-key :player/delay-push)"),
+                .eval_str("(eseq.macros/macro-id-for-key :player/delay-push)"),
             Ok(Some(Value::Number(7.0)))
         );
         editor
             .runtime_mut()
-            .eval_str("(macro-ensure :player/delay-push \"Ignored Rename\")")
+            .eval_str("(eseq.macros/macro-ensure :player/delay-push \"Ignored Rename\")")
             .expect("ensure keyed macro");
 
         let commands = editor.drain_host_commands();
@@ -9942,9 +9948,9 @@
                 r#"
                 (effect-buffer "*macro-controls-test*"
                   (h-stack :gap 1
-                    (macro-knob :macro :player/delay-push)
-                    (macro-momentary :macro :player/delay-push)
-                    (macro-map-button :macro :player/delay-push)))
+                    (eseq.macros/macro-knob :macro :player/delay-push)
+                    (eseq.macros/macro-momentary :macro :player/delay-push)
+                    (eseq.macros/macro-map-button :macro :player/delay-push)))
                 "#,
             )
             .expect("create macro controls test buffer");
@@ -10046,11 +10052,11 @@
             )
             .expect("arm macro mapping");
         assert_eq!(
-            editor.runtime_mut().eval_str("macro-mapping-open"),
+            editor.runtime_mut().eval_str("eseq.macro-state/mapping-open"),
             Ok(Some(Value::Bool(true)))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("macro-mapping-selected"),
+            editor.runtime_mut().eval_str("eseq.macro-state/mapping-selected"),
             Ok(Some(Value::Number(7.0)))
         );
 
@@ -10147,7 +10153,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(do (set! macro-mapping-open true) (set! macro-mapping-selected 7))")
+            .eval_str("(do (set! eseq.macro-state/mapping-open true) (set! eseq.macro-state/mapping-selected 7))")
             .expect("arm macro mapping");
         editor
             .runtime_mut()
@@ -10155,14 +10161,14 @@
                 r#"
                 (effect-buffer "*macro-map-mode-test*"
                   (box :padding 0
-                    (subtree :key (param-macro-structure-key)
+                    (subtree :key (eseq.effects.param-controls/param-macro-structure-key)
                       (h-stack :gap 1
-                        (instrument-param-mod-wrapper
+                        (eseq.effects.param-controls/instrument-param-mod-wrapper
                           (nth (get (nth SEQ.instrument-panel 0) :synth) 0)
                           "macro-test-instrument"
                           (box :width 6 :height 4))
                         (let ((fx (nth SEQ.effects 0)))
-                          (param-mod-wrapper fx (nth (get fx :params) 0)
+                          (eseq.effects.param-controls/param-mod-wrapper fx (nth (get fx :params) 0)
                             "macro-test-effect"
                             (box :width 6 :height 4)))))))
                 "#,
@@ -10246,14 +10252,14 @@
         editor.refresh_runtime_side_effects();
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(instrument-param-control-min (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                "(eseq.effects.param-controls/instrument-param-control-min (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
             ),
             Ok(Some(Value::Number(0.0))),
             "mapping must not repurpose the device control's value domain"
         );
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(instrument-param-control-max (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                "(eseq.effects.param-controls/instrument-param-control-max (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
             ),
             Ok(Some(Value::Number(1.0)))
         );
@@ -10296,18 +10302,18 @@
             .eval_str(
                 r#"
                 (do
-                  (set! instrument-mods-open true)
-                  (set! effect-mods-open true)
-                  (set! process-map-track 0)
-                  (set! process-map-instance-id 42)
-                  (set! process-map-port "shape")
-                  (macro-toggle-mapping-arm :player/delay-push))
+                  (set! eseq.effects.state/instrument-mods-open true)
+                  (set! eseq.effects.state/effect-mods-open true)
+                  (set! eseq.effects.param-controls/process-map-track 0)
+                  (set! eseq.effects.param-controls/process-map-instance-id 42)
+                  (set! eseq.effects.param-controls/process-map-port "shape")
+                  (eseq.macros/macro-toggle-mapping-arm :player/delay-push))
                 "#,
             )
             .expect("enter macro mapping mode");
         assert_eq!(
             editor.runtime_mut().eval_str(
-                "(list macro-mapping-open instrument-mods-open effect-mods-open (process-map-active?))"
+                "(list eseq.macro-state/mapping-open eseq.effects.state/instrument-mods-open eseq.effects.state/effect-mods-open (eseq.effects.param-controls/process-map-active?))"
             ),
             Ok(Some(test_list(vec![
                 Value::Bool(true),
@@ -10321,7 +10327,7 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (process-map-arm-port 0
+                (eseq.effects.param-controls/process-map-arm-port 0
                   (dict :instance-id 42)
                   (dict :name "shape" :target-kind "device-param"))
                 "#,
@@ -10330,18 +10336,18 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(list macro-mapping-open (process-map-active?))"),
+                .eval_str("(list eseq.macro-state/mapping-open (eseq.effects.param-controls/process-map-active?))"),
             Ok(Some(test_list(vec![Value::Bool(false), Value::Bool(true)])))
         );
 
         editor
             .runtime_mut()
-            .eval_str("(instrument-toggle-mods-view)")
+            .eval_str("(eseq.effects.effect-panels/instrument-toggle-mods-view)")
             .expect("enter modulation mode");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(list macro-mapping-open instrument-mods-open (process-map-active?))"),
+                .eval_str("(list eseq.macro-state/mapping-open eseq.effects.state/instrument-mods-open (eseq.effects.param-controls/process-map-active?))"),
             Ok(Some(test_list(vec![
                 Value::Bool(false),
                 Value::Bool(true),
@@ -10893,15 +10899,15 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def sbrowser-editor-name "")
-                (def sbrowser-sample-selected-path () "")
-                (def sbrowser-add-selected-rack-layer () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install selected-step rack fx test helpers");
@@ -10999,15 +11005,15 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def sbrowser-editor-name "")
-                (def sbrowser-sample-selected-path () "")
-                (def sbrowser-add-selected-rack-layer () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install selected-step rack gain test helpers");
@@ -11018,7 +11024,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-slot-set-gain
+                r#"(eseq.effects.instrument-panel/rack-slot-set-gain
                       (nth (get (nth SEQ.instrument-panel 0) :slots) 0)
                       0.33)"#,
             )
@@ -11146,15 +11152,15 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (def sbrowser-sample-selected-path () "")
-                (def sbrowser-add-selected-rack-layer () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install rack mods test helpers");
@@ -11162,7 +11168,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
+            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open true) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
             .expect("open rack sampler mods");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -11322,7 +11328,7 @@
         );
         assert_eq!(
             editor.runtime_mut().eval_str(&format!(
-                "(reactive-value (instrument-mod-target-depth {depth_target_expression}))"
+                "(reactive-value (eseq.effects.param-controls/instrument-mod-target-depth {depth_target_expression}))"
             )),
             Ok(Some(Value::Number(updated_depth as f64))),
             "rack custom-UI modulation knobs must redraw from the targeted rack-slot sync"
@@ -11331,7 +11337,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-set-instrument-option
+                r#"(eseq.effects.param-controls/fx-set-instrument-option
                     (get
                       (nth
                         (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :sources)
@@ -11381,7 +11387,7 @@
                 (not
                   (string-contains?
                     (str
-                      (custom-ui-param-mod-wrapper p "rack-custom-mod-wrapper"
+                      (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p "rack-custom-mod-wrapper"
                         (dict :editable-depth true)))
                     "macro-param-owned-wrapper"))))
             "#
@@ -11401,7 +11407,7 @@
                                (get (nth SEQ.instrument-panel 0) :selected-instrument)
                                :synth))
                            0)))
-                  (param-set-control-value false p 0.5))
+                  (eseq.effects.param-controls/param-set-control-value false p 0.5))
                 "#
             ))
             .expect("edit rack custom-UI modulation depth");
@@ -11522,14 +11528,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
-                (def sbrowser-editor-name "")
-                (def sbrowser-sample-selected-path () "")
-                (def sbrowser-add-selected-rack-layer () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install rack fx test helpers");
@@ -11662,7 +11668,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
+            .eval_str("(do (set! eseq.effects.state/instrument-mods-open true) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
             .expect("open modulation editing for macro-owned rack sampler parameter");
         editor.refresh_runtime_side_effects();
         let mods_layout = editor
@@ -11732,7 +11738,7 @@
         editor.drain_host_commands();
         editor
             .runtime_mut()
-            .eval_str("(set! instrument-mods-open false)")
+            .eval_str("(set! eseq.effects.state/instrument-mods-open false)")
             .expect("return to rack sampler base controls");
         editor.refresh_runtime_side_effects();
 
@@ -11774,7 +11780,7 @@
             ott_panel.props.get("drop-types")
         );
 
-        for source_fn in ["builtin-fx-eq8-source", "builtin-fx-phaser-flanger-source"] {
+        for source_fn in ["eseq.effects.builtin.eq8/eq8-source", "eseq.effects.builtin.phaser-flanger/analyzer-source"] {
             let source = editor
                 .runtime_mut()
                 .eval_str(&format!(
@@ -11963,7 +11969,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(rack-panel-toggle-slot-list)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list)")
             .expect("collapse rack slot list");
         editor.refresh_runtime_side_effects();
         let compact_list_layout = editor
@@ -12005,7 +12011,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(rack-panel-toggle-macros)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros)")
             .expect("open rack macro bank");
         editor.refresh_runtime_side_effects();
         let macro_layout = editor.widget_layout().expect("rack macro bank layout");
@@ -12129,13 +12135,13 @@
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
-            .eval_str("(rack-panel-toggle-macros)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-macros)")
             .expect("close rack macro bank");
         editor.refresh_runtime_side_effects();
 
         editor
             .runtime_mut()
-            .eval_str("(rack-panel-toggle-selected-chain)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain)")
             .expect("collapse selected rack chain");
         editor.refresh_runtime_side_effects();
         let toolbar_only_layout = editor
@@ -12167,7 +12173,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(rack-panel-toggle-slot-list)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-slot-list)")
             .expect("restore rack slot list independently");
         editor.refresh_runtime_side_effects();
         let list_only_layout = editor
@@ -12182,7 +12188,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(rack-panel-toggle-selected-chain)")
+            .eval_str("(eseq.effects.instrument-panel/rack-panel-toggle-selected-chain)")
             .expect("restore selected rack chain");
         editor.refresh_runtime_side_effects();
 
@@ -12190,7 +12196,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-slot-select
+                r#"(eseq.effects.instrument-panel/rack-slot-select
                     (nth (get (nth SEQ.instrument-panel 0) :slots) 0))"#,
             )
             .expect("select rack slot");
@@ -12217,7 +12223,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-slot-select-delete-target
+                r#"(eseq.effects.instrument-panel/rack-slot-select-delete-target
                     (nth (get (nth SEQ.instrument-panel 0) :slots) 0))"#,
             )
             .expect("select rack slot delete target");
@@ -12279,7 +12285,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(fx-delete-selected-effect)")
+            .eval_str("(eseq.effects.panel-widgets/delete-selected-effect)")
             .expect("delete selected rack slot");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -12303,7 +12309,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(fx-select-rack-effect 0 0 0)")
+            .eval_str("(eseq.effects.panel-widgets/select-rack-effect 0 0 0)")
             .expect("select rack slot effect");
         assert_eq!(
             editor
@@ -12314,7 +12320,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(fx-delete-selected-effect)")
+            .eval_str("(eseq.effects.panel-widgets/delete-selected-effect)")
             .expect("delete selected rack slot effect");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -12345,7 +12351,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "rack-effect-instance"
                                      :chain "rack"
@@ -12398,7 +12404,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(param-set-option
+                r#"(eseq.effects.param-controls/param-set-option
                     (dict :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0)
                     (dict :idx 1)
                     "classic")"#,
@@ -12422,7 +12428,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-set-effect-value
+                r#"(eseq.effects.param-controls/fx-set-effect-value
                     (dict :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0)
                     (dict :idx 2)
                     0.75)"#,
@@ -12444,7 +12450,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "builtin-audio-effect"
                                      :name "Filter")
@@ -12489,7 +12495,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-set-instrument-value
+                r#"(eseq.effects.param-controls/fx-set-instrument-value
                     (nth (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :synth) 1)
                     12.0)"#,
             )
@@ -12525,7 +12531,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-panel-drop-on-rack
+                r#"(eseq.effects.instrument-panel/rack-panel-drop-on-rack
                     (dict :drag-type "sample"
                           :payload (dict :path "samples/snare.wav")
                           :target (dict :track 0)))"#,
@@ -12560,7 +12566,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-panel-drop-on-rack
+                r#"(eseq.effects.instrument-panel/rack-panel-drop-on-rack
                     (dict :drag-type "instrument"
                           :payload (dict :name "emulations/digitone")
                           :target (dict :track 0)))"#,
@@ -12589,7 +12595,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-selected-instrument-drop
+                r#"(eseq.effects.instrument-panel/rack-selected-instrument-drop
                     (dict :drag-type "instrument"
                           :payload (dict :name "synths/wavetable")
                           :target (dict :track 0 :slot 1)))"#,
@@ -12622,7 +12628,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-selected-instrument-drop
+                r#"(eseq.effects.instrument-panel/rack-selected-instrument-drop
                     (dict :drag-type "sample"
                           :payload (dict :path "samples/kick.wav")
                           :target (dict :track 0 :slot 1)))"#,
@@ -12838,15 +12844,15 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (def sbrowser-sample-selected-path () "")
-                (def sbrowser-add-selected-rack-layer () false)
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install drum rack fx test helpers");
@@ -12934,7 +12940,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-pad-select
+                r#"(eseq.effects.instrument-panel/rack-pad-select
                     (dict :track 0 :pad-note 15))"#,
             )
             .expect("select drum rack pad");
@@ -12961,7 +12967,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-pad-bank-select
+                r#"(eseq.effects.instrument-panel/rack-pad-bank-select
                     (dict :track 0)
                     (dict :bank-start 12))"#,
             )
@@ -12991,7 +12997,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-slot-set-choke-group-label
+                r#"(eseq.effects.instrument-panel/rack-slot-set-choke-group-label
                     (dict :track 0 :idx 0)
                     "2")"#,
             )
@@ -13023,7 +13029,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(rack-panel-drop-on-drum-pad
+                r#"(eseq.effects.instrument-panel/rack-panel-drop-on-drum-pad
                     (dict :drag-type "sample"
                           :payload (dict :path "samples/snare.wav")
                           :target (dict :track 0 :pad-note 3)))"#,
@@ -13647,12 +13653,12 @@
         runtime
             .eval_str(
                 r#"
-                (def seqv-track-drum-rack? (track)
+                (def eseq.seqv-track-params/seqv-track-drum-rack? (track)
                   (if (< track (len SEQ.track-drum-racks))
                     (nth SEQ.track-drum-racks track)
                     false))
 
-                (def seqv-track-drum-sounds (track)
+                (def eseq.seqv-track-params/seqv-track-drum-sounds (track)
                   (if (< track (len SEQ.track-drum-sounds))
                     (nth SEQ.track-drum-sounds track)
                     '()))
@@ -14091,9 +14097,9 @@
 
         // The compile-time cross-module reads that pinned the old order.
         for probe in [
-            "(seq-has-selected-bus?)",
-            "seq-registered-step-tabs",
-            "(seq-arrangement-view?)",
+            "(eseq.seq-core-state/seq-has-selected-bus?)",
+            "eseq.seq-step-tabs/seq-registered-step-tabs",
+            "(eseq.seq-step-tabs/seq-arrangement-view?)",
         ] {
             let normal = baseline.runtime_mut().eval_str(probe);
             let shuffled = reordered.runtime_mut().eval_str(probe);
@@ -14856,7 +14862,7 @@
         register_standalone_sequencer_helpers(editor.runtime_mut());
         editor
             .runtime_mut()
-            .eval_str("(do (defstate selected-bus -1) (defstate cursor-step 0) (def page-size 16))")
+            .eval_str("(do (defstate eseq.seq-core-state/selected-bus -1) (defstate cursor-step 0) (def eseq.seq-core-state/page-size 16))")
             .expect("install standalone sequencer globals");
         // ui/browser.lisp owns `sbrowser-loading-instrument-name` and is not
         // loaded in this stub harness.  Now that ui/sequencer.lisp is
@@ -15136,12 +15142,12 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
+                "(defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
             )
             .expect("install test slider material macro");
         editor
             .runtime_mut()
-            .eval_str("(defstate selected-bus -1)")
+            .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
             .expect("install shared mixer selection state");
         register_test_delete_target_natives(&mut editor, track_count);
         let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
@@ -15189,7 +15195,7 @@
             .eval_str(
                 r#"
                   (def selected-count (state 0))
-                  (def select-all-steps () (set! selected-count (+ selected-count 1)))
+                  (def eseq.step-grid-interactions/select-all-steps () (set! selected-count (+ selected-count 1)))
                 "#,
             )
             .expect("install select-all test hook");
@@ -15202,7 +15208,7 @@
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
-            .eval_str(r#"(seqv-handle-key "C-a" nil)"#)
+            .eval_str(r#"(eseq.sequencer/handle-key "C-a" nil)"#)
             .expect("route select-all through sequencer key handler");
 
         assert_eq!(
@@ -15281,7 +15287,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(choose-model)")
+            .eval_str("(eseq.choose-model/choose-model)")
             .expect("M-x choose-model");
         editor.refresh_runtime_side_effects();
         editor.set_layout_viewport(140, 36);
@@ -15304,19 +15310,19 @@
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
             .runtime_mut()
-            .eval_str("(choose-model)")
+            .eval_str("(eseq.choose-model/choose-model)")
             .expect("open picker");
         assert_eq!(
-            editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+            editor.runtime_mut().eval_str("eseq.choose-model/open?").unwrap(),
             Some(Value::Bool(true))
         );
 
         editor
             .runtime_mut()
-            .eval_str(r#"(choose-model-select "gpt-5.5")"#)
+            .eval_str(r#"(eseq.choose-model/select "gpt-5.5")"#)
             .expect("select a model");
         assert_eq!(
-            editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+            editor.runtime_mut().eval_str("eseq.choose-model/open?").unwrap(),
             Some(Value::Bool(false)),
             "selecting a model should close the picker"
         );
@@ -15325,7 +15331,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(choose-model-current)")
+                .eval_str("(eseq.choose-model/current)")
                 .unwrap(),
             Some(Value::String("Default (auto)".to_string())),
             "the stubbed native reports no choice, so the sentinel row is current"
@@ -15364,20 +15370,20 @@
             .eval_str(
                 r#"
                 (effect-buffer "*fake-seq*" (label "fake sequencer"))
-                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                (eseq.seq-step-tabs/seq-register-step-sequencer-tab "Fake" "*fake-seq*")
                 "#,
             )
             .expect("register fake sequencer tab");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("remembered-step-panel-buffer")
+                .eval_str("eseq.seq-step-tabs/remembered-step-panel-buffer")
                 .unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
@@ -15403,8 +15409,8 @@
             .eval_str(
                 r#"
                 (effect-buffer "*fake-seq*" (label "fake sequencer"))
-                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
-                (seq-register-step-sequencer-tab "Renamed" "*fake-seq*")
+                (eseq.seq-step-tabs/seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                (eseq.seq-step-tabs/seq-register-step-sequencer-tab "Renamed" "*fake-seq*")
                 "#,
             )
             .expect("register and rename fake sequencer tab");
@@ -15421,12 +15427,12 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-apply-fx-layout)")
+            .eval_str("(eseq.seq-layout/apply-fx-layout)")
             .expect("reapply main layout");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
@@ -15448,13 +15454,13 @@
             .eval_str(
                 r#"
                 (effect-buffer "*16x16*" (label "sixteen"))
-                (seq-register-script-step-sequencer-tab
+                (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
                   "16x16"
                   "*16x16*"
                   "neural-16-demo"
                   "scripts/sequencers/graph-neural-16-demo.lisp")
-                (seq-script-append-to-scratch "scripts/sequencers/graph-neural-16-demo.lisp")
-                (seq-select-main-step-tab-by-index 2)
+                (eseq.seq-script-picker/seq-script-append-to-scratch "scripts/sequencers/graph-neural-16-demo.lisp")
+                (eseq.seq-step-tabs/seq-select-main-step-tab-by-index 2)
                 "#,
             )
             .expect("register and select script sequencer tab");
@@ -15471,7 +15477,7 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(seq-delete-script-sequencer "neural-16-demo")"#)
+            .eval_str(r#"(eseq.seq-script-picker/seq-delete-script-sequencer "neural-16-demo")"#)
             .expect("delete script sequencer");
         editor.refresh_runtime_side_effects();
 
@@ -15507,12 +15513,12 @@
             .eval_str(&format!(
                 r#"
                 (effect-buffer "*source-only-script*" (label "source-only"))
-                (seq-register-script-step-sequencer-tab
+                (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
                   "Conductor Demo"
                   "*source-only-script*"
                   ""
                   "{source_path}")
-                (seq-script-append-to-scratch "{source_path}")
+                (eseq.seq-script-picker/seq-script-append-to-scratch "{source_path}")
                 "#,
             ))
             .expect("register source-only project script tab");
@@ -15615,7 +15621,7 @@
             &script_path,
             r#"
             (effect-buffer "*inferred-script-tab*" (label "inferred"))
-            (seq-register-script-step-sequencer-tab
+            (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
               "Inferred"
               "*inferred-script-tab*"
               "inferred-script"
@@ -15646,7 +15652,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seq-step-tab-source-path (nth seq-registered-step-tabs 0))")
+                .eval_str("(eseq.seq-step-tabs/seq-step-tab-source-path (nth eseq.seq-step-tabs/seq-registered-step-tabs 0))")
                 .expect("read inferred project source path"),
             Some(Value::String(canonical_path)),
             "a script restored by a raw scratch load should retain enough source identity for close cleanup"
@@ -15664,14 +15670,14 @@
                 r#"
                 (effect-buffer "*persistent-step-tab*" (label "persistent"))
                 (effect-buffer "*old-project-script*" (label "old project"))
-                (seq-register-step-sequencer-tab "Persistent" "*persistent-step-tab*")
-                (seq-register-script-step-sequencer-tab
+                (eseq.seq-step-tabs/seq-register-step-sequencer-tab "Persistent" "*persistent-step-tab*")
+                (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
                   "Old Project"
                   "*old-project-script*"
                   ""
                   "scripts/processes/process-conductor-demo.lisp")
                 (set-buffer-text-for "*scratch*" "{scratch_source}")
-                (seq-select-main-step-tab-by-index 3)
+                (eseq.seq-step-tabs/seq-select-main-step-tab-by-index 3)
                 "#,
             ))
             .expect("register mixed step tabs");
@@ -15728,7 +15734,7 @@
             .eval_str(
                 r#"
                 (effect-buffer "*fake-seq*" (label "fake sequencer"))
-                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                (eseq.seq-step-tabs/seq-register-step-sequencer-tab "Fake" "*fake-seq*")
                 "#,
             )
             .expect("register fake sequencer tab");
@@ -15801,7 +15807,7 @@
                 (map
                   (lambda (entry) (get entry :name))
                   (filter
-                    (lambda (entry) (seq-script-entry-visible? entry))
+                    (lambda (entry) (eseq.seq-script-picker/seq-script-entry-visible? entry))
                     (list-directory seq-script-picker-current-dir)))
                 "#,
             )
@@ -15835,11 +15841,11 @@
                 r#"
                 (do
                   (set! seq-script-picker-current-dir
-                    (path-join (seq-script-default-dir) "sequencers"))
+                    (path-join (eseq.seq-script-picker/seq-script-default-dir) "sequencers"))
                   (map
                     (lambda (entry) (get entry :name))
                     (filter
-                      (lambda (entry) (seq-script-entry-visible? entry))
+                      (lambda (entry) (eseq.seq-script-picker/seq-script-entry-visible? entry))
                       (list-directory seq-script-picker-current-dir))))
                 "#,
             )
@@ -15867,7 +15873,7 @@
         let scratch_entry = editor
             .runtime_mut()
             .eval_str(
-                r#"(seq-script-scratch-entry "scripts/sequencers/graph-neural-8x8-demo.lisp")"#,
+                r#"(eseq.seq-script-picker/seq-script-scratch-entry "scripts/sequencers/graph-neural-8x8-demo.lisp")"#,
             )
             .expect("build script scratch entry")
             .expect("script scratch entry value");
@@ -15933,7 +15939,7 @@
         assert_eq!(editor.active_buffer().name, "*scripts*");
 
         let load_form = format!(
-            "(seq-script-load-file {:?})",
+            "(eseq.seq-script-picker/seq-script-load-file {:?})",
             script_path.display().to_string()
         );
         editor
@@ -15976,7 +15982,7 @@
         std::fs::write(
             &script_path,
             r#"
-            (seq-register-script-source-tab "Source Only")
+            (eseq.seq-script-picker/seq-register-script-source-tab "Source Only")
             "#,
         )
         .expect("write source-tab script fixture");
@@ -15986,7 +15992,7 @@
             .to_string();
 
         let load_form = format!(
-            "(seq-script-load-file {:?})",
+            "(eseq.seq-script-picker/seq-script-load-file {:?})",
             script_path.display().to_string()
         );
         editor
@@ -16044,7 +16050,7 @@
         std::fs::write(
             &script_path,
             r#"
-            (seq-register-script-source-tab "Scratch Source")
+            (eseq.seq-script-picker/seq-register-script-source-tab "Scratch Source")
             "#,
         )
         .expect("write project scratch source-tab script fixture");
@@ -16107,7 +16113,7 @@
             .expect("write source-only script fixture");
 
         let load_form = format!(
-            "(seq-script-load-file {:?})",
+            "(eseq.seq-script-picker/seq-script-load-file {:?})",
             script_path.display().to_string()
         );
         editor
@@ -16194,7 +16200,7 @@
         let script_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ui/inline-code-widgets-demo.lisp");
         let load_form = format!(
-            "(seq-script-load-file {:?})",
+            "(eseq.seq-script-picker/seq-script-load-file {:?})",
             script_path.display().to_string()
         );
         editor
@@ -16322,9 +16328,9 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seq-script-load-file
+                r#"(eseq.seq-script-picker/seq-script-load-file
                     (path-join
-                      (path-join (seq-script-default-dir) "processes")
+                      (path-join (eseq.seq-script-picker/seq-script-default-dir) "processes")
                       "process-chain-demo.lisp"))"#,
             )
             .expect("load process chain demo through script picker path");
@@ -16376,9 +16382,9 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seq-script-load-file
+                r#"(eseq.seq-script-picker/seq-script-load-file
                     (path-join
-                      (path-join (seq-script-default-dir) "processes")
+                      (path-join (eseq.seq-script-picker/seq-script-default-dir) "processes")
                       "process-phase3a-ports-demo.lisp"))"#,
             )
             .expect("load Phase 3A ports demo through script picker path");
@@ -16447,9 +16453,9 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seq-script-load-file
+                r#"(eseq.seq-script-picker/seq-script-load-file
                     (path-join
-                      (path-join (seq-script-default-dir) "processes")
+                      (path-join (eseq.seq-script-picker/seq-script-default-dir) "processes")
                       "process-ui-control-demo.lisp"))"#,
             )
             .expect("load process UI demo through script picker path");
@@ -16914,7 +16920,7 @@
         .expect("write script picker sync fixture");
 
         let load_form = format!(
-            "(seq-script-load-file {:?})",
+            "(eseq.seq-script-picker/seq-script-load-file {:?})",
             script_path.display().to_string()
         );
         editor
@@ -17156,14 +17162,14 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (macro-by-key :delay-push) :name)"),
+                .eval_str("(get (eseq.macros/macro-by-key :delay-push) :name)"),
             Ok(Some(Value::String("Delay Push".to_string()))),
             "engine readback should replace the fallback key label"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(macro-toggle-mapping-arm :delay-push)"),
+                .eval_str("(eseq.macros/macro-toggle-mapping-arm :delay-push)"),
             Ok(Some(Value::Bool(true))),
             "the resolved player control should enter macro map mode"
         );
@@ -17174,7 +17180,7 @@
         );
         assert_eq!(
             editor.runtime_mut().eval_str(
-                r#"(len (filter |tab| (and (= (nth tab 0) "Player") (= (nth tab 1) "*macro-player*")) seq-registered-step-tabs))"#,
+                r#"(len (filter |tab| (and (= (nth tab 0) "Player") (= (nth tab 1) "*macro-player*")) eseq.seq-step-tabs/seq-registered-step-tabs))"#,
             ),
             Ok(Some(Value::Number(1.0))),
             "player surface should register as a script-owned tab",
@@ -17188,84 +17194,84 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-placement")
+                .eval_str("eseq.seq-step-tabs/piano-roll-placement")
                 .unwrap(),
             Some(Value::Keyword("bottom".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string()))
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-piano-roll-placement)")
+            .eval_str("(eseq.seq-panels/seq-toggle-piano-roll-placement)")
             .expect("placement toggle should be bottom-only");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-placement")
+                .eval_str("eseq.seq-step-tabs/piano-roll-placement")
                 .unwrap(),
             Some(Value::Keyword("bottom".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "placement toggle while closed must not open or move piano roll"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
             "placement toggle while closed should leave the FX lower pane visible"
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-main-or-piano-roll)")
+            .eval_str("(eseq.seq-panels/seq-toggle-main-or-piano-roll)")
             .expect("open piano roll in lower panel");
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-piano-roll-placement)")
+            .eval_str("(eseq.seq-panels/seq-toggle-piano-roll-placement)")
             .expect("placement toggle while open should keep lower placement");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-placement")
+                .eval_str("eseq.seq-step-tabs/piano-roll-placement")
                 .unwrap(),
             Some(Value::Keyword("bottom".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-main-or-piano-roll)")
+            .eval_str("(eseq.seq-panels/seq-toggle-main-or-piano-roll)")
             .expect("close lower piano roll");
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string()))
         );
     }
@@ -17276,7 +17282,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-main-or-piano-roll)")
+            .eval_str("(eseq.seq-panels/seq-toggle-main-or-piano-roll)")
             .expect("open piano roll in bottom panel");
         editor.refresh_runtime_side_effects();
 
@@ -17321,34 +17327,34 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-open-piano-roll-bottom)")
+            .eval_str("(eseq.seq-panels/seq-open-piano-roll-bottom)")
             .expect("open lower piano roll");
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-select-track-for-edit 0)")
+            .eval_str("(eseq.sequencer/select-track-for-edit 0)")
             .expect("select already-current track");
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string())),
             "selecting the already-current track should keep piano roll open"
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-select-track-for-edit 1)")
+            .eval_str("(eseq.sequencer/select-track-for-edit 1)")
             .expect("select a different track");
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string())),
             "selecting a different track should preserve the lower piano roll"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "selecting a different track should leave the main sequencer panel visible"
         );
@@ -17364,10 +17370,10 @@
             .eval_str(
                 r#"
                 (do
-                  (set! samples-sidebar-visible false)
-                  (set! mixer-panel-visible false)
-                  (set! lower-panel-visible false)
-                  (seq-apply-fx-layout))
+                  (set! eseq.seq-core-state/samples-sidebar-visible false)
+                  (set! eseq.seq-core-state/mixer-panel-visible false)
+                  (set! eseq.seq-core-state/lower-panel-visible false)
+                  (eseq.seq-layout/apply-fx-layout))
                 "#,
             )
             .expect("hide browser, mixer, and FX panels");
@@ -17375,14 +17381,14 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-select-track-for-edit 1)")
+            .eval_str("(eseq.sequencer/select-track-for-edit 1)")
             .expect("select a different track");
         editor.refresh_runtime_side_effects();
 
         for state in [
-            "samples-sidebar-visible",
-            "mixer-panel-visible",
-            "lower-panel-visible",
+            "eseq.seq-core-state/samples-sidebar-visible",
+            "eseq.seq-core-state/mixer-panel-visible",
+            "eseq.seq-core-state/lower-panel-visible",
         ] {
             assert_eq!(
                 editor.runtime_mut().eval_str(state).unwrap(),
@@ -17404,7 +17410,7 @@
         let mut editor = full_grid_editor_for_scroll_tests();
         let spec = editor
             .runtime_mut()
-            .eval_str("(seq-step-and-track-panel-layout-spec)")
+            .eval_str("(eseq.seq-layout/step-and-track-panel-layout-spec)")
             .expect("build step/track layout spec")
             .expect("layout spec value");
 
@@ -17456,16 +17462,16 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-open-arrangement)")
+            .eval_str("(eseq.seq-panels/seq-open-arrangement)")
             .expect("switch to arrangement");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("seq-main-view").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/seq-main-view").unwrap(),
             Some(Value::Keyword("arrangement".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "arrangement mode should be independent from session tab selection"
         );
@@ -17502,7 +17508,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-show-sequencer-main)")
+            .eval_str("(eseq.seq-panels/seq-show-sequencer-main)")
             .expect("return to session");
         editor.refresh_runtime_side_effects();
         let session_tiles = collect_tile_buffer_names(&editor);
@@ -17718,7 +17724,7 @@
             .set_reactive("SEQ", "durations", test_number_list(&durations));
         editor
             .runtime_mut()
-            .eval_str("(set-track-cursor-step 2)")
+            .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 2)")
             .expect("move cursor to third step");
         editor.refresh_runtime_side_effects();
 
@@ -17795,16 +17801,16 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(list cursor-step (cursor-num-steps) (current-step))")
+                .eval_str("(list cursor-step (eseq.seq-core-state/cursor-num-steps) (eseq.seq-core-state/current-step))")
                 .unwrap(),
             Some(test_number_list(&[2.0, 16.0, 2.0])),
         );
         editor
             .runtime_mut()
-            .eval_str("(cursor-right)")
+            .eval_str("(eseq.step-grid-interactions/cursor-right)")
             .expect("move unselected cursor right");
         assert_eq!(
-            editor.runtime_mut().eval_str("(current-step)").unwrap(),
+            editor.runtime_mut().eval_str("(eseq.seq-core-state/current-step)").unwrap(),
             Some(Value::Number(3.0)),
         );
         assert_eq!(layout_prop_number(cursor_label, "value"), Some(4.0));
@@ -18084,7 +18090,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(seqv-set-param-mode 0 3) (seqv-track-menu-click 0)")
+            .eval_str("(eseq.sequencer/set-track-param-mode 0 3) (eseq.sequencer/track-menu-click 0)")
             .expect("select Sound and expand the drum-rack row");
         editor.refresh_runtime_side_effects();
 
@@ -18143,7 +18149,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-track-drum-rack? SEQ.current-track)")
+                .eval_str("(eseq.seqv-track-params/seqv-track-drum-rack? SEQ.current-track)")
                 .expect("evaluate drum-rack step inspector mode"),
             Some(Value::Bool(true)),
             "the test fixture should remain a drum rack when the step panel renders"
@@ -18210,7 +18216,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-select-all-current-track-steps)")
+            .eval_str("(eseq.sequencer/select-all-current-track-steps)")
             .expect("Cmd+A drum-rack selection route");
         assert_eq!(
             selected_pad_notes.lock().unwrap().as_slice(),
@@ -18475,7 +18481,7 @@
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
             .runtime_mut()
-            .eval_str("(set-track-cursor-step 2)")
+            .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 2)")
             .expect("move cursor to third step");
         editor
             .runtime_mut()
@@ -18726,7 +18732,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seqv-drop-sample-on-track
+                r#"(eseq.sequencer/drop-sample-on-track
                     (dict :drag-type "sample"
                           :payload (dict :path "samples/kick.wav")
                           :target (dict :kind "track" :track 1)))"#,
@@ -18761,7 +18767,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seqv-drop-on-track
+                r#"(eseq.sequencer/drop-on-track
                     (dict :drag-type "instrument"
                           :payload (dict :kind "instrument" :name "core/triton")
                           :target (dict :kind "track" :track 1)))"#,
@@ -18797,7 +18803,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seqv-drop-on-track
+                r#"(eseq.sequencer/drop-on-track
                     (dict :drag-type "instrument"
                           :payload (dict :kind "instrument" :name "core/drift")
                           :target (dict :kind "track" :track 2)))"#,
@@ -18816,7 +18822,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seqv-drop-new-track
+                r#"(eseq.sequencer/drop-new-track
                     (dict :drag-type "sample"
                           :payload (dict :path "samples/snare.wav")))"#,
             )
@@ -18846,7 +18852,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seqv-drop-new-track
+                r#"(eseq.sequencer/drop-new-track
                     (dict :drag-type "instrument"
                           :payload (dict :name "emulations/digitone")))"#,
             )
@@ -18870,7 +18876,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(seqv-drop-new-track
+                r#"(eseq.sequencer/drop-new-track
                     (dict :drag-type "sound"
                           :payload (dict :path "sounds/wide-rack.sound")))"#,
             )
@@ -18902,7 +18908,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(set-track-cursor-step 8)")
+            .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 8)")
             .expect("set track 1 visual cursor");
         assert_eq!(
             editor.runtime_mut().eval_str("cursor-step").unwrap(),
@@ -18911,7 +18917,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-cursor-step 0)")
+                .eval_str("(eseq.sequencer/track-cursor 0)")
                 .unwrap(),
             Some(Value::Number(8.0))
         );
@@ -18923,7 +18929,7 @@
                 (do
                   (reactive-set "SEQ" "current-track" 1)
                   (reactive-set "SEQ" "tp-num-steps" 6)
-                  (set-track-cursor-step 8))
+                  (eseq.step-grid-interactions/set-track-cursor-step 8))
                 "#,
             )
             .expect("move global cursor while editing track 2");
@@ -18932,14 +18938,14 @@
             Some(Value::Number(8.0))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("(current-step)").unwrap(),
+            editor.runtime_mut().eval_str("(eseq.seq-core-state/current-step)").unwrap(),
             Some(Value::Number(2.0)),
             "the edit/toggle target should use the same modulo projection as the visual cursor"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-cursor-step 1)")
+                .eval_str("(eseq.sequencer/track-cursor 1)")
                 .unwrap(),
             Some(Value::Number(2.0)),
             "track 2 visual cursor should be global cursor modulo that track's pattern length"
@@ -18947,7 +18953,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-select-track-for-edit 0)")
+            .eval_str("(eseq.sequencer/select-track-for-edit 0)")
             .expect("return to track 1");
 
         assert_eq!(
@@ -18958,7 +18964,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-cursor-step 0)")
+                .eval_str("(eseq.sequencer/track-cursor 0)")
                 .unwrap(),
             Some(Value::Number(8.0)),
             "track 1 visual cursor should repaint from the global cursor when the track is selected"
@@ -18975,7 +18981,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(set-track-cursor-step 12)")
+            .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 12)")
             .expect("place cursor at step 12");
         assert_eq!(
             editor
@@ -18990,7 +18996,7 @@
             .set_reactive("SEQ", "track-num-steps", test_number_list(&[8.0, 16.0]));
         editor
             .runtime_mut()
-            .eval_str("(set-track-cursor-step 3)")
+            .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 3)")
             .expect("move cursor after the pattern shrank");
 
         assert_eq!(
@@ -19022,14 +19028,14 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-samples-sidebar)")
+            .eval_str("(eseq.seq-panels/seq-toggle-samples-sidebar)")
             .expect("hide samples sidebar");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("samples-sidebar-visible")
+                .eval_str("eseq.seq-core-state/samples-sidebar-visible")
                 .unwrap(),
             Some(Value::Bool(false))
         );
@@ -19047,14 +19053,14 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-samples-sidebar)")
+            .eval_str("(eseq.seq-panels/seq-toggle-samples-sidebar)")
             .expect("show samples sidebar");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("samples-sidebar-visible")
+                .eval_str("eseq.seq-core-state/samples-sidebar-visible")
                 .unwrap(),
             Some(Value::Bool(true))
         );
@@ -19106,7 +19112,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-samples-sidebar)")
+            .eval_str("(eseq.seq-panels/seq-toggle-samples-sidebar)")
             .expect("hide samples sidebar");
         editor.refresh_runtime_side_effects();
 
@@ -19137,15 +19143,15 @@
             .eval_str(
                 r#"
                 (do
-                  (set! samples-sidebar-visible true)
-                  (set! mixer-panel-visible true))
+                  (set! eseq.seq-core-state/samples-sidebar-visible true)
+                  (set! eseq.seq-core-state/mixer-panel-visible true))
                 "#,
             )
             .expect("show mixer panel");
 
         let visible_spec = editor
             .runtime_mut()
-            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
             .expect("build mixer-visible layout spec")
             .expect("layout spec");
         assert!(
@@ -19155,20 +19161,20 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-mixer-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
             .expect("hide mixer panel");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("mixer-panel-visible")
+                .eval_str("eseq.seq-core-state/mixer-panel-visible")
                 .unwrap(),
             Some(Value::Bool(false))
         );
         let hidden_spec = editor
             .runtime_mut()
-            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
             .expect("build mixer-hidden layout spec")
             .expect("layout spec");
         assert!(
@@ -19184,20 +19190,20 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-mixer-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
             .expect("show mixer panel");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("mixer-panel-visible")
+                .eval_str("eseq.seq-core-state/mixer-panel-visible")
                 .unwrap(),
             Some(Value::Bool(true))
         );
         let restored_spec = editor
             .runtime_mut()
-            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
             .expect("build restored layout spec")
             .expect("layout spec");
         assert!(
@@ -19211,12 +19217,12 @@
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
             .runtime_mut()
-            .eval_str("(set! lower-panel-visible true)")
+            .eval_str("(set! eseq.seq-core-state/lower-panel-visible true)")
             .expect("show FX panel");
 
         let visible_spec = editor
             .runtime_mut()
-            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
             .expect("build FX-visible layout spec")
             .expect("layout spec");
         assert!(
@@ -19226,20 +19232,20 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-fx-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-fx-panel)")
             .expect("hide FX panel");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("lower-panel-visible")
+                .eval_str("eseq.seq-core-state/lower-panel-visible")
                 .unwrap(),
             Some(Value::Bool(false))
         );
         let hidden_spec = editor
             .runtime_mut()
-            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .eval_str(r#"(eseq.seq-layout/lower-panel-layout-spec "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)"#)
             .expect("build FX-hidden layout spec")
             .expect("layout spec");
         assert!(
@@ -19261,14 +19267,14 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-fx-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-fx-panel)")
             .expect("restore FX panel");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("lower-panel-visible")
+                .eval_str("eseq.seq-core-state/lower-panel-visible")
                 .unwrap(),
             Some(Value::Bool(true))
         );
@@ -19306,10 +19312,10 @@
             .eval_str(
                 r#"
                 (do
-                  (set! samples-sidebar-visible true)
-                  (set! mixer-panel-visible true)
-                  (set! lower-panel-visible true)
-                  (seq-apply-fx-layout))
+                  (set! eseq.seq-core-state/samples-sidebar-visible true)
+                  (set! eseq.seq-core-state/mixer-panel-visible true)
+                  (set! eseq.seq-core-state/lower-panel-visible true)
+                  (eseq.seq-layout/apply-fx-layout))
                 "#,
             )
             .expect("show all three collapsible panels");
@@ -19320,9 +19326,9 @@
         let fx_collapse = collapse_action(&editor, "*fx*");
 
         for (callback, state_name) in [
-            (samples_collapse, "samples-sidebar-visible"),
-            (mixer_collapse, "mixer-panel-visible"),
-            (fx_collapse, "lower-panel-visible"),
+            (samples_collapse, "eseq.seq-core-state/samples-sidebar-visible"),
+            (mixer_collapse, "eseq.seq-core-state/mixer-panel-visible"),
+            (fx_collapse, "eseq.seq-core-state/lower-panel-visible"),
         ] {
             editor
                 .runtime_mut()
@@ -19348,10 +19354,10 @@
                 r#"
                 (do
                   (effect-buffer "*fake-seq*" (label "fake sequencer"))
-                  (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                  (eseq.seq-step-tabs/seq-register-step-sequencer-tab "Fake" "*fake-seq*")
                   (set-layout
                     (list :buf "*sequencer*"
-                      :tabs (seq-main-step-tabs)
+                      :tabs (eseq.seq-step-tabs/seq-main-step-tabs)
                       :hide-status true
                       :border-radius 12
                       :border-width 4)))
@@ -19371,19 +19377,19 @@
         );
         assert_eq!(editor.active_buffer().name, "*fake-seq*");
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "mouse/tab selection intentionally does not update the Lisp selector state directly"
         );
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-mixer-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
             .expect("toggle mixer panel");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*fake-seq*".to_string())),
             "mixer toggle should adopt the active clicked step tab before rebuilding the layout"
         );
@@ -19412,7 +19418,7 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(seq-apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
+            .eval_str(r#"(eseq.seq-layout/apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
             .expect("apply instrument patcher layout");
         editor.refresh_runtime_side_effects();
 
@@ -19474,11 +19480,11 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(seq-apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
+            .eval_str(r#"(eseq.seq-layout/apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
             .expect("apply instrument patcher layout");
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-samples-sidebar)")
+            .eval_str("(eseq.seq-panels/seq-toggle-samples-sidebar)")
             .expect("hide samples sidebar");
         editor.refresh_runtime_side_effects();
 
@@ -19579,7 +19585,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (nth (patch-macros-items) 1) :name)")
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 1) :name)")
                 .unwrap(),
             Some(Value::String("reverb".to_string())),
             "reverb should be the only In Patch root"
@@ -19587,7 +19593,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (nth (get (nth (patch-macros-items) 1) :children) 0) :name)")
+                .eval_str("(get (nth (get (nth (eseq.patch-macros/patch-macros-items) 1) :children) 0) :name)")
                 .unwrap(),
             Some(Value::String("comb".to_string())),
         );
@@ -19595,7 +19601,7 @@
             editor
                 .runtime_mut()
                 .eval_str(
-                    "(get (nth (get (nth (get (nth (patch-macros-items) 1) :children) 0) :children) 0) :name)"
+                    "(get (nth (get (nth (get (nth (eseq.patch-macros/patch-macros-items) 1) :children) 0) :children) 0) :name)"
                 )
                 .unwrap(),
             Some(Value::String("dcblock".to_string())),
@@ -19604,7 +19610,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (nth (patch-macros-items) 3) :icon)")
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 3) :icon)")
                 .unwrap(),
             Some(Value::Keyword("sliders".to_string())),
             "library section row for a used macro should use the :sliders icon"
@@ -19633,7 +19639,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len (patch-macros-items))")
+                .eval_str("(len (eseq.patch-macros/patch-macros-items))")
                 .unwrap(),
             Some(Value::Number(5.0)),
             "two section headers plus three macro rows"
@@ -19641,12 +19647,12 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(set! patch-macros-filter "GAIN")"#)
+            .eval_str(r#"(set! eseq.patch-macros/patch-macros-filter "GAIN")"#)
             .expect("set filter");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len (patch-macros-items))")
+                .eval_str("(len (eseq.patch-macros/patch-macros-items))")
                 .unwrap(),
             Some(Value::Number(2.0)),
             "case-insensitive filter should keep only the Library header and gain2"
@@ -19654,7 +19660,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (nth (patch-macros-items) 1) :name)")
+                .eval_str("(get (nth (eseq.patch-macros/patch-macros-items) 1) :name)")
                 .unwrap(),
             Some(Value::String("gain2".to_string())),
             "macro rows should carry the drag payload name"
@@ -19853,9 +19859,9 @@
                   (def cursor-left-count (state 0))
                   (def cursor-right-count (state 0))
                   (def delete-count (state 0))
-                  (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
-                  (def cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
-                  (def delete-selected-steps () (set! delete-count (+ delete-count 1)))
+                  (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                  (def eseq.step-grid-interactions/cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
+                  (def eseq.step-grid-interactions/delete-selected-steps () (set! delete-count (+ delete-count 1)))
                 "#,
             )
             .expect("install step edit shortcut hooks");
@@ -20351,11 +20357,11 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .eval_str(r#"(def eseq.seqv-track-params/seqv-param-name (mode) "")"#)
             .expect("stub sequencer param name helper");
         editor
             .runtime_mut()
-            .eval_str(r#"(effect-buffer "*plock-panel-test*" (fx-track-plocks-panel))"#)
+            .eval_str(r#"(effect-buffer "*plock-panel-test*" (eseq.effects.track-panels/track-plocks-panel))"#)
             .expect("create p-lock panel test buffer");
         editor.refresh_runtime_side_effects();
         let buffer_id = editor
@@ -20478,11 +20484,11 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .eval_str(r#"(def eseq.seqv-track-params/seqv-param-name (mode) "")"#)
             .expect("stub sequencer param name helper");
         editor
             .runtime_mut()
-            .eval_str(r#"(effect-buffer "*plock-panel-table-test*" (fx-track-plocks-panel))"#)
+            .eval_str(r#"(effect-buffer "*plock-panel-table-test*" (eseq.effects.track-panels/track-plocks-panel))"#)
             .expect("create p-lock table test buffer");
         editor.refresh_runtime_side_effects();
         let buffer_id = editor
@@ -20585,11 +20591,11 @@
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
-            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .eval_str(r#"(def eseq.seqv-track-params/seqv-param-name (mode) "")"#)
             .expect("stub sequencer param name helper");
         editor
             .runtime_mut()
-            .eval_str(r#"(effect-buffer "*plock-panel-binding-test*" (fx-track-plocks-panel))"#)
+            .eval_str(r#"(effect-buffer "*plock-panel-binding-test*" (eseq.effects.track-panels/track-plocks-panel))"#)
             .expect("create p-lock binding test buffer");
         editor.refresh_runtime_side_effects();
         let buffer_id = editor
@@ -20684,11 +20690,11 @@
         editor.refresh_runtime_side_effects();
         editor
             .runtime_mut()
-            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .eval_str(r#"(def eseq.seqv-track-params/seqv-param-name (mode) "")"#)
             .expect("stub sequencer param name helper");
         editor
             .runtime_mut()
-            .eval_str(r#"(effect-buffer "*plock-panel-preview-test*" (fx-track-plocks-panel))"#)
+            .eval_str(r#"(effect-buffer "*plock-panel-preview-test*" (eseq.effects.track-panels/track-plocks-panel))"#)
             .expect("create p-lock preview panel test buffer");
         editor.refresh_runtime_side_effects();
         let buffer_id = editor
@@ -20736,7 +20742,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(set! fx-selected-plock-row 0)")
+            .eval_str("(set! eseq.effects.track-panels/selected-plock-row 0)")
             .expect("select plock row");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -20796,7 +20802,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("fx-selected-plock-row")
+                .eval_str("eseq.effects.track-panels/selected-plock-row")
                 .unwrap(),
             Some(Value::Number(-1.0))
         );
@@ -20809,7 +20815,7 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(fx-plock-chip-click (dict :kind "variant" :label "A"))"#)
+            .eval_str(r#"(eseq.effects.track-panels/plock-chip-click (dict :kind "variant" :label "A"))"#)
             .expect("click p-lock variant chip with no selected step");
 
         let commands = editor.drain_host_commands();
@@ -20896,7 +20902,7 @@
             .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
         editor
             .runtime_mut()
-            .eval_str(r#"(effect-buffer "*sound-palette-test*" (sound-palette-panel))"#)
+            .eval_str(r#"(effect-buffer "*sound-palette-test*" (eseq.sound-palette/panel))"#)
             .expect("create sound palette test buffer");
         editor.refresh_runtime_side_effects();
         let buffer_id = editor
@@ -21089,7 +21095,7 @@
         editor.drain_host_commands();
         editor
             .runtime_mut()
-            .eval_str(r#"(sound-palette-apply (dict :patch-id 3 :mix-id 2))"#)
+            .eval_str(r#"(eseq.sound-palette/apply-entry (dict :patch-id 3 :mix-id 2))"#)
             .expect("apply the fixture entry");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
@@ -21140,7 +21146,7 @@
         editor.runtime_mut().run_reactive_cycle();
         let colored = editor
             .runtime_mut()
-            .eval_str("(arrangement-clip-sound-dot 0 5)")
+            .eval_str("(eseq.arrangement/clip-sound-dot 0 5)")
             .expect("colored clip")
             .expect("dot value");
         let Value::List(rgb) = colored else {
@@ -21151,7 +21157,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(arrangement-clip-sound-dot 0 6)")
+                .eval_str("(eseq.arrangement/clip-sound-dot 0 6)")
                 .expect("name-only clip"),
             Some(Value::Bool(true)),
             "name-only clip uses the gray fallback"
@@ -21159,7 +21165,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(arrangement-clip-sound-dot 0 7)")
+                .eval_str("(eseq.arrangement/clip-sound-dot 0 7)")
                 .expect("unresolvable clip"),
             Some(Value::Nil),
             "a clip with no resolvable sound draws no dot"
@@ -21167,7 +21173,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(arrangement-clip-sound-dot 3 5)")
+                .eval_str("(eseq.arrangement/clip-sound-dot 3 5)")
                 .expect("out-of-range track"),
             Some(Value::Nil)
         );
@@ -21198,7 +21204,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(set! fx-selected-plock-row 0)")
+            .eval_str("(set! eseq.effects.track-panels/selected-plock-row 0)")
             .expect("select preview p-lock row");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -21206,7 +21212,7 @@
 
         let handled = editor
             .runtime_mut()
-            .eval_str("(fx-delete-selected-plock-row-key)")
+            .eval_str("(eseq.effects.buffers/delete-selected-plock-row-key)")
             .expect("delete selected preview p-lock row");
 
         assert_eq!(handled, Some(Value::Bool(true)));
@@ -21217,7 +21223,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("fx-selected-plock-row")
+                .eval_str("eseq.effects.track-panels/selected-plock-row")
                 .unwrap(),
             Some(Value::Number(-1.0))
         );
@@ -21290,7 +21296,7 @@
             .set_reactive("SEQ", "song-cursor-beats", Value::Number(512.0));
         editor
             .runtime_mut()
-            .eval_str("(set! arrangement-cursor-time 512)")
+            .eval_str("(set! eseq.arrangement/cursor-time 512)")
             .expect("park stopped arrangement cursor at bar 129");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -21349,7 +21355,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(do (set! scene-push-target 1) (set! scene-push-value 0.5))")
+            .eval_str("(do (set! eseq.transport/scene-push-target 1) (set! eseq.transport/scene-push-value 0.5))")
             .expect("show scene push interpolation control");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -21412,7 +21418,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(seq-reorder-scene-drop (dict :payload (dict :scene 0) :target (dict :scene 2)))",
+                "(eseq.transport/seq-reorder-scene-drop (dict :payload (dict :scene 0) :target (dict :scene 2)))",
             )
             .expect("dispatch scene reorder drop");
         let commands = editor.drain_host_commands();
@@ -21519,8 +21525,8 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(do (set! arrangement-cursor-time 20) \
-                 (set! arrangement-cursor-track 2) \
+                "(do (set! eseq.arrangement/cursor-time 20) \
+                 (set! eseq.arrangement/cursor-track 2) \
                  (set-window-buffer \"*transport*\"))",
             )
             .expect("park arrangement cursor and open transport");
@@ -21551,14 +21557,14 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("arrangement-cursor-time")
+                .eval_str("eseq.arrangement/cursor-time")
                 .expect("cursor time evaluates"),
             Some(Value::Number(0.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("arrangement-cursor-track")
+                .eval_str("eseq.arrangement/cursor-track")
                 .expect("cursor track evaluates"),
             Some(Value::Number(-1.0))
         );
@@ -22575,19 +22581,19 @@
         // forwards the ghost's final start, ghost clears.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :move-items-absolute :anchor-id 8 :ids (list 8) :start 12))",
+            "(eseq.arrangement/scene-action (dict :type :move-items-absolute :anchor-id 8 :ids (list 8) :start 12))",
         );
         assert!(recorded.lock().unwrap().is_empty(), "live drags never commit");
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :start)"),
             Value::Number(12.0),
             "move ghost previews the dragged span"
         );
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
+            "(eseq.arrangement/scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/ghost"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 1, "one commit per completed gesture");
@@ -22603,20 +22609,20 @@
         // span 1's start), the commit carries the resized event's beat + end.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 10))",
+            "(eseq.arrangement/scene-action (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 10))",
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 0) :end)"),
             Value::Number(10.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :start)"),
             Value::Number(10.0),
             "the next span's start previews the boundary move"
         );
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-resize-items :id 0 :ids (list 0)))",
+            "(eseq.arrangement/scene-action (dict :type :finish-resize-items :id 0 :ids (list 0)))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -22632,7 +22638,7 @@
         // Draw commit carries the start beat plus the selected scene.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-create-item :lane 0 :start 24 :end 28))",
+            "(eseq.arrangement/scene-action (dict :type :finish-create-item :lane 0 :start 24 :end 28))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -22648,19 +22654,19 @@
         // Content-length drag ghosts the end marker; release commits once.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :resize-content-length :length 20))",
+            "(eseq.arrangement/scene-action (dict :type :resize-content-length :length 20))",
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-content-length)"),
+            read(&mut editor, "(eseq.arrangement/content-length)"),
             Value::Number(20.0)
         );
         assert!(recorded.lock().unwrap().len() == 3);
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-resize-content-length :length 20))",
+            "(eseq.arrangement/scene-action (dict :type :finish-resize-content-length :length 20))",
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-content-length)"),
+            read(&mut editor, "(eseq.arrangement/content-length)"),
             Value::Number(16.0),
             "ghost cleared: content length reads the committed song again"
         );
@@ -22673,14 +22679,14 @@
         // Erase forwards the ids (scene-event beats) untouched.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :delete-items :ids (list 8)))",
+            "(eseq.arrangement/scene-action (dict :type :delete-items :ids (list 8)))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 5);
 
         // A finish with no preceding live drag is a no-op commit-wise.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
+            "(eseq.arrangement/scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
         );
         assert_eq!(
             recorded.lock().unwrap().len(),
@@ -22701,16 +22707,16 @@
         );
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
-            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            read(&mut editor, "(len (eseq.arrangement/track-clips 0))"),
             Value::Number(2.0),
             "every stored clip is an item; the gap is not one"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 0) :end)"),
             Value::Number(8.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :id)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 0) :id)"),
             Value::Number(0.0),
             "the item id IS the stored clip id"
         );
@@ -22719,7 +22725,7 @@
         // :clip-resize naming the clip's own span (lane spec 12).
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 6))",
+            "(eseq.arrangement/track-action 0 (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 6))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 5, "live drags never commit");
         // The live preview rides the per-lane ghost channels; the widget
@@ -22729,7 +22735,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
             ),
             Value::Number(3.0),
             "an end-edge drag publishes the resize-end ghost"
@@ -22737,24 +22743,24 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
             ),
             Value::Number(6.0),
             "the ghost channel previews the clip's new end"
         );
         assert_eq!(
-            read(&mut editor, "(get arrangement-track-drag :time)"),
+            read(&mut editor, "(get eseq.arrangement/track-drag :time)"),
             Value::Number(6.0)
         );
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :finish-resize-items :id 0 :ids (list 0)))",
+            "(eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id 0 :ids (list 0)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
             ),
             Value::Number(0.0),
             "the release clears the lane ghost channel"
@@ -22777,8 +22783,8 @@
         // Grow: the clip's own pattern eats into what follows.
         eval(
             &mut editor,
-            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :end :time 15)) \
-             (arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
+            "(do (eseq.arrangement/track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :end :time 15)) \
+             (eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -22796,32 +22802,32 @@
         // deletes the whole clip.
         eval(
             &mut editor,
-            "(do (arrangement-scene-action (dict :type :select :ids (list 8) :time 4)) \
-             (arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1)))",
+            "(do (eseq.arrangement/scene-action (dict :type :select :ids (list 8) :time 4)) \
+             (eseq.arrangement/track-action 0 (dict :type :select :ids (list 0) :time 1)))",
         );
         assert_eq!(
-            read(&mut editor, "arrangement-selection"),
+            read(&mut editor, "eseq.arrangement/selection"),
             Value::List(vec![]),
             "selecting a track clip clears the scene selection"
         );
-        assert_eq!(read(&mut editor, "arrangement-selected-track"), Value::Number(0.0));
+        assert_eq!(read(&mut editor, "eseq.arrangement/selected-track"), Value::Number(0.0));
         assert_eq!(
-            read(&mut editor, "arrangement-cursor-time"),
+            read(&mut editor, "eseq.arrangement/cursor-time"),
             Value::Number(0.0),
             "clicking inside a clip parks transport start at the clip beginning"
         );
         assert_eq!(
-            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            read(&mut editor, "(len (eseq.arrangement/lane-selection 0))"),
             Value::Number(1.0)
         );
         assert_eq!(
-            read(&mut editor, "(len (arrangement-lane-selection 1))"),
+            read(&mut editor, "(len (eseq.arrangement/lane-selection 1))"),
             Value::Number(0.0),
             "only the owning lane shows the selection"
         );
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :delete-items :ids (list 0)))",
+            "(eseq.arrangement/track-action 0 (dict :type :delete-items :ids (list 0)))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -22833,7 +22839,7 @@
             assert_eq!(action_field(&recorded[7], "clip-id"), Value::Number(0.0));
         }
         assert_eq!(
-            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            read(&mut editor, "(len (eseq.arrangement/lane-selection 0))"),
             Value::Number(0.0),
             "delete clears the track selection"
         );
@@ -22842,7 +22848,7 @@
         // nothing.
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :delete-items :ids (list 42)))",
+            "(eseq.arrangement/track-action 0 (dict :type :delete-items :ids (list 42)))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 8);
 
@@ -22851,22 +22857,22 @@
         // owning lane renders it.
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :clear-selection :time 5))",
+            "(eseq.arrangement/track-action 0 (dict :type :clear-selection :time 5))",
         );
-        assert_eq!(read(&mut editor, "arrangement-cursor-time"), Value::Number(5.0));
-        assert_eq!(read(&mut editor, "arrangement-cursor-track"), Value::Number(0.0));
+        assert_eq!(read(&mut editor, "eseq.arrangement/cursor-time"), Value::Number(5.0));
+        assert_eq!(read(&mut editor, "eseq.arrangement/cursor-track"), Value::Number(0.0));
         assert_eq!(
-            read(&mut editor, "(arrangement-lane-cursor-time 0)"),
+            read(&mut editor, "(eseq.arrangement/lane-cursor-time 0)"),
             Value::Number(5.0)
         );
-        assert_eq!(read(&mut editor, "(arrangement-lane-cursor-time -1)"), Value::Nil);
+        assert_eq!(read(&mut editor, "(eseq.arrangement/lane-cursor-time -1)"), Value::Nil);
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :clear-selection :time 7))",
+            "(eseq.arrangement/scene-action (dict :type :clear-selection :time 7))",
         );
-        assert_eq!(read(&mut editor, "arrangement-cursor-track"), Value::Number(-1.0));
+        assert_eq!(read(&mut editor, "eseq.arrangement/cursor-track"), Value::Number(-1.0));
         assert_eq!(
-            read(&mut editor, "(arrangement-lane-cursor-time -1)"),
+            read(&mut editor, "(eseq.arrangement/lane-cursor-time -1)"),
             Value::Number(7.0)
         );
 
@@ -22875,8 +22881,8 @@
         // view's midpoint: view 0..64 -> beat 32.
         eval(
             &mut editor,
-            "(do (set! arrangement-view-start 0) (set! arrangement-view-duration 64) \
-             (arrangement-drop-scene (dict :sx 0.02 :payload (dict :scene 1))))",
+            "(do (set! eseq.arrangement/view-start 0) (set! eseq.arrangement/view-duration 64) \
+             (eseq.arrangement/drop-scene (dict :sx 0.02 :payload (dict :scene 1))))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -22899,7 +22905,7 @@
         // spans [8, 12) — nothing above actually mutated the song.
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 10))",
+            "(eseq.arrangement/track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 10))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 9, "live drags never commit");
         // The live start-edge preview rides the lane ghost channel (kind 2);
@@ -22907,7 +22913,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
             ),
             Value::Number(2.0),
             "a start-edge drag publishes the resize-start ghost"
@@ -22915,16 +22921,16 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
             ),
             Value::Number(10.0),
             "the ghost channel previews the clip's new start"
         );
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2)))",
+            "(eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 10);
@@ -22941,8 +22947,8 @@
         // crossing its start.
         eval(
             &mut editor,
-            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 12)) \
-             (arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
+            "(do (eseq.arrangement/track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 12)) \
+             (eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -22959,18 +22965,18 @@
         // owns. It must never write the start into the event's end.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :resize-item-absolute :id 8 :ids (list 8) :edge :start :time 6))",
+            "(eseq.arrangement/scene-action (dict :type :resize-item-absolute :id 8 :ids (list 8) :edge :start :time 6))",
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :start)"),
             Value::Number(6.0),
             "start ghost previews the scene event's new start"
         );
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-resize-items :id 8 :ids (list 8)))",
+            "(eseq.arrangement/scene-action (dict :type :finish-resize-items :id 8 :ids (list 8)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/ghost"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 12);
@@ -22989,7 +22995,7 @@
         // a single :clip-move.
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0))",
+            "(eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 12, "live drags never commit");
         // The rigid-move preview rides the lane ghost channel (kind 1): the
@@ -22997,7 +23003,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
             ),
             Value::Number(1.0),
             "a title-bar drag publishes the move ghost"
@@ -23005,16 +23011,16 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
             ),
             Value::Number(20.0),
             "the ghost channel previews the clip's new start"
         );
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
+            "(eseq.arrangement/track-action 0 (dict :type :finish-move-items :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 13);
@@ -23032,10 +23038,10 @@
         // exists to prevent.
         eval(
             &mut editor,
-            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0)) \
-             (arrangement-track-action 1 (dict :type :finish-move-items :ids (list 2))))",
+            "(do (eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0)) \
+             (eseq.arrangement/track-action 1 (dict :type :finish-move-items :ids (list 2))))",
         );
-        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
         assert_eq!(recorded.lock().unwrap().len(), 13);
 
         // A drag on a clip inside a region that reaches BEYOND it moves the
@@ -23057,19 +23063,19 @@
         editor.runtime_mut().run_reactive_cycle();
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 12 :lane 0))",
+            "(eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 12 :lane 0))",
         );
         assert_eq!(
-            read(&mut editor, "(= (arrangement-track-drag-kind) :region-move)"),
+            read(&mut editor, "(= (eseq.arrangement/track-drag-kind) :region-move)"),
             Value::Bool(true)
         );
         assert_eq!(
-            read(&mut editor, "(get arrangement-region-ghost :start)"),
+            read(&mut editor, "(get eseq.arrangement/region-ghost :start)"),
             Value::Number(8.0),
             "the region ghost previews the shifted rectangle"
         );
         assert_eq!(
-            read(&mut editor, "(get arrangement-region-ghost :end)"),
+            read(&mut editor, "(get eseq.arrangement/region-ghost :end)"),
             Value::Number(20.0)
         );
         // ...and the covered lanes carry the region-move channel (kind 5)
@@ -23078,7 +23084,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
             ),
             Value::Number(5.0),
             "a covered lane previews the slide through its channel"
@@ -23086,24 +23092,24 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
             ),
             Value::Number(4.0)
         );
         assert_eq!(
             read(
                 &mut editor,
-                "(get (arrangement-lane-region-rect 0) :time-a)"
+                "(get (eseq.arrangement/lane-region-rect 0) :time-a)"
             ),
             Value::Number(8.0),
             "the reconstructed rect is the source rectangle plus the delta"
         );
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
+            "(eseq.arrangement/track-action 0 (dict :type :finish-move-items :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
-        assert_eq!(read(&mut editor, "arrangement-region-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "eseq.arrangement/region-ghost"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 14);
@@ -23118,8 +23124,8 @@
         // 0 rather than lowering a delta the primitive would refuse.
         eval(
             &mut editor,
-            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start -4 :lane 0)) \
-             (arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2))))",
+            "(do (eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start -4 :lane 0)) \
+             (eseq.arrangement/track-action 0 (dict :type :finish-move-items :ids (list 2))))",
         );
         {
             let recorded = recorded.lock().unwrap();
@@ -23159,7 +23165,7 @@
         };
 
         assert_eq!(
-            read(&mut editor, "(arrangement-content-length-min)"),
+            read(&mut editor, "(eseq.arrangement/content-length-min)"),
             Value::Number(1.0),
             "no scenes and no clips: only the >0 rule applies"
         );
@@ -23173,7 +23179,7 @@
         );
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
-            read(&mut editor, "(arrangement-content-length-min)"),
+            read(&mut editor, "(eseq.arrangement/content-length-min)"),
             Value::Number(33.0),
             "the last scene start is refused by the model, not clamped to"
         );
@@ -23190,7 +23196,7 @@
         );
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
-            read(&mut editor, "(arrangement-content-length-min)"),
+            read(&mut editor, "(eseq.arrangement/content-length-min)"),
             Value::Number(40.0),
             "the furthest clip end across every lane is the floor"
         );
@@ -23475,8 +23481,8 @@
         rt.run_reactive_cycle();
         editor
             .runtime_mut()
-            .eval_str("(do (seq-open-arrangement) (set! arrangement-view-start 0) \
-                       (set! arrangement-view-duration 64))")
+            .eval_str("(do (eseq.seq-panels/seq-open-arrangement) (set! eseq.arrangement/view-start 0) \
+                       (set! eseq.arrangement/view-duration 64))")
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
 
@@ -23517,7 +23523,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len (arrangement-lane-selection 0))")
+                .eval_str("(len (eseq.arrangement/lane-selection 0))")
                 .unwrap(),
             Some(Value::Number(1.0)),
             "clicking a track clip must select it"
@@ -23610,8 +23616,8 @@
         rt.run_reactive_cycle();
         editor
             .runtime_mut()
-            .eval_str("(do (seq-open-arrangement) (set! arrangement-view-start 0) \
-                       (set! arrangement-view-duration 64))")
+            .eval_str("(do (eseq.seq-panels/seq-open-arrangement) (set! eseq.arrangement/view-start 0) \
+                       (set! eseq.arrangement/view-duration 64))")
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
         // A short viewport so the eight lanes overflow the scroll container.
@@ -23679,7 +23685,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len (arrangement-lane-selection 5))")
+                .eval_str("(len (eseq.arrangement/lane-selection 5))")
                 .unwrap(),
             Some(Value::Number(1.0)),
             "clicking a scrolled-down clip must select it"
@@ -23731,7 +23737,7 @@
         // song clamps max-view-start to 0 and no pan could be observed.
         editor
             .runtime_mut()
-            .eval_str("(set! arrangement-view-duration 8)")
+            .eval_str("(set! eseq.arrangement/view-duration 8)")
             .expect("zoom in for the pan check");
         editor.refresh_runtime_side_effects();
         let _ = editor.widget_layout();
@@ -23739,13 +23745,13 @@
         editor.refresh_runtime_side_effects();
         let panned_neg = editor
             .runtime_mut()
-            .eval_str("arrangement-view-start")
+            .eval_str("eseq.arrangement/view-start")
             .unwrap();
         assert!(editor.handle_touchpad_scroll(0, 0, click_col, click_row, 40.0, 0.5));
         editor.refresh_runtime_side_effects();
         let panned_pos = editor
             .runtime_mut()
-            .eval_str("arrangement-view-start")
+            .eval_str("eseq.arrangement/view-start")
             .unwrap();
         assert!(
             panned_neg != Some(Value::Number(0.0)) || panned_pos != Some(Value::Number(0.0)),
@@ -23755,7 +23761,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(do (set! arrangement-view-duration 64) (set-arrangement-view-start 0 64))",
+                "(do (set! eseq.arrangement/view-duration 64) (eseq.arrangement/set-view-start 0 64))",
             )
             .expect("restore the view for the resize check");
         editor.refresh_runtime_side_effects();
@@ -23887,11 +23893,11 @@
         };
         // Track items carry the MIDI kind and the flattened dots payload.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :kind)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 0) :kind)"),
             Value::Keyword("midi".to_string())
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :label)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 0) :label)"),
             Value::String("Pattern 1".to_string())
         );
         // A 16-beat clip over a 4-beat pattern loops 4 times: the content
@@ -23899,14 +23905,14 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(get (get (nth (arrangement-track-items 0) 0) :content) :cycle)"
+                "(get (get (nth (eseq.arrangement/track-items 0) 0) :content) :cycle)"
             ),
             Value::Number(0.25)
         );
         assert_eq!(
             read(
                 &mut editor,
-                "(get (get (nth (arrangement-track-items 0) 0) :content) :phase)"
+                "(get (get (nth (eseq.arrangement/track-items 0) 0) :content) :phase)"
             ),
             Value::Number(0.5),
             "pattern preview phase comes from the clip's source offset"
@@ -23914,8 +23920,8 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(arrangement-clip-cycle \
-                   (arrangement-lane-pattern-events 0 1) \
+                "(eseq.arrangement/clip-cycle \
+                   (eseq.arrangement/lane-pattern-events 0 1) \
                    (dict :start-beat 0 :end-beat 2))"
             ),
             Value::Number(2.0),
@@ -23924,7 +23930,7 @@
         // The live left-edge trim preview (offset re-stamp) moved into the
         // timeline widget's bound ghost channel; its wrap/clamp arithmetic
         // is covered by eseqlisp's timeline unit tests.
-        let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
+        let dots = "(get (get (nth (eseq.arrangement/track-items 0) 0) :content) :dots)";
         assert_eq!(
             read(&mut editor, &format!("(len {dots})")),
             Value::Number(3.0)
@@ -23969,7 +23975,7 @@
         // 600 events collapse into <= 256 time buckets.
         let Value::Number(capped) = read(
             &mut editor,
-            "(len (arrangement-pattern-dots (arrangement-lane-pattern-events 0 2)))",
+            "(len (eseq.arrangement/pattern-dots (eseq.arrangement/lane-pattern-events 0 2)))",
         ) else {
             panic!("dot count must be a number");
         };
@@ -24036,21 +24042,21 @@
                 .expect("expr returns a value")
         };
         assert_eq!(
-            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            read(&mut editor, "(len (eseq.arrangement/track-clips 0))"),
             Value::Number(2.0),
             "two stored take clips, published verbatim"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :label)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 0) :label)"),
             Value::String("Take 8".to_string())
         );
         // Clip [0,10) clamps to the take end: 0 + 32 * 0.25 = 8.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 0) :end)"),
             Value::Number(8.0),
             "the item ends at the take's true end, not the stored span"
         );
-        let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
+        let dots = "(get (get (nth (eseq.arrangement/track-items 0) 0) :content) :dots)";
         assert_eq!(
             read(&mut editor, &format!("(len {dots})")),
             Value::Number(3.0)
@@ -24064,10 +24070,10 @@
         // beats, so the row span is exactly the remainder; its dots are the
         // slice [16,32) re-normalized.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 1) :end)"),
             Value::Number(16.0)
         );
-        let dots2 = "(get (get (nth (arrangement-track-items 0) 1) :content) :dots)";
+        let dots2 = "(get (get (nth (eseq.arrangement/track-items 0) 1) :content) :dots)";
         assert_eq!(
             read(&mut editor, &format!("(len {dots2})")),
             Value::Number(2.0),
@@ -24205,42 +24211,42 @@
         // Drawn: the committed clip, then the two launch clips, then the
         // recorded take on top — the order the stop-commit paints them in.
         assert_eq!(
-            read(&mut editor, "(len (arrangement-track-items 0))"),
+            read(&mut editor, "(len (eseq.arrangement/track-items 0))"),
             Value::Number(4.0)
         );
         assert_eq!(
-            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            read(&mut editor, "(len (eseq.arrangement/track-clips 0))"),
             Value::Number(1.0),
             "the gesture source of truth still holds only the stored clip"
         );
         // Launch clips: the first runs to the next launch, the second to the
         // record head, and each tiles its pattern over its own span.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 1) :start)"),
             Value::Number(0.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 1) :end)"),
             Value::Number(8.0)
         );
         assert_eq!(
             read(
                 &mut editor,
-                "(get (get (nth (arrangement-track-items 0) 1) :content) :cycle)"
+                "(get (get (nth (eseq.arrangement/track-items 0) 1) :content) :cycle)"
             ),
             Value::Number(1.0 / 8.0),
             "a 1-beat pattern repeats 8 times across an 8-beat launch span"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 2) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 2) :end)"),
             Value::Number(10.0),
             "the last launch on the lane runs to the record head"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 2) :id)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 2) :id)"),
             Value::Nil
         );
-        let provisional = "(nth (arrangement-track-items 0) 3)";
+        let provisional = "(nth (eseq.arrangement/track-items 0) 3)";
         assert_eq!(
             read(&mut editor, &format!("(get {provisional} :start)")),
             Value::Number(4.0)
@@ -24263,16 +24269,16 @@
         );
         assert_eq!(
             read(&mut editor, &format!("(get {provisional} :color)")),
-            read(&mut editor, "(arrangement-clip-color 0)"),
+            read(&mut editor, "(eseq.arrangement/clip-color 0)"),
             "provisional items wear the committed clips' own tint"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :label)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/track-items 0) 1) :label)"),
             Value::String("Pattern 3".to_string())
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :label)"),
-            read(&mut editor, "(arrangement-scene-name 0)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :label)"),
+            read(&mut editor, "(eseq.arrangement/scene-name 0)"),
             "a captured launch is labelled with the scene it launched"
         );
         assert_eq!(
@@ -24297,21 +24303,21 @@
         // Scene lane: one committed span plus the two captured launches, the
         // last running to the record head.
         assert_eq!(
-            read(&mut editor, "(len (arrangement-scene-items))"),
+            read(&mut editor, "(len (eseq.arrangement/scene-items))"),
             Value::Number(3.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :end)"),
             Value::Number(8.0),
             "a captured launch runs to the next one"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 2) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 2) :end)"),
             Value::Number(10.0),
             "the last captured launch runs to the record head"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 2) :id)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 2) :id)"),
             Value::Nil
         );
 
@@ -24319,7 +24325,7 @@
         // committed song ends before it — clamping to `song-end-beat` alone
         // pinned a whole-song capture at bar 1.
         assert_eq!(
-            read(&mut editor, "(arrangement-scroll-extent)"),
+            read(&mut editor, "(eseq.arrangement/scroll-extent)"),
             Value::Number(16.0),
             "the committed end still wins while it is the furthest content"
         );
@@ -24328,7 +24334,7 @@
             .set_reactive("SEQ", "song-end-beat", Value::Number(0.0));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
-            read(&mut editor, "(arrangement-scroll-extent)"),
+            read(&mut editor, "(eseq.arrangement/scroll-extent)"),
             Value::Number(10.0),
             "with no committed song the record head is the extent"
         );
@@ -24340,28 +24346,28 @@
         // Inert: the real clip selects, the provisional item does not.
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1))",
+            "(eseq.arrangement/track-action 0 (dict :type :select :ids (list 0) :time 1))",
         );
         assert_eq!(
-            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            read(&mut editor, "(len (eseq.arrangement/lane-selection 0))"),
             Value::Number(1.0),
             "a stored clip still selects — the guard is not over-broad"
         );
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :select :ids (list nil) :time 5))",
+            "(eseq.arrangement/track-action 0 (dict :type :select :ids (list nil) :time 5))",
         );
         assert_eq!(
-            read(&mut editor, "arrangement-track-selection"),
+            read(&mut editor, "eseq.arrangement/track-selection"),
             Value::List(vec![]),
             "selecting a provisional item selects nothing"
         );
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :select :ids (list nil) :time 5))",
+            "(eseq.arrangement/scene-action (dict :type :select :ids (list nil) :time 5))",
         );
         assert_eq!(
-            read(&mut editor, "arrangement-selection"),
+            read(&mut editor, "eseq.arrangement/selection"),
             Value::List(vec![]),
             "the same holds in the scene lane"
         );
@@ -24370,21 +24376,21 @@
         let before = recorded.lock().unwrap().len();
         eval(
             &mut editor,
-            "(arrangement-track-action 0 (dict :type :delete-items :ids (list nil)))",
+            "(eseq.arrangement/track-action 0 (dict :type :delete-items :ids (list nil)))",
         );
         eval(
             &mut editor,
-            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id nil :ids (list nil) :start 12)) \
-             (arrangement-track-action 0 (dict :type :finish-move-items)))",
+            "(do (eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id nil :ids (list nil) :start 12)) \
+             (eseq.arrangement/track-action 0 (dict :type :finish-move-items)))",
         );
         eval(
             &mut editor,
-            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id nil :ids (list nil) :edge :end :time 14)) \
-             (arrangement-track-action 0 (dict :type :finish-resize-items :id nil :ids (list nil))))",
+            "(do (eseq.arrangement/track-action 0 (dict :type :resize-item-absolute :id nil :ids (list nil) :edge :end :time 14)) \
+             (eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id nil :ids (list nil))))",
         );
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :delete-items :ids (list nil)))",
+            "(eseq.arrangement/scene-action (dict :type :delete-items :ids (list nil)))",
         );
         assert_eq!(
             recorded.lock().unwrap().len(),
@@ -24434,8 +24440,8 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(do (seq-open-arrangement) \
-                 (set-arrangement-cursor 6 0))",
+                "(do (eseq.seq-panels/seq-open-arrangement) \
+                 (eseq.arrangement/set-cursor 6 0))",
             )
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
@@ -24635,24 +24641,24 @@
                 .expect("expr returns a value")
         };
         assert_eq!(
-            read(&mut editor, "(len (arrangement-track-items 0))"),
+            read(&mut editor, "(len (eseq.arrangement/track-items 0))"),
             Value::Number(1.0)
         );
         // Scene-lane items span row-start to next row-start with scene names.
         assert_eq!(
-            read(&mut editor, "(len (arrangement-scene-items))"),
+            read(&mut editor, "(len (eseq.arrangement/scene-items))"),
             Value::Number(2.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :label)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 0) :label)"),
             Value::String("Intro".to_string())
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 0) :end)"),
             Value::Number(8.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
+            read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :end)"),
             Value::Number(16.0)
         );
     }
@@ -24705,8 +24711,8 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(do (seq-open-arrangement) (set! arrangement-view-start 0) \
-                 (set! arrangement-view-duration 64))",
+                "(do (eseq.seq-panels/seq-open-arrangement) (set! eseq.arrangement/view-start 0) \
+                 (set! eseq.arrangement/view-duration 64))",
             )
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
@@ -24830,7 +24836,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(arrangement-track-action 1 \
+                "(eseq.arrangement/track-action 1 \
                    (dict :type :finish-create-item :start 20 :end 24))",
             )
             .expect("double-click empty arrangement space");
@@ -24844,7 +24850,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("lower-panel-buffer")
+                .eval_str("eseq.seq-step-tabs/lower-panel-buffer")
                 .unwrap(),
             Some(Value::String("*piano-roll*".to_string())),
             "the newly queued take opens in the lower piano roll"
@@ -24876,14 +24882,14 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(arrangement-track-action 0 \
+                "(eseq.arrangement/track-action 0 \
                    (dict :type :clear-selection :ids (list 0) :time 3))",
             )
             .expect("press clip body in FX mode");
         assert!(selected.lock().unwrap().is_empty());
         assert!(*deselected.lock().unwrap() > 0);
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string()))
         );
         assert_eq!(
@@ -24891,15 +24897,15 @@
                 .runtime_mut()
                 .eval_str(
                     "(do \
-                       (seq-open-arrangement-piano-roll-bottom-for-track 0) \
-                       (piano-roll-arrangement-mode?))",
+                       (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track 0) \
+                       (eseq.piano-roll/piano-roll-arrangement-mode?))",
                 )
                 .expect("open explicit arrangement piano-roll mode"),
             Some(Value::Bool(true))
         );
         editor
             .runtime_mut()
-            .eval_str("(seq-show-fx-lower-panel)")
+            .eval_str("(eseq.seq-panels/seq-show-fx-lower-panel)")
             .expect("restore FX mode");
 
         // A title-bar double-click is the explicit transition into the
@@ -24908,22 +24914,22 @@
             .runtime_mut()
             .eval_str(
                 "(do \
-                   (arrangement-track-action 0 \
+                   (eseq.arrangement/track-action 0 \
                      (dict :type :double-click-item :ids (list 0) :time 3)) \
-                   (piano-roll-arrangement-mode?))",
+                   (eseq.piano-roll/piano-roll-arrangement-mode?))",
             )
             .expect("double-click clip title bar");
         assert_eq!(mode_after_open, Some(Value::Bool(true)));
         editor.refresh_runtime_side_effects();
         assert_eq!(selected.lock().unwrap().len(), 1);
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(piano-roll-arrangement-mode?)")
+                .eval_str("(eseq.piano-roll/piano-roll-arrangement-mode?)")
                 .unwrap(),
             Some(Value::Bool(true))
         );
@@ -24933,7 +24939,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(arrangement-track-action 0 \
+                "(eseq.arrangement/track-action 0 \
                    (dict :type :clear-selection :ids (list 0) :time 6))",
             )
             .expect("press clip body in piano-roll mode");
@@ -24945,7 +24951,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len arrangement-track-selection)")
+                .eval_str("(len eseq.arrangement/track-selection)")
                 .unwrap(),
             Some(Value::Number(1.0))
         );
@@ -24957,7 +24963,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(arrangement-track-action 1 \
+                "(eseq.arrangement/track-action 1 \
                    (dict :type :select :ids (list 0) :time 6))",
             )
             .expect("press another track's clip title in piano-roll mode");
@@ -24967,14 +24973,14 @@
             "the newly clicked track's clip becomes the piano-roll target"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string())),
             "cross-track clip selection must preserve the piano-roll panel"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(piano-roll-arrangement-mode?)")
+                .eval_str("(eseq.piano-roll/piano-roll-arrangement-mode?)")
                 .unwrap(),
             Some(Value::Bool(true)),
             "cross-track clip selection must preserve arrangement piano-roll mode"
@@ -24986,19 +24992,19 @@
         let deselect_before = *deselected.lock().unwrap();
         editor
             .runtime_mut()
-            .eval_str("(arrangement-track-action 2 (dict :type :clear-selection :time 20))")
+            .eval_str("(eseq.arrangement/track-action 2 (dict :type :clear-selection :time 20))")
             .expect("press empty lane space in piano-roll mode");
         editor.refresh_runtime_side_effects();
         assert!(*deselected.lock().unwrap() > deselect_before);
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len arrangement-track-selection)")
+                .eval_str("(len eseq.arrangement/track-selection)")
                 .unwrap(),
             Some(Value::Number(0.0))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string())),
             "empty space clears the clip without switching panel mode"
         );
@@ -25050,14 +25056,14 @@
         );
         let Some(Value::Number(pitch)) = editor
             .runtime_mut()
-            .eval_str("arrangement-track-row-pitch")
+            .eval_str("eseq.arrangement/track-row-pitch")
             .expect("pitch evaluates")
         else {
             panic!("arrangement-track-row-pitch must be a number");
         };
         assert!(
             (pitch - measured as f64).abs() < 0.01,
-            "arrangement-track-row-pitch ({pitch}) must match the rendered row \
+            "eseq.arrangement/track-row-pitch ({pitch}) must match the rendered row \
              pitch ({measured}); update the constant next to the lane heights"
         );
     }
@@ -25080,17 +25086,17 @@
                 .expect("expr returns a value")
         };
         assert_eq!(
-            read(&mut editor, "(seq-visible-track-indices)"),
+            read(&mut editor, "(eseq.track-collapse/visible-track-indices)"),
             test_number_list(&[0.0, 1.0, 3.0, 4.0, 5.0]),
             "the collapsed track is absent from the visible order"
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-visible-ordinal (seq-visible-track-indices) 3)"),
+            read(&mut editor, "(eseq.arrangement/visible-ordinal (eseq.track-collapse/visible-track-indices) 3)"),
             Value::Number(2.0),
             "model track 3 is the THIRD visible row once track 2 collapses"
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-visible-ordinal (seq-visible-track-indices) 2)"),
+            read(&mut editor, "(eseq.arrangement/visible-ordinal (eseq.track-collapse/visible-track-indices) 2)"),
             Value::Number(-1.0),
             "a collapsed track has no visible ordinal"
         );
@@ -25099,7 +25105,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(arrangement-region-other-track 1 arrangement-track-row-pitch)"
+                "(eseq.arrangement/region-other-track 1 eseq.arrangement/track-row-pitch)"
             ),
             Value::Number(3.0)
         );
@@ -25107,7 +25113,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(arrangement-region-other-track 1 (* 0.4 arrangement-track-row-pitch))"
+                "(eseq.arrangement/region-other-track 1 (* 0.4 eseq.arrangement/track-row-pitch))"
             ),
             Value::Number(1.0)
         );
@@ -25115,7 +25121,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(arrangement-region-other-track 3 (* -2 arrangement-track-row-pitch))"
+                "(eseq.arrangement/region-other-track 3 (* -2 eseq.arrangement/track-row-pitch))"
             ),
             Value::Number(0.0)
         );
@@ -25123,7 +25129,7 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(arrangement-region-other-track 1 (* 40 arrangement-track-row-pitch))"
+                "(eseq.arrangement/region-other-track 1 (* 40 eseq.arrangement/track-row-pitch))"
             ),
             Value::Number(5.0)
         );
@@ -25131,13 +25137,13 @@
         assert_eq!(
             read(
                 &mut editor,
-                "(arrangement-region-other-track 4 (* -40 arrangement-track-row-pitch))"
+                "(eseq.arrangement/region-other-track 4 (* -40 eseq.arrangement/track-row-pitch))"
             ),
             Value::Number(0.0)
         );
         // Missing :row-delta (a host that never sends one) means no travel.
         assert_eq!(
-            read(&mut editor, "(arrangement-region-other-track 4 nil)"),
+            read(&mut editor, "(eseq.arrangement/region-other-track 4 nil)"),
             Value::Number(4.0)
         );
     }
@@ -25229,12 +25235,12 @@
                 .expect("expr returns a value")
         };
         assert_ne!(
-            read(&mut editor, "(arrangement-lane-region-rect 2)"),
+            read(&mut editor, "(eseq.arrangement/lane-region-rect 2)"),
             Value::Nil,
             "the lane between the drag ends is highlighted too"
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-lane-region-rect 4)"),
+            read(&mut editor, "(eseq.arrangement/lane-region-rect 4)"),
             Value::Nil,
             "lanes outside the sweep stay unhighlighted"
         );
@@ -25260,7 +25266,7 @@
         assert!(region[2] <= 9.0 && region[2] >= 8.0, "start floors: {region:?}");
         assert!(region[3] >= 23.0 && region[3] <= 24.0, "end ceils: {region:?}");
         assert_eq!(
-            read(&mut editor, "arrangement-region-ghost"),
+            read(&mut editor, "eseq.arrangement/region-ghost"),
             Value::Nil,
             "the ghost clears on commit; the committed region is Rust-owned"
         );
@@ -25282,7 +25288,7 @@
             "a zero-movement release clears the region"
         );
         assert_eq!(
-            read(&mut editor, "arrangement-cursor-track"),
+            read(&mut editor, "eseq.arrangement/cursor-track"),
             Value::Number(4.0),
             "the click parks the edit cursor on the clicked track"
         );
@@ -25304,8 +25310,8 @@
                 editor
                     .runtime_mut()
                     .eval_str(&format!(
-                        "(do (set! arrangement-view-start {start}) \
-                         (set! arrangement-view-duration {duration}))"
+                        "(do (set! eseq.arrangement/view-start {start}) \
+                         (set! eseq.arrangement/view-duration {duration}))"
                     ))
                     .expect("set the view");
                 editor.refresh_runtime_side_effects();
@@ -25392,11 +25398,11 @@
             });
 
         for expr in [
-            "(arrangement-track-action 1 (dict :type :copy-items :ids (list 0)))",
-            "(arrangement-track-action 1 (dict :type :paste-items :time 12))",
-            "(arrangement-scene-action (dict :type :copy-items :ids (list 0)))",
-            "(arrangement-scene-action (dict :type :paste-items :time 20))",
-            "(arrangement-track-action 2 (dict :type :set-cursor :time 8))",
+            "(eseq.arrangement/track-action 1 (dict :type :copy-items :ids (list 0)))",
+            "(eseq.arrangement/track-action 1 (dict :type :paste-items :time 12))",
+            "(eseq.arrangement/scene-action (dict :type :copy-items :ids (list 0)))",
+            "(eseq.arrangement/scene-action (dict :type :paste-items :time 20))",
+            "(eseq.arrangement/track-action 2 (dict :type :set-cursor :time 8))",
         ] {
             editor.runtime_mut().eval_str(expr).expect(expr);
         }
@@ -25497,12 +25503,12 @@
             );
         editor.runtime_mut().run_reactive_cycle();
         assert_ne!(
-            read(&mut editor, "(arrangement-lane-region-rect 1)"),
+            read(&mut editor, "(eseq.arrangement/lane-region-rect 1)"),
             Value::Nil,
             "the clicked track lights its region"
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-lane-region-rect 0)"),
+            read(&mut editor, "(eseq.arrangement/lane-region-rect 0)"),
             Value::Nil,
             "other tracks do not"
         );
@@ -25520,7 +25526,7 @@
             "deleting the selected clip clears its region"
         );
         assert_eq!(
-            read(&mut editor, "(len (arrangement-lane-selection 1))"),
+            read(&mut editor, "(len (eseq.arrangement/lane-selection 1))"),
             Value::Number(0.0),
             "and drops the clip selection"
         );
@@ -25534,11 +25540,11 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(scene-push-begin 1 (dict :cmd true :meta true :super true :shift false :y 2.0))",
+                "(eseq.transport/scene-push-begin 1 (dict :cmd true :meta true :super true :shift false :y 2.0))",
             )
             .expect("begin command scene push");
         assert_eq!(
-            editor.runtime_mut().eval_str("scene-push-value").unwrap(),
+            editor.runtime_mut().eval_str("eseq.transport/scene-push-value").unwrap(),
             Some(Value::Number(0.0)),
             "Command push must begin at the source without jumping to the target"
         );
@@ -25558,10 +25564,10 @@
 
         editor
             .runtime_mut()
-            .eval_str("(scene-push-drag 1 (dict :y 5.0))")
+            .eval_str("(eseq.transport/scene-push-drag 1 (dict :y 5.0))")
             .expect("drag command scene push toward target");
         assert!(matches!(
-            editor.runtime_mut().eval_str("scene-push-value").unwrap(),
+            editor.runtime_mut().eval_str("eseq.transport/scene-push-value").unwrap(),
             Some(Value::Number(value)) if (value - 0.42).abs() < 1.0e-6
         ));
         let commands = editor.drain_host_commands();
@@ -25606,7 +25612,7 @@
         editor.drain_host_commands();
         editor
             .runtime_mut()
-            .eval_str(r#"(seq-set-scene-launch-quantize "1/8")"#)
+            .eval_str(r#"(eseq.transport/seq-set-scene-launch-quantize "1/8")"#)
             .expect("choose scene launch quantization");
         let selection_commands = editor.drain_host_commands();
         assert_eq!(selection_commands.len(), 1);
@@ -25636,7 +25642,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-switch-pattern 2)")
+            .eval_str("(eseq.transport/seq-switch-pattern 2)")
             .expect("queue quantized scene launch");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -25693,7 +25699,7 @@
         editor.drain_host_commands();
         editor
             .runtime_mut()
-            .eval_str(r#"(seq-set-record-quantize "1/4")"#)
+            .eval_str(r#"(eseq.transport/seq-set-record-quantize "1/4")"#)
             .expect("choose record quantization");
         let commands = editor.drain_host_commands();
         assert!(matches!(
@@ -25787,7 +25793,7 @@
             .expect("mixer panel button on-click");
         editor
             .runtime_mut()
-            .eval_str("(set! mixer-panel-visible true)")
+            .eval_str("(set! eseq.seq-core-state/mixer-panel-visible true)")
             .expect("reset mixer panel visibility");
         editor
             .runtime_mut()
@@ -25800,7 +25806,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("mixer-panel-visible")
+                .eval_str("eseq.seq-core-state/mixer-panel-visible")
                 .unwrap(),
             Some(Value::Bool(false)),
             "mixer panel button should toggle mixer-panel-visible"
@@ -25815,7 +25821,7 @@
             .expect("FX panel button on-click");
         editor
             .runtime_mut()
-            .eval_str("(set! lower-panel-visible true)")
+            .eval_str("(set! eseq.seq-core-state/lower-panel-visible true)")
             .expect("reset FX panel visibility");
         editor
             .runtime_mut()
@@ -25828,7 +25834,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("lower-panel-visible")
+                .eval_str("eseq.seq-core-state/lower-panel-visible")
                 .unwrap(),
             Some(Value::Bool(false)),
             "FX panel button should toggle lower-panel-visible"
@@ -25844,7 +25850,7 @@
             .set_reactive("SEQ", "durations", test_number_list(&[8.0; 16]));
         editor
             .runtime_mut()
-            .eval_str("(set! param-mode 1)")
+            .eval_str("(set! eseq.seq-core-state/param-mode 1)")
             .expect("switch to duration mode");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -26208,7 +26214,7 @@
             .expect("invoke step-cell double-click");
         editor.refresh_runtime_side_effects();
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
             "step-cell double-click should edit the step without opening the piano roll"
         );
@@ -26230,19 +26236,19 @@
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "track-name double-click should not replace the main sequencer panel"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
             "track-name double-click in FX mode must remain in FX mode"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(piano-roll-arrangement-mode?)")
+                .eval_str("(eseq.piano-roll/piano-roll-arrangement-mode?)")
                 .unwrap(),
             Some(Value::Bool(false)),
             "track-name double-click is an explicit FX transition even when FX is already visible"
@@ -26250,11 +26256,11 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-open-piano-roll-bottom-for-track 0)")
+            .eval_str("(eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0)")
             .expect("put the lower panel in piano-roll mode");
         editor.refresh_runtime_side_effects();
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
         );
 
@@ -26271,12 +26277,12 @@
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "second track-name double-click should keep the main sequencer panel"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
             "track-name double-click from piano-roll mode must enter FX mode"
         );
@@ -26330,12 +26336,12 @@
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "mixer badge double-click should preserve the main sequencer panel"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string())),
             "mixer badge double-click should replace the FX lower pane with piano roll"
         );
@@ -26367,7 +26373,7 @@
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
             "second mixer badge double-click should restore FX"
         );
@@ -26560,7 +26566,7 @@
                   (seq-theme-mac-osx-dark)
                   (load "ui/materials.lisp")
                   (load "ui/track-collapse.lisp")
-                  (defstate selected-bus -1)
+                  (defstate eseq.seq-core-state/selected-bus -1)
                   ;; browser.lisp owns this; see the hazard-j note above.
                   (defstate sbrowser-loading-instrument-name "")
                   (load "ui/mixer.lisp")
@@ -26711,7 +26717,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("seqv-expanded-track-ids")
+                .eval_str("eseq.sequencer/expanded-track-ids")
                 .expect("read expanded track ids"),
             Some(test_number_list(&[0.0])),
             "ellipsis click should add the stable track id to expansion state"
@@ -26768,7 +26774,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str(r#"(seqv-param-mode-for-key "a")"#)
+                .eval_str(r#"(eseq.sequencer/param-mode-for-key "a")"#)
                 .expect("evaluate aux shortcut mode"),
             Some(Value::Number(-1.0)),
             "aux_a should not remain reachable through the expanded sequencer shortcut"
@@ -27057,8 +27063,8 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 7)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -27824,7 +27830,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-map-active?)")
+                .eval_str("(eseq.effects.param-controls/process-map-active?)")
                 .expect("read process map active state"),
             Some(Value::Bool(true))
         );
@@ -27834,7 +27840,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-map-active?)")
+                .eval_str("(eseq.effects.param-controls/process-map-active?)")
                 .expect("read process map active state before fx layout"),
             Some(Value::Bool(true))
         );
@@ -27842,7 +27848,7 @@
             editor
                 .runtime_mut()
                 .eval_str(
-                    "(process-param-bindable? false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
+                    "(eseq.effects.param-controls/process-param-bindable? false (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
                 )
                 .expect("read process map bindable state before fx layout"),
             Some(Value::Bool(true))
@@ -27879,7 +27885,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-map-active?)")
+                .eval_str("(eseq.effects.param-controls/process-map-active?)")
                 .expect("read cleared process map active state"),
             Some(Value::Bool(false))
         );
@@ -27943,7 +27949,7 @@
         assert!(matches!(
             editor
                 .runtime_mut()
-                .eval_str("(process-panel-selected-slot)")
+                .eval_str("(eseq.effects.process-panel/selected-slot)")
                 .expect("selected process"),
             Some(Value::Map(_))
         ));
@@ -27967,7 +27973,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-panel-selected-slot)")
+                .eval_str("(eseq.effects.process-panel/selected-slot)")
                 .expect("cleared process selection"),
             Some(Value::Nil),
             "clicking empty process-panel space should collapse the selected process"
@@ -27992,7 +27998,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-panel-selected-slot)")
+                .eval_str("(eseq.effects.process-panel/selected-slot)")
                 .expect("selection after neighboring panel click"),
             Some(Value::Nil),
             "clicking outside the process panel should collapse its selection"
@@ -28009,7 +28015,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-panel-selected-slot)")
+                .eval_str("(eseq.effects.process-panel/selected-slot)")
                 .expect("selection after Backspace"),
             Some(Value::Nil),
             "deleting a process should clear its expanded selection"
@@ -28040,7 +28046,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-track-param-origin 0 7)")
+                .eval_str("(eseq.seqv-track-params/seqv-track-param-origin 0 7)")
                 .expect("evaluate asymmetric process lane origin"),
             Some(Value::Number(2.0)),
             "non-symmetric process lane ranges should originate at their minimum"
@@ -28048,7 +28054,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-track-param-origin 0 8)")
+                .eval_str("(eseq.seqv-track-params/seqv-track-param-origin 0 8)")
                 .expect("evaluate symmetric process lane origin"),
             Some(Value::Number(0.0)),
             "symmetric process lane ranges should originate at zero"
@@ -28056,7 +28062,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-range-origin 4 4)")
+                .eval_str("(eseq.seqv-track-params/seqv-range-origin 4 4)")
                 .expect("evaluate positive-only degenerate range origin"),
             Some(Value::Number(4.0)),
             "positive-only ranges should still originate at their minimum"
@@ -28066,8 +28072,8 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 7)
                 "#,
             )
             .expect("expand track and select asymmetric process lane");
@@ -28136,7 +28142,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str(r#"(do (seqv-select-process-lane-option 0 0 "3 pr/amount") (seqv-param-mode 0))"#)
+                .eval_str(r#"(do (eseq.sequencer/select-process-lane-option 0 0 "3 pr/amount") (eseq.sequencer/track-param-mode 0))"#)
                 .expect("select third process lane through selector"),
             Some(Value::Number(9.0)),
             "third process selector option should select the third process-lane mode"
@@ -28145,7 +28151,7 @@
             editor
                 .runtime_mut()
                 .eval_str(
-                    r#"(do (seqv-select-process-lane-option 0 0 "none") (seqv-param-mode 0))"#
+                    r#"(do (eseq.sequencer/select-process-lane-option 0 0 "none") (eseq.sequencer/track-param-mode 0))"#
                 )
                 .expect("clear process lane through selector"),
             Some(Value::Number(3.0)),
@@ -28155,8 +28161,8 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 7)
                 "#,
             )
             .expect("expand track and select first process lane");
@@ -28230,8 +28236,8 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 7)
                 "#,
             )
             .expect("expand track 0 and select its process lane after selecting track 1");
@@ -28316,8 +28322,8 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 7)
                 "#,
             )
             .expect("expand track and select process lane");
@@ -28389,9 +28395,9 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (seqv-set-track-expanded 0 true)
-                (seqv-set-param-mode 0 7)
-                (set-track-cursor-step 3)
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 7)
+                (eseq.step-grid-interactions/set-track-cursor-step 3)
                 "#,
             )
             .expect("expand track, select process lane, and move cursor");
@@ -28481,7 +28487,7 @@
         editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0);
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 7)")
+            .eval_str("(eseq.sequencer/track-menu-click 7)")
             .expect("expand selected bottom row");
         editor.refresh_runtime_side_effects();
         assert!(
@@ -28576,7 +28582,7 @@
     ) -> bool {
         let _ = editor
             .runtime_mut()
-            .eval_str("(seq-toggle-current-track-expanded-main)");
+            .eval_str("(eseq.seq-panels/seq-toggle-current-track-expanded-main)");
         editor.refresh_runtime_side_effects();
         true
     }
@@ -29144,7 +29150,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-set-track-expanded 0 true)")
+            .eval_str("(eseq.sequencer/set-track-expanded 0 true)")
             .expect("expand track through inactive sequencer effect");
         editor.refresh_runtime_side_effects();
         let expanded_tiled =
@@ -29176,7 +29182,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-set-track-expanded 0 false)")
+            .eval_str("(eseq.sequencer/set-track-expanded 0 false)")
             .expect("collapse track through inactive sequencer effect");
         editor.refresh_runtime_side_effects();
         let collapsed_tiled =
@@ -29386,7 +29392,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-set-track-expanded 0 true)")
+            .eval_str("(eseq.sequencer/set-track-expanded 0 true)")
             .expect("expand tall track");
         editor.refresh_runtime_side_effects();
         let expanded = eseqlisp::frame::build_render_frame(
@@ -29407,7 +29413,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-set-track-expanded 0 false)")
+            .eval_str("(eseq.sequencer/set-track-expanded 0 false)")
             .expect("collapse tall track");
         editor.refresh_runtime_side_effects();
         let collapsed = eseqlisp::frame::build_render_frame(
@@ -29654,7 +29660,7 @@
         editor.set_layout_viewport(220, 200);
         editor
             .runtime_mut()
-            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
 
@@ -29696,14 +29702,14 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-param-mode 0)")
+                .eval_str("(eseq.sequencer/track-param-mode 0)")
                 .unwrap(),
             Some(Value::Number(3.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-param-mode 1)")
+                .eval_str("(eseq.sequencer/track-param-mode 1)")
                 .unwrap(),
             Some(Value::Number(4.0))
         );
@@ -29728,14 +29734,14 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-current-page 0 0)")
+                .eval_str("(eseq.sequencer/track-current-page 0 0)")
                 .unwrap(),
             Some(Value::Number(1.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-current-page 1 1)")
+                .eval_str("(eseq.sequencer/track-current-page 1 1)")
                 .unwrap(),
             Some(Value::Number(0.0))
         );
@@ -29760,10 +29766,10 @@
             .runtime_mut()
             .eval_str(
                 "(do
-                  (seqv-track-menu-click 0)
-                  (seqv-track-menu-click 1)
-                  (seqv-set-cursor-step 0 6)
-                  (seqv-set-cursor-step 1 3)
+                  (eseq.sequencer/track-menu-click 0)
+                  (eseq.sequencer/track-menu-click 1)
+                  (eseq.sequencer/set-track-cursor 0 6)
+                  (eseq.sequencer/set-track-cursor 1 3)
                   (set! cursor-step 3))",
             )
             .expect("expand rows and seed cursors");
@@ -29836,12 +29842,12 @@
 
         editor
             .runtime_mut()
-            .eval_str("(cursor-right)")
+            .eval_str("(eseq.step-grid-interactions/cursor-right)")
             .expect("move sequencer cursor right");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-current-step 1 1)")
+                .eval_str("(eseq.sequencer/track-current-step 1 1)")
                 .unwrap(),
             Some(Value::Number(4.0)),
             "arrow movement should move the expanded editor cursor for the current track"
@@ -29886,11 +29892,11 @@
             .eval_str(
                 r#"
                 (do
-                  (seqv-set-param-mode 0 4)
-                  (seqv-set-param-mode 1 0)
-                  (set! selected-bus 1)
-                  (seqv-set-track-expanded 0 true)
-                  (seqv-set-track-expanded 1 true))
+                  (eseq.sequencer/set-track-param-mode 0 4)
+                  (eseq.sequencer/set-track-param-mode 1 0)
+                  (set! eseq.seq-core-state/selected-bus 1)
+                  (eseq.sequencer/set-track-expanded 0 true)
+                  (eseq.sequencer/set-track-expanded 1 true))
                 "#,
             )
             .expect("seed sequencer shortcut state");
@@ -29901,7 +29907,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-param-mode 0)")
+                .eval_str("(eseq.sequencer/track-param-mode 0)")
                 .unwrap(),
             Some(Value::Number(4.0)),
             "parameter shortcuts should not mutate inactive expanded rows"
@@ -29909,14 +29915,14 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(seqv-param-mode 1)")
+                .eval_str("(eseq.sequencer/track-param-mode 1)")
                 .unwrap(),
             Some(Value::Number(1.0)),
             "duration shortcut should select duration for the current track"
         );
 
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(Value::Number(1.0)),
             "plain parameter shortcuts should not disturb bus selection"
         );
@@ -29998,7 +30004,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 1)")
+            .eval_str("(eseq.sequencer/track-menu-click 1)")
             .expect("expand second sequencer row");
         editor.refresh_runtime_side_effects();
         calls.lock().unwrap().clear();
@@ -30189,7 +30195,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click 0)")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -30231,7 +30237,7 @@
             .set_reactive("SEQ", "playing", Value::Bool(true));
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click 0)")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -30296,7 +30302,7 @@
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor
             .runtime_mut()
-            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
         editor
@@ -30379,7 +30385,7 @@
         editor.set_layout_viewport(180, 30);
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click 0)")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -30454,7 +30460,7 @@
         editor.set_layout_viewport(180, 30);
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click 0)")
             .expect("expand current sequencer row");
         editor.refresh_runtime_side_effects();
 
@@ -30562,7 +30568,7 @@
         editor.set_layout_viewport(220, 200);
         editor
             .runtime_mut()
-            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -30634,7 +30640,7 @@
         editor.runtime_mut().run_reactive_cycle();
         editor
             .runtime_mut()
-            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .eval_str("(do (eseq.sequencer/track-menu-click 0) (eseq.sequencer/track-menu-click 1))")
             .expect("expand two sequencer rows");
         editor.refresh_runtime_side_effects();
         let initial_layout = editor
@@ -30784,7 +30790,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seqv-track-menu-click 0)")
+            .eval_str("(eseq.sequencer/track-menu-click 0)")
             .expect("expand sequencer row");
         editor.refresh_runtime_side_effects();
         calls.lock().unwrap().clear();
@@ -30909,12 +30915,12 @@
             .eval_str(
                 r#"
                   (defstate step-drag-anchor nil)
-                  (def selection-click? (evt) (get evt :shift))
-                  (def step-pointer-down-for-track (track step evt use-selection)
+                  (def eseq.step-grid-interactions/selection-click? (evt) (get evt :shift))
+                  (def eseq.step-grid-interactions/step-pointer-down-for-track (track step evt use-selection)
                     (do (set! step-drag-anchor step) (seq-select-step-range step step)))
-                  (def step-select-drag-over-for-track (track step evt)
+                  (def eseq.step-grid-interactions/step-select-drag-over-for-track (track step evt)
                     (seq-select-step-range step-drag-anchor step))
-                  (def step-pointer-up (step evt) (set! step-drag-anchor nil))
+                  (def eseq.step-grid-interactions/step-pointer-up (step evt) (set! step-drag-anchor nil))
                 "#,
             )
             .expect("install standalone selection gesture support");
@@ -31230,7 +31236,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-mixer-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
             .expect("hide mixer panel");
         editor.refresh_runtime_side_effects();
         let hidden_frame =
@@ -31245,7 +31251,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-toggle-mixer-panel)")
+            .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
             .expect("show mixer panel");
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*mixer*");
@@ -31335,7 +31341,7 @@
             let hide_start = std::time::Instant::now();
             editor
                 .runtime_mut()
-                .eval_str("(seq-toggle-mixer-panel)")
+                .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
                 .expect("hide mixer panel");
             editor.refresh_runtime_side_effects();
             let hidden_frame =
@@ -31353,7 +31359,7 @@
             let show_eval_start = std::time::Instant::now();
             editor
                 .runtime_mut()
-                .eval_str("(seq-toggle-mixer-panel)")
+                .eval_str("(eseq.seq-panels/seq-toggle-mixer-panel)")
                 .expect("show mixer panel");
             let show_eval_ms = show_eval_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -32067,12 +32073,12 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
+                "(defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
             )
             .expect("install test slider material macro");
         editor
             .runtime_mut()
-            .eval_str("(defstate selected-bus -1)")
+            .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
             .expect("install shared mixer selection state");
         register_test_delete_target_natives(&mut editor, 1);
         // ui/track-collapse.lisp is a module now, and its compat aliases only
@@ -32258,14 +32264,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -32277,7 +32283,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-copy-values-to-all-scenes
+                r#"(eseq.effects.panel-frame/fx-copy-values-to-all-scenes
                     (dict :slot-idx 2 :track-idx 0 :bus-fx false :midi-fx false))"#,
             )
             .expect("copy track effect values to every scene");
@@ -32298,7 +32304,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-copy-values-to-all-scenes
+                r#"(eseq.effects.panel-frame/fx-copy-values-to-all-scenes
                     (dict :slot-idx 3 :track-idx 0 :bus-fx false :midi-fx true))"#,
             )
             .expect("copy MIDI effect values to every scene");
@@ -32319,7 +32325,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-copy-values-to-all-scenes
+                r#"(eseq.effects.panel-frame/fx-copy-values-to-all-scenes
                     (dict :slot-idx 1 :bus-fx true :bus-idx 2 :midi-fx false))"#,
             )
             .expect("copy bus effect values to every scene");
@@ -32339,7 +32345,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(instrument-copy-values-to-all-scenes (dict :track 0))")
+            .eval_str("(eseq.effects.panel-frame/instrument-copy-values-to-all-scenes (dict :track 0))")
             .expect("copy instrument values to every scene");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -32353,7 +32359,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(instrument-copy-values-to-all-scenes (dict :track 0 :rack-slot 0))")
+            .eval_str("(eseq.effects.panel-frame/instrument-copy-values-to-all-scenes (dict :track 0 :rack-slot 0))")
             .expect("copy rack-slot instrument values to every scene");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -32368,7 +32374,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "builtin-audio-effect" :name "Filter")
                       :target (dict :chain "audio" :track 0 :slot 2)))"#,
@@ -32402,7 +32408,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "audio-effect-instance" :chain "audio" :track 0 :slot 3 :name "Delay")
                       :target (dict :chain "audio" :track 0 :slot 2)))"#,
@@ -32434,7 +32440,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "midi-effect" :name "Arp")
                       :target (dict :chain "midi" :track 0 :slot 1)))"#,
@@ -32462,7 +32468,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "builtin-audio-effect" :name "Filter")
                       :target (dict :chain "bus" :bus 1 :slot 0)))"#,
@@ -32492,7 +32498,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "bus-effect-instance" :chain "bus" :bus 1 :slot 2 :name "Delay")
                       :target (dict :chain "bus" :bus 1 :slot 0)))"#,
@@ -32528,7 +32534,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-drop-on-effect
+                r#"(eseq.effects.drag-drop/drop-on-effect
                     (dict
                       :payload (dict :kind "custom-audio-effect" :name "verb")
                       :target (dict :chain "append" :bus 1 :track 0 :slot -1)))"#,
@@ -32556,44 +32562,44 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(do (set! sampler-view-start 3.5)
-                     (set! sampler-view-duration 1.25)
-                     (set! sampler-cursor-time 3.75)
-                     (set! sampler-active-marker \"start\")
-                     (sampler-reset-view))",
+                "(do (set! eseq.effects.sampler-panel/sampler-view-start 3.5)
+                     (set! eseq.effects.sampler-panel/sampler-view-duration 1.25)
+                     (set! eseq.effects.sampler-panel/sampler-cursor-time 3.75)
+                     (set! eseq.effects.sampler-panel/sampler-active-marker \"start\")
+                     (eseq.effects.sampler-panel/sampler-reset-view))",
             )
             .expect("reset sampler waveform viewport");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sampler-view-start")
+                .eval_str("eseq.effects.sampler-panel/sampler-view-start")
                 .expect("read sampler view start"),
             Some(Value::Number(0.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sampler-view-duration")
+                .eval_str("eseq.effects.sampler-panel/sampler-view-duration")
                 .expect("read sampler view duration"),
             Some(Value::Number(0.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sampler-cursor-time")
+                .eval_str("eseq.effects.sampler-panel/sampler-cursor-time")
                 .expect("read sampler cursor time"),
             Some(Value::Number(0.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("sampler-active-marker")
+                .eval_str("eseq.effects.sampler-panel/sampler-active-marker")
                 .expect("read sampler active marker"),
             Some(Value::String("none".to_string()))
         );
         let filter_ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe filter ui")
             .expect("filter ui probe value");
         assert!(
@@ -32623,7 +32629,7 @@
         ));
         editor
             .runtime_mut()
-            .eval_str("(set! selected-bus 1)")
+            .eval_str("(set! eseq.seq-core-state/selected-bus 1)")
             .expect("select bus");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -32699,14 +32705,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -32714,7 +32720,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let filter_ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe filter ui")
             .expect("filter ui probe value");
         assert!(
@@ -32809,14 +32815,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -32917,14 +32923,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -32932,7 +32938,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let eq8_ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe eq8 ui")
             .expect("eq8 ui probe value");
         assert!(
@@ -33037,14 +33043,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -33179,14 +33185,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -33318,14 +33324,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -33484,14 +33490,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install selected-step sampler fx test helpers");
@@ -33634,14 +33640,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install sampler fx test helpers");
@@ -33682,9 +33688,9 @@
             .eval_str(
                 r#"
                 (do
-                  (set! process-map-track 0)
-                  (set! process-map-instance-id 42)
-                  (set! process-map-port "speed"))
+                  (set! eseq.effects.param-controls/process-map-track 0)
+                  (set! eseq.effects.param-controls/process-map-instance-id 42)
+                  (set! eseq.effects.param-controls/process-map-port "speed"))
                 "#,
             )
             .expect("arm process map state");
@@ -33753,7 +33759,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(process-map-active?)")
+                .eval_str("(eseq.effects.param-controls/process-map-active?)")
                 .expect("read cleared process map state"),
             Some(Value::Bool(false))
         );
@@ -33799,14 +33805,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -33814,7 +33820,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe dimension ui")
             .expect("dimension ui probe value");
         assert!(
@@ -33898,14 +33904,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -33913,7 +33919,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe phaser-flanger ui")
             .expect("phaser-flanger ui probe value");
         assert!(
@@ -34122,14 +34128,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -34137,7 +34143,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe roar ui")
             .expect("roar ui probe value");
         assert!(
@@ -34274,14 +34280,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -34289,7 +34295,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe ott ui")
             .expect("ott ui probe value");
         for label in [
@@ -34455,14 +34461,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -34470,7 +34476,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe compressor ui")
             .expect("compressor ui probe value");
         for label in [
@@ -34577,14 +34583,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -34592,7 +34598,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe space echo ui")
             .expect("space echo ui probe value");
         assert!(
@@ -34734,14 +34740,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -34749,7 +34755,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe filterbank ui")
             .expect("filterbank ui probe value");
         assert!(
@@ -34823,14 +34829,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -34838,7 +34844,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe Multiverb ui")
             .expect("Multiverb ui probe value");
         for text in [
@@ -34926,7 +34932,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(builtin-fx-multiverb-apply-preset (nth SEQ.effects 0) \"Xtal Wash\")")
+            .eval_str("(eseq.effects.builtin.multiverb/builtin-fx-multiverb-apply-preset (nth SEQ.effects 0) \"Xtal Wash\")")
             .expect("apply Xtal Wash factory setting");
         let mut writes = Vec::new();
         let mut source_writes = Vec::new();
@@ -35040,14 +35046,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -35055,7 +35061,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let delay_ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe str8 delay ui")
             .expect("str8 delay ui probe value");
         assert!(
@@ -35164,14 +35170,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -35179,7 +35185,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let reverb_ui_probe = editor
             .runtime_mut()
-            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe reverb ui");
         assert!(
             matches!(reverb_ui_probe, Some(Value::Bool(false))),
@@ -36127,7 +36133,7 @@
                 (def custom-instrument-synth-ui (inst)
                   (label "custom metadata ui" :font-size 10 :bg :transparent))
                 (load "ui/effects/panel-bodies.lisp")
-                (effect-buffer "*custom-metadata-ui-test*" (instrument-synth-panel-body TEST.inst))
+                (effect-buffer "*custom-metadata-ui-test*" (eseq.effects.panel-bodies/instrument-synth-panel-body TEST.inst))
                 "#,
             )
             .expect("load custom metadata ui test");
@@ -36208,13 +36214,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -36311,13 +36317,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -36449,13 +36455,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -36579,13 +36585,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -36674,9 +36680,9 @@
             "instruments/test-instrument/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-panel "SYNTH" 0
+              (eseq.effects.custom-ui-sections/ui-panel "SYNTH" 0
                 (h-stack :gap 0.2
-                  (ui-param-knob "cutoff" "cut"))))
+                  (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "cut"))))
             "#
             .to_string(),
         )));
@@ -36724,12 +36730,12 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -36820,7 +36826,7 @@
             "instruments/test-instrument/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-param-matrix "strike_mask" 4.0 3.0))
+              (eseq.effects.custom-ui-controls/ui-param-matrix "strike_mask" 4.0 3.0))
             "#
             .to_string(),
         )));
@@ -36891,13 +36897,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install matrix test helpers");
@@ -36972,10 +36978,10 @@
             "instruments/test-instrument/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-lego-micro-option-s
+              (eseq.effects.custom-ui-lego/ui-lego-micro-option-s
                 0 "voice" "drum" 6.0
                 '("kick" "snare" "lo tom")
-                (ui-accent-cyan)))
+                (eseq.effects.custom-ui-lego/ui-accent-cyan)))
             "#
             .to_string(),
         )));
@@ -37036,12 +37042,12 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -37142,7 +37148,7 @@
             "instruments/test-instrument/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-panel "SYNTH" 2
+              (eseq.effects.custom-ui-sections/ui-panel "SYNTH" 2
                 (label
                   (if (= custom-ui-selected-section 2) "INST_SELECTED" "INST_UNSELECTED")
                   :font-size 10 :color :white :bg :transparent)))
@@ -37154,7 +37160,7 @@
             "effects/dimension-d-chorus/ui.lisp".to_string(),
             r#"
             (defeffect-ui
-              (ui-control-block-medium-s "MOTION" (ui-accent-cyan) 1
+              (eseq.effects.custom-ui-lego/ui-control-block-medium-s "MOTION" (eseq.effects.custom-ui-lego/ui-accent-cyan) 1
                 (label
                   (if (= custom-ui-selected-section 1) "FX_SELECTED" "FX_UNSELECTED")
                   :font-size 10 :color :white :bg :transparent)))
@@ -37199,12 +37205,12 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -37233,9 +37239,9 @@
                 r#"
                 (do
                   (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
-                  (def test-instrument-section-click (ui-section-select-callback 2))
+                  (def test-instrument-section-click (eseq.effects.custom-ui-sections/ui-section-select-callback 2))
                   (custom-audio-fx-ui (nth SEQ.effects 0))
-                  (def test-fx-section-click (ui-section-select-callback 1))
+                  (def test-fx-section-click (eseq.effects.custom-ui-sections/ui-section-select-callback 1))
                   (test-instrument-section-click false)
                   (test-fx-section-click false))
                 "#,
@@ -37293,10 +37299,10 @@
             (defsynth-ui
               (h-stack :width :fill :gap 0.5
                 (v-stack :width 16.0 :gap 0.10
-                  (ui-panel "CUSTOM_OK" 0
+                  (eseq.effects.custom-ui-sections/ui-panel "CUSTOM_OK" 0
                     (h-stack :gap 0.25
-                      (ui-param-knob "cutoff" "cut"))))
-                (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
+                      (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "cut"))))
+                (eseq.effects.custom-ui-lego/ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
             "#
             .to_string(),
         )));
@@ -37326,13 +37332,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -37534,9 +37540,9 @@
             "instruments/test-instrument/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-panel "SYNTH" 0
+              (eseq.effects.custom-ui-sections/ui-panel "SYNTH" 0
                 (h-stack :gap 0.2
-                  (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-blue) 2))))
+                  (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2))))
             "#
             .to_string(),
         )));
@@ -37716,13 +37722,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -37734,7 +37740,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open false) (set! instrument-selected-mod-slot 1))")
+            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open false) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
             .expect("show custom synth panel");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -37765,7 +37771,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(defstate lower-panel-buffer \"*fx*\")")
+            .eval_str("(defstate eseq.seq-step-tabs/lower-panel-buffer \"*fx*\")")
             .expect("install lower panel state for mods toggle action");
         // S2 moved the fx lower-panel defs from ui/main.lisp into the
         // seq-panels section file.
@@ -37812,7 +37818,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("instrument-mods-open")
+                .eval_str("eseq.effects.state/instrument-mods-open")
                 .unwrap(),
             Some(Value::Bool(true))
         );
@@ -37906,7 +37912,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(set! instrument-selected-mod-slot 2)")
+            .eval_str("(set! eseq.effects.state/instrument-selected-mod-slot 2)")
             .expect("select second modulator");
         editor
             .runtime_mut()
@@ -38296,14 +38302,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -38311,7 +38317,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open true) (set! instrument-selected-mod-slot 2))")
+            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open true) (set! eseq.effects.state/instrument-selected-mod-slot 2))")
             .expect("open sampler inline mods");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -38442,7 +38448,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(set! instrument-selected-mod-slot 1)")
+            .eval_str("(set! eseq.effects.state/instrument-selected-mod-slot 1)")
             .expect("select sampler LFO source editor");
         editor
             .runtime_mut()
@@ -38524,13 +38530,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -38634,13 +38640,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -38776,13 +38782,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -38917,13 +38923,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39051,13 +39057,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39238,13 +39244,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39380,13 +39386,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39514,13 +39520,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39644,13 +39650,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39774,13 +39780,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -39906,13 +39912,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -40047,13 +40053,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -40205,13 +40211,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -40356,13 +40362,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -40730,14 +40736,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -40747,13 +40753,13 @@
             .runtime_mut()
             .eval_str(
                 r#"(do
-                  (set! effect-mods-open true)
-                  (set! effect-mods-chain "audio")
-                  (set! effect-mods-track 0)
-                  (set! effect-mods-slot 0)
-                  (set! effect-mods-rack-slot -1)
-                  (set! effect-mods-bus -1)
-                  (set! effect-selected-mod-slot 1))"#,
+                  (set! eseq.effects.state/effect-mods-open true)
+                  (set! eseq.effects.state/effect-mods-chain "audio")
+                  (set! eseq.effects.state/effect-mods-track 0)
+                  (set! eseq.effects.state/effect-mods-slot 0)
+                  (set! eseq.effects.state/effect-mods-rack-slot -1)
+                  (set! eseq.effects.state/effect-mods-bus -1)
+                  (set! eseq.effects.state/effect-selected-mod-slot 1))"#,
             )
             .expect("open effect mods");
         editor.refresh_runtime_side_effects();
@@ -40992,14 +40998,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -41015,24 +41021,24 @@
                     (set! audio-fx-ui-current-name (get fx :name))
                     (set! custom-ui-current-kind "audio-fx")
                     (h-stack :width :fill :gap 0.35 :align :stretch
-                      (ui-lego-column-2
-                        (ui-control-block-medium-s "CUSTOM" (ui-accent-violet) 0
+                      (eseq.effects.custom-ui-lego/ui-lego-column-2
+                        (eseq.effects.custom-ui-lego/ui-control-block-medium-s "CUSTOM" (eseq.effects.custom-ui-lego/ui-accent-violet) 0
                           (h-stack :gap 0.32 :align :start
-                            (ui-lego-knob-s 0 "decay" "dcy" 4.8 (ui-accent-violet) 2)
-                            (ui-lego-knob-s 0 "haze" "haze" 4.8 (ui-accent-green) 2)))
-                        (ui-control-block-small-s "OUT" (ui-accent-blue) 1
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "decay" "dcy" 4.8 (eseq.effects.custom-ui-lego/ui-accent-violet) 2)
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "haze" "haze" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 2)))
+                        (eseq.effects.custom-ui-lego/ui-control-block-small-s "OUT" (eseq.effects.custom-ui-lego/ui-accent-blue) 1
                           (h-stack :gap 0.30 :align :start
-                            (ui-lego-num-s 1 "freeze" "frz" 5.2 2 false (ui-accent-cyan))
-                            (ui-lego-num-s 1 "mix" "mix" 5.2 2 false (ui-accent-orange))))))))
+                            (eseq.effects.custom-ui-lego/ui-lego-num-s 1 "freeze" "frz" 5.2 2 false (eseq.effects.custom-ui-lego/ui-accent-cyan))
+                            (eseq.effects.custom-ui-lego/ui-lego-num-s 1 "mix" "mix" 5.2 2 false (eseq.effects.custom-ui-lego/ui-accent-orange))))))))
 
                 (do
-                  (set! effect-mods-open true)
-                  (set! effect-mods-chain "audio")
-                  (set! effect-mods-track 0)
-                  (set! effect-mods-slot 0)
-                  (set! effect-mods-rack-slot -1)
-                  (set! effect-mods-bus -1)
-                  (set! effect-selected-mod-slot 1))
+                  (set! eseq.effects.state/effect-mods-open true)
+                  (set! eseq.effects.state/effect-mods-chain "audio")
+                  (set! eseq.effects.state/effect-mods-track 0)
+                  (set! eseq.effects.state/effect-mods-slot 0)
+                  (set! eseq.effects.state/effect-mods-rack-slot -1)
+                  (set! eseq.effects.state/effect-mods-bus -1)
+                  (set! eseq.effects.state/effect-selected-mod-slot 1))
                 "#,
             )
             .expect("install custom audio effect UI and open mods");
@@ -41162,14 +41168,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -41185,22 +41191,22 @@
                     (set! audio-fx-ui-current-name (get fx :name))
                     (set! custom-ui-current-kind "audio-fx")
                     (h-stack :width :fill :gap 0.35 :align :stretch
-                      (ui-lego-column-wide-full
-                        (ui-control-block-medium-wide-s "SPECTRAL" (ui-accent-violet) 0
+                      (eseq.effects.custom-ui-lego/ui-lego-column-wide-full
+                        (eseq.effects.custom-ui-lego/ui-control-block-medium-wide-s "SPECTRAL" (eseq.effects.custom-ui-lego/ui-accent-violet) 0
                           (h-stack :debug-name "spectral-five-knob-row"
                                    :gap 0.32 :align :start
-                            (ui-lego-knob-s 0 "decay" "dcy" 4.8 (ui-accent-violet) 2)
-                            (ui-lego-knob-s 0 "drift" "drft" 4.8 (ui-accent-cyan) 2)
-                            (ui-lego-knob-s 0 "bloom" "blm" 4.8 (ui-accent-blue) 2)
-                            (ui-lego-knob-s 0 "haze" "haze" 4.8 (ui-accent-green) 2)
-                            (ui-lego-knob-s 0 "damp" "dmp" 4.8 (ui-accent-orange) 2)))))))
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "decay" "dcy" 4.8 (eseq.effects.custom-ui-lego/ui-accent-violet) 2)
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "drift" "drft" 4.8 (eseq.effects.custom-ui-lego/ui-accent-cyan) 2)
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "bloom" "blm" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2)
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "haze" "haze" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 2)
+                            (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "damp" "dmp" 4.8 (eseq.effects.custom-ui-lego/ui-accent-orange) 2)))))))
 
                 (do
-                  (set! effect-mods-open true)
-                  (set! effect-mods-chain "audio")
-                  (set! effect-mods-slot 0)
-                  (set! effect-mods-bus -1)
-                  (set! effect-selected-mod-slot 1))
+                  (set! eseq.effects.state/effect-mods-open true)
+                  (set! eseq.effects.state/effect-mods-chain "audio")
+                  (set! eseq.effects.state/effect-mods-slot 0)
+                  (set! eseq.effects.state/effect-mods-bus -1)
+                  (set! eseq.effects.state/effect-selected-mod-slot 1))
                 "#,
             )
             .expect("install custom spectral-style audio effect UI");
@@ -41504,14 +41510,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -41521,13 +41527,13 @@
             .runtime_mut()
             .eval_str(
                 r#"(do
-                  (set! effect-mods-open true)
-                  (set! effect-mods-chain "audio")
-                  (set! effect-mods-track 0)
-                  (set! effect-mods-slot 0)
-                  (set! effect-mods-rack-slot -1)
-                  (set! effect-mods-bus -1)
-                  (set! effect-selected-mod-slot 1))"#,
+                  (set! eseq.effects.state/effect-mods-open true)
+                  (set! eseq.effects.state/effect-mods-chain "audio")
+                  (set! eseq.effects.state/effect-mods-track 0)
+                  (set! eseq.effects.state/effect-mods-slot 0)
+                  (set! eseq.effects.state/effect-mods-rack-slot -1)
+                  (set! eseq.effects.state/effect-mods-bus -1)
+                  (set! eseq.effects.state/effect-selected-mod-slot 1))"#,
             )
             .expect("open DJ Mixer effect mods");
         editor.refresh_runtime_side_effects();
@@ -41717,7 +41723,7 @@
             assert_eq!(
                 editor
                     .runtime_mut()
-                    .eval_str("effect-mods-open")
+                    .eval_str("eseq.effects.state/effect-mods-open")
                     .expect("read effect mods open"),
                 Some(Value::Bool(expected)),
                 "{context}"
@@ -41886,14 +41892,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -42332,14 +42338,14 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -42502,13 +42508,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -42520,7 +42526,7 @@
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open false) (set! instrument-selected-mod-slot 1))")
+            .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 0) (set! eseq.effects.state/instrument-mods-open false) (set! eseq.effects.state/instrument-selected-mod-slot 1))")
             .expect("show synth tab before opening inline mods");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -42720,13 +42726,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -43044,13 +43050,13 @@
                 .runtime_mut()
                 .eval_str(
                     r#"
-                    (def selected-bus-name () "Mix")
+                    (def eseq.seq-core-state/selected-bus-name () "Mix")
                     (def seq-has-selection? () false)
-                    (def sbrowser-editor-name "")
-                    (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                    (def eseq.browser/sbrowser-editor-name "")
+                    (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                     (def custom-midi-fx-ui (fx) false)
                     (def custom-audio-fx-ui (fx) false)
-                    (defstate selected-bus -1)
+                    (defstate eseq.seq-core-state/selected-bus -1)
                     "#,
                 )
                 .expect("install fx test helpers");
@@ -43223,13 +43229,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -43250,8 +43256,8 @@
         let numeric_param_value = editor
             .runtime_mut()
             .eval_str(
-                r#"(> (custom-ui-param-value
-                       (inst-param (nth SEQ.instrument-panel 0) "engine"))
+                r#"(> (eseq.effects.custom-ui-runtime/custom-ui-param-value
+                       (eseq.effects.custom-ui-runtime/inst-param (nth SEQ.instrument-panel 0) "engine"))
                       0.5)"#,
             )
             .expect("custom UI numeric parameter API should support arithmetic");
@@ -43259,8 +43265,8 @@
         let bound_param_value = editor
             .runtime_mut()
             .eval_str(
-                r#"(custom-ui-param-binding
-                    (inst-param (nth SEQ.instrument-panel 0) "engine"))"#,
+                r#"(eseq.effects.custom-ui-runtime/custom-ui-param-binding
+                    (eseq.effects.custom-ui-runtime/inst-param (nth SEQ.instrument-panel 0) "engine"))"#,
             )
             .expect("custom UI widget parameter API should return a binding");
         assert!(
@@ -43270,7 +43276,7 @@
         let binding_backed_effect_toggle = editor
             .runtime_mut()
             .eval_str(
-                r#"(fx-param-on-for?
+                r#"(eseq.effects.param-controls/fx-param-on-for?
                     false
                     (dict :value 0 :value-field "md-hat-test-engine"))"#,
             )
@@ -43391,13 +43397,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -43456,7 +43462,7 @@
             .expect("invoke filter_env_amount on-change");
         let sections = editor
             .runtime_mut()
-            .eval_str("custom-ui-selected-sections")
+            .eval_str("eseq.effects.custom-ui-sections/custom-ui-selected-sections")
             .expect("read custom UI selected sections")
             .expect("selected sections value");
 
@@ -43479,12 +43485,12 @@
             "test/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-readout-block-small "SOURCE" (ui-accent-cyan)
-                (ui-lego-text-row-4
-                  (label "saw" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+              (eseq.effects.custom-ui-lego/ui-readout-block-small "SOURCE" (eseq.effects.custom-ui-lego/ui-accent-cyan)
+                (eseq.effects.custom-ui-lego/ui-lego-text-row-4
+                  (label "saw" :font-size 9.0 :color (eseq.effects.custom-ui-lego/ui-accent-cyan) :bg :transparent)
                   (label "<->" :font-size 9.0 :color :dim :bg :transparent)
-                  (label "pulse" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
-                  (label "pw mod" :font-size 9.0 :color (ui-accent-blue) :bg :transparent))))
+                  (label "pulse" :font-size 9.0 :color (eseq.effects.custom-ui-lego/ui-accent-cyan) :bg :transparent)
+                  (label "pw mod" :font-size 9.0 :color (eseq.effects.custom-ui-lego/ui-accent-blue) :bg :transparent))))
             "#
             .to_string(),
         )));
@@ -43514,13 +43520,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -43584,28 +43590,28 @@
             "test/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-rack :breathe
+              (eseq.effects.custom-ui-lego/ui-rack :breathe
                 (list
-                  (ui-panel "GLOBAL" 0
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "cut")))
-                  (ui-panel "VCO 1" 0
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "saw")))
-                  (ui-panel "VCO 2 / MIX" 0
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "vco2")))
-                  (ui-panel "DIRT" 0
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "input"))))
-                (ui-adsr-switch
+                  (eseq.effects.custom-ui-sections/ui-panel "GLOBAL" 0
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "cut")))
+                  (eseq.effects.custom-ui-sections/ui-panel "VCO 1" 0
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "saw")))
+                  (eseq.effects.custom-ui-sections/ui-panel "VCO 2 / MIX" 0
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "vco2")))
+                  (eseq.effects.custom-ui-sections/ui-panel "DIRT" 0
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "input"))))
+                (eseq.effects.custom-ui-lego/ui-adsr-switch
                   0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
                   1 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
                 (list
-                  (ui-panel "MS FILTER" 1
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "cut")))
-                  (ui-panel "HP / SCREAM" 1
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "hp")))
-                  (ui-panel "MOD" 0
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "rate")))
-                  (ui-panel "NOISE / RING" 0
-                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "noise"))))))
+                  (eseq.effects.custom-ui-sections/ui-panel "MS FILTER" 1
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "cut")))
+                  (eseq.effects.custom-ui-sections/ui-panel "HP / SCREAM" 1
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "hp")))
+                  (eseq.effects.custom-ui-sections/ui-panel "MOD" 0
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "rate")))
+                  (eseq.effects.custom-ui-sections/ui-panel "NOISE / RING" 0
+                    (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "noise"))))))
             "#
             .to_string(),
         )));
@@ -43635,13 +43641,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -43743,16 +43749,16 @@
             "test/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-rack :breathe
+              (eseq.effects.custom-ui-lego/ui-rack :breathe
                 (list
-                  (ui-panel "P1" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
-                  (ui-panel "P2" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
-                  (ui-panel "P3" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
-                  (ui-panel "P4" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c"))))
-                (ui-adsr "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
+                  (eseq.effects.custom-ui-sections/ui-panel "P1" 0 (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "c")))
+                  (eseq.effects.custom-ui-sections/ui-panel "P2" 0 (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "c")))
+                  (eseq.effects.custom-ui-sections/ui-panel "P3" 0 (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "c")))
+                  (eseq.effects.custom-ui-sections/ui-panel "P4" 0 (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "c"))))
+                (eseq.effects.custom-ui-lego/ui-adsr "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
                 (list
-                  (ui-panel "P5" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
-                  (ui-panel "P6" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c"))))))
+                  (eseq.effects.custom-ui-sections/ui-panel "P5" 0 (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "c")))
+                  (eseq.effects.custom-ui-sections/ui-panel "P6" 0 (h-stack :gap 0.2 (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "c"))))))
             "#
             .to_string(),
         )));
@@ -43782,13 +43788,13 @@
             .runtime_mut()
             .eval_str(
                 r#"
-                (def selected-bus-name () "Mix")
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def sbrowser-editor-name "")
-                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 "#,
             )
             .expect("install fx test helpers");
@@ -44188,12 +44194,12 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
+                "(defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
             )
             .expect("install test slider material macro");
         editor
             .runtime_mut()
-            .eval_str("(defstate selected-bus -1)")
+            .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
             .expect("install shared mixer selection state");
         // browser.lisp owns this one and is not loaded in this stub harness.
         // Before ui/mixer.lisp became `(module eseq.mixer)` its `(set!
@@ -44225,7 +44231,7 @@
             "seq-toggle-bus-solo",
             "seq-set-bus-volume",
             "seq-clear-selection",
-            "sbrowser-drop-sample-on-track",
+            "eseq.browser/drop-sample-on-track",
         ] {
             let calls = Arc::clone(&calls);
             editor
@@ -44262,7 +44268,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-select-next-channel)")
+            .eval_str("(eseq.mixer/select-next-channel)")
             .expect("right arrow should select next track channel");
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
@@ -44272,7 +44278,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("selected-bus")
+                .eval_str("eseq.seq-core-state/selected-bus")
                 .expect("read selected bus"),
             Some(Value::Number(-1.0)),
             "next track selection should keep selected-bus cleared"
@@ -44288,12 +44294,12 @@
             .set_reactive("SEQ", &track_selected_field(1), Value::Bool(true));
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-select-next-channel)")
+            .eval_str("(eseq.mixer/select-next-channel)")
             .expect("right arrow should select next mixer channel");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("selected-bus")
+                .eval_str("eseq.seq-core-state/selected-bus")
                 .expect("read selected bus"),
             Some(Value::Number(1.0)),
             "next channel from the last track should select Bus A in display order"
@@ -44304,7 +44310,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-delete-selected-track)")
+            .eval_str("(eseq.mixer/delete-selected-track)")
             .expect("delete on bus selection should be handled safely");
         assert!(
             editor.drain_host_commands().is_empty(),
@@ -44312,7 +44318,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-select-prev-channel)")
+            .eval_str("(eseq.mixer/select-prev-channel)")
             .expect("left arrow should select previous mixer channel");
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
@@ -44322,14 +44328,14 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("selected-bus")
+                .eval_str("eseq.seq-core-state/selected-bus")
                 .expect("read selected bus"),
             Some(Value::Number(-1.0)),
             "track selection should clear selected-bus"
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-select-track 0)")
+            .eval_str("(eseq.mixer/select-track 0)")
             .expect("explicit mixer track selection should not claim delete target");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
@@ -44342,7 +44348,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-select-track-delete-target 0)")
+            .eval_str("(eseq.mixer/select-track-delete-target 0)")
             .expect("explicit mixer track badge selection should claim delete target");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
@@ -44354,7 +44360,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-delete-selected-track)")
+            .eval_str("(eseq.mixer/delete-selected-track)")
             .expect("delete on mixer delete target should queue host command");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -44376,7 +44382,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-sample-on-track
+                r#"(eseq.mixer/drop-sample-on-track
                     (dict
                       :payload (dict :path "samples/kick.wav")
                       :target (dict :kind "track" :track 0)))"#,
@@ -44385,8 +44391,8 @@
         let sample_drop_calls = calls.lock().unwrap();
         assert_eq!(sample_drop_calls.len(), 1);
         assert!(
-            sample_drop_calls[0].starts_with("sbrowser-drop-sample-on-track:"),
-            "mixer sample drops should delegate to the sample browser: {sample_drop_calls:?}"
+            sample_drop_calls[0].starts_with("eseq.browser/drop-sample-on-track:"),
+            "mixer sample drops should delegate to the qualified sample-browser command: {sample_drop_calls:?}"
         );
         drop(sample_drop_calls);
         assert!(
@@ -44397,7 +44403,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-on-track
+                r#"(eseq.mixer/drop-on-track
                     (dict
                       :drag-type "audio-effect"
                       :payload (dict :kind "builtin-audio-effect" :name "Filter")
@@ -44430,7 +44436,7 @@
             "dropping an effect on a track should select that track"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(Value::Number(-1.0)),
             "track effect drops should clear any bus selection"
         );
@@ -44438,7 +44444,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-on-track
+                r#"(eseq.mixer/drop-on-track
                     (dict
                       :drag-type "audio-effect"
                       :payload (dict :kind "custom-audio-effect" :name "delayz")
@@ -44469,7 +44475,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-on-track
+                r#"(eseq.mixer/drop-on-track
                     (dict
                       :drag-type "midi-effect"
                       :payload (dict :kind "midi-effect" :name "Arp")
@@ -44500,7 +44506,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-effect-on-bus
+                r#"(eseq.mixer/drop-effect-on-bus
                     (dict
                       :drag-type "audio-effect"
                       :payload (dict :kind "builtin-audio-effect" :name "Filter")
@@ -44527,7 +44533,7 @@
             other => panic!("expected add-builtin-bus-effect host command, got {other:?}"),
         }
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(Value::Number(1.0)),
             "dropping an effect on a bus should select that bus"
         );
@@ -44535,7 +44541,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-effect-on-bus
+                r#"(eseq.mixer/drop-effect-on-bus
                     (dict
                       :drag-type "audio-effect"
                       :payload (dict :kind "custom-audio-effect" :name "delayz")
@@ -44562,7 +44568,7 @@
             other => panic!("expected add-bus-effect host command, got {other:?}"),
         }
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(Value::Number(2.0)),
             "dropping an effect on a group bus should select that group"
         );
@@ -44570,7 +44576,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-on-group-header
+                r#"(eseq.mixer/drop-on-group-header
                     (dict
                       :drag-type "sample"
                       :payload (dict :path "samples/hat.wav")
@@ -44597,7 +44603,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-on-group-header
+                r#"(eseq.mixer/drop-on-group-header
                     (dict
                       :drag-type "instrument"
                       :payload (dict :kind "instrument" :name "core/drift")
@@ -44624,7 +44630,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-sample-new-track
+                r#"(eseq.mixer/drop-sample-new-track
                     (dict :payload (dict :path "samples/kick.wav")))"#,
             )
             .expect("drop sample on new-track zone");
@@ -44653,7 +44659,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-sample-new-track
+                r#"(eseq.mixer/drop-sample-new-track
                     (dict :drag-type "instrument"
                           :payload (dict :kind "instrument"
                                          :name "emulations/digitone"
@@ -44686,7 +44692,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(mixer-v2-drop-sample-new-track
+                r#"(eseq.mixer/drop-sample-new-track
                     (dict :drag-type "sound"
                           :payload (dict :path "sounds/wide-rack.sound")))"#,
             )
@@ -44788,14 +44794,14 @@
             .expect("group badge should expose a selection callback");
         editor
             .runtime_mut()
-            .eval_str("(set! selected-bus -1)")
+            .eval_str("(set! eseq.seq-core-state/selected-bus -1)")
             .unwrap();
         editor
             .runtime_mut()
             .invoke(group_badge_click, vec![Value::Map(Default::default())])
             .expect("click group badge");
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(Value::Number(2.0)),
             "clicking the group badge should select its backing bus"
         );
@@ -44905,7 +44911,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-launch-track-pattern 1 (nth (mixer-v2-track-pattern-cells 1) 1))")
+            .eval_str("(eseq.mixer/launch-track-pattern 1 (nth (eseq.mixer/track-pattern-cells 1) 1))")
             .expect("launch track pattern from mixer grid");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -44945,7 +44951,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-launch-track-pattern 1 (nth (mixer-v2-track-pattern-cells 1) 1))")
+            .eval_str("(eseq.mixer/launch-track-pattern 1 (nth (eseq.mixer/track-pattern-cells 1) 1))")
             .expect("launch track pattern with quantize set");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -45061,7 +45067,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-handle-key \"BS\" nil)")
+            .eval_str("(eseq.mixer/handle-key \"BS\" nil)")
             .expect("delete selected track pattern from mixer grid");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -45086,7 +45092,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(mixer-v2-select-track 0)")
+            .eval_str("(eseq.mixer/select-track 0)")
             .expect("select track before clicking track control");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         editor.runtime_mut().set_reactive(
@@ -45239,7 +45245,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("selected-bus")
+                .eval_str("eseq.seq-core-state/selected-bus")
                 .expect("read selected bus after Bus A label click"),
             Some(Value::Number(1.0)),
             "Bus A label click should select Bus A"
@@ -45283,7 +45289,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("selected-bus")
+                .eval_str("eseq.seq-core-state/selected-bus")
                 .expect("read selected bus after Bus A solo click"),
             Some(Value::Number(1.0)),
             "Bus A solo click should keep Bus A selected"
@@ -45497,12 +45503,12 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-request-fit-for-track 0)")
+            .eval_str("(eseq.piano-roll/piano-roll-request-fit-for-track 0)")
             .expect("fit empty piano roll");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-lane-scroll")
+                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read empty piano roll lane scroll"),
             // The "No song yet" banner is gone (empty-arrangement spec 8),
             // so the lower pane is one banner-height taller and C4 centers
@@ -45513,7 +45519,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(piano-roll-max-lane-scroll)")
+                .eval_str("(eseq.piano-roll/piano-roll-max-lane-scroll)")
                 .expect("read default piano roll max lane scroll"),
             // Also one banner-height taller (empty-arrangement spec 8).
             Some(Value::Number(78.0)),
@@ -45522,19 +45528,19 @@
         editor
             .runtime_mut()
             .eval_str(
-                "(piano-roll-action (dict :type :scroll-view :lane-scroll 78 :delta-lanes 0))",
+                "(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :lane-scroll 78 :delta-lanes 0))",
             )
             .expect("scroll piano roll to low lanes");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-lane-scroll")
+                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read low piano roll lane scroll"),
             Some(Value::Number(78.0))
         );
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-action (dict :type :finish-create-item :start 2 :end 4.5))")
+            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :finish-create-item :start 2 :end 4.5))")
             .expect("record created duration");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -45548,7 +45554,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-action (dict :type :resize-item-absolute :duration 3.25))")
+            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :resize-item-absolute :duration 3.25))")
             .expect("record resized duration");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -45562,7 +45568,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-action (dict :type :clear-selection :time 4.5))")
+            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :clear-selection :time 4.5))")
             .expect("record cursor time");
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -45588,35 +45594,35 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(set! piano-roll-view-duration 8)")
+            .eval_str("(set! eseq.piano-roll/piano-roll-view-duration 8)")
             .expect("set piano roll duration");
         editor
             .runtime_mut()
-            .eval_str("(set! piano-roll-lane-height 1)")
+            .eval_str("(set! eseq.piano-roll/piano-roll-lane-height 1)")
             .expect("set piano roll lane height");
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-action (dict :type :zoom-view :anchor-time 4 :factor 2))")
+            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :zoom-view :anchor-time 4 :factor 2))")
             .expect("zoom piano roll");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-lane-height")
+                .eval_str("eseq.piano-roll/piano-roll-lane-height")
                 .expect("read piano roll lane height after x zoom"),
             Some(Value::Number(1.0))
         );
         editor
             .runtime_mut()
-            .eval_str("(set! piano-roll-view-duration 8)")
+            .eval_str("(set! eseq.piano-roll/piano-roll-view-duration 8)")
             .expect("reset piano roll duration");
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-action (dict :type :scroll-view :delta-time 100))")
+            .eval_str("(eseq.piano-roll/piano-roll-action (dict :type :scroll-view :delta-time 100))")
             .expect("scroll piano roll");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-view-start")
+                .eval_str("eseq.piano-roll/piano-roll-view-start")
                 .expect("read piano roll view start"),
             Some(Value::Number(12.0))
         );
@@ -45641,30 +45647,30 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(set! piano-roll-lane-height 0.5)")
+            .eval_str("(set! eseq.piano-roll/piano-roll-lane-height 0.5)")
             .expect("restore default piano roll lane height");
         editor
             .runtime_mut()
-            .eval_str("(piano-roll-request-fit-for-track 0)")
+            .eval_str("(eseq.piano-roll/piano-roll-request-fit-for-track 0)")
             .expect("fit piano roll to notes");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-view-start")
+                .eval_str("eseq.piano-roll/piano-roll-view-start")
                 .expect("read fitted piano roll view start"),
             Some(Value::Number(1.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-view-duration")
+                .eval_str("eseq.piano-roll/piano-roll-view-duration")
                 .expect("read fitted piano roll view duration"),
             Some(Value::Number(16.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("piano-roll-lane-scroll")
+                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read fitted piano roll lane scroll"),
             // One lane row earlier since the "No song yet" banner's removal
             // made the lower pane taller (empty-arrangement spec 8).
@@ -45693,7 +45699,7 @@
         runtime.register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
         runtime.eval_str(&src).expect("load piano roll lisp");
         runtime
-            .eval_str("(piano-roll-request-fit-for-track 1)")
+            .eval_str("(eseq.piano-roll/piano-roll-request-fit-for-track 1)")
             .expect("request fit for future current track");
         assert_eq!(
             runtime
@@ -45721,19 +45727,19 @@
         );
         assert_eq!(
             runtime
-                .eval_str("piano-roll-view-start")
+                .eval_str("eseq.piano-roll/piano-roll-view-start")
                 .expect("read fitted view start after sync"),
             Some(Value::Number(11.0))
         );
         assert_eq!(
             runtime
-                .eval_str("piano-roll-view-duration")
+                .eval_str("eseq.piano-roll/piano-roll-view-duration")
                 .expect("read fitted view duration after sync"),
             Some(Value::Number(4.0))
         );
         assert_eq!(
             runtime
-                .eval_str("piano-roll-lane-scroll")
+                .eval_str("eseq.piano-roll/piano-roll-lane-scroll")
                 .expect("read fitted lane scroll after sync"),
             // One lane row earlier since the "No song yet" banner's removal
             // made the lower pane taller (empty-arrangement spec 8).
@@ -46403,83 +46409,83 @@
                 r#"
                 (def synth-ui-current-inst false)
                 (def synth-ui-current-name "")
-                (def inst-param (inst name)
+                (def eseq.effects.custom-ui-runtime/inst-param (inst name)
                   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
-                (def inst-base-note-param (inst)
-                  (nth (filter |p| (= (get p :control) "base-note") (get inst :synth)) 0))
-                (def fx-param-value (p)
+                (def eseq.effects.custom-ui-runtime/inst-base-note-param (inst)
+                  (nth (filter |p| (= (get p :control) "eseq.effects.custom-ui-runtime/base-note") (get inst :synth)) 0))
+                (def eseq.effects.param-controls/fx-param-value (p)
                   (if (get p :value-field)
                     (bind-seq (get p :value-field))
                     (get p :value)))
-                (def base-note ()
+                (def eseq.effects.custom-ui-runtime/base-note ()
                   (label "base" :font-size 10 :color :gray :bg :transparent))
                 (def custom-ui-current-kind "instrument")
                 (def custom-ui-selected-section 0)
-                (def custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
-                (def ui-select-section (section) (set! custom-ui-selected-section section))
-                (def ui-accent-blue () :blue)
-                (def ui-accent-cyan () :cyan)
-                (def ui-accent-orange () :orange)
-                (def ui-accent-green () :green)
-                (def ui-accent-violet () :magenta)
-                (def ui-lego-gap () 0.25)
-                (def ui-lego-small-h () 1.95)
-                (def ui-lego-medium-h () 4.08)
-                (def ui-lego-dense-h () 3.08)
-                (def ui-lego-full-h () 8.48)
-                (def ui-lego-col-w () 24.0)
-                (def ui-lego-strip-w () 7.2)
-                (def ui-control-block-small (title accent body) body)
-                (def ui-control-block-medium (title accent body) body)
-                (def ui-control-block-full (title accent body) body)
-                (def ui-control-block-small-s (title accent section body) body)
-                (def ui-control-block-medium-s (title accent section body) body)
-                (def ui-control-block-small-wide-s (title accent section body) body)
-                (def ui-control-block-medium-wide-s (title accent section body) body)
-                (def ui-control-block-dense-s (title accent section body) body)
-                (def ui-control-panel-dense-s (section body) body)
-                (def ui-control-panel-small-s (section body) body)
-                (def ui-control-panel-medium-s (section body) body)
-                (def ui-control-block-full-s (title accent section body) body)
-                (def ui-readout-block-small (title accent body) body)
-                (def ui-readout-block-small-s (title accent section body) body)
-                (def ui-readout-block-small-wide-s (title accent section body) body)
-                (def ui-readout-block-dense-s (title accent section body) body)
-                (def ui-readout-panel-small-s (section body) body)
-                (def ui-readout-panel-dense-s (section body) body)
-                (def ui-readout-panel-medium-s (section body) body)
-                (def ui-readout-block-medium (title accent body) body)
-                (def ui-readout-block-full (title accent body) body)
-                (def ui-lego-column (a b c) (v-stack a b c))
-                (def ui-lego-column-2 (a b) (v-stack a b))
-                (def ui-lego-column-full (a) (v-stack a))
-                (def ui-lego-column-wide (a b c) (v-stack a b c))
-                (def ui-lego-column-wide-2 (a b) (v-stack a b))
-                (def ui-lego-column-wide-full (a) (v-stack a))
-                (def ui-lego-strip-s (title accent section body) body)
-                (def ui-lego-strip-half-s (title accent section body) body)
-                (def ui-lego-strip-panel-s (section body) body)
-                (def ui-lego-badge (title width accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-badge-s (section title width accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-micro-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-micro-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-micro-base-note-s (section width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
-                (def ui-lego-text-row-3 (a b c) (h-stack a b c))
-                (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
-                (def ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-detail-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-                (def ui-adsr-compact-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-                (def ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-                (def ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
+                (def eseq.effects.custom-ui-sections/ui-select-section (section) (set! custom-ui-selected-section section))
+                (def eseq.effects.custom-ui-lego/ui-accent-blue () :blue)
+                (def eseq.effects.custom-ui-lego/ui-accent-cyan () :cyan)
+                (def eseq.effects.custom-ui-lego/ui-accent-orange () :orange)
+                (def eseq.effects.custom-ui-lego/ui-accent-green () :green)
+                (def eseq.effects.custom-ui-lego/ui-accent-violet () :magenta)
+                (def eseq.effects.custom-ui-lego/ui-lego-gap () 0.25)
+                (def eseq.effects.custom-ui-lego/ui-lego-small-h () 1.95)
+                (def eseq.effects.custom-ui-lego/ui-lego-medium-h () 4.08)
+                (def eseq.effects.custom-ui-lego/ui-lego-dense-h () 3.08)
+                (def eseq.effects.custom-ui-lego/ui-lego-full-h () 8.48)
+                (def eseq.effects.custom-ui-lego/ui-lego-col-w () 24.0)
+                (def eseq.effects.custom-ui-lego/ui-lego-strip-w () 7.2)
+                (def eseq.effects.custom-ui-lego/ui-control-block-small (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-medium (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-full (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-small-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-medium-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-small-wide-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-medium-wide-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-dense-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-panel-dense-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-panel-small-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-panel-medium-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-full-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-small (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-small-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-small-wide-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-dense-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-panel-small-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-panel-dense-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-panel-medium-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-medium (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-full (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-lego-column (a b c) (v-stack a b c))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-2 (a b) (v-stack a b))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-full (a) (v-stack a))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-wide (a b c) (v-stack a b c))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-wide-2 (a b) (v-stack a b))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-wide-full (a) (v-stack a))
+                (def eseq.effects.custom-ui-lego/ui-lego-strip-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-lego-strip-half-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-lego-strip-panel-s (section body) body)
+                (def eseq.effects.custom-ui-lego/ui-lego-badge (title width accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-badge-s (section title width accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-micro-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-micro-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (section width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-lego-text-row-3 (a b c) (h-stack a b c))
+                (def eseq.effects.custom-ui-lego/ui-lego-text-row-4 (a b c d) (h-stack a b c d))
+                (def eseq.effects.custom-ui-lego/ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-detail-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-adsr-compact-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+                (def eseq.effects.custom-ui-lego/ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
                 "#,
             )
             .expect("load custom UI test helpers");
@@ -46512,7 +46518,7 @@
             "emulations/rhodes-additive-v2/",
         ] {
             let expr = format!(
-                "(custom-instrument-synth-ui (dict :name {:?} :synth (list (dict :name \"base_note\" :control \"base-note\" :value 0 :min -48 :max 48))))",
+                "(custom-instrument-synth-ui (dict :name {:?} :synth (list (dict :name \"base_note\" :control \"eseq.effects.custom-ui-runtime/base-note\" :value 0 :min -48 :max 48))))",
                 instrument_name
             );
             let rendered = runtime.eval_str(&expr).expect(instrument_name);
@@ -46531,15 +46537,15 @@
                 r#"
                 (def midi-fx-ui-current-fx false)
                 (def midi-fx-ui-current-name "")
-                (def midi-fx-ui-param (fx name)
+                (def eseq.effects.custom-effect-ui/midi-fx-ui-param (fx name)
                   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
-                (def fx-param-row (p fx key)
+                (def eseq.effects.param-grid/fx-param-row (p fx key)
                   (v-stack :gap 0
                     (label (get p :name) :font-size 9 :color :dim :bg :transparent)))
-                (def midi-fx-ui-param-control (name)
-                  (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
+                (def eseq.effects.custom-effect-ui/midi-fx-ui-param-control (name)
+                  (let ((p (eseq.effects.custom-effect-ui/midi-fx-ui-param midi-fx-ui-current-fx name)))
                     (if p
-                      (fx-param-row p midi-fx-ui-current-fx
+                      (eseq.effects.param-grid/fx-param-row p midi-fx-ui-current-fx
                         (str "custom-midi-fx-ui-" midi-fx-ui-current-name
                              "-slot-" (get midi-fx-ui-current-fx :slot-idx) "-" name))
                       false)))
@@ -46576,22 +46582,22 @@
                 r#"
                 (def midi-fx-ui-current-fx false)
                 (def midi-fx-ui-current-name "")
-                (def midi-fx-ui-param (fx name)
+                (def eseq.effects.custom-effect-ui/midi-fx-ui-param (fx name)
                   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
-                (def fx-param-row (p fx key)
+                (def eseq.effects.param-grid/fx-param-row (p fx key)
                   (dict :param (get p :name) :key key))
-                (def fx-param-value-for (fx p) (get p :value))
-                (def param-control-min (fx p) (get p :min))
-                (def param-control-max (fx p) (get p :max))
-                (def param-base-value-prop (fx p) false)
-                (def param-base-min-prop (fx p) false)
-                (def param-base-max-prop (fx p) false)
-                (def param-control-key-mode (fx p) "-base")
-                (def param-set-control-value (fx p v) v)
-                (def midi-fx-ui-param-control (name)
-                  (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
+                (def eseq.effects.param-controls/fx-param-value-for (fx p) (get p :value))
+                (def eseq.effects.param-controls/param-control-min (fx p) (get p :min))
+                (def eseq.effects.param-controls/param-control-max (fx p) (get p :max))
+                (def eseq.effects.param-controls/param-base-value-prop (fx p) false)
+                (def eseq.effects.param-controls/param-base-min-prop (fx p) false)
+                (def eseq.effects.param-controls/param-base-max-prop (fx p) false)
+                (def eseq.effects.param-controls/param-control-key-mode (fx p) "-base")
+                (def eseq.effects.param-controls/param-set-control-value (fx p v) v)
+                (def eseq.effects.custom-effect-ui/midi-fx-ui-param-control (name)
+                  (let ((p (eseq.effects.custom-effect-ui/midi-fx-ui-param midi-fx-ui-current-fx name)))
                     (if p
-                      (fx-param-row p midi-fx-ui-current-fx
+                      (eseq.effects.param-grid/fx-param-row p midi-fx-ui-current-fx
                         (str "custom-midi-fx-ui-" midi-fx-ui-current-name
                              "-slot-" (get midi-fx-ui-current-fx :slot-idx) "-" name))
                       false)))
@@ -46637,7 +46643,7 @@
         );
         runtime.set_global_value("spatial-test-fx", spatial_fx);
         let direct_lookup = runtime
-            .eval_str(r#"(midi-fx-ui-param spatial-test-fx "delay-1")"#)
+            .eval_str(r#"(eseq.effects.custom-effect-ui/midi-fx-ui-param spatial-test-fx "delay-1")"#)
             .expect("lookup delay-1 param");
         assert!(
             !matches!(direct_lookup, Some(Value::Bool(false)) | None),
@@ -46646,10 +46652,10 @@
         let taps_range = runtime
             .eval_str(
                 r#"(list
-                     (param-control-min spatial-test-fx
-                       (midi-fx-ui-param spatial-test-fx "taps"))
-                     (param-control-max spatial-test-fx
-                       (midi-fx-ui-param spatial-test-fx "taps")))"#,
+                     (eseq.effects.param-controls/param-control-min spatial-test-fx
+                       (eseq.effects.custom-effect-ui/midi-fx-ui-param spatial-test-fx "taps"))
+                     (eseq.effects.param-controls/param-control-max spatial-test-fx
+                       (eseq.effects.custom-effect-ui/midi-fx-ui-param spatial-test-fx "taps")))"#,
             )
             .expect("lookup taps min/max")
             .expect("taps min/max should evaluate");
@@ -46693,51 +46699,51 @@
                 r#"
                 (def audio-fx-ui-current-fx false)
                 (def audio-fx-ui-current-name "")
-                (def audio-fx-ui-param (fx name)
+                (def eseq.effects.custom-effect-ui/audio-fx-ui-param (fx name)
                   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
-                (def fx-param-row (p fx key)
+                (def eseq.effects.param-grid/fx-param-row (p fx key)
                   (dict :param (get p :name) :key key))
-                (def custom-ui-scope-name ()
+                (def eseq.effects.custom-ui-runtime/custom-ui-scope-name ()
                   (if (get audio-fx-ui-current-fx :bus-fx)
                     (str audio-fx-ui-current-name "-bus-" (get audio-fx-ui-current-fx :bus-idx)
                          "-slot-" (get audio-fx-ui-current-fx :slot-idx))
                     (str audio-fx-ui-current-name "-slot-" (get audio-fx-ui-current-fx :slot-idx))))
-                (def audio-fx-ui-param-control (name)
-                  (let ((p (audio-fx-ui-param audio-fx-ui-current-fx name)))
+                (def eseq.effects.custom-effect-ui/audio-fx-ui-param-control (name)
+                  (let ((p (eseq.effects.custom-effect-ui/audio-fx-ui-param audio-fx-ui-current-fx name)))
                     (if p
-                      (fx-param-row p audio-fx-ui-current-fx
-                        (str "custom-audio-fx-ui-" (custom-ui-scope-name) "-" name))
+                      (eseq.effects.param-grid/fx-param-row p audio-fx-ui-current-fx
+                        (str "custom-audio-fx-ui-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name))
                       false)))
                 (def custom-ui-current-kind "audio-fx")
                 (def custom-ui-selected-section 0)
-                (def custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
-                (def ui-select-section (section) section)
-                (def ui-accent-blue () :blue)
-                (def ui-accent-cyan () :cyan)
-                (def ui-accent-orange () :orange)
-                (def ui-accent-green () :green)
-                (def ui-accent-violet () :magenta)
-                (def ui-control-block-small-s (title accent section body) body)
-                (def ui-control-block-medium-s (title accent section body) body)
-                (def ui-control-block-small-wide-s (title accent section body) body)
-                (def ui-control-block-medium-wide-s (title accent section body) body)
-                (def ui-control-block-full-s (title accent section body) body)
-                (def ui-readout-block-small-s (title accent section body) body)
-                (def ui-readout-block-small-wide-s (title accent section body) body)
-                (def ui-readout-block-medium (title accent body) body)
-                (def ui-readout-block-full (title accent body) body)
-                (def ui-lego-column (a b c) (v-stack a b c))
-                (def ui-lego-column-2 (a b) (v-stack a b))
-                (def ui-lego-column-full (a) (v-stack a))
-                (def ui-lego-column-wide (a b c) (v-stack a b c))
-                (def ui-lego-column-wide-2 (a b) (v-stack a b))
-                (def ui-lego-column-wide-full (a) (v-stack a))
-                (def ui-lego-knob-s (section name title width accent decimals)
-                  (audio-fx-ui-param-control name))
-                (def ui-lego-num-s (section name title width decimals unit accent)
-                  (audio-fx-ui-param-control name))
-                (def ui-lego-text-row-3 (a b c) (h-stack a b c))
-                (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
+                (def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
+                (def eseq.effects.custom-ui-sections/ui-select-section (section) section)
+                (def eseq.effects.custom-ui-lego/ui-accent-blue () :blue)
+                (def eseq.effects.custom-ui-lego/ui-accent-cyan () :cyan)
+                (def eseq.effects.custom-ui-lego/ui-accent-orange () :orange)
+                (def eseq.effects.custom-ui-lego/ui-accent-green () :green)
+                (def eseq.effects.custom-ui-lego/ui-accent-violet () :magenta)
+                (def eseq.effects.custom-ui-lego/ui-control-block-small-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-medium-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-small-wide-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-medium-wide-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-control-block-full-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-small-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-small-wide-s (title accent section body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-medium (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-readout-block-full (title accent body) body)
+                (def eseq.effects.custom-ui-lego/ui-lego-column (a b c) (v-stack a b c))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-2 (a b) (v-stack a b))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-full (a) (v-stack a))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-wide (a b c) (v-stack a b c))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-wide-2 (a b) (v-stack a b))
+                (def eseq.effects.custom-ui-lego/ui-lego-column-wide-full (a) (v-stack a))
+                (def eseq.effects.custom-ui-lego/ui-lego-knob-s (section name title width accent decimals)
+                  (eseq.effects.custom-effect-ui/audio-fx-ui-param-control name))
+                (def eseq.effects.custom-ui-lego/ui-lego-num-s (section name title width decimals unit accent)
+                  (eseq.effects.custom-effect-ui/audio-fx-ui-param-control name))
+                (def eseq.effects.custom-ui-lego/ui-lego-text-row-3 (a b c) (h-stack a b c))
+                (def eseq.effects.custom-ui-lego/ui-lego-text-row-4 (a b c d) (h-stack a b c d))
                 "#,
             )
             .expect("load custom audio FX UI test helpers");
@@ -46772,7 +46778,7 @@
             .expect("render custom audio FX UI");
         assert!(!matches!(rendered, Some(Value::Bool(false)) | None));
         let rendered_control = runtime
-            .eval_str(r#"(audio-fx-ui-param-control "time")"#)
+            .eval_str(r#"(eseq.effects.custom-effect-ui/audio-fx-ui-param-control "time")"#)
             .expect("render scoped custom audio FX control");
         let rendered_text = format!("{rendered_control:?}");
         assert!(
@@ -46794,7 +46800,7 @@
             .expect("render second custom audio FX UI slot");
         assert!(!matches!(rendered_slot_5, Some(Value::Bool(false)) | None));
         let rendered_slot_5_control = runtime
-            .eval_str(r#"(audio-fx-ui-param-control "time")"#)
+            .eval_str(r#"(eseq.effects.custom-effect-ui/audio-fx-ui-param-control "time")"#)
             .expect("render second scoped custom audio FX control");
         let rendered_slot_5_text = format!("{rendered_slot_5_control:?}");
         assert!(
