@@ -1927,6 +1927,41 @@ stays as-is; real macro hygiene is out of scope for this spec.
 
   Running conversion count: **66 files — slice 3 done.**
 
+  ### Content call-site sweep preflight (eseq-mods.11, 2026-08-13)
+
+  The ratified follow-up reverses the earlier "hard floor" decision: old
+  spellings in repository content are migration debt, not API. The 720
+  `module-compat-alias` forms are now extracted by
+  `tools/migrate_module_aliases.py` into one durable old→fully-qualified table
+  (`tools/module-compat-aliases.tsv`). All 720 old names have exactly one target;
+  there are no conflicting mappings.
+
+  The token-aware preflight scanned the real tracked content set rather than the
+  old ~305-file estimate: 210 eligible files after protecting the author's dirty
+  directories (73 instruments, 30 effects, 10 defmacros, 6 MIDI FX, 27 scripts,
+  and 64 capture/theme files). **135 files contain 6,177 old-name occurrences**:
+  5,559 in 66 instrument files, 539 in all 30 effect UIs, 28 in 21 scripts, 11
+  in one MIDI FX UI, and 40 in 17 capture fixtures. Defmacros and themes have no
+  hits. The protected `instruments/monomachine/vox/ui.lisp` is a separate
+  101-occurrence follow-up.
+
+  **Sharp-edge triage for this corpus:** all 6,175 executable occurrences are
+  whole Lisp symbols, never substrings; the other two are backtick-delimited
+  documentation references in instrument comments. There are **zero old names
+  in strings and zero in quoted data**, so mode-handler strings and symbolic
+  widget-key strings need no special rewrite in this repository sweep. Symbols
+  used as prop values (notably the `ui-accent-*` and `ui-lego-*` vocabulary) are
+  evaluated globals and therefore qualify like calls. Matching and rewriting is
+  lexer-based, so `seq-x` cannot touch `my-seq-x`; strings and quoted forms are
+  rejected for manual triage rather than guessed.
+
+  **`defstate` exposure is concentrated and testable:** 25 occurrences spanning
+  17 renamed states in 10 capture fixtures (effect-modulation, rack panel,
+  macro-mapping, scene-push, arrangement, and instrument-panel state). These
+  must become direct qualified reads/writes so the fixture and rendered module
+  share the same reactive node after aliases disappear. Capture those fixtures,
+  rather than treating a successful parse as evidence that the value flowed.
+
   ### What remains for slice 3
 
   **Nothing — slice 3 is complete.** Every non-fixture file under
