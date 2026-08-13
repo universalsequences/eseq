@@ -678,12 +678,16 @@ pub(super) fn build_rack_slot_effect_value(
         .iter()
         .enumerate()
         .filter_map(|(param_idx, param)| {
-            if param.node_param_idx == u32::MAX
-                || (sequencer::instruments::voice_modulator::is_source_param(param.node_param_idx)
-                    && !matches!(
-                        param.host_control,
-                        Some(sequencer::effects::HostControl::FxSidechain { .. })
-                    ))
+            // Host-routed sidechain params (Compressor `sidechain`, Filterbank
+            // `fm source` / `am source`) carry node_param_idx == u32::MAX, which
+            // is_source_param also matches. Keep them the way the track chain
+            // does (effects_panel.rs) so custom built-in panels that require
+            // them still resolve on rack tracks.
+            if (sequencer::instruments::voice_modulator::is_source_param(param.node_param_idx)
+                && !matches!(
+                    param.host_control,
+                    Some(sequencer::effects::HostControl::FxSidechain { .. })
+                ))
                 || routing_params.contains(&param_idx)
                 || param.name.starts_with("__host_mod__")
                 || param.name.starts_with("__dgen_mod_active__")
