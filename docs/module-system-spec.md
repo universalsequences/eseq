@@ -668,6 +668,23 @@ stays as-is; real macro hygiene is out of scope for this spec.
      Rule of thumb: a name that Rust writes by bare spelling is not yours to
      move; a name Rust only *reads* by bare spelling is (aliases cover reads).
 
+     **Pinning a `defstate` pins it in every keyspace (stage 5, batch 4).**
+     `ui/browser.lisp` pins five reactive states, and the escape hatch did not
+     originally reach the `defstate` registry: an explicitly-qualified
+     registration name was passed through verbatim, keying `state_bindings` as
+     `eseq.vanilla/<name>` while every flat reader and writer looks up `<name>`,
+     with no implicit-module rung in either state-binding ladder — hazard (b)'s
+     `IncorrectType` failure, reached through (i).
+     `Compiler::qualify_registration_name` now **strips** an explicit
+     `eseq.vanilla/` prefix, and `Compiler::state_binding_for` /
+     `VM::state_binding_node` reduce the qualified spelling to the flat key on
+     lookup (needed separately: without it a pinned state read *written*
+     qualified compiles to `LoadGlobal` and returns the raw `NodeRef`). The
+     principle is general — vanilla's registry keyspace **is** the flat keyspace
+     under slice 0 — so it applies to `def-process` / `def-accumulator` names
+     and any future registration form. Test:
+     `a_vanilla_pinned_defstate_registers_flat` (vm.rs).
+
   j. **A module's bare *outbound write* needs its vanilla owner already
      defined** (found converting `ui/mixer.lisp`, batch 4 — the mirror image of
      (i)). `(set! some-vanilla-global v)` inside a module resolves through the
@@ -732,10 +749,22 @@ stays as-is; real macro hygiene is out of scope for this spec.
        call died with `ExpectedFunction`: a module `def` must never collide
        with a vanilla `defstate` name.
 
+     **Widened again by `ui/browser.lisp`: lisp globals are not the whole
+     namespace.** Two of its six collisions were a registered **native**
+     (`filter`, which that file calls three times) and a **builtin widget name**
+     (`tabs`), neither of which appears in any `.lisp` `def`. The sweep set is
+     four lists, not one: the file's own binders, every UI-lisp
+     `def`/`module-compat-alias` name, the natives registered from Rust
+     (`register_native*`), and `BUILTIN_WIDGET_NAMES` (`widgets.rs`). Two
+     apparent collisions there are benign and should not trigger a rename: a
+     name **pinned to `eseq.vanilla`** never strips, so it cannot collide with
+     anything; and a name owned only by *already-converted* modules is qualified
+     and has no flat entry to merge with.
+
      The practical recipe is one script: collect every `def`/`defstate`/
      `defwidget`/`defmacro` name in the headerless files plus every
-     `module-compat-alias` key the converted modules publish, and intersect
-     with the post-rename set. `%`-private names do not collide (`%` is part
+     `module-compat-alias` key the converted modules publish, plus the native
+     and builtin-widget lists, and intersect with the post-rename set. `%`-private names do not collide (`%` is part
      of the interned spelling), so the check only has to cover the public
      half plus any bare name the strip produces.
 
@@ -750,6 +779,14 @@ stays as-is; real macro hygiene is out of scope for this spec.
      `"eseq.sequencer/expanded-param-number-picker-<id>"` with the module name
      written into the value. Grep a converting file for lisp that *constructs*
      a key rather than attaching one.
+
+     **And write a test pairing the two (batch 4, `browser.lisp`).**
+     `sbrowser-active-tree-key` is the second instance, and nothing in the suite
+     covered it: the helper's spelling and the widget's `:key` are maintained in
+     different places, and no ordinary layout assertion exercises both. The
+     conversion added `metal_seq_browser_active_tree_key_matches_the_rendered_-
+     tree_key`, which asserts the helper's return value locates the rendered
+     node. Treat that pairing test as part of the hazard-(l) fix.
 
   m. **A module's bare reference to a mutable vanilla `def` global is frozen
      at its first read — and its bare write never lands at all** (found
@@ -1131,6 +1168,134 @@ stays as-is; real macro hygiene is out of scope for this spec.
   mutable-vanilla-global audit (m) — the last is likely to bite, since
   `browser.lisp` is also the only file carrying hazard (i), i.e. it already has
   six names Rust writes by bare spelling.
+
+  ### Batch 4 tally — `browser.lisp` (2026-08-12), and the big four are done
+
+  `ui/browser.lisp` → `eseq.browser`. 147 defs: 4 `defwidget` names left flat
+  (hazard e), 6 pinned to `eseq.vanilla`, 46 public, 91 `%`-private; one new
+  helper (`%tree-key`) makes 148. **46 compat aliases.** The preflight's column-4
+  list of 8 lisp-side names is right, but two of them (`sbrowser-tab`,
+  `sbrowser-loading-instrument-name`) are the pinned pair and correctly get none;
+  the full sweep takes the set from 6 to 46.
+
+  **Hazard (i) confirmed exactly, and it moved infrastructure.** Re-sweeping
+  `crates/*/src` with whole-file regexes reproduces the preflight's six names
+  precisely — every other Rust writer is `#[cfg(test)]` (`ui/input.rs` from
+  `:1687`, and standalone harness stubs). What the table could not predict is
+  that five of the six are reactive state, and **the §3 escape hatch did not
+  reach the `defstate` keyspace**. `qualify_registration_name` returned an
+  already-qualified name verbatim, so `(defstate eseq.vanilla/sbrowser-tab …)`
+  registered `eseq.vanilla/sbrowser-tab` while every flat reader and writer looks
+  up `sbrowser-tab`, and neither state-binding ladder has an implicit-module
+  rung: the binding is invisible and `(set! …)` StoreGlobals over the slot
+  holding the `NodeRef` — hazard (b)'s failure mode, reached through hazard (i).
+
+  **Stage 5 (BUILT 2026-08-12): vanilla's registry keyspace is the flat
+  keyspace.** `Compiler::qualify_registration_name` strips an explicit
+  `eseq.vanilla/` prefix instead of passing it through, and both
+  `Compiler::state_binding_for` and `VM::state_binding_node` reduce the qualified
+  escape-hatch spelling to the flat key on lookup. The second half is not
+  optional: without it a pinned state *read* written qualified compiles to
+  `LoadGlobal` and hands back the raw `NodeRef`. Test:
+  `a_vanilla_pinned_defstate_registers_flat` (vm.rs). Generalizes to every
+  registration form — a name pinned to vanilla is flat in *all* keyspaces, which
+  is what "the implicit module is the pre-module world" has to mean.
+
+  **Hazard (m) is live as a write, and load order does not save it.** The
+  sequencer tally's case was a frozen read; here it is
+  `(set! seq-script-picker-source-buffer …)`, a mutable vanilla plain `def` owned
+  by `ui/seq-script-picker.lisp` — which loads at `main.lisp:42`, *after*
+  browser at `:17`. So this is hazards (j) and (m) at once, and neither the heal
+  nor load order helps: the write lands in `eseq.browser`'s slot and the owner's
+  reader silently keeps returning `""`. Fixed with the owner-side accessor
+  `seq-script-remember-source-buffer`. **Second conversion in a row to require
+  editing a vanilla file it depends on** — treat accessor-adding as a normal cost
+  of conversion, not an exception. The file's only other outbound reference,
+  `selected-bus`, is a `defstate` and immune, as in mixer.
+
+  **Hazard (l) is live and was untested.** `active-tree-key` hands a widget key
+  to `focus_widget_by_stable_key` (exact match) from `ui/input.rs:245`; it now
+  emits `"eseq.browser/<tab>-tab-tree"`. Nothing covered it — the only tests were
+  the flat `live_keyboard_tests` stub — so the conversion added
+  `metal_seq_browser_active_tree_key_matches_the_rendered_tree_key`, which
+  asserts the reported key against the rendered node. **A key-returning helper
+  should get a test asserting helper-vs-widget agreement**, because the two
+  spellings are maintained in different places and no existing assertion pairs
+  them.
+
+  **Hazard (k): 6 collisions in 147 names, and two are new shapes.** Two are
+  *natives and builtin widgets*, not lisp globals — `filter` (called three times
+  in this very file) and `tabs` — which the sequencer recipe's "every global the
+  app owns" does not cover. The practical sweep set is therefore four lists:
+  this file's binders, every UI-lisp `def`/alias key, the registered natives, and
+  `BUILTIN_WIDGET_NAMES`. The rest: `header` (a `defwidget` in
+  `effects/effect-panels.lisp`), `midi-fx-panel` (a vanilla global), plus `tabs`
+  also shadowing a `let` head in its own body. Two apparent collisions are
+  benign and were kept, which is worth recording because both would waste a
+  rename: a **pinned** name never strips, so `sbrowser-tab` cannot collide with
+  the `tab` local; and a name owned only by *already-converted* modules
+  (`drop-sample-on-track`, in eseq.mixer and eseq.sequencer) has no flat entry to
+  merge with. No wrapper/delegate pairs — nothing here is named after the vanilla
+  function it calls.
+
+  **Hazard (a) is the mildest of the four despite the most keys.** 45 `:key`
+  sites, **all one keyspace**: no subtree keys, no `(channel …)` strings, no
+  `:debug-name`s. All 45 qualify; the seven carrying the hand-rolled
+  `sbrowser-`/`browser-` prefix drop it. Only **16** external assertion sites
+  (against the preflight's "~14" — the first estimate in the batch that was not
+  badly low, precisely because there is no second keyspace inflating it), all in
+  `state_values/tests.rs`, plus a new
+  `collect_layout_nodes_by_stable_key_suffix` (the collecting twin of the batch-4
+  finder). The revised budgeting rule: the assertion count tracks the number of
+  *distinct* keys Rust names, and the `:key` split predicts how much of the
+  rewrite is mechanical. Two production literals in `src/ui/input.rs` try the
+  qualified spelling and fall back to the flat one, because the headerless
+  `live_keyboard_tests` stub browser reuses the same string; that fallback is
+  deleted when the stub qualifies.
+
+  **Zero exposure, as predicted:** (c) no `defwidget :state`; (d) no
+  `define-mode`, no `(current-buffer-mode)` comparison; (h) three `:shader`
+  bodies but no `defmacro` at all, so nothing of this file's expands outside it.
+
+  Running conversion count: **13 files, and the big four are converted.**
+
+  ### What remains for slice 3
+
+  - **121 unconverted files** under `crates/sequencer/ui`, but the shape has
+    changed completely: the big four were the files that concentrated the
+    hazards, and what is left is long-tailed and mostly small. The largest
+    unconverted units are `effects/custom-ui-lego.lisp` (1034),
+    `effects/param-controls.lisp` (993), `transport.lisp` (863) and
+    `effects/instrument-panel.lisp` (771); everything else is under 550 lines.
+    The `effects/` subtree (~50 files, including the per-builtin panels) is the
+    bulk and is where §7 nested module names (`eseq.effects.builtin.roar`) get
+    their first real workout.
+  - **One known infra gap:** `ui/seq-grid-mode.lisp` is unblocked by stage 4 but
+    still un-converted, and it is the file that will actually exercise the
+    flat→qualified mode rung end to end. Its seven `mode-bind-key` handlers that
+    live outside it are covered by the ordinary global alias, per the sequencer
+    tally.
+  - **Two files that should convert together:** `step-grid.lisp` /
+    `step-grid-interactions.lisp` and `seq-core-state.lisp` now own the accessors
+    the converted modules reach through (`cursor-step-value`,
+    `step-clear-drag-state`, `seq-script-remember-source-buffer` in
+    `seq-script-picker.lisp`). Converting an *owner* is the mirror of hazard (m)
+    and has not been done yet — the accessor pattern makes it safe, but no batch
+    has validated it.
+  - **The compat-alias table is at 186 entries** across the converted files.
+    Deletion criteria, concretely: an alias may be dropped when (1) no
+    unconverted lisp file spells the old name, (2) no Rust source spells it —
+    including `#[cfg(test)]` harnesses and multi-line raw-string lisp, which is
+    what the whole-file sweep is for, and (3) for the identity aliases
+    (`sample-browser-here`, `seq-ctrl-g`, `choose-model`), the by-name Rust
+    caller has been taught the qualified spelling. Criterion (2) is the binding
+    one: most surviving aliases exist for `state_values/tests.rs`, so the table
+    shrinks fastest by requalifying test entry points, not by converting more
+    files. The six vanilla-pinned names in `browser.lisp` are **not** alias-table
+    entries and do not shrink with it — they fold in only when the Rust codegen
+    in `host_commands/{scripts,tracks,instrument_authoring}.rs`,
+    `ui/event_loop.rs` and `ui/edit_sessions.rs` emits qualified names, which is
+    a slice-4/5 item.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
