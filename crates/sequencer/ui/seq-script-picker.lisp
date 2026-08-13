@@ -42,7 +42,7 @@
 ;;       and stubbed/evaled flat by src/lisp_host/tests.rs.
 ;;   seq-script-load-file            — production Rust evals it by flat name
 ;;       (src/ui/host_commands/scripts.rs:208).
-;;   seq-delete-script-sequencer-by-buffer — ui/seq-step-tabs.lisp (headerless)
+;;   seq-delete-script-sequencer-by-buffer — ui/seq-step-tabs.lisp (eseq.seq-step-tabs,
 ;;       calls it from the step-tab :on-close lambda.
 ;;   seq-delete-script-sequencer, seq-script-default-dir,
 ;;   seq-script-entry-visible?, seq-script-scratch-entry,
@@ -210,7 +210,7 @@
     (host-command "remove-project-script-from-scratch" (dict :path path))))
 
 ;; `seq-register-script-step-sequencer-tab`, `seq-registered-step-tabs` and the
-;; `seq-step-tab-*` accessors live in ui/seq-step-tabs.lisp, still headerless:
+;; `seq-step-tab-*` accessors live in ui/seq-step-tabs.lisp (eseq.seq-step-tabs):
 ;; referenced bare (the stage-3 late-binding heal covers the function reads, and
 ;; `seq-registered-step-tabs` is a `defstate`, which resolves through the
 ;; state-bindings ladder rather than the global one — hazard (m) does not apply).

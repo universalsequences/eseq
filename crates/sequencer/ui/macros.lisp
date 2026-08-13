@@ -1,6 +1,69 @@
 ;; Reusable project-macro controls for script-authored player surfaces.
 ;; This file intentionally mounts no buffer of its own. The UI manifest loads
 ;; ui/macro-state.lisp first.
+;;
+;; Converted to a module in S3b. Two policies shape this header:
+;;
+;; 1. This is a generated-vocabulary hub. Its names are the surface that
+;;    user-authored and script-generated lisp calls by FLAT spelling — the
+;;    317 lisp files under crates/sequencer outside ui/ (instruments, effects,
+;;    scripts, midi-fx, defmacros) are content and stay headerless forever.
+;;    So: no renames, no %-private names, and one *identity* compat alias per
+;;    def. An identity alias serves both rungs at once — a headerless caller
+;;    matches the flat key exactly, and a converted module's bare reference
+;;    qualifies against itself, misses, and lands on the same alias by base
+;;    name. Every name here is a function, so its slot is written once by its
+;;    own def and the late-binding heal can never unlink it (hazard m's escape
+;;    clause). Nothing here needs an eseq.vanilla pin.
+;;
+;; 2. NO `import` lines, deliberately (spec hazard n2). Two Rust harnesses in
+;;    src/ui/state_values/tests.rs read this whole file and eval it into a
+;;    bare runtime with no @/ source root; an import there would resolve to a
+;;    nonexistent cwd-relative path and push a load error into those VMs.
+;;    Cross-module names are therefore reached BARE through their owners'
+;;    compat aliases: macro-mapping-open / macro-mapping-selected /
+;;    rack-macro-mapping-selected / macro-clear-mapping-arm /
+;;    rack-macro-clear-mapping-arm all belong to eseq.macro-state, which
+;;    aliases each of those flat spellings. Same convention as
+;;    ui/effects/effect-panels.lisp.
+;;
+;; Extension hooks are addressed as data via `run-hook` (spec hazard e): a
+;; bare hook call inside a module would intern a dead qualified slot instead
+;; of reaching the flat hook keyspace.
+(module eseq.macros)
+
+;; Identity compat aliases — see note 1 above. Order matches the definitions.
+(module-compat-alias macro-key-string macro-key-string)
+(module-compat-alias macro-by-key macro-by-key)
+(module-compat-alias macro-by-id macro-by-id)
+(module-compat-alias macro-id-for-key macro-id-for-key)
+(module-compat-alias macro-ensure macro-ensure)
+(module-compat-alias macro-set-key-value macro-set-key-value)
+(module-compat-alias macro-release-key macro-release-key)
+(module-compat-alias macro-mapping-active-for-key? macro-mapping-active-for-key?)
+(module-compat-alias macro-toggle-mapping-arm macro-toggle-mapping-arm)
+(module-compat-alias macro-set-mapping-display-range macro-set-mapping-display-range)
+(module-compat-alias macro-set-mapping-curve macro-set-mapping-curve)
+(module-compat-alias macro-unmap-row macro-unmap-row)
+(module-compat-alias rack-macro-mapping-table-macro rack-macro-mapping-table-macro)
+(module-compat-alias active-macro-mapping-table-macros active-macro-mapping-table-macros)
+(module-compat-alias macro-mapping-editor-header macro-mapping-editor-header)
+(module-compat-alias macro-mapping-editor-row macro-mapping-editor-row)
+(module-compat-alias macro-mapping-editor-row-count macro-mapping-editor-row-count)
+(module-compat-alias macro-mapping-editor-rows-for-macro macro-mapping-editor-rows-for-macro)
+(module-compat-alias macro-mapping-editor-rows macro-mapping-editor-rows)
+(module-compat-alias macro-mapping-editor-row-list macro-mapping-editor-row-list)
+(module-compat-alias macro-mapping-editor-empty macro-mapping-editor-empty)
+(module-compat-alias macro-mapping-editor macro-mapping-editor)
+(module-compat-alias macro-mapping-table macro-mapping-table)
+(module-compat-alias macro-knob macro-knob)
+(module-compat-alias macro-momentary macro-momentary)
+(module-compat-alias macro-map-button macro-map-button)
+(module-compat-alias scene-macro-options scene-macro-options)
+(module-compat-alias scene-macro-option-index scene-macro-option-index)
+(module-compat-alias scene-macro-track-mask-with scene-macro-track-mask-with)
+(module-compat-alias scene-macro-config scene-macro-config)
+(module-compat-alias scene-macro-controls scene-macro-controls)
 
 ;; Script keys are written in canonical lowercase. `str` preserves strings and
 ;; prefixes keywords with `:`, so normalize both accepted spellings for lookup.
@@ -48,11 +111,14 @@
       (if (macro-mapping-active-for-key? key)
         (macro-clear-mapping-arm)
         (do
-          (macro-mapping-arm-enter-hook)
-          (macro-mapping-sidebar-open-hook)
+          ;; Hooks are a flat keyspace and do NOT auto-qualify: reach them as
+          ;; data, never as a bare call (spec hazard e).
+          (run-hook "macro-mapping-arm-enter-hook")
+          (run-hook "macro-mapping-sidebar-open-hook")
+          ;; eseq.macro-state defstates, bare through its compat aliases.
           (set! macro-mapping-open true)
           (set! macro-mapping-selected id)
-          (macro-mapping-sidebar-refresh-hook)
+          (run-hook "macro-mapping-sidebar-refresh-hook")
           true)))))
 
 (def macro-set-mapping-display-range (macro mapping endpoint value)

@@ -27,8 +27,11 @@
 ;;     misses, and lands on eseq.seq-grid-mode's identity alias rung.
 ;;   * step-grid-interactions.lisp / bus-grid.lisp / transport.lisp names
 ;;     (`step-index`, `bus-*`, `page-button-width`, `pattern-control-style`,
-;;     …) are left bare — headerless owners, covered by the stage-3
-;;     late-binding heal, and all of them are write-once `def`s or functions.
+;;     …) are left bare. transport.lisp is still a headerless owner (covered
+;;     by the stage-3 late-binding heal); step-grid-interactions.lisp and
+;;     bus-grid.lisp converted in S3b waves 8/9 and carry *identity* compat
+;;     aliases, which a converted module's bare reference reaches through the
+;;     base-name rung. All of them are write-once `def`s or functions.
 
 (module eseq.step-grid)
 

@@ -6841,9 +6841,11 @@
                         .widget_layout
                         .as_ref()
                         .expect("transport tile layout");
-                    let node = find_layout_node_by_stable_key(
+                    // ui/transport.lisp is `eseq.transport`, so the pill's
+                    // `:key` renders qualified (`eseq.transport/…`).
+                    let node = find_layout_node_by_stable_key_suffix(
                         layout,
-                        &format!("transport-scene-pill-{scene}"),
+                        &format!("/transport-scene-pill-{scene}"),
                     )
                     .unwrap_or_else(|| panic!("visible transport scene pill {scene}"));
                     let center_col =

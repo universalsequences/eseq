@@ -1,17 +1,60 @@
 ;; ui/piano-roll.lisp -- step-quantized piano roll for current track.
 ;; Renders to *piano-roll* buffer. Loaded by ui/main.lisp.
+;;
+;; Converted to a module in S3b. This file is a small hub: its names are
+;; spelled FLAT from four directions — production Rust
+;; (`src/ui/piano_roll.rs` reads `piano-roll-fit-pending` and invokes
+;; `piano-roll-apply-pending-fit` through `rt.global_value(...)`), two Rust
+;; harnesses that eval the WHOLE file into a bare VM and then poke it with
+;; flat `eval_str` (`metal_seq_piano_roll_lisp_loads`,
+;; `sync_piano_roll_state_applies_pending_track_fit_after_items_update`), the
+;; unconverted `ui/seq-panels.lisp` / `ui/seq-step-tabs.lisp`, and the already
+;; converted `ui/arrangement.lisp`. So the externally reachable names convert
+;; with NO renames and *identity* compat aliases (the seq-core-state
+;; precedent): an unconverted caller matches the alias key flat, a converted
+;; module's bare reference qualifies against itself, misses, and lands on the
+;; same alias by base name. Everything with no caller outside this file is
+;; `%`-private.
+;;
+;; `piano-roll-fit-pending` is the one *mutable plain def* here (hazard m), so
+;; it is PINNED to eseq.vanilla rather than aliased — an alias cannot protect a
+;; slot that a later flat write could unlink, and production Rust reads it by
+;; its flat spelling every tick. Every in-file reference therefore spells the
+;; pinned name in full.
+(module eseq.piano-roll)
 
-(defstate piano-roll-tool :pointer)
+;; `cool-off-follow` belongs to the converted eseq.seq-core-state. It is
+;; referenced BARE on purpose (no `import`): both Rust harnesses above eval this
+;; file into a bare `Runtime::new()` whose source manager has no `@/` root, so
+;; an `import` would fail to resolve `ui/seq-core-state.lisp` and push a load
+;; error into every one of those VMs. The bare reference reaches
+;; eseq.seq-core-state's identity alias through the base-name rung of the
+;; late-binding heal, which is exactly the rung that alias exists to serve.
+
+(module-compat-alias piano-roll-view-start piano-roll-view-start)
+(module-compat-alias piano-roll-view-duration piano-roll-view-duration)
+(module-compat-alias piano-roll-lane-scroll piano-roll-lane-scroll)
+(module-compat-alias piano-roll-lane-height piano-roll-lane-height)
+(module-compat-alias piano-roll-arrangement-mode? piano-roll-arrangement-mode?)
+(module-compat-alias piano-roll-default-pane-height piano-roll-default-pane-height)
+(module-compat-alias piano-roll-max-lane-scroll piano-roll-max-lane-scroll)
+(module-compat-alias piano-roll-request-fit-for-track piano-roll-request-fit-for-track)
+(module-compat-alias piano-roll-request-fit piano-roll-request-fit)
+(module-compat-alias piano-roll-apply-pending-fit piano-roll-apply-pending-fit)
+(module-compat-alias piano-roll-action piano-roll-action)
+
+(defstate %tool :pointer)
 (defstate piano-roll-view-start 0)
 (defstate piano-roll-view-duration 10.6667)
 (defstate piano-roll-lane-scroll 36)
 (defstate piano-roll-lane-height 0.5)
-(defstate piano-roll-cursor-time 0)
-(defstate piano-roll-selection-rect nil)
-(defstate piano-roll-status "piano roll")
-(defstate piano-roll-create-duration 1)
-(def piano-roll-fit-pending false)
-(def piano-roll-fit-track -1)
+(defstate %cursor-time 0)
+(defstate %selection-rect nil)
+(defstate %status "piano roll")
+(defstate %create-duration 1)
+;; PINNED (hazard m): mutable plain def, read flat by production Rust.
+(def eseq.vanilla/piano-roll-fit-pending false)
+(def %fit-track -1)
 
 ;; True only when the lower piano roll was entered from arrangement clip
 ;; gestures. Kept in a reactive channel rather than a source defstate because
@@ -20,14 +63,14 @@
 (def piano-roll-arrangement-mode? ()
   (= (reactive-get "SEQV" "piano-roll-arrangement-mode") 1))
 
-(def piano-roll-timeline-height 35)
-(def piano-roll-header-height 2)
+(def %timeline-height 35)
+(def %header-height 2)
 (def piano-roll-default-pane-height 11.5)
-(def piano-roll-view-padding 1)
-(def piano-roll-min-view-duration 4)
-(def piano-roll-max-view-duration 256)
+(def %view-padding 1)
+(def %min-view-duration 4)
+(def %max-view-duration 256)
 
-(def piano-roll-native-action? (event)
+(def %native-action? (event)
   (or (= event.type :select)
       (= event.type :clear-selection)
       (= event.type :finish-marquee-select)
@@ -41,46 +84,46 @@
       (= event.type :finish-resize-items)
       (= event.type :finish-create-item)))
 
-(def piano-roll-event-num (event key fallback)
+(def %event-num (event key fallback)
   (let ((value (get event key)))
     (if (= value nil) fallback value)))
 
-(def piano-roll-lane-height-value ()
+(def %lane-height-value ()
   (if (= piano-roll-lane-height nil) 1 piano-roll-lane-height))
 
-(def piano-roll-lane-count ()
+(def %lane-count ()
   (max 1 (len SEQ.piano-roll-lanes)))
 
-(def piano-roll-content-height ()
+(def %content-height ()
   (max 1
     (- piano-roll-default-pane-height
-      piano-roll-header-height)))
+      %header-height)))
 
-(def piano-roll-visible-lane-count ()
-  (/ (piano-roll-content-height) (piano-roll-lane-height-value)))
+(def %visible-lane-count ()
+  (/ (%content-height) (%lane-height-value)))
 
 (def piano-roll-max-lane-scroll ()
-  (max 0 (- (piano-roll-lane-count) (piano-roll-visible-lane-count))))
+  (max 0 (- (%lane-count) (%visible-lane-count))))
 
-(def piano-roll-clamp-lane-scroll (scroll)
+(def %clamp-lane-scroll (scroll)
   (max 0 (min (piano-roll-max-lane-scroll) scroll)))
 
-(def set-piano-roll-lane-scroll (scroll)
-  (set! piano-roll-lane-scroll (piano-roll-clamp-lane-scroll scroll)))
+(def %set-lane-scroll (scroll)
+  (set! piano-roll-lane-scroll (%clamp-lane-scroll scroll)))
 
-(def piano-roll-action-duration (event)
+(def %action-duration (event)
   (max 0.03125
-    (piano-roll-event-num event :duration
-      (- (piano-roll-event-num event :end 1)
-         (piano-roll-event-num event :start 0)))))
+    (%event-num event :duration
+      (- (%event-num event :end 1)
+         (%event-num event :start 0)))))
 
-(def piano-roll-set-cursor-from-event (event)
+(def %set-cursor-from-event (event)
   (let ((time (get event :time)))
     (if (= time nil)
       nil
-      (set! piano-roll-cursor-time time))))
+      (set! %cursor-time time))))
 
-(def piano-roll-current-track-color ()
+(def %current-track-color ()
   (if (and (< SEQ.current-track (len SEQ.track-colors)) (>= SEQ.current-track 0))
     (nth SEQ.track-colors SEQ.current-track)
     (list 0.34 0.48 0.98)))
@@ -89,117 +132,117 @@
 ;; a pinned pattern's num-steps, a pinned take's playable length, or the
 ;; live pattern's num-steps in follow mode. SEQ.tp-num-steps stays the live
 ;; value for the step grid.
-(def piano-roll-num-steps ()
+(def %num-steps ()
   (let ((focus (or SEQ.focus-num-steps 0)))
     (if (> focus 0) focus SEQ.tp-num-steps)))
 
-(def piano-roll-max-view-start (duration)
-  (max 0 (- (+ (piano-roll-num-steps) 4) duration)))
+(def %max-view-start (duration)
+  (max 0 (- (+ (%num-steps) 4) duration)))
 
-(def set-piano-roll-view-start (start duration)
+(def %set-view-start (start duration)
   (set! piano-roll-view-start
-    (max 0 (min (piano-roll-max-view-start duration) start))))
+    (max 0 (min (%max-view-start duration) start))))
 
-(def piano-roll-zoom-view (event)
+(def %zoom-view (event)
   (let ((cur-duration piano-roll-view-duration)
-        (factor (piano-roll-event-num event :factor 1)))
-    (let ((next-duration (max piano-roll-min-view-duration
-                           (min piano-roll-max-view-duration
+        (factor (%event-num event :factor 1)))
+    (let ((next-duration (max %min-view-duration
+                           (min %max-view-duration
                              (/ piano-roll-view-duration factor)))))
       (let ((anchor-ratio
               (if (<= cur-duration 0)
                 0.5
-                (max 0 (min 1 (/ (- (piano-roll-event-num event :anchor-time piano-roll-view-start) piano-roll-view-start) cur-duration))))))
+                (max 0 (min 1 (/ (- (%event-num event :anchor-time piano-roll-view-start) piano-roll-view-start) cur-duration))))))
         (do
           (set! piano-roll-view-duration next-duration)
-          (set-piano-roll-view-start
-            (- (piano-roll-event-num event :anchor-time piano-roll-view-start) (* anchor-ratio next-duration))
+          (%set-view-start
+            (- (%event-num event :anchor-time piano-roll-view-start) (* anchor-ratio next-duration))
             next-duration))))))
 
-(def piano-roll-zoom-lanes (event)
-  (let ((cur-height (piano-roll-lane-height-value))
-        (factor (piano-roll-event-num event :factor 1)))
-    (let ((next-height (max 0.5 (min 6 (* (piano-roll-lane-height-value) factor)))))
-      (let ((anchor-lane (piano-roll-event-num event :anchor-lane piano-roll-lane-scroll)))
+(def %zoom-lanes (event)
+  (let ((cur-height (%lane-height-value))
+        (factor (%event-num event :factor 1)))
+    (let ((next-height (max 0.5 (min 6 (* (%lane-height-value) factor)))))
+      (let ((anchor-lane (%event-num event :anchor-lane piano-roll-lane-scroll)))
         (let ((anchor-offset (- anchor-lane piano-roll-lane-scroll)))
           (do
             (set! piano-roll-lane-height next-height)
-            (set-piano-roll-lane-scroll
+            (%set-lane-scroll
               (- anchor-lane
                 (* anchor-offset (/ cur-height next-height))))))))))
 
-(def piano-roll-has-items? ()
+(def %has-items? ()
   (> (len SEQ.piano-roll-items) 0))
 
-(def piano-roll-item-start (item)
-  (piano-roll-event-num item :start 0))
+(def %item-start (item)
+  (%event-num item :start 0))
 
-(def piano-roll-item-end (item)
-  (max (piano-roll-item-start item)
-    (piano-roll-event-num item :end (piano-roll-item-start item))))
+(def %item-end (item)
+  (max (%item-start item)
+    (%event-num item :end (%item-start item))))
 
-(def piano-roll-item-lane (item)
-  (piano-roll-event-num item :lane 0))
+(def %item-lane (item)
+  (%event-num item :lane 0))
 
-(def piano-roll-fit-horizontal (min-start max-end)
-  (let ((start (max 0 (- min-start piano-roll-view-padding)))
-        (end (max min-start (+ max-end piano-roll-view-padding))))
-    (let ((duration (max piano-roll-min-view-duration
-                      (min piano-roll-max-view-duration
+(def %fit-horizontal (min-start max-end)
+  (let ((start (max 0 (- min-start %view-padding)))
+        (end (max min-start (+ max-end %view-padding))))
+    (let ((duration (max %min-view-duration
+                      (min %max-view-duration
                         (- end start)))))
       (do
         (set! piano-roll-view-duration duration)
-        (set-piano-roll-view-start start duration)))))
+        (%set-view-start start duration)))))
 
-(def piano-roll-fit-vertical (min-lane max-lane)
+(def %fit-vertical (min-lane max-lane)
   (let ((center (/ (+ min-lane max-lane 1) 2)))
-    (set-piano-roll-lane-scroll
-      (- center (/ (piano-roll-visible-lane-count) 2)))))
+    (%set-lane-scroll
+      (- center (/ (%visible-lane-count) 2)))))
 
-(def piano-roll-fit-empty-view ()
+(def %fit-empty-view ()
   (do
     (set! piano-roll-view-duration
-      (max piano-roll-min-view-duration
-        (min piano-roll-max-view-duration (piano-roll-num-steps))))
-    (set-piano-roll-view-start 0 piano-roll-view-duration)
-    (piano-roll-fit-vertical
-      (floor (/ (- (piano-roll-lane-count) 1) 2))
-      (floor (/ (- (piano-roll-lane-count) 1) 2)))))
+      (max %min-view-duration
+        (min %max-view-duration (%num-steps))))
+    (%set-view-start 0 piano-roll-view-duration)
+    (%fit-vertical
+      (floor (/ (- (%lane-count) 1) 2))
+      (floor (/ (- (%lane-count) 1) 2)))))
 
-(def piano-roll-fit-notes-to-view ()
-  (if (piano-roll-has-items?)
+(def %fit-notes-to-view ()
+  (if (%has-items?)
     (let ((first (nth SEQ.piano-roll-items 0)))
-      (let ((min-start (reduce |acc item| (min acc (piano-roll-item-start item))
-                         (piano-roll-item-start first)
+      (let ((min-start (reduce |acc item| (min acc (%item-start item))
+                         (%item-start first)
                          SEQ.piano-roll-items))
-            (max-end (reduce |acc item| (max acc (piano-roll-item-end item))
-                       (piano-roll-item-end first)
+            (max-end (reduce |acc item| (max acc (%item-end item))
+                       (%item-end first)
                        SEQ.piano-roll-items))
-            (min-lane (reduce |acc item| (min acc (piano-roll-item-lane item))
-                        (piano-roll-item-lane first)
+            (min-lane (reduce |acc item| (min acc (%item-lane item))
+                        (%item-lane first)
                         SEQ.piano-roll-items))
-            (max-lane (reduce |acc item| (max acc (piano-roll-item-lane item))
-                        (piano-roll-item-lane first)
+            (max-lane (reduce |acc item| (max acc (%item-lane item))
+                        (%item-lane first)
                         SEQ.piano-roll-items)))
         (do
-          (piano-roll-fit-horizontal min-start max-end)
-          (piano-roll-fit-vertical min-lane max-lane))))
-    (piano-roll-fit-empty-view)))
+          (%fit-horizontal min-start max-end)
+          (%fit-vertical min-lane max-lane))))
+    (%fit-empty-view)))
 
 (def piano-roll-request-fit-for-track (track)
   (do
-    (set! piano-roll-fit-pending true)
-    (set! piano-roll-fit-track track)
+    (set! eseq.vanilla/piano-roll-fit-pending true)
+    (set! %fit-track track)
     (piano-roll-apply-pending-fit)))
 
 (def piano-roll-request-fit ()
   (piano-roll-request-fit-for-track SEQ.current-track))
 
 (def piano-roll-apply-pending-fit ()
-  (if (and piano-roll-fit-pending (= piano-roll-fit-track SEQ.current-track))
+  (if (and eseq.vanilla/piano-roll-fit-pending (= %fit-track SEQ.current-track))
     (do
-      (piano-roll-fit-notes-to-view)
-      (set! piano-roll-fit-pending false))
+      (%fit-notes-to-view)
+      (set! eseq.vanilla/piano-roll-fit-pending false))
     nil))
 
 (def piano-roll-action (event)
@@ -209,21 +252,21 @@
       (let ((view-start (get event :view-start))
             (lane-scroll (get event :lane-scroll)))
         (do
-          (set-piano-roll-view-start
+          (%set-view-start
             (if (= view-start nil)
-              (+ piano-roll-view-start (piano-roll-event-num event :delta-time 0))
+              (+ piano-roll-view-start (%event-num event :delta-time 0))
               view-start)
             piano-roll-view-duration)
-          (set-piano-roll-lane-scroll
+          (%set-lane-scroll
             (if (= lane-scroll nil)
-              (+ piano-roll-lane-scroll (piano-roll-event-num event :delta-lanes 0))
+              (+ piano-roll-lane-scroll (%event-num event :delta-lanes 0))
               lane-scroll))))
       :zoom-view
-      (piano-roll-zoom-view event)
+      (%zoom-view event)
       :zoom-lanes
-      (piano-roll-zoom-lanes event)
+      (%zoom-lanes event)
       :set-cursor
-      (set! piano-roll-cursor-time event.time)
+      (set! %cursor-time event.time)
       ;; The loop bar edits the FOCUSED source's length (clip-edit-target
       ;; spec 5, locked decision 3): the live pattern through today's track
       ;; path, a pinned pattern through the pattern-addressed write (the
@@ -233,6 +276,7 @@
       (match SEQ.focus-kind
         :live
         (do
+          ;; eseq.seq-core-state, reached bare through its identity alias.
           (cool-off-follow)
           (seq-set-track-param :num-steps event.length))
         :pattern
@@ -247,58 +291,58 @@
       ;; carries the TOTAL delta and lowers to one undoable phase edit.
       :slide-band nil
       :finish-slide-band
-      (let ((delta (round (piano-roll-event-num event :delta-time 0))))
+      (let ((delta (round (%event-num event :delta-time 0))))
         (if (or (not (= SEQ.focus-clip-kind :pattern)) (= delta 0))
           nil
           (host-command "focus-slide-band"
             (dict :track SEQ.current-track :delta-steps delta))))
       :marquee-select
-      (set! piano-roll-selection-rect event)
+      (set! %selection-rect event)
       :finish-marquee-select
-      (set! piano-roll-selection-rect nil)
+      (set! %selection-rect nil)
       :select
       (do
-        (set! piano-roll-selection-rect nil)
-        (piano-roll-set-cursor-from-event event))
+        (set! %selection-rect nil)
+        (%set-cursor-from-event event))
       :clear-selection
       (do
-        (set! piano-roll-selection-rect nil)
-        (piano-roll-set-cursor-from-event event))
+        (set! %selection-rect nil)
+        (%set-cursor-from-event event))
       :finish-create-item
-      (set! piano-roll-create-duration (piano-roll-action-duration event))
+      (set! %create-duration (%action-duration event))
       :resize-item-absolute
-      (set! piano-roll-create-duration (piano-roll-action-duration event)))
-    (if (piano-roll-native-action? event)
-      (set! piano-roll-status (seq-piano-roll-action event))
-      (set! piano-roll-status "piano roll"))))
+      (set! %create-duration (%action-duration event)))
+    (if (%native-action? event)
+      (set! %status (seq-piano-roll-action event))
+      (set! %status "piano roll"))))
 
-(def piano-roll-timeline ()
+(def %timeline ()
   (box :height :fill :flex 1 :width 0
     ;; Flex child of the panel row (the arrangement-lane idiom): the timeline
     ;; absorbs exactly the width left of the clip panel — without :width 0
     ;; :flex 1 an h-stack child lays out against an INFINITE max width.
     (timeline
-      :width :fill 
-      :height :fill 
+      :width :fill
+      :height :fill
       :focusable true
       :sidebar-width 5
       :sidebar-style :piano
-      :header-height piano-roll-header-height
+      :header-height %header-height
       :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
-      :item-color (piano-roll-current-track-color)
-      :loop-color (piano-roll-current-track-color)
-      :tool piano-roll-tool
+      :item-color (%current-track-color)
+      :loop-color (%current-track-color)
+      :tool %tool
       :playhead-time (bind-seq "piano-roll-playhead")
-      :cursor-time piano-roll-cursor-time
+      :cursor-time %cursor-time
       :lanes SEQ.piano-roll-lanes
       :items SEQ.piano-roll-items
       :selection SEQ.piano-roll-selection
-      :selection-rect piano-roll-selection-rect
+      :selection-rect %selection-rect
       :view-start piano-roll-view-start
       :view-duration piano-roll-view-duration
-      :zoom-min-duration piano-roll-min-view-duration
-      :zoom-max-duration piano-roll-max-view-duration
-      :content-length (piano-roll-num-steps)
+      :zoom-min-duration %min-view-duration
+      :zoom-max-duration %max-view-duration
+      :content-length (%num-steps)
       :content-length-min 1
       :content-length-max 256
       ;; Loop-window gestures + overlay (clip-edit-target spec 5): only a
@@ -308,11 +352,11 @@
       :window-span SEQ.focus-window-span
       :window-repeat SEQ.focus-window-repeat
       :lane-scroll piano-roll-lane-scroll
-      :lane-height (piano-roll-lane-height-value)
+      :lane-height (%lane-height-value)
       :scroll-viewport-height piano-roll-default-pane-height
       :snap 1
       :min-duration 0.03125
-      :create-duration piano-roll-create-duration
+      :create-duration %create-duration
       :move-snap-mode :alignment-helper
       :resize-snap :grid
       :snap-mode :floor
@@ -326,34 +370,38 @@
 ;; Start/End (beats), signed start offset, length, loop duality. Start/End/
 ;; Offset only exist for a pinned clip; in follow mode the column shows the
 ;; session identity, the live length and the loop row.
+;;
+;; Widget `:key`s auto-qualify inside a module (hazard a), so the hand-rolled
+;; "piano-roll-" prefix is dropped: "panel-start" renders as
+;; "eseq.piano-roll/panel-start".
 
-(def piano-roll-clip-panel-width 24)
+(def %clip-panel-width 24)
 
-(def piano-roll-panel-row (name body)
+(def %panel-row (name body)
   (h-stack :gap 0.3 :align :baseline
     (box :width 4.6 :height 1.0
       (label name :font-size 10 :color :dim :bg :transparent))
     body))
 
-(def piano-roll-panel-static (name text key)
-  (piano-roll-panel-row name
+(def %panel-static (name text key)
+  (%panel-row name
     (box :width 8 :height 1.0
       (label text :key key :font-size 10 :color :white :bg :transparent))))
 
 ;; Signed display (spec 6): an offset in the top half of the pattern reads as
 ;; a negative pickup — offset L−1 shows as −1, exactly Ableton's start = −1
 ;; with the loop at 0.
-(def piano-roll-signed-offset (offset)
-  (let ((steps (piano-roll-num-steps)))
+(def %signed-offset (offset)
+  (let ((steps (%num-steps)))
     (if (> offset (/ steps 2)) (- offset steps) offset)))
 
-(def piano-roll-clip-panel-rows ()
+(def %clip-panel-rows ()
   (if (= SEQ.focus-clip-start nil)
     (box :width 0 :height 0 :bg :transparent)
     (v-stack :gap 0.2
       (h-stack
-        (piano-roll-panel-row "Start"
-          (number-picker :key "piano-roll-panel-start"
+        (%panel-row "Start"
+          (number-picker :key "panel-start"
             :value SEQ.focus-clip-start
             :min 0 :max 512 :decimals 0
             :background-color :buffer-bg
@@ -364,8 +412,8 @@
                   (dict :track SEQ.current-track
                     :start-beat v :end-beat SEQ.focus-clip-end))))
             :width 5 :height 1.0 :font-size 8))
-        (piano-roll-panel-row "End"
-          (number-picker :key "piano-roll-panel-end"
+        (%panel-row "End"
+          (number-picker :key "panel-end"
             :value SEQ.focus-clip-end
             :min 0 :max 512 :decimals 0
             :background-color :buffer-bg
@@ -377,33 +425,33 @@
                     :start-beat SEQ.focus-clip-start :end-beat v))))
             :width 5 :height 1.0 :font-size 8))
         )
-        (piano-roll-panel-row "Offset"
-          (number-picker :key "piano-roll-panel-offset"
+        (%panel-row "Offset"
+          (number-picker :key "panel-offset"
             ;; Signed pickup display is a PATTERN-wrap idea (spec 6); a take's
             ;; offset clamps at 0 and never wraps, so it reads raw.
             :background-color :buffer-bg
             :value (if (= SEQ.focus-clip-kind :pattern)
-              (piano-roll-signed-offset SEQ.focus-clip-offset)
+              (%signed-offset SEQ.focus-clip-offset)
               SEQ.focus-clip-offset)
             :min (if (= SEQ.focus-clip-kind :pattern) -256 0) :max 256 :decimals 0
             :on-change (lambda (v)
               (if (= v (if (= SEQ.focus-clip-kind :pattern)
-                    (piano-roll-signed-offset SEQ.focus-clip-offset)
+                    (%signed-offset SEQ.focus-clip-offset)
                     SEQ.focus-clip-offset))
                 nil
                 (host-command "focus-set-offset"
                   (dict :track SEQ.current-track :offset-steps v))))
             :width 5 :height 1.0 :font-size 8)))))
 
-(def piano-roll-panel-length-row ()
-  (piano-roll-panel-row "Length"
-    (number-picker :key "piano-roll-panel-length"
-      :value (piano-roll-num-steps)
+(def %panel-length-row ()
+  (%panel-row "Length"
+    (number-picker :key "panel-length"
+      :value (%num-steps)
       ;; A take's linear axis can outgrow one pattern (chunks); patterns and
       ;; the live path stay capped at MAX_STEPS.
       :min 1 :max (if (= SEQ.focus-kind :take) 4096 256) :decimals 0
       :on-change (lambda (v)
-        (if (= v (piano-roll-num-steps))
+        (if (= v (%num-steps))
           nil
           (if (= SEQ.focus-kind :take)
             ;; Coalesced take resize: grows mint silent chunks, shrinks keep
@@ -417,60 +465,61 @@
               (host-command "focus-set-num-steps"
                 (dict :track SEQ.current-track :length v))
               (do
+                ;; eseq.seq-core-state, reached bare through its identity alias.
                 (cool-off-follow)
                 (seq-set-track-param :num-steps v))))))
       :width 5 :height 1.0 :font-size 8)))
 
-(def piano-roll-clip-panel ()
-  (let ((color (piano-roll-current-track-color)))
-    (box :height :fill 
-      (v-stack 
+(def %clip-panel ()
+  (let ((color (%current-track-color)))
+    (box :height :fill
+      (v-stack
         :height :fill
-        :padding 0 :width piano-roll-clip-panel-width
-        (box 
+        :padding 0 :width %clip-panel-width
+        (box
           :height 1
           :width :fill
-          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)          
+          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
           (h-stack (box :width 0.5)
-            (label 
+            (label
               (nth SEQ.track-names SEQ.current-track)
               :font-size 10 :bg :transparent :color :black))
           )
-        
+
         (box :width :fill :height 1.0
           :background-color :gray
           (h-stack (box :width 0.5)
             (label SEQ.focus-label
-              :key "piano-roll-panel-source"
+              :key "panel-source"
               :font-size 10 :color :white :bg :transparent
               )
             ))
-        
-        (box :padding 1  :height 5 
-          :width piano-roll-clip-panel-width
+
+        (box :padding 1  :height 5
+          :width %clip-panel-width
           (v-stack :gap 0.25
-            
-            (piano-roll-clip-panel-rows)
-            (piano-roll-panel-length-row)
+
+            (%clip-panel-rows)
+            (%panel-length-row)
             ;; Informational in v1 (spec 6): states the pattern/take duality; layout
             ;; leaves room for Position/Length when sub-pattern windows land (5.1).
-            (piano-roll-panel-static "Loop"
+            (%panel-static "Loop"
               (if (= SEQ.focus-kind :take) "off" "on")
-              "piano-roll-panel-loop")))))))
+              "panel-loop")))))))
 
-(def piano-roll-buffer-content ()
+(def %buffer-content ()
   (if (and (piano-roll-arrangement-mode?) (= SEQ.focus-clip-start nil))
     (box
-      :key "piano-roll-no-clip-selected"
+      :key "no-clip-selected"
       :width :fill :height :fill
       :h-align :center :v-align :center
       (label "No clip selected"
-        :key "piano-roll-no-clip-selected-label"
+        :key "no-clip-selected-label"
         :font-size 11 :color :dim :bg :transparent))
     (h-stack :width :fill :gap 0.0 :height :fill
-      (piano-roll-clip-panel)
-      (piano-roll-timeline))))
+      (%clip-panel)
+      (%timeline))))
 
 (effect-buffer "*piano-roll*"
   (box :width :fill :height :fill
-    (piano-roll-buffer-content)))
+    (%buffer-content)))

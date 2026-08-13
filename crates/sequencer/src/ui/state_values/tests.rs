@@ -845,9 +845,33 @@
             "ui/transport.lisp",
             "ui/agent.lisp",
             "ui/step-grid.lisp",
+            "ui/legacy/mixer.lisp",
             "ui/sequencer.lisp",
             "ui/arrangement.lisp",
             "ui/main.lisp",
+            // S3b wave 10: this list had gone stale — 18 files carrying
+            // `(module …)` headers were absent from it, so the cheap parse
+            // gate silently proved nothing about them. Every converted module
+            // under ui/ is listed here now. Keep it that way: when a file
+            // gains a module header, add it here in the same commit.
+            "ui/seq-core-state.lisp",
+            "ui/seq-grid-mode.lisp",
+            "ui/seq-step-tabs.lisp",
+            "ui/seq-script-picker.lisp",
+            "ui/seq-panels.lisp",
+            "ui/seq-layout.lisp",
+            "ui/seq-macro-mapping-hooks.lisp",
+            "ui/seqv-track-params.lisp",
+            "ui/step-grid-interactions.lisp",
+            "ui/bus-grid.lisp",
+            "ui/macros.lisp",
+            "ui/macro-state.lisp",
+            "ui/track-collapse.lisp",
+            "ui/sound-palette.lisp",
+            "ui/effects/process-panel.lisp",
+            "ui/effects/builtin/compressor.lisp",
+            "ui/effects/builtin/convolution-reverb.lisp",
+            "ui/effects/builtin/filterbank.lisp",
         ] {
             let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             let tokens = Parser::new(src)
@@ -1017,7 +1041,8 @@
         let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
             .expect("read ui/step-grid-interactions.lisp");
         // The anchor is pinned into `eseq.vanilla` (module spec §10 hazard m):
-        // ui/bus-grid.lisp is still headerless and `set!`s it flat.
+        // ui/bus-grid.lisp (eseq.bus-grid) shares this gesture slot and
+        // `set!`s it through the same `eseq.vanilla/` spelling.
         let start = src
             .find("(def eseq.vanilla/step-key-select-anchor")
             .expect("keyboard step selection source should define anchor");
@@ -1822,13 +1847,15 @@
             .clone()
             .expect("agent layout");
 
-        let input = find_layout_node_by_stable_key(&layout, "agent-prompt-input")
+        // `ui/agent.lisp` is `eseq.agent`; its widget keys auto-qualify, so
+        // these assert on the module-qualified suffix (module spec §10 hazard a).
+        let input = find_layout_node_by_stable_key_suffix(&layout, "/prompt-input")
             .expect("agent prompt input");
-        let actions = find_layout_node_by_stable_key(&layout, "agent-composer-actions")
+        let actions = find_layout_node_by_stable_key_suffix(&layout, "/composer-actions")
             .expect("agent action row");
-        let model_select = find_layout_node_by_stable_key(&layout, "agent-model-select")
+        let model_select = find_layout_node_by_stable_key_suffix(&layout, "/model-select")
             .expect("agent model selector");
-        let submit = find_layout_node_by_stable_key(&layout, "agent-submit")
+        let submit = find_layout_node_by_stable_key_suffix(&layout, "/submit")
             .expect("agent submit affordance");
 
         assert!(
@@ -1971,7 +1998,8 @@
             "busy agent composer should not render a separate Cancel button"
         );
 
-        let submit = find_layout_node_by_stable_key(&layout, "agent-submit")
+        // Module-qualified key suffix — `ui/agent.lisp` is `eseq.agent`.
+        let submit = find_layout_node_by_stable_key_suffix(&layout, "/submit")
             .expect("agent submit affordance");
         assert!(
             submit.rect.width > 0.0 && submit.rect.height > 0.0,
@@ -2067,7 +2095,8 @@
             .current_layout
             .clone()
             .expect("agent layout");
-        let stack = find_layout_node_by_stable_key(&layout, "agent-message-stack")
+        // Module-qualified key suffixes — `ui/agent.lisp` is `eseq.agent`.
+        let stack = find_layout_node_by_stable_key_suffix(&layout, "/message-stack")
             .expect("virtualized message stack");
 
         assert_eq!(stack.widget_type, "virtual-v-stack");
@@ -2076,7 +2105,7 @@
             "agent transcript should materialize only a visible message window, got {} children",
             stack.children.len()
         );
-        let first_message = find_layout_node_by_stable_key(&layout, "agent-message-79")
+        let first_message = find_layout_node_by_stable_key_suffix(&layout, "/message-79")
             .expect("latest visible message card");
         assert!(
             first_message.rect.height > 0.0 && first_message.rect.width > 0.0,
@@ -21212,8 +21241,10 @@
 
         let layout = editor.widget_layout().expect("transport layout");
         for scene in 0..3 {
-            let key = format!("transport-scene-pill-{scene}");
-            let pill = find_layout_node_by_stable_key(&layout, &key)
+            // ui/transport.lisp is `eseq.transport`: widget `:key`s render
+            // module-qualified, so match the authored key as a suffix.
+            let key = format!("/transport-scene-pill-{scene}");
+            let pill = find_layout_node_by_stable_key_suffix(&layout, &key)
                 .unwrap_or_else(|| panic!("missing scene pill {scene}"));
             assert_finite_nonzero_rect(pill, &key);
             assert!(matches!(
@@ -21255,8 +21286,9 @@
             strip.props.get("push-target"),
             Some(Value::Number(value)) if (*value - 1.0).abs() < 1.0e-6
         ));
-        let push_pill = find_layout_node_by_stable_key(&push_layout, "transport-scene-pill-1")
-            .expect("active scene push pill");
+        let push_pill =
+            find_layout_node_by_stable_key_suffix(&push_layout, "/transport-scene-pill-1")
+                .expect("active scene push pill");
         assert_finite_nonzero_rect(push_pill, "transport-scene-pill-1");
         assert!(
             matches!(push_pill.props.get("push"), Some(Value::Number(value)) if (*value - 0.5).abs() < 1.0e-6),
@@ -21277,8 +21309,9 @@
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let queued_layout = editor.widget_layout().expect("queued transport layout");
-        let queued_pill = find_layout_node_by_stable_key(&queued_layout, "transport-scene-pill-1")
-            .expect("queued scene pill");
+        let queued_pill =
+            find_layout_node_by_stable_key_suffix(&queued_layout, "/transport-scene-pill-1")
+                .expect("queued scene pill");
         assert!(
             matches!(
                 queued_pill.props.get("background"),
@@ -24898,12 +24931,13 @@
         );
         editor.set_layout_viewport(96, 20);
         let layout = editor.widget_layout().expect("empty piano-roll layout");
-        let empty = find_layout_node_by_stable_key(&layout, "piano-roll-no-clip-selected")
+        // ui/piano-roll.lisp is `(module eseq.piano-roll)`, so its widget
+        // `:key`s render qualified (module-system spec §10 hazard a).
+        let empty = find_layout_node_by_stable_key_suffix(&layout, "/no-clip-selected")
             .expect("piano roll no-clip state");
         assert_finite_nonzero_rect(empty, "piano roll no-clip state");
-        let label =
-            find_layout_node_by_stable_key(empty, "piano-roll-no-clip-selected-label")
-                .expect("piano roll no-clip label");
+        let label = find_layout_node_by_stable_key_suffix(empty, "/no-clip-selected-label")
+            .expect("piano roll no-clip label");
         assert_finite_nonzero_rect(label, "piano roll no-clip label");
     }
 

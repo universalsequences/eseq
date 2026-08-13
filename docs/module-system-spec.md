@@ -810,6 +810,17 @@ stays as-is; real macro hygiene is out of scope for this spec.
 
      Exposure is precisely **plain `def` + somebody `set!`s it**:
 
+     - **`(def x (state …))` is a `defstate` in disguise — alias it, do not
+       pin it** (found converting `ui/patch-macros.lisp`, S3b wave 10). The
+       `(state …)` initializer routes the form through
+       `compile_named_state_definition`, the *same* path `defstate` takes
+       (compiler.rs:1787-1798), so the name lives in the `state_bindings`
+       keyspace and inherits the immunity below — a flat `set!` from a test
+       reaches the qualified binding through `state_binding_for`'s compat-alias
+       rung (compiler.rs:1432-1436) as a `StoreState` on the identical node.
+       `patch-macros-filter` was pinned on the first pass and reverted. When
+       classifying a file's globals, read each `def`'s *initializer*, not just
+       its keyword: only a genuinely plain value makes it a pin candidate.
      - `defstate` is immune — it resolves through `state_bindings` on the flat
        key at compile time and never touches the global ladder. This is why
        `selected-bus`, `lower-panel-buffer` and `drum-step-cursor-*` were fine
@@ -831,6 +842,104 @@ stays as-is; real macro hygiene is out of scope for this spec.
      outbound references, keep only the ones whose owner declares them with
      `def` (not `defstate`), and drop the ones nothing ever `set!`s. What is
      left needs an accessor.
+
+  n. **A file whose source Rust tests eval in SLICES cannot use `import`
+     aliases — spell the module out in full** (found converting
+     `ui/step-grid-interactions.lisp`, S3b wave 8).
+
+     `state_values::tests` drives several gesture harnesses by reading a UI
+     lisp file, cutting a *substring* of it (`load_step_gesture_source`,
+     `load_keyboard_step_selection_source` slice from one `(def …)` to
+     another), and eval'ing that fragment alone. The `(import … :as core)`
+     line sits above the cut, so it is not in scope in the fragment — and the
+     two spellings fail asymmetrically at `Compiler` (compiler.rs:1273-1288):
+
+     - `core/cool-off-follow` — the namespace is **undotted**, which the
+       compiler reads as alias-shaped and therefore a typo'd or missing
+       import: a hard `errors.push`. Twelve tests broke.
+     - `eseq.seq-core-state/cool-off-follow` — **dotted**, so it is a full
+       module name, which only `warn_once`s (the §3 escape hatch has to be
+       able to name a module before it loads) and then heals onto the
+       harness's flat natives.
+
+     So the conversion uses the full dotted spelling for every cross-module
+     reference, and says why in its header. The rule generalizes: **`:as`
+     aliases are a whole-file convenience and are only safe when the whole
+     file is always compiled as a unit.** Grep a converting file's path in
+     `crates/sequencer/src` for `read_to_string` + `find(`/`[..]` slicing
+     before choosing the spelling. This is the third distinct way the Rust
+     test harness constrains a conversion, after the hazard-(a) key
+     assertions and the hazard-(m) native re-`def`s — the pattern is that
+     *how Rust loads the lisp* is as much a part of a file's contract as
+     what the lisp says.
+
+     **(n2) A file that any Rust harness evals STANDALONE cannot `import` at
+     all** (found converting `ui/piano-roll.lisp`, same wave).
+     `metal_seq_piano_roll_lisp_loads` and
+     `sync_piano_roll_state_applies_pending_track_fit_after_items_update`
+     `read_to_string` the *whole* file — no slicing, so (n) proper does not
+     fire — but they eval it into a bare `Runtime::new()` whose source
+     manager has **no `@/` root**. `import` resolves its target through
+     `module_file_candidates`, which would fall through to a cwd-relative
+     `seq-core-state.lisp` that does not exist, pushing a load error into
+     every such VM. So piano-roll adds no imports at all and reaches
+     `cool-off-follow` bare through eseq.seq-core-state's identity alias.
+     Check for standalone evals with the same grep as (n); the two failure
+     modes are distinguished by whether the harness slices, and the safe
+     answers differ (dotted spelling for (n), *no import* for (n2)).
+
+     **(n3) Do not quote the slice boundary literals in your own header
+     comment.** The slicer is a plain `str::find` on two string literals, and
+     it takes the FIRST match. A conversion whose new header comment quotes
+     the boundary `(def …)` forms verbatim moves the cut into the comment and
+     the fragment evals as garbage (`ParseError`). `seq-panels.lisp` hit this
+     on its first draft; its header now *describes* its two boundaries
+     instead of spelling them, and says why. This is a booby trap unique to
+     conversions, because conversions are exactly when a file grows a large
+     new header.
+
+  o. **A cross-file call that runs at RENDER time, against a file that loads
+     LATER, caches empty forever once the caller becomes a module** (found
+     converting `ui/transport.lisp`, S3b wave 10 — the hardest failure of the
+     batch, and the one with the most consequence for slice 4).
+
+     `ui/transport.lisp` loads at `main.lisp:25`; `seq-arrangement-view?`'s
+     owner `ui/seq-step-tabs.lisp` loads at `:41`. Transport's two view-button
+     subtrees call it **during render**, and the effect body runs once at
+     load — i.e. while the owner does not yet exist.
+
+     Headerless, this survives by accident: the bare reference interns the
+     *flat* slot, and the later vanilla `def` fills that very slot. As a
+     module the reference interns `eseq.transport/seq-arrangement-view?`, the
+     late-binding heal has nothing to land on at that instant
+     (`unknown_global`), and — the part that makes it permanent — **no
+     reactive dependency is recorded**, because the failing `LoadGlobal`
+     errors out before `record_symbol_read`. The two subtree owners therefore
+     cache their empty result and nothing ever re-runs them.
+
+     Two non-fixes worth knowing, both tried:
+     - **Pinning does not help.** `eseq.vanilla/seq-arrangement-view?` interns
+       its own slot and heals through the same still-empty flat slot.
+     - **An alias does not help either**, for the same reason: the owner has
+       not run, so there is nothing to alias *to* yet.
+
+     The fix is **`import`**, and it is the one hazard where import is
+     load-bearing rather than stylistic: `import` evaluates its target (§4),
+     so the owner is guaranteed to exist before the caller's render runs.
+     `eseq.transport` therefore carries `(import eseq.seq-step-tabs :as tabs)`.
+
+     Per-file check: **list every cross-file call that executes at render
+     time — inside a widget/subtree body, not inside an `on-click` lambda —
+     and check it against `main.lisp` load order.** Event-time calls are
+     always safe (everything has loaded by the time a key or click arrives);
+     load-time and render-time calls to a later-loading file are not.
+
+     **This is the standing hazard for slice 4 (`eseq-mods.9`).** Dissolving
+     the `main.lisp` manifest *changes load order by construction*, so every
+     edge of this shape becomes live at once. The manifest's ordering comments
+     are load-bearing for exactly this reason, and the safe dissolution order
+     is: add the `import` that encodes each ordering constraint FIRST, verify,
+     and only then delete the corresponding `(load …)` line.
 
   **Step 4 — validate.** `cargo build -p eseqlisp -p sequencer`,
   `cargo test -p eseqlisp`, `cargo test -p sequencer`, plus the specific
@@ -1485,28 +1594,185 @@ stays as-is; real macro hygiene is out of scope for this spec.
 
   Running conversion count: **51 files.**
 
+  ### S3b wave 7 tally (2026-08-12) — the accessor OWNER and the mode rung
+
+  The two conversions every earlier wave deferred, done together because
+  `seq-grid-mode` consumes `seq-core-state`.
+
+  **`ui/seq-core-state.lisp` → `eseq.seq-core-state` — the first accessor
+  OWNER to convert, and the mirror of hazard (m) that no batch had
+  validated.** 20 defs, 1 `%`-private, **0 renames**, 18 identity compat
+  aliases, 1 vanilla pin. The result generalizes into a reusable pattern:
+
+  - **An identity alias serves BOTH ladder rungs at once.** An unconverted
+    vanilla caller matches the alias key flat; a *converted* module's bare
+    reference qualifies against **itself**, misses, and falls to the same
+    base-name rung. So a hub file — and this is the vanilla UI's shared-state
+    hub, spelled flat by ~20 lisp files and several Rust call sites —
+    converts with no renames and no caller edits at all. Recipe step 3's
+    offer to strip prefixes should be **declined** for hub files: renaming
+    buys nothing and churns every consumer.
+  - **Which of an owner's names are alias-safe** (the useful restatement of
+    hazard (m), now with a worked example of each): *functions* are safe
+    (slots written once by their `def`, the heal never unlinks); *`defstate`*
+    is safe (`state_bindings`, flat key, compile time — and the alias covers
+    that keyspace); *write-once plain `def`* is safe (`page-size`); a
+    **mutable plain `def` is not, and an alias does not rescue it.**
+  - `cursor-step` is the file's only mutable plain `def` and is therefore
+    **pinned to `eseq.vanilla`** rather than aliased. Two flat spellings
+    force it, and neither is reachable by alias: production Rust reads it
+    with `rt.global_value("cursor-step")`
+    (`src/ui/state_values/param_fields_and_sync.rs:1299`), and a Rust test
+    seeds it with a headerless `(def cursor-step N)`
+    (`src/ui/host_commands/step_history.rs:1632`) — a re-def that strands any
+    healed module slot on the previous cell.
+  - **New pitfall, silent and easy to hit: pinning obliges you to requalify
+    every *in-file* reference too.** Inside the owning module a bare
+    `cursor-step` interns `eseq.seq-core-state/cursor-step`, a *different
+    cell* from the pinned `eseq.vanilla/cursor-step`. All three in-file
+    references were rewritten to the pinned spelling. Nothing errors if you
+    forget; the owner simply reads and writes a private shadow.
+  - `current-page` had no caller anywhere outside the file and is one of the
+    three globals hazard (k) names as collision-famous, so it went
+    `%`-private. `param-mode` and `current-step`, the other two, are widely
+    consumed and stay public behind identity aliases.
+  - **A benign four-list hit worth recording so later waves do not rename for
+    it:** `current-step`, `cursor-num-steps` and `cool-off-follow` all appear
+    in the `register_native` sweep list — but every registration is a
+    `#[cfg(test)]` stub in `src/ui/state_values/tests.rs`, for VMs that never
+    load the owning lisp file. A `list3-natives.txt` hit only matters when
+    the registration is in **production** Rust; a test stub *of the very name
+    you own* is the intended shape and must not trigger a rename.
+
+  **`ui/seq-grid-mode.lisp` → `eseq.seq-grid-mode` — the mode keyspace's
+  end-to-end acceptance test.** 26 defs, 18 identity aliases, imports
+  `eseq.seq-core-state`. It is the only *defining* file for a mode whose
+  keymap binds handlers it does not own, so all three rungs fire in one
+  file — and **all three turned out to be pre-built infra that needed no
+  changes**, which is the headline result:
+
+  1. `define-mode` qualified the registry key to
+     `eseq.seq-grid-mode/seq-grid-mode`; both flat
+     `(set-buffer-mode-for … "seq-grid-mode")` callers reach it through the
+     identity alias — `ui/step-grid.lisp` (headerless) on the flat rung, and
+     `ui/sequencer.lisp` (converted) via qualify-against-self → miss → same
+     base-name rung.
+  2. `mode-bind-key` qualifies its *handler* string against the caller's
+     module unconditionally, so the **seven handlers defined outside this
+     file** (`cursor-left`, `cursor-right`, `select-all-steps`,
+     `delete-selected-steps` ×2, `cursor-toggle`, `seqv-collapse-all-tracks`)
+     became `eseq.seq-grid-mode/<name>` and landed on
+     `resolve_handler_name`'s qualified→flat fallback — exactly what
+     `module_mode_binding_dispatches_a_vanilla_handler` was written to pin.
+  3. The eight `set-*-mode` handlers are defined here, so their bound strings
+     qualify to slots this module owns: exact hits.
+
+  `param-mode` is deliberately left **bare** despite its owner being
+  imported: it is a `defstate`, whose flat-key `state_bindings` resolution is
+  the documented and test-pinned path, whereas a *qualified write to another
+  module's `defstate`* is a shape no test covers. Prefer the documented rung
+  over the tidier-looking one.
+
+  Gate: 586 / 2 pre-existing (metal_seq), 1720 / 2 (`sequencer --lib`),
+  eseqlisp clean at `--test-threads=1` — the parallel
+  `widget_render::patcher::tests::*writeback*` failures are user-confirmed
+  flakes and cannot depend on `ui/*.lisp`.
+
+  Running conversion count: **53 files.**
+
+  ### S3b waves 8-10 tally (2026-08-13) — slice 3 is COMPLETE
+
+  Thirteen files in three parallel waves, each gated at baseline. **Every
+  non-fixture file under `crates/sequencer/ui` now carries a module header**
+  except the deliberate exclusions listed below.
+
+  - **wave 8** — `eseq.step-grid-interactions` (71 defs, 42 identity aliases,
+    12 pins), `eseq.seq-script-picker` (39 defs, 9 pins), `eseq.step-grid`.
+  - **wave 9** — `eseq.transport` (the largest file, 863 lines),
+    `eseq.piano-roll`, `eseq.bus-grid`, `eseq.seq-panels`,
+    `eseq.seqv-track-params`.
+  - **wave 10** — `eseq.agent`, `eseq.macros`, `eseq.patch-macros`,
+    `eseq.seq-step-tabs`, `eseq.legacy.mixer`.
+
+  **The import-retires-aliases cycle, demonstrated.** `eseq.step-grid`
+  imported `eseq.seq-grid-mode` and retired **15 of the 18** aliases wave 7
+  had minted — the whole point of S3b. The 3 survivors are load-bearing: the
+  mode identity alias, and `double-`/`halve-track-pattern`, which production
+  `input.rs` evals by flat name. One of the retired names (`param-color`) had
+  no caller at all: wave 7 over-minted it, which is the expected failure mode
+  of sweeping *before* the consumer converts.
+
+  **Pins are a two-file property, not a Rust property.** The eleven mutable
+  drag-state globals in `eseq.step-grid-interactions` are pinned not because
+  Rust spells them but because `ui/bus-grid.lisp` reads *and* `set!`s all
+  eleven for the bus-lane gestures — genuinely one shared gesture state
+  across two files. When bus-grid converted in wave 9 the pins did not
+  retire; both modules now spell the same `eseq.vanilla/` slot, and they can
+  only retire if both files are requalified together. Restatement of the
+  rule: **an alias can never rescue a mutable plain def, no matter who owns
+  it.**
+
+  **Three corrections to earlier belief, all worth carrying forward:**
+
+  1. **`bind-key` is not a reason to alias.** `Runtime::bind_key` calls
+     `qualify_registration_name` exactly like `mode_bind_key`
+     (runtime.rs:864-867), so a handler defined in the binding module is an
+     exact hit. A wave-9 conversion asserted the opposite in its header and
+     minted an alias for it; both were removed after the two global bindings
+     in `eseq.step-grid-interactions` were verified working with none. §2's
+     "late-bound string handlers capture their module" was right all along.
+  2. **`(def x (state …))` is a `defstate` in disguise** — see hazard (m).
+     `patch-macros-filter` was pinned, then correctly reverted to an alias.
+  3. **The `metal_seq_core_lisp_files_parse` gate list had gone stale.**
+     Eighteen files carrying module headers were absent from it, so the cheap
+     gate silently proved nothing about them — several conversions in these
+     waves ran it, passed, and had to be told it was meaningless for their
+     file. All converted modules are listed now, with a comment saying to keep
+     it that way.
+
+  **Headerless BY DESIGN, and why** (this is the final answer for slice 3):
+  - `ui/main.lisp`, `ui/effects.lisp`, `ui/builtin-effects.lisp` — load
+    manifests; they dissolve at `eseq-mods.9`.
+  - `ui/effects/step-buffer.lisp` — pure side-effect root.
+  - `ui/themes.lisp` + the ten `ui/themes/*.lisp` — each is a flat bag of
+    theme-slot assignments with no callable surface to namespace.
+  - the 58 `ui/capture-fixtures/*.lisp` — test fixtures that deliberately
+    exercise the *flat* caller path, which is precisely what the compat-alias
+    rungs exist to serve; converting them would delete that coverage.
+  - **the ~305 lisp files outside `ui/`** (`instruments/**`, `effects/**`,
+    `scripts/**`, `midi-fx/**`, `defmacros/**`) are user and generated
+    CONTENT and stay headerless permanently. They are the reason a large
+    block of identity aliases can never retire — `eseq.macros`' 31, the
+    `eseq.seq-script-picker` host→script contract pins, and
+    `eseq.effects.custom-ui-lego`'s 83. Alias-table shrinkage has a floor,
+    and this is it.
+
+  Gate: metal_seq 586 / 2 pre-existing, `sequencer --lib` 1720 / 2, eseqlisp
+  clean at `--test-threads=1`.
+
+  Running conversion count: **66 files — slice 3 done.**
+
   ### What remains for slice 3
 
-  - **~70 unconverted files** under `crates/sequencer/ui` (the non-effects
-    tail: `transport.lisp` (863) is the largest; `seq-grid-mode.lisp`,
-    `step-grid.lisp`/`step-grid-interactions.lisp`, `seq-core-state.lisp`,
-    piano-roll, browser-adjacent files, and the small long tail). effects/
-    (39 modules incl. per-builtin panels) is DONE — §7 nested names,
-    `import` (both clauses), import cycles, and the stage-4 mode rung are
-    all production-validated now.
-  - **One known infra gap:** `ui/seq-grid-mode.lisp` is unblocked by stage 4 but
-    still un-converted, and it is the file that will actually exercise the
-    flat→qualified mode rung end to end. Its seven `mode-bind-key` handlers that
-    live outside it are covered by the ordinary global alias, per the sequencer
-    tally.
-  - **Two files that should convert together:** `step-grid.lisp` /
-    `step-grid-interactions.lisp` and `seq-core-state.lisp` now own the accessors
-    the converted modules reach through (`cursor-step-value`,
-    `step-clear-drag-state`, `seq-script-remember-source-buffer` in
-    `seq-script-picker.lisp`). Converting an *owner* is the mirror of hazard (m)
-    and has not been done yet — the accessor pattern makes it safe, but no batch
-    has validated it.
-  - **The compat-alias table is at 186 entries** across the converted files.
+  **Nothing — slice 3 is complete.** Every non-fixture file under
+  `crates/sequencer/ui` carries a `(module …)` header except the
+  headerless-by-design set enumerated in the waves 8-10 tally above. The three
+  items this section used to track are all closed:
+
+  - the **~70 unconverted files** figure was a stale estimate carried forward
+    from before the effects batch; the real remaining set was 15 files.
+  - the **`seq-grid-mode.lisp` infra gap** is closed, and the answer was that
+    there was no gap: all three mode rungs were pre-built, and the seven
+    foreign `mode-bind-key` handlers needed no work at all.
+  - the **accessor-owner question** is answered. Converting an owner is safe,
+    and cheaper than feared: identity aliases serve both ladder rungs at once,
+    so a hub converts with zero renames and zero caller edits. Only *mutable
+    plain defs* need pinning.
+
+  - **The compat-alias table is at 720 entries** across the 65 converted files
+    (it was 186 when the "big four" landed; effects/ and slice 3's hub
+    conversions account for the rest, most of them *identity* aliases minted
+    so that hub files could convert without touching a single caller).
     Deletion criteria, concretely: an alias may be dropped when (1) no
     unconverted lisp file spells the old name, (2) no Rust source spells it —
     including `#[cfg(test)]` harnesses and multi-line raw-string lisp, which is
@@ -1520,6 +1786,18 @@ stays as-is; real macro hygiene is out of scope for this spec.
     in `host_commands/{scripts,tracks,instrument_authoring}.rs`,
     `ui/event_loop.rs` and `ui/edit_sessions.rs` emits qualified names, which is
     a slice-4/5 item.
+
+    **The table has a hard floor, established in slice 3.** Criterion (1) can
+    never be satisfied for the aliases serving the ~305 headerless lisp files
+    OUTSIDE `crates/sequencer/ui` — user and generated content under
+    `instruments/**`, `effects/**`, `scripts/**`, `midi-fx/**` — nor for the
+    58 `ui/capture-fixtures/*.lisp`, which exist precisely to exercise the
+    flat caller path. `eseq.macros`' 31 identity aliases,
+    `eseq.effects.custom-ui-lego`'s 83, and the `eseq.seq-script-picker`
+    host→script pins are all permanent by construction. Treat the identity
+    aliases on *vocabulary hub* files as API surface, not migration debt; the
+    debt worth paying down is the subset held open only by
+    `state_values/tests.rs`.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,

@@ -1,7 +1,89 @@
 ;; ui/transport.lisp — Transport bar UI (Logic Pro style)
-;; Renders to *transport* buffer. Loaded by ui/main.lisp.
+;; Renders to *transport* buffer. Loaded by ui/main.lisp. Converted in S3b.
+;;
+;; NEVER `(import eseq.transport …)`. `import` EVALUATES its target and this
+;; file is a live render root: the `(effect-buffer "*transport*" …)` at the
+;; bottom registers a buffer at top level, so importing it would drag the
+;; transport UI into every VM that loads the importer (the wave-2 lesson that
+;; broke 60 tests). Callers reach the names below through the identity compat
+;; aliases instead — which is also why `pattern-control-style`, used by the
+;; converted `eseq.step-grid` and `eseq.sequencer`, is aliased rather than
+;; requalified at those call sites.
+;;
+;; Exactly one `import` (below). Every OTHER outbound reference is left bare:
+;; a Rust native (`seq-toggle-play`, `seq-set-bpm`, `seq-toggle-record`,
+;; `seq-toggle-master-recording`, `seq-song-back-to-song`, `host-command`,
+;; `bind-seq`), a function in ui/seq-panels.lisp (the panel toggles and the two
+;; view switches), or a name owned by a UI ROOT module reached through that
+;; root's own compat alias (`set-arrangement-cursor` → eseq.arrangement,
+;; `sbrowser-*` → eseq.browser). All of those are reached only from `on-click`
+;; lambdas — i.e. at event time, long after main.lisp has loaded everything —
+;; so the stage-3 late-binding heal covers them even though main.lisp loads
+;; this file (line 25) BEFORE seq-panels.lisp, sequencer.lisp and
+;; arrangement.lisp. A reference evaluated during the RENDER cannot rely on
+;; that; see the import note below.
+;;
+;; The three panel-visibility reads (`samples-sidebar-visible`,
+;; `mixer-panel-visible`, `lower-panel-visible`) stay BARE. They are
+;; `defstate`s owned by `eseq.seq-core-state`, which main.lisp loads first;
+;; a bare read resolves through that module's identity alias into the *same*
+;; state node (compiler.rs `state_binding_for`'s compat-alias rung), so the
+;; reads stay reactive and hazard (m) does not apply.
+;;
+;; Hazard (n): no Rust harness slices this file's source — the single
+;; `crates/sequencer/src` mention of "ui/transport.lisp" is the
+;; `metal_seq_core_lisp_files_parse` file list, a whole-file parse — so the
+;; `:as` alias below is safe (a fragment eval would need the full dotted
+;; `eseq.seq-step-tabs/…` spelling instead).
+(module eseq.transport)
+
+;; The ONE import, and it is load-bearing rather than cosmetic. The two view
+;; buttons at the right edge call `seq-arrangement-view?` at RENDER time, and
+;; main.lisp loads ui/seq-step-tabs.lisp (its owner) at line 41 — sixteen lines
+;; AFTER this file. The transport's effect body runs once at load, so that call
+;; hits an empty slot; a headerless file survives that because the flat slot it
+;; interned is later filled by the vanilla `def`, but a module's
+;; `eseq.transport/seq-arrangement-view?` slot has nothing to heal onto at that
+;; instant and the two subtrees stay permanently empty (they never re-run,
+;; nothing invalidates them). `import` resolves the module to its file and
+;; evaluates it if it has not been evaluated yet (spec §4), so the owner is
+;; loaded before this body ever runs. Safe to import: eseq.seq-step-tabs is a
+;; state/accessor hub with no `effect-buffer`, not one of the four UI roots.
+(import eseq.seq-step-tabs :as tabs)
+
+;; Identity compat aliases (spec §10 slice 3). Each covers a flat caller that
+;; cannot see a qualified name; every one is a function or a `defstate`, both
+;; immune to hazard (m):
+;;   transport-stop, seq-set-scene-launch-quantize, seq-set-record-quantize,
+;;   seq-switch-pattern, seq-reorder-scene-drop, scene-push-begin,
+;;   scene-push-drag — evaluated by name from Rust tests in
+;;   src/ui/state_values/tests.rs.
+;;   scene-push-target, scene-push-value — `defstate`s that flat callers WRITE:
+;;   ui/capture-fixtures/scene-push-transport.lisp and the
+;;   `(set! scene-push-target 1)` eval in state_values/tests.rs. The alias
+;;   covers the `state_bindings` keyspace too, so those writes still land on
+;;   this module's state node (no eseq.vanilla pin needed).
+;;   pattern-control-style — a write-once style `def` read bare by
+;;   ui/step-grid.lisp (eseq.step-grid) and ui/sequencer.lisp (eseq.sequencer).
+;;   Neither may import a UI root, so the alias is the supported edge.
+(module-compat-alias transport-stop transport-stop)
+(module-compat-alias seq-set-scene-launch-quantize seq-set-scene-launch-quantize)
+(module-compat-alias seq-set-record-quantize seq-set-record-quantize)
+(module-compat-alias seq-switch-pattern seq-switch-pattern)
+(module-compat-alias seq-reorder-scene-drop seq-reorder-scene-drop)
+(module-compat-alias scene-push-target scene-push-target)
+(module-compat-alias scene-push-value scene-push-value)
+(module-compat-alias scene-push-begin scene-push-begin)
+(module-compat-alias scene-push-drag scene-push-drag)
+(module-compat-alias pattern-control-style pattern-control-style)
 
 ;; ── Shared container backgrounds ──
+;; `defwidget` names live in their own flat keyspace (hazard e) and are left
+;; unrenamed: `transport-btn-bg`, `pattern-pill-bg`, `pattern-pill-btn-bg`,
+;; `queued-scene-pill-bg`, `transport-scene-strip-bg` and `save-icon` are named
+;; as `:background` strings from other lisp files, capture fixtures and Rust.
+;; The `:shader`/`:material` bodies expand OUTSIDE this module (hazard g/h), so
+;; every `sdf/*`, `material`, `shadow`, `lighting` reference in them stays FLAT.
 
 (defwidget transport-btn-bg
   :width 1 :height 1
@@ -537,9 +619,9 @@
       (sdf/fill (sdf/circle 0.4)
         (material :color fg-col)))))
 
-(def scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+(def %scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
 
-(def record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+(def %record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
 
 (def seq-set-scene-launch-quantize (value)
   (host-command "set-scene-launch-quantize" value))
@@ -569,26 +651,26 @@
 ;; mouse cannot turn the gesture into a reorder operation.
 (def scene-push-target (state -1))
 (def scene-push-value (state 1.0))
-(def scene-push-start-y (state 0.0))
-(def scene-push-from-source (state false))
+(def %scene-push-start-y (state 0.0))
+(def %scene-push-from-source (state false))
 
 (def scene-push-begin (scene event)
   (let ((from-source (or (get event :cmd) (get event :meta) (get event :super))))
   (if (or (get event :shift) from-source)
     (do
       (set! scene-push-target scene)
-      (set! scene-push-from-source from-source)
+      (set! %scene-push-from-source from-source)
       (set! scene-push-value (if from-source 0.0 1.0))
-      (set! scene-push-start-y (get event :y))
+      (set! %scene-push-start-y (get event :y))
       (host-command "scene-push-begin"
         (dict :target-scene scene :value (if from-source 0.0 1.0))))
     (seq-switch-pattern scene))))
 
 (def scene-push-drag (scene event)
   (if (= scene-push-target scene)
-    (let ((value (if scene-push-from-source
-          (clamp (* 0.14 (- (get event :y) scene-push-start-y)) 0.0 1.0)
-          (clamp (+ 1.0 (* 0.14 (- scene-push-start-y (get event :y)))) 0.0 1.0))))
+    (let ((value (if %scene-push-from-source
+          (clamp (* 0.14 (- (get event :y) %scene-push-start-y)) 0.0 1.0)
+          (clamp (+ 1.0 (* 0.14 (- %scene-push-start-y (get event :y)))) 0.0 1.0))))
       (set! scene-push-value value)
       (host-command "scene-push-set-value" (dict :value value)))
     nil))
@@ -598,11 +680,11 @@
     (do
       (host-command "scene-push-end" (dict))
       (set! scene-push-target -1)
-      (set! scene-push-from-source false)
+      (set! %scene-push-from-source false)
       (set! scene-push-value 1.0))
     nil))
 
-(def transport-icon-style
+(def %transport-icon-style
   (ui/style
     :pressed (dict
       :scale 1.08
@@ -628,25 +710,25 @@
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
         :on-click |x y r| (seq-toggle-samples-sidebar)
-        :style transport-icon-style
+        :style %transport-icon-style
         :active (if samples-sidebar-visible 1 0)))
     
     (subtree :key "transport-mixer-panel-button"
       (mix-panel-icon
         :on-click |x y r| (seq-toggle-mixer-panel)
-        :style transport-icon-style
+        :style %transport-icon-style
         :active (if mixer-panel-visible 1 0)))
     
     (subtree :key "transport-fx-panel-button"
       (fx-panel-icon
         :on-click |x y r| (seq-toggle-fx-panel)
-        :style transport-icon-style
+        :style %transport-icon-style
         :active (if lower-panel-visible 1 0)))
     
     (subtree :key "transport-save-button"
       (save-icon
         :on-click |x y r| (sbrowser-open-project-save)
-        :style transport-icon-style
+        :style %transport-icon-style
         :active (if (sbrowser-project-save-mode?) 1 0)))
     
     ;; Transport buttons in a shared rounded-rect container
@@ -667,7 +749,7 @@
             :width 4.2 :height 1.1
             :background "pattern-pill-bg"
             :active (if SEQ.master-recording 1 0)
-            :style transport-icon-style
+            :style %transport-icon-style
             :on-click |x y r| (seq-toggle-master-recording)
             (v-stack :align :center
               (label "WAV"
@@ -685,7 +767,7 @@
         (subtree :key "transport-back-to-arrangement"
           (box :debug-name "transport-back-to-arrangement"
             :width 2.5 :height 1.4
-            :style transport-icon-style
+            :style %transport-icon-style
             :on-click |x y r| (if SEQ.song-manual-latch (seq-song-back-to-song) nil)
             (back-to-arrangement-icon
               :active (if SEQ.song-manual-latch 1 0))))))
@@ -723,7 +805,7 @@
                 :key "transport-scene-launch-quantize-dropdown"
                 :debug-name "transport-scene-launch-quantize"
                 :value (or SEQ.scene-launch-quantize "off")
-                :options scene-launch-quantize-options
+                :options %scene-launch-quantize-options
                 :on-change seq-set-scene-launch-quantize
                 :width 5.2 :height 1.15 :font-size 9))
             (box :width 1.0)
@@ -735,7 +817,7 @@
                 :key "transport-record-quantize-dropdown"
                 :debug-name "transport-record-quantize"
                 :value (or SEQ.record-quantize "1/16")
-                :options record-quantize-options
+                :options %record-quantize-options
                 :on-change seq-set-record-quantize
                 :width 5.2 :height 1.15 :font-size 9))
             (subtree :key "transport-metronome-toggle"
@@ -854,10 +936,10 @@
     (subtree :key "transport-session-view-button"
       (session-view-icon
         :on-click |x y r| (seq-show-sequencer-main)
-        :style transport-icon-style
-        :active (if (seq-arrangement-view?) 0 1)))
+        :style %transport-icon-style
+        :active (if (tabs/seq-arrangement-view?) 0 1)))
     (subtree :key "transport-arrangement-view-button"
       (arrangement-view-icon
         :on-click |x y r| (seq-open-arrangement)
-        :style transport-icon-style
-        :active (if (seq-arrangement-view?) 1 0)))))
+        :style %transport-icon-style
+        :active (if (tabs/seq-arrangement-view?) 1 0)))))
