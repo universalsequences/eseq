@@ -12655,6 +12655,69 @@
         }
     }
 
+    fn rack_slot_effect_param_names(descriptor: &sequencer::effects::EffectDescriptor) -> Vec<String> {
+        let app = test_app_with_rack_panel();
+        let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(descriptor, 43);
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.effect_descriptors[0] = descriptor.clone();
+                    slot.effect_slots[0] = snapshot.clone();
+                    slot.custom_effect_names[0] = Some(format!("builtin:{}", descriptor.name));
+                },)
+        );
+        let rack = app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(0)
+            .cloned()
+            .flatten()
+            .expect("rack fixture");
+        let effect = build_rack_slot_effect_value(&rack, 0, 0, 0, descriptor, &snapshot, None);
+        let Value::Map(effect) = &*effect.borrow() else {
+            panic!("rack slot effect value should be a map");
+        };
+        let params = effect
+            .get("params")
+            .expect("rack effect params")
+            .borrow()
+            .clone();
+        value_list_maps(&params)
+            .iter()
+            .map(|param| match &*param.get("name").expect("param name").borrow() {
+                Value::String(name) => name.clone(),
+                other => panic!("param name should be a string, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rack_slot_effect_params_keep_host_sidechain_sources() {
+        // Host-routed sidechain params carry node_param_idx == u32::MAX; the
+        // rack panel used to drop them, so the Filterbank custom UI (which
+        // requires both source pickers) fell back to the plain param grid.
+        let filterbank =
+            rack_slot_effect_param_names(&sequencer::effects::EffectDescriptor::builtin_filterbank());
+        assert!(
+            filterbank.iter().any(|name| name == "fm source"),
+            "rack Filterbank params should expose the FM sidechain source: {filterbank:?}"
+        );
+        assert!(
+            filterbank.iter().any(|name| name == "am source"),
+            "rack Filterbank params should expose the AM sidechain source: {filterbank:?}"
+        );
+
+        let compressor =
+            rack_slot_effect_param_names(&sequencer::effects::EffectDescriptor::builtin_compressor());
+        assert!(
+            compressor.iter().any(|name| name == "sidechain"),
+            "rack Compressor params should expose the sidechain source: {compressor:?}"
+        );
+    }
+
     #[test]
     fn rack_slot_effect_plocks_appear_in_track_rows_and_step_mask() {
         let app = test_app_with_rack_panel_and_slot_fx();
