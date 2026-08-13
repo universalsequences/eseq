@@ -308,11 +308,35 @@ fn push_occurrence(
 pub fn occurrences(source: &str) -> Result<Vec<AliasOccurrence>, String> {
     let mut tokens = raw_tokens(source)?;
     mark_quoted(&mut tokens);
+    // Historical alias declarations contain both sides of the mapping as
+    // metadata, not as executable references. Ignoring their two arguments
+    // prevents factory module declarations from diagnosing themselves while
+    // leaving the embedded TSV as the sole source of migration mappings.
+    let significant = tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::Comment)
+        .collect::<Vec<_>>();
+    let mut declaration_arguments = HashSet::new();
+    for window in significant.windows(4) {
+        if window[0].kind == TokenKind::Open
+            && window[1].kind == TokenKind::Symbol
+            && &source[window[1].start..window[1].end] == "module-compat-alias"
+            && window[2].kind == TokenKind::Symbol
+            && window[3].kind == TokenKind::Symbol
+        {
+            declaration_arguments.insert((window[2].start, window[2].end));
+            declaration_arguments.insert((window[3].start, window[3].end));
+        }
+    }
+
     let aliases = aliases();
     let mut found = Vec::new();
     for token in tokens {
         match token.kind {
             TokenKind::Symbol => {
+                if declaration_arguments.contains(&(token.start, token.end)) {
+                    continue;
+                }
                 let text = &source[token.start..token.end];
                 if let Some((&old, &new)) = aliases.get_key_value(text) {
                     let kind = if token.quoted {
@@ -421,6 +445,15 @@ fn warned_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// old spelling in this process. Clean scans are not remembered, so a later
 /// edit that introduces an old spelling is still detected.
 pub fn warn_on_old_module_aliases(path: &Path, source: &str) -> Option<String> {
+    let path = warning_path(path);
+    {
+        let warned = warned_paths()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if warned.contains(&path) {
+            return None;
+        }
+    }
     let found = match occurrences(source) {
         Ok(found) => found,
         Err(error) => {
@@ -436,7 +469,6 @@ pub fn warn_on_old_module_aliases(path: &Path, source: &str) -> Option<String> {
     if found.is_empty() {
         return None;
     }
-    let path = warning_path(path);
     let mut warned = warned_paths()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -783,6 +815,11 @@ mod tests {
                 .rewritten
                 .contains("(set! eseq.seq-core-state/current-step 9)")
         );
+
+        let declaration = "(module-compat-alias current-step current-step)\n(current-step)\n";
+        let hits = occurrences(declaration).unwrap();
+        assert_eq!(hits.len(), 1, "alias metadata must not diagnose itself");
+        assert_eq!(hits[0].line, 2);
     }
 
     #[test]
@@ -829,6 +866,25 @@ mod tests {
             2,
             "staging and backup files must be cleaned up"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_factory_root_exclusion_does_not_disable_other_roots() {
+        let dir = temp_dir("factory-exclusion");
+        let factory = dir.join("factory");
+        fs::create_dir_all(&factory).unwrap();
+        let path = factory.join("internal.lisp");
+        let source = "(def seq-apply-fx-layout 1)\n";
+        fs::write(&path, source).unwrap();
+        let mut runtime = crate::Runtime::new();
+        runtime.exclude_module_alias_scan_root(factory);
+        runtime.eval_source_at_path(path.clone(), source).unwrap();
+        assert!(
+            warn_on_old_module_aliases(&path, source).is_some(),
+            "excluded factory source must not consume the warning"
+        );
+        assert!(warn_on_old_module_aliases(&path, source).is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 

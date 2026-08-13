@@ -2047,9 +2047,15 @@ stays as-is; real macro hygiene is out of scope for this spec.
     path:line:column old→qualified hits, and exact dry-run and write commands.
     Clean scans are not memoized, so introducing an old name in a later edit is
     still detected. The scan is one lexer pass and happens before normal parse
-    and evaluation; detection never blocks loading while aliases remain.
+    and evaluation; detection never blocks loading while aliases remain. Metal
+    Seq explicitly excludes only its checked-in `crates/sequencer/ui` factory
+    root, whose module-local bare names are valid and whose repeated startup
+    pass is unnecessary. Authored instruments, effects, MIDI FX, and scripts
+    remain outside that exclusion. Exclusions are registered roots rather than
+    checkout heuristics, so an arbitrary out-of-repo path cannot be mistaken
+    for factory content.
 
-    Three authored-source paths transform or concatenate files before the VM
+    Four authored-source paths transform or concatenate files before the VM
     sees their real provenance, so they call the same scanner before doing so:
     custom instrument `ui.lisp`, custom audio-effect `ui.lisp`, custom MIDI-FX
     `ui.lisp`, and the MIDI-FX control-Lisp library. Script discovery needs no

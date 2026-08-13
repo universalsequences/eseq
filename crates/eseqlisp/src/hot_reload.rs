@@ -198,6 +198,7 @@ pub struct SourceManager {
     changed_symbols: HashSet<String>,
     diagnostics: Vec<String>,
     evaluated_sources: HashMap<(PathBuf, u64), String>,
+    module_alias_scan_exclusions: Vec<PathBuf>,
 }
 
 impl Default for SourceManager {
@@ -218,6 +219,7 @@ impl SourceManager {
             changed_symbols: HashSet::new(),
             diagnostics: Vec::new(),
             evaluated_sources: HashMap::new(),
+            module_alias_scan_exclusions: Vec::new(),
         }
     }
 
@@ -226,6 +228,23 @@ impl SourceManager {
     /// a synthetic layout without touching the process-wide cwd.
     pub fn set_cwd(&mut self, cwd: PathBuf) {
         self.cwd = cwd;
+    }
+
+    /// Excludes a known factory-content root from legacy-alias preflight.
+    /// Authored roots must not be registered here: future user roots should
+    /// inherit detection automatically through normal path evaluation.
+    pub fn exclude_module_alias_scan_root(&mut self, root: PathBuf) {
+        let root = self.canonicalize_path(&root);
+        if !self.module_alias_scan_exclusions.contains(&root) {
+            self.module_alias_scan_exclusions.push(root);
+        }
+    }
+
+    pub fn should_scan_module_aliases(&self, path: &Path) -> bool {
+        !self
+            .module_alias_scan_exclusions
+            .iter()
+            .any(|root| path.starts_with(root))
     }
 
     pub fn set_overlays(&mut self, overlays: Vec<SourceOverlay>) {

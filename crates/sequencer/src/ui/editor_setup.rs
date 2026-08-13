@@ -27,9 +27,15 @@ pub(crate) fn create_editor_and_backend(
 }
 
 pub(crate) fn create_editor(
-    runtime: Runtime,
+    mut runtime: Runtime,
     app: &app::App,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
+    // The checked-in UI modules contain intentional module-local bare names
+    // and historical alias declarations. Authored instruments/effects/scripts
+    // stay outside this exclusion and are always preflighted.
+    runtime.exclude_module_alias_scan_root(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"),
+    );
     let (init_src, init_path) = read_eseqlisp_init_source();
     let mut editor = Editor::new(
         runtime,

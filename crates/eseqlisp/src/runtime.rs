@@ -1841,6 +1841,10 @@ impl Runtime {
         self.last_ui_invalidation_trace = snapshot.last_ui_invalidation_trace;
     }
 
+    pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
+        self.vm.source_manager.exclude_module_alias_scan_root(root);
+    }
+
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
