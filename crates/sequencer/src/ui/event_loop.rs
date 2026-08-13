@@ -65,6 +65,7 @@ pub(crate) fn run_event_loop(
     };
     let mut frame = FrameDiffState {
         prev_editor_macro_action: (String::new(), String::new()),
+        prev_editor_macro_action_fingerprint: u64::MAX,
         prev_editor_macro_sidebar_fingerprint: u64::MAX,
         prev_editor_open_macro: String::new(),
         prev_playing: false,

@@ -973,6 +973,45 @@ fn save_local_macro_to_library_declares_its_library_dependencies() {
     );
 }
 
+/// The editor asks for the macro-action button state on every tick, so the
+/// query resolves origins from names instead of projecting the patch. Pin it
+/// to the projected origins it stands in for, shadowing included.
+#[test]
+fn macro_library_action_kind_matches_projected_macro_origin() {
+    let library = temp_defmacro_library(
+        "action-kind",
+        &[
+            ("shape", "(defmacro shape (x) (* x 2))"),
+            ("drive", "(defmacro drive (x) (+ x 1))"),
+        ],
+    );
+    // `drive` is defined locally too, which shadows the package.
+    let source = "(use-defmacro shape)\n(defmacro drive (x) (- x 1))\n(def input (in 1))\n(def out1 (drive (shape input)))\n(out out1 1)";
+    let patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+
+    for (name, expected) in [
+        ("drive", Some(PatcherMacroLibraryActionKind::SaveToLibrary)),
+        ("shape", Some(PatcherMacroLibraryActionKind::Fork)),
+        ("missing", None),
+    ] {
+        let projected = patch
+            .macros
+            .iter()
+            .find(|macro_patch| macro_patch.name == name)
+            .map(|macro_patch| match macro_patch.origin {
+                MacroOrigin::Local => PatcherMacroLibraryActionKind::SaveToLibrary,
+                MacroOrigin::Library { .. } => PatcherMacroLibraryActionKind::Fork,
+            });
+        assert_eq!(projected, expected, "projected origin for '{name}'");
+        assert_eq!(
+            macro_library_action_kind_in(source, name, Some(&library)).unwrap(),
+            expected,
+            "name-only action kind for '{name}'"
+        );
+    }
+}
+
 #[test]
 fn fork_library_macro_to_local_replaces_import_with_defmacro_and_copies_layout() {
     let library =
