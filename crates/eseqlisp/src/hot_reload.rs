@@ -221,6 +221,13 @@ impl SourceManager {
         }
     }
 
+    /// Override the `@/`-prefix root (defaults to the process cwd at
+    /// construction). Tests use this to pin module→file resolution against
+    /// a synthetic layout without touching the process-wide cwd.
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = cwd;
+    }
+
     pub fn set_overlays(&mut self, overlays: Vec<SourceOverlay>) {
         self.overlays.clear();
         for overlay in overlays {

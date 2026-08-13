@@ -46,15 +46,24 @@ pub fn is_private_name(base: &str) -> bool {
 }
 
 /// Candidate load paths for a module name (spec §7): `eseq.track-collapse`
-/// → `track-collapse.lisp` under a load-path root (`@/` = the source
-/// manager cwd, the ui root in production, then relative to the importing
-/// file). Dots in the remainder map to directory separators.
+/// → `track-collapse.lisp` under a load-path root, dots in the remainder
+/// mapping to directory separators. `@/` is the source manager cwd — in
+/// production that is `crates/sequencer` (`enter_sequencer_dir`), whose
+/// vanilla-distro root is its `ui/` subdirectory, so `@/ui/…` candidates
+/// are what resolve `eseq.effects.state` → `@/ui/effects/state.lisp`
+/// against the real layout. The rootless spellings resolve relative to the
+/// importing file (and cover harnesses whose cwd is the ui root itself).
 pub fn module_file_candidates(name: &str) -> Vec<String> {
     let stripped = name.strip_prefix("eseq.").unwrap_or(name);
     let flat = format!("{stripped}.lisp");
     let nested = format!("{}.lisp", stripped.replace('.', "/"));
-    let mut candidates = vec![format!("@/{flat}"), flat.clone()];
+    let mut candidates = vec![
+        format!("@/ui/{flat}"),
+        format!("@/{flat}"),
+        flat.clone(),
+    ];
     if nested != flat {
+        candidates.push(format!("@/ui/{nested}"));
         candidates.push(format!("@/{nested}"));
         candidates.push(nested);
     }

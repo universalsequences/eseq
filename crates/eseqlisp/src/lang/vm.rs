@@ -3475,7 +3475,18 @@ impl VM {
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, None);
         }
-        self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
+        let native = Value::NativeFunction(Rc::new(f));
+        // Re-registration mutates the existing cell in place instead of
+        // replacing the slot Option: a converted module's healed alias slot
+        // (spec §10 stage 3) shares the cell, and replacing the Option would
+        // strand it on the old native forever (hazard (m) for natives —
+        // test harnesses re-register stubs like `seq-has-selection?` after
+        // module slots have healed). Transactionally safe: snapshots
+        // deep-clone every cell, so restore rebuilds slots wholesale.
+        match &self.globals[idx] {
+            Some(cell) => *cell.borrow_mut() = native,
+            None => self.globals[idx] = Some(Rc::new(RefCell::new(native))),
+        }
     }
 
     /// Register a native under a namespace (spec §3 "Core namespaces"):
@@ -6371,6 +6382,65 @@ mod tests {
             .expect("second import eval");
         assert_eq!(again, Some(Value::Number(5.0)));
         let _ = std::fs::remove_file(conventional);
+    }
+
+    #[test]
+    fn native_reregistration_reaches_a_healed_module_slot() {
+        // A converted module's bare call to a flat native interns a
+        // qualified slot that the late-binding heal aliases to the native's
+        // cell on first read. Re-registering the native (test stubs do this
+        // mid-run) must write through that shared cell, not replace the
+        // slot Option — otherwise the module keeps calling the old native
+        // forever (hazard (m) for natives).
+        let mut vm = module_test_vm();
+        vm.register_native("probe-native", |_args| Value::Number(1.0));
+        vm.eval_module_source(
+            temp_lisp_path("native-rereg"),
+            "(module test.native-rereg)\n(def call-probe () (probe-native))",
+            1,
+        )
+        .expect("module eval");
+        let first = vm
+            .eval_str("(test.native-rereg/call-probe)")
+            .expect("first call heals the module slot");
+        assert_eq!(first, Some(Value::Number(1.0)));
+        vm.register_native("probe-native", |_args| Value::Number(2.0));
+        let second = vm
+            .eval_str("(test.native-rereg/call-probe)")
+            .expect("second call after re-registration");
+        assert_eq!(second, Some(Value::Number(2.0)));
+    }
+
+    #[test]
+    fn import_resolves_nested_eseq_module_under_the_ui_root() {
+        // Production layout (spec §7): the source-manager cwd is
+        // crates/sequencer, and the vanilla distro lives in its ui/
+        // subdirectory, so `eseq.effects.state` must resolve as
+        // `@/ui/effects/state.lisp`. Pinned here against a synthetic root
+        // because in the app the manifest usually pre-loads every module
+        // and import's load branch never fires.
+        let mut vm = module_test_vm();
+        let root = std::env::temp_dir().join(format!(
+            "eseqlisp-modules-ui-root-{}",
+            std::process::id()
+        ));
+        let effects_dir = root.join("ui/effects");
+        std::fs::create_dir_all(&effects_dir).expect("create ui/effects");
+        std::fs::write(
+            effects_dir.join("import-probe.lisp"),
+            "(module eseq.effects.import-probe)\n(def probe-val () 17)",
+        )
+        .expect("write probe module");
+        vm.source_manager.set_cwd(root.clone());
+        let main_path = root.join("ui/consumer.lisp");
+        let source =
+            "(import eseq.effects.import-probe :as probe)\n(probe/probe-val)";
+        let result = vm
+            .eval_module_source(main_path, source, 1)
+            .expect("import eval");
+        assert_eq!(result, Some(Value::Number(17.0)));
+        assert!(vm.declared_modules.contains_key("eseq.effects.import-probe"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
