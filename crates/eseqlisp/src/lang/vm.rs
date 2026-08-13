@@ -43,6 +43,26 @@ pub enum VMError {
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideKind {
+    Replace,
+    Around,
+}
+
+#[derive(Clone)]
+pub struct OverrideEntry {
+    pub overriding_module: String,
+    pub kind: OverrideKind,
+    pub callback: Value,
+    pub quarantined: bool,
+}
+
+#[derive(Clone)]
+pub struct OverrideSet {
+    pub entries: Vec<OverrideEntry>,
+    dispatcher: Rc<RefCell<Value>>,
+}
 pub type InlineWidgetMetadataResolver = Rc<dyn Fn(&str, &str) -> Option<InlineWidgetMetadata>>;
 pub type NodeId = u32;
 
@@ -158,6 +178,11 @@ pub enum Value {
         slot: Arc<AtomicU64>,
     },
     NativeFunction(NativeFn),
+    /// Internal callables used by the §6.1 override layer. Dispatchers are
+    /// returned by global reads; originals bypass that layer and resolve the
+    /// current factory cell at call time.
+    OverrideDispatcher(String),
+    OverrideOriginal(String),
     HostHandle {
         kind: String,
         id: u64,
@@ -625,6 +650,8 @@ pub fn format_lisp_value(value: &Value) -> String {
             ..
         } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
+        Value::OverrideDispatcher(name) => format!("<override:{name}>"),
+        Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
     }
 }
@@ -674,6 +701,8 @@ pub fn format_lisp_source(value: &Value) -> String {
             ..
         } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
+        Value::OverrideDispatcher(name) => format!("<override:{name}>"),
+        Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
     }
 }
@@ -838,6 +867,8 @@ impl PartialEq for Value {
             (Self::Closure(a, _), Self::Closure(b, _)) => a == b,
             (Self::Function(a), Self::Function(b)) => a == b,
             (Self::NodeRef(a), Self::NodeRef(b)) => a == b,
+            (Self::OverrideDispatcher(a), Self::OverrideDispatcher(b)) => a == b,
+            (Self::OverrideOriginal(a), Self::OverrideOriginal(b)) => a == b,
             (
                 Self::ReactiveRef {
                     namespace: a_ns,
@@ -899,6 +930,8 @@ impl Clone for Value {
                 slot: slot.clone(),
             },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+            Self::OverrideDispatcher(name) => Self::OverrideDispatcher(name.clone()),
+            Self::OverrideOriginal(name) => Self::OverrideOriginal(name.clone()),
             Self::HostHandle { kind, id, callable } => Self::HostHandle {
                 kind: kind.clone(),
                 id: *id,
@@ -1683,6 +1716,8 @@ impl Value {
                 slot: slot.clone(),
             },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+            Self::OverrideDispatcher(name) => Self::OverrideDispatcher(name.clone()),
+            Self::OverrideOriginal(name) => Self::OverrideOriginal(name.clone()),
             Self::HostHandle { kind, id, callable } => Self::HostHandle {
                 kind: kind.clone(),
                 id: *id,
@@ -1995,6 +2030,10 @@ pub struct VM {
     /// listeners. Re-adding with an existing key replaces that entry in place,
     /// so re-evaluating a module never duplicates its listeners.
     pub extension_hooks: HashMap<String, Vec<(String, Value)>>,
+    /// Qualified factory symbol → advice registrations. Entries are keyed by
+    /// overriding module within each set; the most recently evaluated module
+    /// is active. Factory global cells remain untouched underneath.
+    pub overrides: HashMap<String, OverrideSet>,
     /// Modules declared via `(module NAME)` → the file that declared them
     /// (None for include_str!-style sources with no path). `import`
     /// consults this for load-once semantics (spec §4).
@@ -2043,6 +2082,7 @@ pub struct VmStateSnapshot {
     source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
+    overrides: HashMap<String, OverrideSet>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     imported_at_epoch: HashMap<String, u64>,
     import_pass_epoch: u64,
@@ -2609,6 +2649,58 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         };
         run_extension_hook(vm, &name, args)
+    });
+
+    // `override` itself is compiler syntax so its symbol target is not read as
+    // a value. These private natives receive the canonical target and closure.
+    vm.register_native_with_vm("__register-override", |args, vm| {
+        let (Some(Value::String(name)), Some(Value::String(kind)), Some(callback)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            log_native_misuse(
+                "__register-override",
+                "expects target string, kind string, and callback",
+            );
+            return Value::Nil;
+        };
+        let kind = match kind.as_str() {
+            "replace" => OverrideKind::Replace,
+            "around" => OverrideKind::Around,
+            _ => {
+                log_native_misuse("__register-override", "unknown override kind");
+                return Value::Nil;
+            }
+        };
+        let overriding_module = vm.current_module_name().to_string();
+        let set = vm
+            .overrides
+            .entry(name.clone())
+            .or_insert_with(|| OverrideSet {
+                entries: Vec::new(),
+                dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(name.clone()))),
+            });
+        // Re-evaluation replaces this module's registration and makes it the
+        // active (most recently evaluated) layer rather than stacking copies.
+        set.entries
+            .retain(|entry| entry.overriding_module != overriding_module);
+        set.entries.push(OverrideEntry {
+            overriding_module,
+            kind,
+            callback: callback.clone(),
+            quarantined: false,
+        });
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("__remove-override", |args, vm| {
+        let Some(Value::String(name)) = args.first() else {
+            log_native_misuse("__remove-override", "expects a target string");
+            return Value::Nil;
+        };
+        // The public contract is an immediate return to factory behavior, not
+        // exposure of an older hidden advice layer.
+        vm.overrides.remove(name);
+        Value::Nil
     });
 
     vm.register_native("zip", |args| {
@@ -3505,6 +3597,7 @@ impl VM {
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
+            overrides: HashMap::new(),
             declared_modules: HashMap::new(),
             imported_at_epoch: HashMap::new(),
             import_pass_epoch: 1,
@@ -3862,6 +3955,31 @@ impl VM {
                     )
                 })
                 .collect(),
+            overrides: self
+                .overrides
+                .iter()
+                .map(|(name, set)| {
+                    let entries = set
+                        .entries
+                        .iter()
+                        .map(|entry| OverrideEntry {
+                            overriding_module: entry.overriding_module.clone(),
+                            kind: entry.kind,
+                            callback: clone_value_for_snapshot(&entry.callback),
+                            quarantined: entry.quarantined,
+                        })
+                        .collect();
+                    (
+                        name.clone(),
+                        OverrideSet {
+                            entries,
+                            dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(
+                                name.clone(),
+                            ))),
+                        },
+                    )
+                })
+                .collect(),
             declared_modules: self.declared_modules.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
             import_pass_epoch: self.import_pass_epoch,
@@ -3900,6 +4018,7 @@ impl VM {
         self.source_load_errors = snapshot.source_load_errors;
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
+        self.overrides = snapshot.overrides;
         self.declared_modules = snapshot.declared_modules;
         self.imported_at_epoch = snapshot.imported_at_epoch;
         self.import_pass_epoch = snapshot.import_pass_epoch;
@@ -4047,6 +4166,109 @@ impl VM {
         self.resolve_global_read_index(name).is_some()
     }
 
+    /// Effective cell for a cached global index. The empty-registry branch is
+    /// deliberately first: global reads are ubiquitous, while overrides are
+    /// optional user configuration. Only the non-empty case hashes names.
+    fn override_dispatcher_for_index(&self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        if self.overrides.is_empty() {
+            return None;
+        }
+        let name = self.global_names.get(idx)?;
+        let set = self.overrides.get(name).or_else(|| {
+            (!crate::modules::is_qualified(name)).then(|| {
+                std::iter::once(crate::modules::IMPLICIT_MODULE)
+                    .chain(crate::modules::CORE_NAMESPACES.iter().copied())
+                    .find_map(|namespace| {
+                        self.overrides
+                            .get(&crate::modules::qualify(namespace, name))
+                    })
+            })?
+        })?;
+        if set.entries.last().is_some_and(|entry| !entry.quarantined) {
+            Some(set.dispatcher.clone())
+        } else {
+            None
+        }
+    }
+
+    fn raw_global_cell(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        self.globals
+            .get(idx)
+            .and_then(|slot| slot.clone())
+            .or_else(|| self.late_bind_empty_global(idx))
+    }
+
+    fn global_read_cell(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        self.override_dispatcher_for_index(idx)
+            .or_else(|| self.raw_global_cell(idx))
+    }
+
+    fn invoke_raw_global(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, VMError> {
+        let idx = self
+            .resolve_global_read_index(name)
+            .ok_or_else(|| VMError::UnknownVariable(name.to_string()))?;
+        let callable = self
+            .raw_global_cell(idx)
+            .ok_or_else(|| VMError::UnknownVariable(name.to_string()))?
+            .borrow()
+            .clone();
+        self.invoke(callable, args)
+    }
+
+    fn dispatch_override(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, VMError> {
+        let Some(active) = self
+            .overrides
+            .get(name)
+            .and_then(|set| set.entries.last())
+            .cloned()
+        else {
+            return self.invoke_raw_global(name, args);
+        };
+        if active.quarantined {
+            return self.invoke_raw_global(name, args);
+        }
+
+        let mut override_args = args.clone();
+        if active.kind == OverrideKind::Around {
+            override_args.insert(0, Value::OverrideOriginal(name.to_string()));
+        }
+        match self.invoke(active.callback, override_args) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if let Some(entry) = self
+                    .overrides
+                    .get_mut(name)
+                    .and_then(|set| {
+                        set.entries.iter_mut().rev().find(|entry| {
+                            entry.overriding_module == active.overriding_module
+                        })
+                    })
+                {
+                    entry.quarantined = true;
+                }
+                let detail = self.last_reactive_error_detail.as_deref().unwrap_or("-");
+                let message = format!(
+                    "override {name} from {} failed ({error:?}, detail={detail}); \
+                     quarantined and using factory definition",
+                    active.overriding_module
+                );
+                self.source_load_errors.push(message.clone());
+                if debug_lisp_callback_errors_enabled() {
+                    eprintln!("[lisp-error][override] {message}");
+                }
+                self.invoke_raw_global(name, args)
+            }
+        }
+    }
+
     /// Late-binding heal for a compile-time forward reference (module-system
     /// spec §3, migration pragmatics): a slot interned before its symbol
     /// existed anywhere stays empty if the definition later landed in a
@@ -4123,9 +4345,8 @@ impl VM {
 
     pub fn global_value(&self, name: &str) -> Option<Value> {
         let idx = self.resolve_global_read_index(name)?;
-        self.globals
-            .get(idx)
-            .and_then(|value| value.as_ref())
+        self.override_dispatcher_for_index(idx)
+            .or_else(|| self.globals.get(idx).and_then(|value| value.clone()))
             .map(|value| value.borrow().clone())
     }
 
@@ -4752,6 +4973,8 @@ impl VM {
                 }
                 Ok(Some(result))
             }
+            Value::OverrideDispatcher(name) => self.dispatch_override(&name, args),
+            Value::OverrideOriginal(name) => self.invoke_raw_global(&name, args),
             Value::HostHandle { callable, .. } => {
                 let result = callable(args, self);
                 if self.execution_depth == 0 && !self.processing_reactive {
@@ -5734,13 +5957,7 @@ impl VM {
                 }
                 OpCode::LoadGlobal(idx) => {
                     if let Some(frame) = frames.last_mut() {
-                        if let Some(Some(val)) = self.globals.get(idx).cloned() {
-                            if let Some(name) = self.global_names.get(idx).cloned() {
-                                self.record_symbol_read(&name);
-                            }
-                            stack.push(val);
-                            frame.pc += 1;
-                        } else if let Some(val) = self.late_bind_empty_global(idx) {
+                        if let Some(val) = self.global_read_cell(idx) {
                             if let Some(name) = self.global_names.get(idx).cloned() {
                                 self.record_symbol_read(&name);
                             }
@@ -6145,6 +6362,24 @@ impl VM {
                                 stack.push(Rc::new(RefCell::new(result)));
                                 frames.last_mut().unwrap().pc += 1;
                             }
+                            Value::OverrideDispatcher(name) | Value::OverrideOriginal(name) => {
+                                let name = name.clone();
+                                let is_dispatcher = matches!(&*borrowed, Value::OverrideDispatcher(_));
+                                drop(borrowed);
+                                let mut args: Vec<Value> = (0..arity)
+                                    .filter_map(|_| stack.pop())
+                                    .map(|v| v.borrow().clone())
+                                    .collect();
+                                args.reverse();
+                                let result = if is_dispatcher {
+                                    self.dispatch_override(&name, args)?
+                                } else {
+                                    self.invoke_raw_global(&name, args)?
+                                }
+                                .unwrap_or(Value::Nil);
+                                stack.push(Rc::new(RefCell::new(result)));
+                                frames.last_mut().unwrap().pc += 1;
+                            }
                             Value::HostHandle { callable, .. } => {
                                 let f = callable.clone();
                                 drop(borrowed);
@@ -6360,6 +6595,233 @@ mod tests {
             "eseqlisp-modules-{tag}-{}.lisp",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn override_survives_owner_reload_and_removal_restores_reloaded_factory() {
+        let mut vm = module_test_vm();
+        let owner = temp_lisp_path("override-owner");
+        let user = temp_lisp_path("override-user");
+        vm.eval_module_source(
+            owner.clone(),
+            "(module test.factory)\n(def value () 10)\n(def call-value () (value))",
+            1,
+        )
+        .expect("owner v1");
+        // `call-value` cached value's global slot before the advice existed.
+        vm.eval_module_source(
+            user.clone(),
+            "(module test.user)\n(override test.factory/value (lambda () 99))",
+            1,
+        )
+        .expect("register override");
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("overridden call"),
+            Some(Value::Number(99.0))
+        );
+
+        vm.eval_module_source(
+            owner,
+            "(module test.factory)\n(def value () 20)\n(def call-value () (value))",
+            2,
+        )
+        .expect("owner v2");
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("override after reload"),
+            Some(Value::Number(99.0))
+        );
+        vm.eval_module_source(
+            user,
+            "(module test.user)\n(override test.factory/value (lambda () 98))",
+            2,
+        )
+        .expect("reload override owner");
+        assert_eq!(
+            vm.overrides["test.factory/value"].entries.len(),
+            1,
+            "re-evaluation must replace the overriding module's entry"
+        );
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("reloaded override"),
+            Some(Value::Number(98.0))
+        );
+        vm.eval_str("(remove-override test.factory/value)")
+            .expect("remove override");
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("restored factory"),
+            Some(Value::Number(20.0))
+        );
+    }
+
+    #[test]
+    fn around_override_late_binds_original_across_owner_reload() {
+        let mut vm = module_test_vm();
+        let owner = temp_lisp_path("around-owner");
+        vm.eval_module_source(
+            owner.clone(),
+            "(module test.around-factory)\n(def value (x) (+ x 1))",
+            1,
+        )
+        .expect("owner v1");
+        vm.eval_module_source(
+            temp_lisp_path("around-user"),
+            "(module test.around-user)\n\
+             (override test.around-factory/value :around (original x) (+ (original x) 100))",
+            1,
+        )
+        .expect("around override");
+        assert_eq!(
+            vm.eval_str("(test.around-factory/value 2)").expect("v1 around"),
+            Some(Value::Number(103.0))
+        );
+        vm.eval_module_source(
+            owner,
+            "(module test.around-factory)\n(def value (x) (+ x 10))",
+            2,
+        )
+        .expect("owner v2");
+        assert_eq!(
+            vm.eval_str("(test.around-factory/value 2)").expect("v2 around"),
+            Some(Value::Number(112.0))
+        );
+    }
+
+    #[test]
+    fn failing_override_is_quarantined_once_and_falls_through_to_factory() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("failing-override-owner"),
+            "(module test.safe-factory)\n(def value () 7)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("failing-override-user"),
+            "(module test.safe-user)\n\
+             (override test.safe-factory/value () (missing-override-helper))",
+            1,
+        )
+        .expect("override registration");
+        for _ in 0..2 {
+            assert_eq!(
+                vm.eval_str("(test.safe-factory/value)").expect("contained call"),
+                Some(Value::Number(7.0))
+            );
+        }
+        let failures = vm
+            .take_source_load_errors()
+            .into_iter()
+            .filter(|error| error.contains("override test.safe-factory/value"))
+            .count();
+        assert_eq!(failures, 1, "a quarantined override must warn only once");
+    }
+
+    #[test]
+    fn private_override_warns_but_works() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("private-override-owner"),
+            "(module test.private-factory)\n(def %value () 1)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("private-override-user"),
+            "(module test.private-user)\n\
+             (override test.private-factory/%value () 2)",
+            1,
+        )
+        .expect("private override");
+        assert_eq!(
+            vm.eval_str("(test.private-factory/%value)").expect("call"),
+            Some(Value::Number(2.0))
+        );
+        assert!(
+            vm.source_manager
+                .diagnostics()
+                .iter()
+                .any(|warning| warning.contains("overriding test.private-factory/%value")),
+            "expected private-override warning"
+        );
+    }
+
+    #[test]
+    fn override_registry_is_snapshot_aware() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("snapshot-override-owner"),
+            "(module test.snapshot-factory)\n(def value () 3)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("snapshot-override-user"),
+            "(module test.snapshot-user)\n\
+             (override test.snapshot-factory/value () 4)",
+            1,
+        )
+        .expect("override");
+        let snapshot = vm.snapshot_state();
+        vm.eval_str("(remove-override test.snapshot-factory/value)")
+            .expect("remove");
+        assert_eq!(
+            vm.eval_str("(test.snapshot-factory/value)").expect("factory"),
+            Some(Value::Number(3.0))
+        );
+        vm.restore_state(snapshot);
+        assert_eq!(
+            vm.eval_str("(test.snapshot-factory/value)").expect("restored override"),
+            Some(Value::Number(4.0))
+        );
+    }
+
+    #[test]
+    #[ignore = "override global-read microbenchmark; run explicitly in release mode"]
+    fn override_empty_registry_global_read_cost() {
+        let mut vm = module_test_vm();
+        vm.set_global_value("benchmark-global", Value::Number(1.0));
+        let idx = vm
+            .resolve_global_read_index("benchmark-global")
+            .expect("benchmark slot");
+        let iterations = 10_000_000_u32;
+        let mut raw_samples = Vec::new();
+        let mut effective_samples = Vec::new();
+        for trial in 0..8 {
+            let measure_raw = |vm: &mut VM| {
+                let started = std::time::Instant::now();
+                for _ in 0..iterations {
+                    std::hint::black_box(vm.raw_global_cell(idx).expect("raw cell"));
+                }
+                started.elapsed()
+            };
+            let measure_effective = |vm: &mut VM| {
+                let started = std::time::Instant::now();
+                for _ in 0..iterations {
+                    std::hint::black_box(vm.global_read_cell(idx).expect("effective cell"));
+                }
+                started.elapsed()
+            };
+            let (raw, effective) = if trial % 2 == 0 {
+                (measure_raw(&mut vm), measure_effective(&mut vm))
+            } else {
+                let effective = measure_effective(&mut vm);
+                (measure_raw(&mut vm), effective)
+            };
+            if trial >= 2 {
+                raw_samples.push(raw.as_nanos() as f64 / f64::from(iterations));
+                effective_samples.push(effective.as_nanos() as f64 / f64::from(iterations));
+            }
+        }
+        raw_samples.sort_by(f64::total_cmp);
+        effective_samples.sort_by(f64::total_cmp);
+        let raw = raw_samples[raw_samples.len() / 2];
+        let effective = effective_samples[effective_samples.len() / 2];
+        eprintln!(
+            "empty override registry: raw={raw:.3}ns effective={effective:.3}ns \
+             delta={:.3}ns ({:.2}%)",
+            effective - raw,
+            (effective / raw - 1.0) * 100.0
+        );
     }
 
     #[test]

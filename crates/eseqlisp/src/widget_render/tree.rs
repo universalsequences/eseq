@@ -422,6 +422,10 @@ fn hash_tree_item_value(value: &Value, state: &mut DefaultHasher) {
         Value::NativeFunction(_) | Value::HostHandle { .. } => {
             11_u8.hash(state);
         }
+        Value::OverrideDispatcher(name) | Value::OverrideOriginal(name) => {
+            12_u8.hash(state);
+            name.hash(state);
+        }
     }
 }
 

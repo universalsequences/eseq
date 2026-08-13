@@ -1948,6 +1948,128 @@ impl Compiler {
                 ]);
                 return self.compile_expression(&load);
             }
+            // Advice-style user overrides (spec §6.1). The target is syntax,
+            // not a value lookup: compile it to a canonical qualified string
+            // plus a callback. Supported spellings are:
+            //   (override module/name (lambda (args...) ...))
+            //   (override module/name (args...) body...)
+            //   (override module/name :around (original args...) body...)
+            if s == "override" {
+                let Some(Expression::Symbol(target)) = list.get(1) else {
+                    self.errors.push(
+                        "(override …) expects a qualified symbol target".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                let Some((namespace, base)) = super::modules::split_qualified(target) else {
+                    self.errors.push(format!(
+                        "override target '{target}' must be module-qualified"
+                    ));
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                let namespace = self
+                    .import_aliases
+                    .get(namespace)
+                    .cloned()
+                    .unwrap_or_else(|| namespace.to_string());
+                let target = super::modules::qualify(&namespace, base);
+                if super::modules::is_private_name(base) {
+                    self.warn_once(format!(
+                        "warning: overriding {target}, which is %-private to {namespace}; \
+                         this override may break on update"
+                    ));
+                }
+
+                let (kind, callback) = match list.get(2) {
+                    Some(Expression::Keyword(kind)) if kind == "around" => {
+                        let Some(Expression::List(args)) = list.get(3) else {
+                            self.errors.push(
+                                "(override … :around …) expects (original args...) and a body"
+                                    .to_string(),
+                            );
+                            self.emit(OpCode::PushNil);
+                            return Ok(());
+                        };
+                        if args.is_empty() || list.len() < 5 {
+                            self.errors.push(
+                                "(override … :around …) requires original and a body".to_string(),
+                            );
+                            self.emit(OpCode::PushNil);
+                            return Ok(());
+                        }
+                        let mut lambda = vec![
+                            Expression::Symbol("lambda".to_string()),
+                            Expression::List(args.clone()),
+                        ];
+                        lambda.extend_from_slice(&list[4..]);
+                        ("around", Expression::List(lambda))
+                    }
+                    Some(Expression::List(items))
+                        if matches!(items.first(), Some(Expression::Symbol(head)) if head == "lambda")
+                            && list.len() == 3 =>
+                    {
+                        ("replace", list[2].clone())
+                    }
+                    Some(Expression::List(args)) if list.len() >= 4 => {
+                        let mut lambda = vec![
+                            Expression::Symbol("lambda".to_string()),
+                            Expression::List(args.clone()),
+                        ];
+                        lambda.extend_from_slice(&list[3..]);
+                        ("replace", Expression::List(lambda))
+                    }
+                    Some(callback) if list.len() == 3 => ("replace", callback.clone()),
+                    _ => {
+                        self.errors.push(
+                            "(override …) expects a callback or argument list and body".to_string(),
+                        );
+                        self.emit(OpCode::PushNil);
+                        return Ok(());
+                    }
+                };
+                let register = Expression::List(vec![
+                    Expression::Symbol("__register-override".to_string()),
+                    Expression::String(target),
+                    Expression::String(kind.to_string()),
+                    callback,
+                ]);
+                return self.compile_expression(&register);
+            }
+            if s == "remove-override" {
+                let Some(Expression::Symbol(target)) = list.get(1) else {
+                    self.errors.push(
+                        "(remove-override …) expects a qualified symbol target".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                if list.len() != 2 {
+                    self.errors.push(
+                        "(remove-override …) expects exactly one target".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let Some((namespace, base)) = super::modules::split_qualified(target) else {
+                    self.errors.push(format!(
+                        "remove-override target '{target}' must be module-qualified"
+                    ));
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                let namespace = self
+                    .import_aliases
+                    .get(namespace)
+                    .map(String::as_str)
+                    .unwrap_or(namespace);
+                let remove = Expression::List(vec![
+                    Expression::Symbol("__remove-override".to_string()),
+                    Expression::String(super::modules::qualify(namespace, base)),
+                ]);
+                return self.compile_expression(&remove);
+            }
             if s == "defmacro" && list.len() == 4 {
                 let Expression::Symbol(name) = &list[1] else {
                     return Err(CompilerError::InvalidArg);
