@@ -892,13 +892,19 @@ mod tests {
     fn path_backed_runtime_load_uses_the_preflight_chokepoint() {
         let dir = temp_dir("runtime-load");
         let path = dir.join("external.lisp");
-        let source = "(def seq-apply-fx-layout 1)\n";
+        let source = "(seq-apply-fx-layout)\n";
         fs::write(&path, source).unwrap();
         let mut runtime = crate::Runtime::new();
-        runtime.eval_source_at_path(path.clone(), source).unwrap();
+        let error = runtime
+            .eval_source_at_path(path.clone(), source)
+            .expect_err("retired flat spelling must miss resolution");
+        assert!(
+            matches!(&error, crate::VMError::UnknownVariable(name) if name == "seq-apply-fx-layout"),
+            "old spelling should fail as an unknown variable, got {error:?}"
+        );
         assert!(
             warn_on_old_module_aliases(&path, source).is_none(),
-            "the VM load must have consumed this file's one session warning"
+            "the failed VM load must still have consumed this file's warning"
         );
         fs::remove_dir_all(dir).unwrap();
     }
