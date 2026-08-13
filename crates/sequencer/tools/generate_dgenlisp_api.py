@@ -88,7 +88,7 @@ CURATED_OPERATORS = {
     "hop-hold": {"category": "stateful", "summary": "Hold a signal, tensor, or signalTensor for one hop interval.", "signatures": ["(hop-hold value hop)"], "arity": {"minimum": 2, "maximum": 2}},
     "biquad": {"category": "effect", "summary": "IIR biquad filter.", "signatures": ["(biquad signal cutoff q gain mode)", "(biquad signal @cutoff 1000 @q 0.707 @gain 0 @mode 0)"], "arity": {"minimum": 1, "maximum": 5}},
     "compressor": {"category": "effect", "summary": "Dynamics compressor with optional sidechain forms.", "signatures": ["(compressor signal ratio threshold knee attack release)", "(compressor signal ratio threshold knee attack release sidechain)", "(compressor signal ratio threshold knee attack release isSidechain sidechain)"], "arity": {"minimum": 1, "maximum": 8}},
-    "delay": {"category": "effect", "summary": "Delay by a time in samples.", "signatures": ["(delay signal time_in_samples)"], "arity": {"minimum": 2, "maximum": 2}},
+    "delay": {"category": "effect", "summary": "Delay by a time in samples. Tensor input gets one independent delay line per lane; @max-delay bounds the buffer (default 88000 samples for scalars, 48000 per lane for tensors).", "signatures": ["(delay signal time_in_samples)", "(delay tensor time_in_samples)", "(delay tensor times_tensor @max-delay N)"], "arity": {"minimum": 2, "maximum": 2}},
     "param": {
         "category": "io",
         "summary": "Host-visible scalar parameter.",
@@ -228,6 +228,7 @@ ATTRIBUTE_SPECS = {
     "@hidden": {"type": "bool", "summary": "Hide a generated or internal parameter from normal host presentation."},
     "@hop": {"type": "int", "summary": "Hop size for STFT and hop-rate operators.", "aliases": ["@hopSize"]},
     "@hopSize": {"type": "int", "summary": "Camel-case alias for @hop.", "aliases": ["@hop"]},
+    "@max-delay": {"type": "int", "summary": "Delay circular-buffer length in samples (per lane for tensor input). Defaults to 88000 for scalar input, 48000 per lane for tensor input."},
     "@hops": {"type": "int", "summary": "Fixed delay in hops for spectrum-delay."},
     "@knee": {"type": "signal|float", "summary": "Compressor knee in dB."},
     "@max": {"type": "float", "summary": "Maximum parameter value."},
@@ -329,6 +330,10 @@ HIDDEN_OPERATORS = {"wavetable", "wavetable-param"}
 
 
 CURATED_OPERATOR_INPUTS = {
+    "delay": [
+        {"name": "signal", "kind": "signal|float|tensor", "summary": "Input signal. A tensor gets one independent delay line per lane.", "required": True},
+        {"name": "time_in_samples", "kind": "signal|float|tensor", "summary": "Delay time in samples (clamped to [0, max-delay - 1], interpolated). A scalar broadcasts to every lane; a tensor gives per-lane delay times and requires a tensor input signal.", "required": True},
+    ],
     "phasor": [
         {"name": "freq", "kind": "signal|float", "summary": "Frequency in Hz.", "required": True},
         {"name": "reset", "kind": "signal|float", "summary": "Optional reset trigger. Defaults to 0.", "required": False},
@@ -474,17 +479,22 @@ SPECIAL_FORMS = [
     },
     {
         "name": "make-history",
-        "summary": "Create a history cell for feedback.",
-        "signatures": ["(make-history name)"],
+        "summary": "Create a history cell for feedback. With @shape it is a tensor history; read-history/write-history dispatch on the cell's shape.",
+        "signatures": [
+            "(make-history name)",
+            "(make-history name @shape [d1 d2 ...])",
+            "(make-history name @shape [d1 d2 ...] @hop N)",
+            "(make-history name @shape [d1 d2 ...] @data [...])",
+        ],
     },
     {
         "name": "read-history",
-        "summary": "Read the previous frame from a history cell.",
+        "summary": "Read the previous frame from a history cell. Returns a tensor when the cell was declared with @shape.",
         "signatures": ["(read-history name)"],
     },
     {
         "name": "write-history",
-        "summary": "Write the current frame to a history cell and return the written signal.",
+        "summary": "Write the current frame to a history cell and return the written signal. Accepts a tensor when the cell was declared with @shape.",
         "signatures": ["(write-history name expr)"],
     },
     {
@@ -814,7 +824,10 @@ def apply_required_flags(inputs, arity):
 
 
 def result_kind_for_operator(name: str, category: str) -> str:
-    if name in {"param", "in", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "delay", "peek", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
+    if name == "delay":
+        # Tensor in -> tensor out; scalar in -> signal out.
+        return "same-as-inputs"
+    if name in {"param", "in", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "peek", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
         return "signal"
     if name in {"tensor", "zeros", "ones", "full", "randn", "tensor-param", "audio-tensor", "ir", "matmul", "conv1d", "conv2d", "reshape", "transpose", "shrink", "pad", "expand", "repeat", "windows", "hann", "window", "softmax"}:
         return "tensor"
