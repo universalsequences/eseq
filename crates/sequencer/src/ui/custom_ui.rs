@@ -317,6 +317,10 @@ fn instrument_ui_dispatch_aliases(
     aliases.into_iter().collect()
 }
 
+fn warn_custom_ui_source(path: &str, source: &str) {
+    eseqlisp::module_alias_migration::warn_on_old_module_aliases(Path::new(path), source);
+}
+
 pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     overlay: Option<(String, String, String)>,
 ) -> String {
@@ -381,6 +385,7 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     }
 
     for (instrument_name, ui_path, src) in ui_sources {
+        warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -539,6 +544,7 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
     let mut functions = String::new();
     let mut dispatch = "false".to_string();
     for (fx_name, ui_path, src) in ui_sources {
+        warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -639,6 +645,7 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
     let mut functions = String::new();
     let mut dispatch = "false".to_string();
     for (fx_name, ui_path, src) in ui_sources {
+        warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -749,7 +756,8 @@ fn reload_custom_ui_source(editor: &mut Editor, path: &str, source: &str, label:
 mod tests {
     use super::{
         build_custom_audio_fx_ui_source_with_overlay,
-        build_custom_instrument_ui_source_with_overlay, instrument_ui_dispatch_aliases,
+        build_custom_instrument_ui_source_with_overlay, build_custom_midi_fx_ui_source_with_overlay,
+        instrument_ui_dispatch_aliases,
         reload_custom_ui_source, GENERATED_INSTRUMENT_UI_PATH,
     };
     use eseqlisp::vm::Value;
@@ -767,6 +775,44 @@ mod tests {
                 key.contains(needle) || value_contains_string(&value.borrow(), needle)
             }),
             _ => false,
+        }
+    }
+
+    #[test]
+    fn authored_custom_ui_bypasses_run_module_alias_preflight() {
+        let cases = [
+            (
+                "instrument",
+                "instruments/external/ui.lisp",
+                "(def helper () (seq-apply-fx-layout))\n(defsynth-ui (label \"ok\"))",
+            ),
+            (
+                "midi-fx",
+                "midi-fx/external/ui.lisp",
+                "(def helper () (seq-apply-fx-layout))\n(def-midi-fx-ui (label \"ok\"))",
+            ),
+            (
+                "audio-fx",
+                "effects/external/ui.lisp",
+                "(def helper () (seq-apply-fx-layout))\n(defeffect-ui (label \"ok\"))",
+            ),
+        ];
+        build_custom_instrument_ui_source_with_overlay(Some((
+            "external/".to_string(), cases[0].1.to_string(), cases[0].2.to_string(),
+        )));
+        build_custom_midi_fx_ui_source_with_overlay(Some((
+            "external".to_string(), cases[1].1.to_string(), cases[1].2.to_string(),
+        )));
+        build_custom_audio_fx_ui_source_with_overlay(Some((
+            "external".to_string(), cases[2].1.to_string(), cases[2].2.to_string(),
+        )));
+        for (kind, path, source) in cases {
+            assert!(
+                eseqlisp::module_alias_migration::warn_on_old_module_aliases(
+                    std::path::Path::new(path), source,
+                ).is_none(),
+                "{kind} authored source was not preflighted before transformation",
+            );
         }
     }
 

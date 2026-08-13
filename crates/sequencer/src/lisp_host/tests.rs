@@ -7201,6 +7201,25 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn midi_fx_control_lisp_read_runs_module_alias_preflight() {
+        let dir = std::env::temp_dir().join(format!(
+            "eseq-midi-fx-alias-preflight-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dsp.lisp");
+        let source = "(def helper () (seq-apply-fx-layout))\n";
+        std::fs::write(&path, source).unwrap();
+        assert_eq!(super::read_midi_fx_lisp(&path).unwrap(), source);
+        assert!(
+            eseqlisp::module_alias_migration::warn_on_old_module_aliases(&path, source).is_none(),
+            "MIDI-FX control source must be preflighted before concatenation"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn builtin_midi_fx_source_resolves_crate_local_library() {
         let manifest_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("midi-fx")

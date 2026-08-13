@@ -3802,6 +3802,12 @@ impl VM {
         source: &str,
         revision: u64,
     ) -> Result<Option<Value>, VMError> {
+        // Path-associated source from load/import, editor evaluation, scripts,
+        // captures, and hot reload converges here. Virtual generated modules
+        // have no backing file and are scanned at their authored-file seams.
+        if path.is_file() {
+            crate::module_alias_migration::warn_on_old_module_aliases(&path, source);
+        }
         let mut defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
             self.source_load_errors
                 .push(format!("{}: {error}", path.display()));
