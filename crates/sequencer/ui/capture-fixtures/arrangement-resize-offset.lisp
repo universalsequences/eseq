@@ -15,11 +15,11 @@
 
 (def capture-after-sync ()
   (do
-    (seq-open-arrangement)
-    (set! arrangement-view-start 0)
-    (set! arrangement-view-duration 16)
+    (eseq.seq-panels/seq-open-arrangement)
+    (set! eseq.arrangement/view-start 0)
+    (set! eseq.arrangement/view-duration 16)
     (let ((clip (nth (nth SEQ.song-lanes 0) 0)))
-      (set! arrangement-ghost
+      (set! eseq.arrangement/ghost
         (dict
           :kind :track-resize
           :track 0

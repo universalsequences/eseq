@@ -34,5 +34,5 @@
     (if (> (len hits) 0) (get (nth hits 0) :clip-id) nil)))
 
 (def capture-after-sync ()
-  (seq-open-arrangement)
+  (eseq.seq-panels/seq-open-arrangement)
   (seq-arrangement-clip-delete (arrangement-clip-id-at 1 8)))

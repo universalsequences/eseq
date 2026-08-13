@@ -24,4 +24,4 @@
   :end 48)
 
 (def capture-after-sync ()
-  (seq-open-arrangement))
+  (eseq.seq-panels/seq-open-arrangement))
