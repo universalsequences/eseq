@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "mnm_srr",
+  "params": [
+    "sig",
+    "amount"
+  ],
+  "outputs": [
+    "out"
+  ]
+}

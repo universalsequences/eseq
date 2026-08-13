@@ -1,0 +1,75 @@
+{
+  "macros": {
+    "smoothstep": {
+      "cables": {},
+      "inputPresentation": {
+        "created-11:0": "cable",
+        "created-12:0": "cable",
+        "created-12:1": "cable",
+        "created-14:0": "cable",
+        "created-15:0": "cable",
+        "created-16:0": "cable",
+        "created-16:1": "cable",
+        "created-7:0": "cable",
+        "created-7:1": "cable",
+        "created-8:0": "cable",
+        "created-8:1": "cable",
+        "created-9:0": "cable",
+        "created-9:1": "cable",
+        "out:0": "cable"
+      },
+      "nodes": {
+        "created-11": {
+          "x": 29.679758,
+          "y": 14.912094
+        },
+        "created-12": {
+          "x": 26.879757,
+          "y": 19.28463
+        },
+        "created-14": {
+          "x": 42.187386,
+          "y": 18.906267
+        },
+        "created-15": {
+          "x": 42.187386,
+          "y": 22.086267
+        },
+        "created-16": {
+          "x": 42.187386,
+          "y": 25.266268
+        },
+        "created-4": {
+          "x": 26.301594,
+          "y": 4.2093554
+        },
+        "created-5": {
+          "x": 50.122562,
+          "y": 3.6416287
+        },
+        "created-7": {
+          "x": 23.882748,
+          "y": 9.0302515
+        },
+        "created-8": {
+          "x": 43.211254,
+          "y": 8.796848
+        },
+        "created-9": {
+          "x": 30.982748,
+          "y": 12.512192
+        },
+        "input": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "out": {
+          "x": 20.890127,
+          "y": 26.846268
+        }
+      }
+    }
+  },
+  "root": {},
+  "version": 1
+}

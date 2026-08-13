@@ -1,0 +1,153 @@
+{
+  "macros": {
+    "mnm_srr": {
+      "cables": {
+        "+#0:0->srr_ph:0": {
+          "segmented": true,
+          "y": 23.08
+        },
+        "/#0:0->pow#0:0": {
+          "segmented": true,
+          "y": 7.89
+        },
+        "/#1:0->+#0:1": {
+          "segmented": true,
+          "y": 18.74
+        },
+        "amount:0->srr_amt:0": {
+          "segmented": true,
+          "y": 6.34
+        },
+        "hold_hz:0->/#1:0": {
+          "segmented": true,
+          "y": 15.639999
+        },
+        "lte#0:0->max#0:1": {
+          "segmented": true,
+          "y": 19.980001
+        },
+        "max#0:0->srr_held:0": {
+          "segmented": true,
+          "y": 33.0
+        },
+        "pow#0:0->hold_hz:1": {
+          "segmented": true,
+          "y": 12.539999
+        },
+        "sig:0->srr_held:1": {
+          "segmented": true,
+          "y": 19.36
+        },
+        "srr_amt:0->lte#0:0": {
+          "segmented": true,
+          "y": 9.440001
+        },
+        "srr_amt:0->pow#0:1": {
+          "segmented": true,
+          "y": 9.440001
+        },
+        "srr_held:0->out:0": {
+          "segmented": true,
+          "y": 36.41
+        },
+        "srr_held:0->srr_val_h:0": {
+          "segmented": true,
+          "y": 36.24
+        },
+        "srr_ph:0->srr_ph_h:0": {
+          "segmented": true,
+          "y": 26.32
+        },
+        "srr_ph:0->srr_wrapped:0": {
+          "segmented": true,
+          "y": 25.869999
+        },
+        "srr_ph_h:0->+#0:0": {
+          "segmented": true,
+          "y": 26.49
+        },
+        "srr_ph_h:0->srr_wrapped:1": {
+          "segmented": true,
+          "y": 26.49
+        },
+        "srr_val_h:0->srr_held:2": {
+          "segmented": true,
+          "y": 35.69
+        },
+        "srr_wrapped:0->max#0:0": {
+          "segmented": true,
+          "y": 29.9
+        }
+      },
+      "nodes": {
+        "+#0": {
+          "width": 7.1000023,
+          "x": 60.485004,
+          "y": 20.74
+        },
+        "/#0": {
+          "x": 63.285004,
+          "y": 4.0
+        },
+        "/#1": {
+          "x": 63.285004,
+          "y": 16.4
+        },
+        "amount": {
+          "x": 39.955,
+          "y": 4.0
+        },
+        "hold_hz": {
+          "x": 63.285004,
+          "y": 13.299999
+        },
+        "lte#0": {
+          "x": 39.955,
+          "y": 10.2
+        },
+        "max#0": {
+          "x": 60.485004,
+          "y": 30.66
+        },
+        "out": {
+          "x": 60.485004,
+          "y": 37.48
+        },
+        "pow#0": {
+          "x": 63.285004,
+          "y": 10.2
+        },
+        "sig": {
+          "x": 85.575005,
+          "y": 4.0
+        },
+        "srr_amt": {
+          "x": 39.955,
+          "y": 7.1
+        },
+        "srr_held": {
+          "x": 60.485004,
+          "y": 33.76
+        },
+        "srr_ph": {
+          "x": 60.485004,
+          "y": 23.84
+        },
+        "srr_ph_h": {
+          "x": 12.0,
+          "y": 23.84
+        },
+        "srr_val_h": {
+          "x": 4.0,
+          "y": 33.76
+        },
+        "srr_wrapped": {
+          "x": 60.485004,
+          "y": 27.56
+        }
+      }
+    }
+  },
+  "root": {},
+  "version": 1
+}

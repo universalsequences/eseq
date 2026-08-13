@@ -129,10 +129,80 @@ shadowing; `init.lisp` still evaluates last so user code wins):
 2. `~/.eseq.d/packages/<pkg>/src/` (and any configured distro)
 3. factory: `Resources/` (release) or `<repo>/assets/` (dev)
 
+### 4.0 Packages: the tier shape recurses; a repo IS a package
+
+A package directory mirrors the factory layout in miniature — any content
+type loadable from a tier is loadable from a package with zero new code
+per type:
+
+```
+alec.acid-tools/            ;; = one git repo
+  manifest.json             ;; name, version, deps, declared assets (module spec §8)
+  src/                      ;; modules under alec.acid-tools.*
+  instruments/303/          ;; dsp.lisp + ui.lisp — same shape as factory (§4.1)
+  effects/  midi-fx/  themes/  samples/
+```
+
+Distribution is git, not a registry (precedent: straight.el/Doom pins,
+Homebrew taps, Strudel's `samples('github:user/repo')` + `strudel.json` —
+runtime fetch keyed by repo path, no registry, and the repo name in code
+doubles as visible provenance): the convention above IS the standard, and
+install v1 is
+`git clone` into `~/.eseq.d/packages/`. An `install` command is a thin
+convenience — clone, validate manifest, verify declared asset hashes.
+Packages ship **source, not binaries**: the embedded dgen toolchain
+compiles instrument dsp on the user's machine (no Xcode needed) and the
+dgen audit checks the compiled output regardless of origin.
+
+**Projects become portable** as a consequence of qualified ids: a project
+referencing `pkg:alec.acid-tools/303@1.2` carries its dependency list, so
+opening a shared project can offer one-click install-and-compile of
+missing packages.
+
+Deferred deliberately: central index (a name→git-URL repo, later, without
+format changes); version resolution (manifest pins a tag/commit; newest
+wins + loud warning on conflict); sandboxing — **packages are trusted
+code**: installing one runs its lisp, and the mitigations are provenance
+visibility and source-form distribution, not a sandbox. Do not design as
+if a sandbox exists.
+
 **Copy-on-write editing.** "Edit this factory instrument/module" in-app
 copies it into the user tier and edits the copy; the factory original
 stays pristine underneath; "revert to factory" deletes the copy. This
 restores the just-hack-everything feel without update clobbering.
+
+### 4.1 Instruments / effects / midi-fx: same shape, two roots, NO shadowing
+
+The app ships a curated factory set; users author their own via the
+patcher, the in-app agent, or an external Claude Code session. Rules:
+
+- **Identical directory format in every tier** — `dsp.lisp` + `ui.lisp`
+  (+ `waves/`, presets) whether under `Resources/instruments/` (factory),
+  `…/Application Support/eseq/instruments/` (user), or
+  `~/.eseq.d/packages/<pkg>/instruments/`. All tooling (audition harness,
+  probe validation, hot-swap compile, external agents writing plain files)
+  works on any tier unchanged. `effects/` and `midi-fx/` are symmetric.
+- **All creation flows write to the user tier only.** Post-Phase-5 the
+  signed bundle makes factory writes physically impossible; any runtime
+  code path writing into the factory content dirs today is a bug (audit
+  during T1).
+- **Browser shows the union with provenance badges** (Factory / Yours /
+  package name).
+- **Unlike code modules, instruments do NOT shadow by name.** Projects
+  reference instruments; a user instrument silently replacing a same-named
+  factory one changes the sound of old projects. Project serialization
+  records a tier-qualified id — `factory:core/wavetable`, `user:my-kick`,
+  `pkg:alec.acid-tools/303` — so cross-tier name collisions are legal and
+  unambiguous. This resolves open question 3.
+- **"Customize a factory instrument" = fork**: copy into the user tier
+  under a new id, rebind in the current project. Mechanics per
+  `docs/instrument-fork-spec.md` (notably its p-lock `param_index`
+  positional-remap gotcha — the fork path carries the care, not load).
+- **Compiled dylibs never live with source**: dgen cache v2 (Caches dir,
+  content+toolchain-keyed) makes tier invisible to the engine.
+- **Migration**: existing projects reference bare names; on first load
+  after T3, resolve bare → `factory:` if present there else `user:`, and
+  stamp the qualified id on next save.
 
 ## 5. AppPaths is the choke point
 
@@ -182,10 +252,7 @@ becomes one line per root, not a repo-wide grep.
 2. **`sounds/` and `samples/`**: pool-referenced by existing projects —
    moving them requires a project-path migration or a resolve-time
    fallback chain. Decide before T2.
-3. **Instrument name collisions across tiers**: user `instruments/foo/`
-   shadows factory `foo` (consistent with load-path semantics), but
-   projects that referenced factory-`foo` silently change sound. Probably
-   want provenance recorded in the project (factory vs user vs
-   package-qualified id).
+3. ~~Instrument name collisions across tiers~~ — resolved, see §4.1:
+   instruments do not shadow; projects record tier-qualified ids.
 4. **Naming**: `assets/` vs `content/` for the repo dir; `~/.eseq.d` is
    locked by the module spec.
