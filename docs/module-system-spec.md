@@ -2028,17 +2028,50 @@ stays as-is; real macro hygiene is out of scope for this spec.
     `ui/event_loop.rs` and `ui/edit_sessions.rs` emits qualified names, which is
     a slice-4/5 item.
 
-    **The table has a hard floor, established in slice 3.** Criterion (1) can
-    never be satisfied for the aliases serving the ~305 headerless lisp files
-    OUTSIDE `crates/sequencer/ui` — user and generated content under
-    `instruments/**`, `effects/**`, `scripts/**`, `midi-fx/**` — nor for the
-    58 `ui/capture-fixtures/*.lisp`, which exist precisely to exercise the
-    flat caller path. `eseq.macros`' 31 identity aliases,
-    `eseq.effects.custom-ui-lego`'s 83, and the `eseq.seq-script-picker`
-    host→script pins are all permanent by construction. Treat the identity
-    aliases on *vocabulary hub* files as API surface, not migration debt; the
-    debt worth paying down is the subset held open only by
-    `state_values/tests.rs`.
+    **External content no longer imposes a hard floor (eseq-mods.13).** The
+    durable 720-entry TSV is embedded in `eseqlisp`; runtime protection does
+    not read `tools/`, derive mappings from Lisp forms, or depend on
+    `module-compat-alias` continuing to exist. A single token-aware lexer is
+    shared by detection and migration. It matches complete Lisp symbols, so a
+    longer hyphen-prefixed symbol cannot collide; identity aliases still
+    qualify; and executable `defstate` reads and writes receive the same direct
+    qualified replacement. Strings and quoted data are diagnostics for manual
+    review, never guessed rewrites.
+
+    Path-associated ESeqLisp converges on `VM::eval_module_source`: this covers
+    `load`/`import` through `SourceManager`, editor evaluation and hot reload,
+    explicit out-of-checkout paths, scratch and project scripts, and capture
+    scripts. A process-wide canonical-path set emits at most one warning per
+    file per app session even when a hot-reload pass evaluates it repeatedly.
+    The warning includes the total occurrence count, the first five
+    path:line:column old→qualified hits, and exact dry-run and write commands.
+    Clean scans are not memoized, so introducing an old name in a later edit is
+    still detected. The scan is one lexer pass and happens before normal parse
+    and evaluation; detection never blocks loading while aliases remain.
+
+    Three authored-source paths transform or concatenate files before the VM
+    sees their real provenance, so they call the same scanner before doing so:
+    custom instrument `ui.lisp`, custom audio-effect `ui.lisp`, custom MIDI-FX
+    `ui.lisp`, and the MIDI-FX control-Lisp library. Script discovery needs no
+    special hook because execution reaches the VM chokepoint. Instrument and
+    audio-effect `dsp.lisp`, and `defmacro_library.rs`'s `macro.lisp` packages,
+    are DGenLisp rather than ESeqLisp and are deliberately outside this alias
+    vocabulary. There are not yet `~/.eseq.d` or content-tier roots; future
+    roots that use normal path-associated evaluation inherit the VM preflight
+    without another integration.
+
+    The user-facing vehicle is the small Rust binary
+    `eseqlisp_migrate_module_aliases`, rather than the developer-only Python
+    sweep. This keeps the embedded dictionary and lexer identical to load-time
+    detection and requires no Python runtime in an app bundle. Invocation must
+    choose exactly one of `--dry-run` or `--write`; omitting the mode is an
+    error, so migration is never silent. Dry-run prints a unified diff per
+    changed file and performs no writes. Write mode stages and syncs every
+    changed file beside its destination before mutation, then uses adjacent
+    rename/backup pairs; any replacement failure rolls the already-committed
+    files back, preventing a half-migrated tree. A second run reports zero
+    replacements. String and quoted-data diagnostics retain path, line,
+    column, old spelling, and target, and remain untouched in both modes.
 
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
