@@ -1966,7 +1966,7 @@ mod tests {
         assert_eq!(
             harness.nested_list_number("track-transposes", TRACK, STEP),
             7.0,
-            "the per-track transpose list-of-lists (seqv-track-param-values) \
+            "the per-track transpose list-of-lists (eseq.seqv-track-params/seqv-track-param-values) \
              must be published"
         );
         assert_eq!(

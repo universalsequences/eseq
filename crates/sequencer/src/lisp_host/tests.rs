@@ -1307,13 +1307,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
-            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
         runtime
             .eval_str(
                 r#"
                 (def graph-8x8-registered-tab nil)
-                (def seq-register-script-step-sequencer-tab
+                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
                   (label buffer sequencer source-path)
                   (set! graph-8x8-registered-tab
                     (list label buffer sequencer source-path)))
@@ -1898,11 +1898,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
-            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
         runtime
             .eval_str(
-                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
             )
             .expect("install script sequencer tab registration test stub");
 
@@ -2345,11 +2345,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
-            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
         runtime
             .eval_str(
-                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
             )
             .expect("install script sequencer tab registration test stub");
 
@@ -2670,7 +2670,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
             .eval_str(
-                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
             )
             .expect("install script sequencer tab registration test stub");
 
@@ -2832,11 +2832,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
-            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .eval_str("(def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
         runtime
             .eval_str(
-                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
             )
             .expect("install script sequencer tab registration test stub");
 
@@ -2996,15 +2996,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
             .eval_str(
                 r#"
-                (defstate seq-registered-step-tabs '())
-                (def seq-register-step-sequencer-tab (label buffer)
-                  (set! seq-registered-step-tabs
+                (defstate eseq.seq-step-tabs/seq-registered-step-tabs '())
+                (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer)
+                  (set! eseq.seq-step-tabs/seq-registered-step-tabs
                     (append
                       (filter (lambda (tab) (not (= (nth tab 1) buffer)))
-                        seq-registered-step-tabs)
+                        eseq.seq-step-tabs/seq-registered-step-tabs)
                       (list (list label buffer)))))
-                (def seq-register-script-step-sequencer-tab (label buffer sequencer icon)
-                  (seq-register-step-sequencer-tab label buffer))
+                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon)
+                  (eseq.seq-step-tabs/seq-register-step-sequencer-tab label buffer))
                 "#,
             )
             .expect("install sequencer tab registration test stub");
@@ -3017,7 +3017,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime.eval_str(&source).expect("evaluate graph 16 demo");
         assert_eq!(
             runtime
-                .eval_str("seq-registered-step-tabs")
+                .eval_str("eseq.seq-step-tabs/seq-registered-step-tabs")
                 .expect("read registered step tabs"),
             Some(gv_list(vec![gv_list(vec![
                 Value::String("16x16".to_string()),
@@ -3252,12 +3252,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
             .eval_str(
                 r#"
-                (defstate seq-registered-step-tabs '())
-                (def seq-register-step-sequencer-tab (label buffer)
-                  (set! seq-registered-step-tabs
-                    (append seq-registered-step-tabs (list (list label buffer)))))
-                (def seq-register-script-step-sequencer-tab (label buffer sequencer icon)
-                  (seq-register-step-sequencer-tab label buffer))
+                (defstate eseq.seq-step-tabs/seq-registered-step-tabs '())
+                (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer)
+                  (set! eseq.seq-step-tabs/seq-registered-step-tabs
+                    (append eseq.seq-step-tabs/seq-registered-step-tabs (list (list label buffer)))))
+                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon)
+                  (eseq.seq-step-tabs/seq-register-step-sequencer-tab label buffer))
                 "#,
             )
             .expect("install sequencer tab registration test stub");
@@ -3507,8 +3507,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let report = runtime.eval_source_transactional(
             Some(workspace_root),
             r#"
-            (def seq-register-step-sequencer-tab (label buffer) nil)
-            (def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
+            (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
+            (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
             (load "crates/sequencer/scripts/sequencers/graph-neural-8x8-demo.lisp")
             "#,
             Vec::new(),
@@ -6445,7 +6445,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut runtime = scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
 
         runtime
-            .eval(r#"(seq-register-script-source-tab "Source Only")"#)
+            .eval(r#"(eseq.seq-script-picker/seq-register-script-source-tab "Source Only")"#)
             .expect("source-tab script contract should be a scratch-runtime no-op");
     }
 
@@ -7209,7 +7209,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("dsp.lisp");
-        let source = "(def helper () (seq-apply-fx-layout))\n";
+        let source = "(def helper () (eseq.seq-layout/apply-fx-layout))\n";
         std::fs::write(&path, source).unwrap();
         assert_eq!(super::read_midi_fx_lisp(&path).unwrap(), source);
         assert!(
@@ -8300,7 +8300,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
         runtime
-            .eval_str("(def seq-register-script-source-tab (label) nil)")
+            .eval_str("(def eseq.seq-script-picker/seq-register-script-source-tab (label) nil)")
             .expect("install source-tab stub");
         let ui_epoch = Arc::new(AtomicUsize::new(0));
         register_published_process_authoring_natives(
@@ -10298,7 +10298,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         let mut ui_runtime = Runtime::new();
         ui_runtime
-            .eval_str("(def seq-register-script-source-tab (label) nil)")
+            .eval_str("(def eseq.seq-script-picker/seq-register-script-source-tab (label) nil)")
             .expect("install source-tab stub");
         register_published_process_authoring_natives(
             &mut ui_runtime,
@@ -10352,7 +10352,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let eval_demo = |state: Arc<SequencerState>| {
             let mut runtime = Runtime::new();
             runtime
-                .eval_str("(def seq-register-script-source-tab (label) nil)")
+                .eval_str("(def eseq.seq-script-picker/seq-register-script-source-tab (label) nil)")
                 .expect("install source-tab stub");
             register_published_process_authoring_natives(
                 &mut runtime,
@@ -10594,12 +10594,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         authoring
             .eval_str(
                 r#"
-                (defstate seq-registered-step-tabs '())
-                (def seq-register-script-step-sequencer-tab (label buffer sequencer source-path)
-                  (set! seq-registered-step-tabs
+                (defstate eseq.seq-step-tabs/seq-registered-step-tabs '())
+                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer source-path)
+                  (set! eseq.seq-step-tabs/seq-registered-step-tabs
                     (append
                       (filter (lambda (tab) (not (= (nth tab 1) buffer)))
-                        seq-registered-step-tabs)
+                        eseq.seq-step-tabs/seq-registered-step-tabs)
                       (list (list label buffer sequencer source-path)))))
                 "#,
             )
@@ -10639,7 +10639,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         assert_eq!(
             authoring
-                .eval_str("seq-registered-step-tabs")
+                .eval_str("eseq.seq-step-tabs/seq-registered-step-tabs")
                 .expect("read registered step tabs"),
             Some(gv_list(vec![gv_list(vec![
                 Value::String("Process UI".to_string()),
@@ -10781,12 +10781,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         authoring
             .eval_str(
                 r#"
-                (defstate seq-registered-step-tabs '())
-                (def seq-register-script-step-sequencer-tab (label buffer sequencer source-path)
-                  (set! seq-registered-step-tabs
+                (defstate eseq.seq-step-tabs/seq-registered-step-tabs '())
+                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer source-path)
+                  (set! eseq.seq-step-tabs/seq-registered-step-tabs
                     (append
                       (filter (lambda (tab) (not (= (nth tab 1) buffer)))
-                        seq-registered-step-tabs)
+                        eseq.seq-step-tabs/seq-registered-step-tabs)
                       (list (list label buffer sequencer source-path)))))
                 "#,
             )

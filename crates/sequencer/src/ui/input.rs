@@ -130,7 +130,7 @@ fn global_sequencer_navigation_available(editor: &Editor) -> bool {
 }
 
 fn fx_plock_row_selected(editor: &mut Editor) -> bool {
-    let Some(callable) = editor.runtime_mut().global_value("fx-plock-row-selected?") else {
+    let Some(callable) = editor.runtime_mut().global_value("eseq.effects.track-panels/plock-row-selected?") else {
         return false;
     };
     matches!(
@@ -150,14 +150,14 @@ fn selected_steps_delete_shortcut_available(
 fn select_track_for_edit(editor: &mut Editor, track: usize) {
     if let Some(callable) = editor
         .runtime_mut()
-        .global_value("seqv-select-track-for-edit")
+        .global_value("eseq.sequencer/select-track-for-edit")
     {
         let _ = editor
             .runtime_mut()
             .invoke(callable, vec![Value::Number(track as f64)]);
     } else {
         let _ = editor.runtime_mut().eval_str(&format!(
-            "(do (set! selected-bus -1) (seq-set-track {track}))"
+            "(do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track {track}))"
         ));
     }
 }
@@ -195,7 +195,7 @@ fn sequencer_tab_shortcut_index(key: &crossterm::event::KeyEvent) -> Option<usiz
 }
 
 fn current_sequencer_step_tab_buffer(editor: &mut Editor) -> String {
-    match editor.runtime_mut().eval_str("(seq-current-step-buffer)") {
+    match editor.runtime_mut().eval_str("(eseq.seq-panels/seq-current-step-buffer)") {
         Ok(Some(Value::String(buffer))) => buffer,
         _ => "*sequencer*".to_string(),
     }
@@ -213,7 +213,7 @@ fn select_sequencer_tab_by_index(editor: &mut Editor, index: usize) -> bool {
     let selected = matches!(
         editor
             .runtime_mut()
-            .eval_str(&format!("(seq-select-main-step-tab-by-index {index})")),
+            .eval_str(&format!("(eseq.seq-step-tabs/seq-select-main-step-tab-by-index {index})")),
         Ok(Some(Value::Bool(true)))
     );
     if selected {
@@ -233,7 +233,7 @@ const LEGACY_BROWSER_SEARCH_INPUT_KEY: &str = "sbrowser-search-input";
 
 fn focus_samples_browser_search(editor: &mut Editor) -> bool {
     if !editor.switch_active_tile_to_buffer_named("*samples*") {
-        if let Some(callable) = editor.runtime_mut().global_value("sample-browser-here") {
+        if let Some(callable) = editor.runtime_mut().global_value("eseq.browser/sample-browser-here") {
             let _ = editor.runtime_mut().invoke(callable, vec![]);
         } else {
             let _ = editor
@@ -251,7 +251,7 @@ fn focus_samples_browser_search(editor: &mut Editor) -> bool {
 }
 
 fn sample_browser_active_tree_key(editor: &mut Editor) -> Option<String> {
-    match editor.runtime_mut().eval_str("(sbrowser-active-tree-key)") {
+    match editor.runtime_mut().eval_str("(eseq.browser/active-tree-key)") {
         Ok(Some(Value::String(key))) => Some(key),
         _ => None,
     }
@@ -356,7 +356,7 @@ fn tab_locked_to_patch_editor(editor: &mut Editor) -> bool {
         return true;
     }
     matches!(
-        editor.runtime_mut().eval_str("seq-layout-mode"),
+        editor.runtime_mut().eval_str("eseq.seq-step-tabs/seq-layout-mode"),
         Ok(Some(Value::Keyword(mode)))
             if mode == "instrument-patcher" || mode == "instrument-patcher-source"
     )
@@ -467,14 +467,14 @@ pub(crate) fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent
 }
 
 pub(crate) fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
-    match editor.runtime_mut().eval_str("(current-step)") {
+    match editor.runtime_mut().eval_str("(eseq.seq-core-state/current-step)") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
     }
 }
 
 pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
-    match editor.runtime_mut().eval_str("param-mode") {
+    match editor.runtime_mut().eval_str("eseq.seq-core-state/param-mode") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
     }
@@ -483,7 +483,7 @@ pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
 fn current_sequencer_cursor_step(editor: &mut Editor) -> Option<usize> {
     match editor
         .runtime_mut()
-        .eval_str("(seqv-current-selected-step)")
+        .eval_str("(eseq.sequencer/current-selected-step)")
     {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
@@ -491,7 +491,7 @@ fn current_sequencer_cursor_step(editor: &mut Editor) -> Option<usize> {
 }
 
 fn current_sequencer_param_mode(editor: &mut Editor) -> Option<usize> {
-    match editor.runtime_mut().eval_str("(seqv-current-param-mode)") {
+    match editor.runtime_mut().eval_str("(eseq.sequencer/current-param-mode)") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
     }
@@ -512,7 +512,7 @@ mod tests {
 
 pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
     matches!(
-        editor.runtime_mut().eval_str("(seq-has-selected-bus?)"),
+        editor.runtime_mut().eval_str("(eseq.seq-core-state/seq-has-selected-bus?)"),
         Ok(Some(Value::Bool(true)))
     )
 }
@@ -773,7 +773,7 @@ fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
         "*metal*" => Some("eseq.step-grid/step-param-number-picker".to_string()),
         "*sequencer*" => match editor
             .runtime_mut()
-            .eval_str("(seqv-current-number-picker-key)")
+            .eval_str("(eseq.sequencer/current-number-picker-key)")
         {
             Ok(Some(Value::String(key))) => Some(key),
             _ => None,
@@ -1108,7 +1108,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     {
         let _ = editor
             .runtime_mut()
-            .eval_str("(seq-toggle-current-track-mods-view)");
+            .eval_str("(eseq.seq-panels/seq-toggle-current-track-mods-view)");
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
         return true;
@@ -1127,7 +1127,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     {
         let _ = editor
             .runtime_mut()
-            .eval_str("(seq-toggle-main-or-piano-roll)");
+            .eval_str("(eseq.seq-panels/seq-toggle-main-or-piano-roll)");
         editor.refresh_runtime_side_effects();
         return true;
     }
@@ -1162,7 +1162,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && editor.focused_widget_id().is_none()
         && selected_steps_delete_shortcut_available(editor, selected_steps)
     {
-        let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
+        let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/delete-selected-steps)");
         editor.refresh_runtime_side_effects();
         return true;
     }
@@ -1170,31 +1170,31 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     if global_sequencer_navigation_available(editor) {
         match (key.code, key.modifiers) {
             (KeyCode::Left, KeyModifiers::SHIFT) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-select-left)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-select-left)");
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
             }
             (KeyCode::Right, KeyModifiers::SHIFT) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-select-right)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-select-right)");
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
             }
             (KeyCode::Left, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-left)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-left)");
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
             }
             (KeyCode::Right, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-right)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-right)");
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-toggle)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-toggle)");
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
@@ -1233,8 +1233,8 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return false;
             }
             let command = match shortcut {
-                PatternLengthShortcut::Double => "(double-track-pattern)",
-                PatternLengthShortcut::Halve => "(halve-track-pattern)",
+                PatternLengthShortcut::Double => "(eseq.seq-grid-mode/double-track-pattern)",
+                PatternLengthShortcut::Halve => "(eseq.seq-grid-mode/halve-track-pattern)",
             };
             let _ = editor.runtime_mut().eval_str(command);
             editor.refresh_runtime_side_effects();
@@ -1248,9 +1248,9 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 let command = if editor.active_buffer().name == "*sequencer*" {
-                    "seqv-select-all-current-track-steps"
+                    "eseq.sequencer/select-all-current-track-steps"
                 } else {
-                    "select-all-steps"
+                    "eseq.step-grid-interactions/select-all-steps"
                 };
                 let _ = editor.runtime_mut().invoke_global(command, Vec::new());
                 editor.refresh_runtime_side_effects();
@@ -1260,7 +1260,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
             (KeyCode::Tab, KeyModifiers::CONTROL) => {
                 let _ = editor
                     .runtime_mut()
-                    .eval_str("(seq-toggle-piano-roll-placement)");
+                    .eval_str("(eseq.seq-panels/seq-toggle-piano-roll-placement)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -1270,11 +1270,11 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 }
                 let _ = if let Some(callable) = editor
                     .runtime_mut()
-                    .global_value("seq-toggle-arrangement")
+                    .global_value("eseq.seq-panels/seq-toggle-arrangement")
                 {
                     editor.runtime_mut().invoke(callable, vec![])
                 } else {
-                    editor.runtime_mut().eval_str("(seq-toggle-arrangement)")
+                    editor.runtime_mut().eval_str("(eseq.seq-panels/seq-toggle-arrangement)")
                 };
                 editor.refresh_runtime_side_effects();
                 return true;
@@ -1282,13 +1282,13 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
             _ if is_shift_tab_shortcut(key) => {
                 let _ = editor
                     .runtime_mut()
-                    .eval_str("(seq-toggle-main-or-piano-roll)");
+                    .eval_str("(eseq.seq-panels/seq-toggle-main-or-piano-roll)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
             _ if editor.focused_widget_id().is_some() => {}
             (KeyCode::Char('h') | KeyCode::Char('H'), KeyModifiers::CONTROL) => {
-                let _ = editor.runtime_mut().eval_str("(seqv-collapse-all-tracks)");
+                let _ = editor.runtime_mut().eval_str("(eseq.sequencer/collapse-all-tracks)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -1318,7 +1318,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         // A 2+ track multi-selection only exists via mixer cmd-click, so C-g
         // groups when one is present; otherwise it opens the agent. The Lisp
         // dispatcher (seq-ctrl-g) decides.
-        let _ = editor.runtime_mut().eval_str("(seq-ctrl-g)");
+        let _ = editor.runtime_mut().eval_str("(eseq.mixer/seq-ctrl-g)");
         editor.refresh_runtime_side_effects();
         return true;
     }
@@ -1331,12 +1331,12 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     {
         match (key.code, key.modifiers) {
             (KeyCode::Left, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-left)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-left)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
             (KeyCode::Right, KeyModifiers::NONE) => {
-                let _ = editor.runtime_mut().eval_str("(cursor-right)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/cursor-right)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -1344,7 +1344,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 if !selected_steps_delete_shortcut_available(editor, selected_steps) {
                     return false;
                 }
-                let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
+                let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/delete-selected-steps)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -1848,7 +1848,7 @@ mod live_keyboard_tests {
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
         editor
             .runtime_mut()
-            .eval_str("(defstate selected-bus -1)")
+            .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
             .expect("install selected bus state");
         let current_track = Arc::new(AtomicUsize::new(0));
         let native_track = Arc::clone(&current_track);
@@ -1936,17 +1936,17 @@ mod live_keyboard_tests {
             .eval_str(
                 r#"
                 (defstate sbrowser-tab "samples")
-                (defstate sbrowser-filter "")
+                (defstate eseq.browser/search-filter "")
                 (defstate sbrowser-modified-label "")
                 (defstate main-view-toggle-count 0)
-                (def seq-toggle-arrangement ()
+                (def eseq.seq-panels/seq-toggle-arrangement ()
                   (set! main-view-toggle-count (+ main-view-toggle-count 1)))
-                (def sbrowser-active-tree-key ()
+                (def eseq.browser/active-tree-key ()
                   (if (= sbrowser-tab "samples") "samples-tab-tree" "instruments-tab-tree"))
-                (def sbrowser-next-tab ()
+                (def eseq.browser/next-tab ()
                   (set! sbrowser-tab
                     (if (= sbrowser-tab "samples") "instruments" "samples")))
-                (def sample-browser-here () (switch-to-buffer "*samples*"))
+                (def eseq.browser/sample-browser-here () (switch-to-buffer "*samples*"))
                 (def sbrowser-keyboard-items ()
                   (list (dict :label "kick.wav" :path "samples/kick.wav")))
                 (def sbrowser-keyboard-panel ()
@@ -1954,9 +1954,9 @@ mod live_keyboard_tests {
                     (text-input
                       :key "sbrowser-search-input"
                       :width :fill
-                      :value sbrowser-filter
+                      :value eseq.browser/search-filter
                       :placeholder "Search"
-                      :on-change (lambda (v) (set! sbrowser-filter v)))
+                      :on-change (lambda (v) (set! eseq.browser/search-filter v)))
                     (if (= sbrowser-tab "samples")
                       (tree
                         :key "samples-tab-tree"
@@ -2094,9 +2094,9 @@ mod live_keyboard_tests {
                 r#"
                 (def delete-count (state 0))
                 (def plock-row-selected (state false))
-                (def delete-selected-steps ()
+                (def eseq.step-grid-interactions/delete-selected-steps ()
                   (set! delete-count (+ delete-count 1)))
-                (def fx-plock-row-selected? () plock-row-selected)
+                (def eseq.effects.track-panels/plock-row-selected? () plock-row-selected)
                 "#,
             )
             .expect("install step/plock delete hooks");
@@ -2295,21 +2295,21 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate selected-bus 1)
+                (defstate eseq.seq-core-state/selected-bus 1)
                 (defstate cursor-left-count 0)
                 (defstate cursor-right-count 0)
                 (defstate cursor-select-left-count 0)
                 (defstate cursor-select-right-count 0)
                 (defstate cursor-toggle-count 0)
                 (defstate selected-track-via-seqv -1)
-                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
-                (def cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
-                (def cursor-select-left () (set! cursor-select-left-count (+ cursor-select-left-count 1)))
-                (def cursor-select-right () (set! cursor-select-right-count (+ cursor-select-right-count 1)))
-                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
-                (def seqv-select-track-for-edit (track)
+                (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                (def eseq.step-grid-interactions/cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
+                (def eseq.step-grid-interactions/cursor-select-left () (set! cursor-select-left-count (+ cursor-select-left-count 1)))
+                (def eseq.step-grid-interactions/cursor-select-right () (set! cursor-select-right-count (+ cursor-select-right-count 1)))
+                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def eseq.sequencer/select-track-for-edit (track)
                   (do
-                    (set! selected-bus -1)
+                    (set! eseq.seq-core-state/selected-bus -1)
                     (set! selected-track-via-seqv track)
                     (seq-set-track track)))
                 "#,
@@ -2404,7 +2404,7 @@ mod live_keyboard_tests {
         ));
         assert_eq!(current_track.load(Ordering::Relaxed), 1);
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(Value::Number(-1.0))
         );
         assert_eq!(
@@ -2427,8 +2427,8 @@ mod live_keyboard_tests {
                 r#"
                 (defstate cursor-left-count 0)
                 (defstate cursor-toggle-count 0)
-                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
-                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
                 (effect
                   (timeline
                     :height 8
@@ -2504,10 +2504,10 @@ mod live_keyboard_tests {
             .eval_str(
                 r#"
                 (defstate tab-target "")
-                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
-                (def seq-toggle-arrangement () (set! tab-target "arrangement"))
-                (def seq-toggle-piano-roll-placement () (set! tab-target "placement"))
-                (def seq-toggle-mixer-panel () (set! tab-target "mixer"))
+                (def eseq.seq-panels/seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def eseq.seq-panels/seq-toggle-arrangement () (set! tab-target "arrangement"))
+                (def eseq.seq-panels/seq-toggle-piano-roll-placement () (set! tab-target "placement"))
+                (def eseq.seq-panels/seq-toggle-mixer-panel () (set! tab-target "mixer"))
                 "#,
             )
             .expect("install tab handlers");
@@ -2585,16 +2585,16 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate step-panel-buffer "*sequencer*")
-                (defstate remembered-step-panel-buffer "*sequencer*")
+                (defstate eseq.seq-step-tabs/step-panel-buffer "*sequencer*")
+                (defstate eseq.seq-step-tabs/remembered-step-panel-buffer "*sequencer*")
                 (defstate selected-step-tab "")
-                (def seq-current-step-buffer () step-panel-buffer)
-                (def seq-select-main-step-tab-by-index (index)
+                (def eseq.seq-panels/seq-current-step-buffer () eseq.seq-step-tabs/step-panel-buffer)
+                (def eseq.seq-step-tabs/seq-select-main-step-tab-by-index (index)
                   (if (= index 2)
                     (do
                       (set! selected-step-tab "script")
-                      (set! step-panel-buffer "*script-tab*")
-                      (set! remembered-step-panel-buffer "*script-tab*")
+                      (set! eseq.seq-step-tabs/step-panel-buffer "*script-tab*")
+                      (set! eseq.seq-step-tabs/remembered-step-panel-buffer "*script-tab*")
                       (set-window-buffer "*script-tab*")
                       true)
                     false))
@@ -2635,7 +2635,7 @@ mod live_keyboard_tests {
             Some(eseqlisp::vm::Value::String("script".to_string()))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(eseqlisp::vm::Value::String("*script-tab*".to_string()))
         );
         assert_ne!(
@@ -2671,9 +2671,9 @@ mod live_keyboard_tests {
                     :view-start 0
                     :view-duration 16
                     :on-action |e| e))
-                (def seq-toggle-arrangement ()
+                (def eseq.seq-panels/seq-toggle-arrangement ()
                   (set! tab-target "arrangement"))
-                (def seq-toggle-mixer-panel ()
+                (def eseq.seq-panels/seq-toggle-mixer-panel ()
                   (set! tab-target "mixer"))
                 "#,
             )
@@ -2766,7 +2766,7 @@ mod live_keyboard_tests {
             .eval_str(&format!(
                 r#"
                 (defstate tab-target "")
-                (def seq-toggle-arrangement () (set! tab-target "arrangement"))
+                (def eseq.seq-panels/seq-toggle-arrangement () (set! tab-target "arrangement"))
                 (effect
                   (patcher
                     :height 10
@@ -2832,8 +2832,8 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate seqv-expanded-track-ids '(0 1))
-                (def seqv-collapse-all-tracks () (set! seqv-expanded-track-ids '()))
+                (defstate eseq.sequencer/expanded-track-ids '(0 1))
+                (def eseq.sequencer/collapse-all-tracks () (set! eseq.sequencer/expanded-track-ids '()))
                 "#,
             )
             .expect("install collapse handler");
@@ -2854,7 +2854,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("seqv-expanded-track-ids")
+                .eval_str("eseq.sequencer/expanded-track-ids")
                 .unwrap(),
             Some(eseqlisp::vm::Value::List(vec![]))
         );
@@ -2886,11 +2886,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate selected-bus 1)
+                (defstate eseq.seq-core-state/selected-bus 1)
                 (defstate select-all-count 0)
-                (def seqv-select-all-current-track-steps ()
+                (def eseq.sequencer/select-all-current-track-steps ()
                   (do
-                    (set! selected-bus -1)
+                    (set! eseq.seq-core-state/selected-bus -1)
                     (set! select-all-count (+ select-all-count 1))
                     (seq-select-all-steps)))
                 "#,
@@ -2910,7 +2910,7 @@ mod live_keyboard_tests {
             &step_clipboard,
         ));
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(eseqlisp::vm::Value::Number(-1.0))
         );
         assert_eq!(
@@ -2996,11 +2996,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate selected-bus -1)
+                (defstate eseq.seq-core-state/selected-bus -1)
                 (defstate pattern-length-action "")
-                (def seq-has-selected-bus? () (>= selected-bus 0))
-                (def double-track-pattern () (set! pattern-length-action "double"))
-                (def halve-track-pattern () (set! pattern-length-action "halve"))
+                (def eseq.seq-core-state/seq-has-selected-bus? () (>= eseq.seq-core-state/selected-bus 0))
+                (def eseq.seq-grid-mode/double-track-pattern () (set! pattern-length-action "double"))
+                (def eseq.seq-grid-mode/halve-track-pattern () (set! pattern-length-action "halve"))
                 "#,
             )
             .expect("install pattern length handlers");
@@ -3094,11 +3094,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate selected-bus 0)
+                (defstate eseq.seq-core-state/selected-bus 0)
                 (defstate pattern-length-action "")
-                (def seq-has-selected-bus? () (>= selected-bus 0))
-                (def double-track-pattern () (set! pattern-length-action "double"))
-                (def halve-track-pattern () (set! pattern-length-action "halve"))
+                (def eseq.seq-core-state/seq-has-selected-bus? () (>= eseq.seq-core-state/selected-bus 0))
+                (def eseq.seq-grid-mode/double-track-pattern () (set! pattern-length-action "double"))
+                (def eseq.seq-grid-mode/halve-track-pattern () (set! pattern-length-action "halve"))
                 "#,
             )
             .expect("install selected bus fixture");
@@ -3141,17 +3141,17 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate instrument-panel-tab 2)
-                (defstate instrument-mods-open false)
-                (defstate selected-bus 1)
-                (def instrument-toggle-mods-view ()
+                (defstate eseq.effects.state/instrument-panel-tab 2)
+                (defstate eseq.effects.state/instrument-mods-open false)
+                (defstate eseq.seq-core-state/selected-bus 1)
+                (def eseq.effects.effect-panels/instrument-toggle-mods-view ()
                   (do
-                    (set! instrument-panel-tab 0)
-                    (set! instrument-mods-open (not instrument-mods-open))))
-                (def seq-toggle-current-track-mods-view ()
+                    (set! eseq.effects.state/instrument-panel-tab 0)
+                    (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open))))
+                (def eseq.seq-panels/seq-toggle-current-track-mods-view ()
                   (do
-                    (set! selected-bus -1)
-                    (instrument-toggle-mods-view)))
+                    (set! eseq.seq-core-state/selected-bus -1)
+                    (eseq.effects.effect-panels/instrument-toggle-mods-view)))
                 "#,
             )
             .expect("install mods view handler");
@@ -3172,19 +3172,19 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("instrument-mods-open")
+                .eval_str("eseq.effects.state/instrument-mods-open")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(true))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("instrument-panel-tab")
+                .eval_str("eseq.effects.state/instrument-panel-tab")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Number(0.0))
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
             Some(eseqlisp::vm::Value::Number(-1.0))
         );
 
@@ -3199,7 +3199,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("instrument-mods-open")
+                .eval_str("eseq.effects.state/instrument-mods-open")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(false))
         );
@@ -3214,11 +3214,11 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (defstate instrument-mods-open false)
-                (def instrument-toggle-mods-view ()
-                  (set! instrument-mods-open (not instrument-mods-open)))
-                (def seq-toggle-current-track-mods-view ()
-                  (instrument-toggle-mods-view))
+                (defstate eseq.effects.state/instrument-mods-open false)
+                (def eseq.effects.effect-panels/instrument-toggle-mods-view ()
+                  (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open)))
+                (def eseq.seq-panels/seq-toggle-current-track-mods-view ()
+                  (eseq.effects.effect-panels/instrument-toggle-mods-view))
                 "#,
             )
             .expect("install mods view handler");
@@ -3240,7 +3240,7 @@ mod live_keyboard_tests {
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("instrument-mods-open")
+                .eval_str("eseq.effects.state/instrument-mods-open")
                 .unwrap(),
             Some(eseqlisp::vm::Value::Bool(true))
         );
@@ -3260,8 +3260,8 @@ mod live_keyboard_tests {
                 r#"
                 (defstate tab-target "")
                 (defstate cursor-left-count 0)
-                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
-                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                (def eseq.seq-panels/seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def eseq.step-grid-interactions/cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
                 "#,
             )
             .expect("install tab handler");
@@ -3309,7 +3309,7 @@ mod live_keyboard_tests {
             .eval_str(
                 r#"
                 (defstate tab-target "")
-                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def eseq.seq-panels/seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
                 "#,
             )
             .expect("install tab handler");
@@ -3344,7 +3344,7 @@ mod live_keyboard_tests {
             .eval_str(
                 r#"
                 (defstate tab-target "")
-                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def eseq.seq-panels/seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
                 "#,
             )
             .expect("install tab handler");
@@ -3425,13 +3425,13 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (def seq-has-selected-bus? () false)
-                (def seqv-current-selected-step () 2)
-                (def seqv-current-param-mode () 0)
-                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (def eseq.seq-core-state/seq-has-selected-bus? () false)
+                (def eseq.sequencer/current-selected-step () 2)
+                (def eseq.sequencer/current-param-mode () 0)
+                (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
                 (defstate seqv-soft-edit-flushed 1)
                 (defstate cursor-toggle-count 0)
-                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
                 (effect
                   (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
                 "#,
@@ -3555,12 +3555,12 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (def seq-has-selected-bus? () false)
-                (def seqv-current-selected-step () 2)
-                (def seqv-current-param-mode () 7)
-                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (def eseq.seq-core-state/seq-has-selected-bus? () false)
+                (def eseq.sequencer/current-selected-step () 2)
+                (def eseq.sequencer/current-param-mode () 7)
+                (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
                 (defstate cursor-toggle-count 0)
-                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
 
                 (def-accumulator sparse-transpose
                   :target (step-param :transpose)
@@ -3690,13 +3690,13 @@ mod live_keyboard_tests {
             .runtime_mut()
             .eval_str(
                 r#"
-                (def seq-has-selected-bus? () false)
-                (def seqv-current-selected-step () 2)
-                (def seqv-current-param-mode () 0)
-                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (def eseq.seq-core-state/seq-has-selected-bus? () false)
+                (def eseq.sequencer/current-selected-step () 2)
+                (def eseq.sequencer/current-param-mode () 0)
+                (def eseq.sequencer/current-number-picker-key () "seqv-expanded-param-number-picker-0")
                 (defstate seqv-soft-edit-flushed 1)
                 (defstate cursor-toggle-count 0)
-                (def cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
+                (def eseq.step-grid-interactions/cursor-toggle () (set! cursor-toggle-count (+ cursor-toggle-count 1)))
                 (effect
                   (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
                 "#,

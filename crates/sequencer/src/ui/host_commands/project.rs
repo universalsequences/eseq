@@ -47,7 +47,7 @@ pub(super) fn handle(
                         Ok(new_name) => {
                             if let Err(error) = editor
                                 .runtime_mut()
-                                .eval_str("(sbrowser-refresh-buffer)")
+                                .eval_str("(eseq.browser/refresh-buffer)")
                             {
                                 eprintln!(
                                     "instrument browser: failed to refresh after move: {error:?}"
