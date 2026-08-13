@@ -1457,16 +1457,24 @@ fn convert_source_expr(
     }
 }
 
-fn convert_source_exprs_with_origins(
-    exprs: &[Expr],
-    source_revision: u64,
-    existing_macros: &HashSet<String>,
-) -> Vec<Expression> {
+/// The unit-wide name collections the source→Expression conversion needs:
+/// defwidget/defmacro names defined anywhere in the unit and the module
+/// defs that shadow builtin widget constructors. Computed once over the
+/// FULL top-level form list so that splitting a unit into import-bounded
+/// segments (see `eval_str`) cannot hide a later definition from an
+/// earlier segment's conversion.
+struct UnitConversionContext {
+    local_defwidgets: HashSet<String>,
+    unit_macro_names: HashSet<String>,
+    shadowed_widget_names: HashSet<String>,
+}
+
+fn unit_conversion_context(exprs: &[Expr]) -> UnitConversionContext {
     let mut local_defwidgets = HashSet::new();
-    let mut macro_names = existing_macros.clone();
+    let mut unit_macro_names = HashSet::new();
     for expr in exprs {
         collect_defwidget_names(expr, &mut local_defwidgets);
-        collect_defmacro_names(expr, &mut macro_names);
+        collect_defmacro_names(expr, &mut unit_macro_names);
     }
     // Inside a declared module, the module's own top-level defs shadow
     // builtin widget-constructor names (spec §3: current module wins), so
@@ -1480,19 +1488,74 @@ fn convert_source_exprs_with_origins(
             collect_shadowing_def_names(expr, &local_defwidgets, &mut shadowed_widget_names);
         }
     }
+    UnitConversionContext {
+        local_defwidgets,
+        unit_macro_names,
+        shadowed_widget_names,
+    }
+}
+
+fn convert_segment_exprs_with_origins(
+    context: &UnitConversionContext,
+    exprs: &[Expr],
+    source_revision: u64,
+    existing_macros: &HashSet<String>,
+) -> Vec<Expression> {
+    let mut macro_names = existing_macros.clone();
+    macro_names.extend(context.unit_macro_names.iter().cloned());
     exprs
         .iter()
         .map(|expr| {
             convert_source_expr(
                 expr,
                 source_revision,
-                &local_defwidgets,
-                &shadowed_widget_names,
+                &context.local_defwidgets,
+                &context.shadowed_widget_names,
                 &macro_names,
                 true,
             )
         })
         .collect()
+}
+
+fn convert_source_exprs_with_origins(
+    exprs: &[Expr],
+    source_revision: u64,
+    existing_macros: &HashSet<String>,
+) -> Vec<Expression> {
+    let context = unit_conversion_context(exprs);
+    convert_segment_exprs_with_origins(&context, exprs, source_revision, existing_macros)
+}
+
+/// True for a literal top-level `(import …)` form — the only shape whose
+/// compile-time half (spec §4) splits a unit into segments. Quoted or
+/// nested occurrences stay runtime-only.
+fn is_top_level_import(expr: &Expr) -> bool {
+    let ExprKind::List(items) = &expr.kind else {
+        return false;
+    };
+    matches!(items.first().map(|item| &item.kind),
+             Some(ExprKind::Symbol(name)) if name == "import")
+}
+
+/// Split a unit's top-level forms at import boundaries: every segment ends
+/// with an import form (except possibly the last). Compiling and executing
+/// segment-by-segment makes each import's target evaluated before any
+/// later form COMPILES, so the next segment's compiler is re-seeded with
+/// the target's defstate keyspace, macros and compat aliases.
+fn split_at_top_level_imports(exprs: &[Expr]) -> Vec<&[Expr]> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (idx, expr) in exprs.iter().enumerate() {
+        if is_top_level_import(expr) {
+            segments.push(&exprs[start..=idx]);
+            start = idx + 1;
+        }
+    }
+    if start < exprs.len() || segments.is_empty() {
+        segments.push(&exprs[start..]);
+    }
+    segments
 }
 
 fn source_origin_number_arg(value: &Value) -> Option<usize> {
@@ -3623,6 +3686,22 @@ impl VM {
     }
 
     /// Compile and run `code` in this VM's existing context (globals persist).
+    ///
+    /// The unit is split at top-level `(import …)` forms (spec §4: import's
+    /// compile-time half): each segment is compiled and EXECUTED before the
+    /// next segment is compiled, so an import's target is evaluated —
+    /// through the ordinary `__import-module` runtime ledger — before any
+    /// later form in this unit compiles, and the next segment's compiler is
+    /// re-seeded from the VM with the target's defstate keyspace, macros
+    /// and compat aliases. A unit with no top-level imports is exactly one
+    /// segment, i.e. the historical whole-unit compile.
+    ///
+    /// Failure semantics: a compile error in segment N surfaces after
+    /// segments 1..N-1 already executed. Inside the transactional eval
+    /// entry points the surrounding snapshot rolls everything back; on a
+    /// bare `eval_str` the earlier segments' effects persist, matching the
+    /// existing precedent that load-once side effects persist across a
+    /// failed load.
     pub fn eval_str(&mut self, code: &str) -> Result<Option<Value>, VMError> {
         let tokens = Parser::new(code.to_string())
             .parse_spanned()
@@ -3634,71 +3713,87 @@ impl VM {
             .source_manager
             .current_revision()
             .unwrap_or_else(|| crate::hot_reload::hash_source(code));
-        let existing_macro_names = self.macro_call_names();
-        let exprs = convert_source_exprs_with_origins(
-            &spanned_exprs,
-            source_revision,
-            &existing_macro_names,
-        );
-        self.register_static_inline_widgets(&spanned_exprs, source_revision);
+        let conversion_context = unit_conversion_context(&spanned_exprs);
+        let segments = split_at_top_level_imports(&spanned_exprs);
+        let mut module_context = None;
+        let mut last_value = None;
+        for segment in segments {
+            let existing_macro_names = self.macro_call_names();
+            let exprs = convert_segment_exprs_with_origins(
+                &conversion_context,
+                segment,
+                source_revision,
+                &existing_macro_names,
+            );
+            self.register_static_inline_widgets(segment, source_revision);
 
-        let entry_idx = self.chunks.len();
-        let names_len = self.global_names.len();
-        // Move the program into the compiler instead of cloning it: this path
-        // runs on every shortcut eval, and cloning (then dropping) thousands
-        // of chunks made every keyboard action pay ~10 ms. The compiler only
-        // appends chunks and global names, so an error restores the moved
-        // state exactly by truncating to the pre-eval lengths.
-        let existing = std::mem::take(&mut self.chunks);
-        let names = std::mem::take(&mut self.global_names);
-        let reactive_namespaces = self.reactive_namespaces.clone();
-        let derived_bindings = self.derived_bindings.clone();
-        let state_bindings = self.state_bindings.clone();
-        let next_node_id = self.dag.next_id;
+            let entry_idx = self.chunks.len();
+            let names_len = self.global_names.len();
+            // Move the program into the compiler instead of cloning it: this
+            // path runs on every shortcut eval, and cloning (then dropping)
+            // thousands of chunks made every keyboard action pay ~10 ms. The
+            // compiler only appends chunks and global names, so an error
+            // restores the moved state exactly by truncating to the
+            // pre-segment lengths.
+            let existing = std::mem::take(&mut self.chunks);
+            let names = std::mem::take(&mut self.global_names);
+            let reactive_namespaces = self.reactive_namespaces.clone();
+            let derived_bindings = self.derived_bindings.clone();
+            let state_bindings = self.state_bindings.clone();
+            let next_node_id = self.dag.next_id;
 
-        let macros = self.macros.clone();
-        let source_file = self.source_manager.current_source_file();
-        let mut compiler = Compiler::new_repl(
-            exprs,
-            existing,
-            names,
-            reactive_namespaces,
-            derived_bindings,
-            state_bindings,
-            next_node_id,
-            macros,
-            source_file,
-        );
-        compiler.set_compat_aliases(self.compat_aliases.clone());
-        match compiler.compile() {
-            Ok(chunks) => {
-                self.chunks = chunks;
-                self.global_names = compiler.take_global_names();
-                self.derived_bindings = compiler.take_derived_bindings();
-                self.state_bindings = compiler.take_state_bindings();
-                self.dag.next_id = compiler.next_node_id();
-                // The compiler's macro table started from this VM's, so
-                // taking it wholesale keeps every existing macro and merges
-                // any new definitions.
-                self.macros = compiler.take_macros();
-                for warning in compiler.take_warnings() {
-                    self.source_manager.push_diagnostic(warning);
-                }
-                self.execute_from(entry_idx)
+            let macros = self.macros.clone();
+            let source_file = self.source_manager.current_source_file();
+            let mut compiler = Compiler::new_repl(
+                exprs,
+                existing,
+                names,
+                reactive_namespaces,
+                derived_bindings,
+                state_bindings,
+                next_node_id,
+                macros,
+                source_file,
+            );
+            compiler.set_compat_aliases(self.compat_aliases.clone());
+            // Continuation segments belong to the same unit: the module
+            // declaration and any :as/:refer bindings compiled in earlier
+            // segments carry forward.
+            if let Some(context) = module_context.take() {
+                compiler.set_module_context(context);
             }
-            Err(error) => {
-                if let CompilerError::Message(message) = &error {
-                    self.source_load_errors.push(message.clone());
+            match compiler.compile() {
+                Ok(chunks) => {
+                    self.chunks = chunks;
+                    self.global_names = compiler.take_global_names();
+                    self.derived_bindings = compiler.take_derived_bindings();
+                    self.state_bindings = compiler.take_state_bindings();
+                    self.dag.next_id = compiler.next_node_id();
+                    // The compiler's macro table started from this VM's, so
+                    // taking it wholesale keeps every existing macro and
+                    // merges any new definitions.
+                    self.macros = compiler.take_macros();
+                    for warning in compiler.take_warnings() {
+                        self.source_manager.push_diagnostic(warning);
+                    }
+                    module_context = Some(compiler.take_module_context());
+                    last_value = self.execute_from(entry_idx)?;
                 }
-                let mut chunks = compiler.take_chunks();
-                chunks.truncate(entry_idx);
-                self.chunks = chunks;
-                let mut names = compiler.take_global_names();
-                names.truncate(names_len);
-                self.global_names = names;
-                Err(VMError::CompileError)
+                Err(error) => {
+                    if let CompilerError::Message(message) = &error {
+                        self.source_load_errors.push(message.clone());
+                    }
+                    let mut chunks = compiler.take_chunks();
+                    chunks.truncate(entry_idx);
+                    self.chunks = chunks;
+                    let mut names = compiler.take_global_names();
+                    names.truncate(names_len);
+                    self.global_names = names;
+                    return Err(VMError::CompileError);
+                }
             }
         }
+        Ok(last_value)
     }
 
     pub fn eval_module_source(
@@ -6912,6 +7007,196 @@ counter
         )
         .expect("module eval");
         assert_eq!(vm.eval_str("(stale-mac 3)"), Ok(Some(Value::Number(6.0))));
+    }
+
+    // ── import's compile-time half (spec §4, eseq-mods.12) ──────────────
+    // A unit is compiled and executed in segments split at top-level
+    // `(import …)` forms, so an import supplies COMPILE-time surface — the
+    // target's defstate keyspace, macros and aliases — to every form after
+    // it in the same unit, retiring §10 hazard (p).
+
+    fn import_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "eseqlisp-ct-import-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The (p) reproducer shape, inverted: a `set!`/read of another
+    /// module's `defstate` in the SAME unit as the import must compile as
+    /// a state write/read, not a raw global store next to the binding.
+    #[test]
+    fn import_supplies_defstate_keyspace_to_the_rest_of_the_unit() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("defstate");
+        std::fs::write(
+            dir.join("ctimp-child.lisp"),
+            "(module ctimp-child)\n(defstate ctimp-counter 1)",
+        )
+        .unwrap();
+        let source = "(import ctimp-child)\n\
+                      (set! ctimp-child/ctimp-counter 5)\n\
+                      (def ctimp-read () ctimp-child/ctimp-counter)";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        assert_eq!(vm.eval_str("(ctimp-read)"), Ok(Some(Value::Number(5.0))));
+        assert_eq!(
+            vm.read_tracked_state_value("ctimp-child/ctimp-counter"),
+            Some(Value::Number(5.0)),
+            "the unit's set! must land on the state binding, not a flat global"
+        );
+        vm.eval_str("(set! ctimp-child/ctimp-counter 9)")
+            .expect("later set!");
+        assert_eq!(
+            vm.eval_str("(ctimp-read)"),
+            Ok(Some(Value::Number(9.0))),
+            "the unit's reader must read through the state binding"
+        );
+    }
+
+    /// Macros are the second compile-time keyspace hazard (p) names: a
+    /// macro call after the import in the same unit must expand.
+    #[test]
+    fn import_supplies_macros_to_the_rest_of_the_unit() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("macros");
+        std::fs::write(
+            dir.join("ctmac-child.lisp"),
+            "(module ctmac-child)\n(defmacro ctmac-double (x) `(+ ,x ,x))",
+        )
+        .unwrap();
+        let source = "(import ctmac-child)\n(def ctmac-val (ctmac-child/ctmac-double 4))";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        assert_eq!(vm.eval_str("ctmac-val"), Ok(Some(Value::Number(8.0))));
+    }
+
+    /// `:as` bindings and the `(module …)` declaration are compiler-local;
+    /// both must survive the segment split introduced by a later import
+    /// (`Compiler::take_module_context` threading).
+    #[test]
+    fn module_context_survives_later_import_segments() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("context");
+        std::fs::write(
+            dir.join("ctas-child.lisp"),
+            "(module ctas-child)\n(def ctas-fn () 7)",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ctas-other.lisp"),
+            "(module ctas-other)\n(def ctas-other-fn () 1)",
+        )
+        .unwrap();
+        let source = "(module ctas-root)\n\
+                      (import ctas-child :as cc)\n\
+                      (import ctas-other)\n\
+                      (def ctas-val (cc/ctas-fn))\n\
+                      (def ctas-own () 42)";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        // The alias bound before the second import still resolves after it …
+        assert_eq!(
+            vm.eval_str("ctas-root/ctas-val"),
+            Ok(Some(Value::Number(7.0)))
+        );
+        // … and bare defs after the imports still intern under the module
+        // declared in the first segment.
+        assert_eq!(
+            vm.eval_str("(ctas-root/ctas-own)"),
+            Ok(Some(Value::Number(42.0)))
+        );
+    }
+
+    /// The compile-time eval consults the same per-pass ledger as the
+    /// runtime half: a second import in the unit (or a later REPL
+    /// `eval_str` in the same pass) is a re-seed, not a re-eval; a new
+    /// import pass re-arms it (the hot-reload contract).
+    #[test]
+    fn import_compile_time_eval_is_load_once_per_pass() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("once");
+        vm.eval_str("(defstate ctonce-count 0)").expect("counter");
+        std::fs::write(
+            dir.join("ctonce-child.lisp"),
+            "(module ctonce-child)\n(set! ctonce-count (+ ctonce-count 1))",
+        )
+        .unwrap();
+        let source = "(import ctonce-child)\n(import ctonce-child)";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        assert_eq!(
+            vm.read_tracked_state_value("ctonce-count"),
+            Some(Value::Number(1.0)),
+            "two imports in one unit must evaluate the target once"
+        );
+        // REPL import later in the same pass: still satisfied.
+        vm.eval_str("(import ctonce-child)").expect("repl import");
+        assert_eq!(
+            vm.read_tracked_state_value("ctonce-count"),
+            Some(Value::Number(1.0))
+        );
+        // A new pass re-arms load-once: re-evaluating the owner root (the
+        // hot-reload shape) re-imports the child.
+        vm.begin_import_pass();
+        vm.eval_module_source(dir.join("root.lisp"), source, 2)
+            .expect("new-pass root eval");
+        assert_eq!(
+            vm.read_tracked_state_value("ctonce-count"),
+            Some(Value::Number(2.0))
+        );
+    }
+
+    /// A imports B while A is mid-compile and B imports A back. The
+    /// per-pass ledger records A when its `(module …)` form executes —
+    /// segment 1, before the import runs — so B's back-import is a no-op
+    /// and the split terminates exactly like the runtime path does.
+    #[test]
+    fn import_cycle_terminates_at_compile_time() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("cycle");
+        std::fs::write(
+            dir.join("cyc-a.lisp"),
+            "(module cyc-a)\n(import cyc-b)\n(def cyc-a-val 1)",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("cyc-b.lisp"),
+            "(module cyc-b)\n(import cyc-a)\n(def cyc-b-val 2)",
+        )
+        .unwrap();
+        let source = std::fs::read_to_string(dir.join("cyc-a.lisp")).unwrap();
+        vm.eval_module_source(dir.join("cyc-a.lisp"), &source, 1)
+            .expect("cycle eval");
+        assert_eq!(vm.eval_str("cyc-a/cyc-a-val"), Ok(Some(Value::Number(1.0))));
+        assert_eq!(vm.eval_str("cyc-b/cyc-b-val"), Ok(Some(Value::Number(2.0))));
+    }
+
+    /// Failure mid-unit on the bare (non-transactional) path: a compile
+    /// error after an import keeps the already-evaluated target, matching
+    /// the load-once precedent that side effects persist across a failed
+    /// load. The transactional entry points roll the whole pass back via
+    /// their snapshot instead.
+    #[test]
+    fn compile_error_after_an_import_keeps_the_imported_module() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("fail");
+        std::fs::write(
+            dir.join("ctfail-child.lisp"),
+            "(module ctfail-child)\n(def ctfail-x 11)",
+        )
+        .unwrap();
+        let source = "(import ctfail-child)\n(module-compat-alias broken)";
+        let result = vm.eval_module_source(dir.join("root.lisp"), source, 1);
+        assert!(result.is_err(), "the malformed form must fail the unit");
+        assert_eq!(
+            vm.eval_str("ctfail-child/ctfail-x"),
+            Ok(Some(Value::Number(11.0))),
+            "the import evaluated before the failing segment compiled"
+        );
     }
 
     /// Macro aliases inherit the global aliases' forward-only constraint:

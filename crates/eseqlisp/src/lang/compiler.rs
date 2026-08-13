@@ -104,6 +104,17 @@ pub struct MacroDef {
     pub body: Expression,
 }
 
+/// Compiler-local module state carried across the segment compilers of one
+/// compile unit (see `Compiler::take_module_context`).
+#[derive(Debug, Clone)]
+pub struct ModuleCompileContext {
+    current_module: String,
+    module_declared: bool,
+    import_aliases: HashMap<String, String>,
+    refers: HashMap<String, String>,
+    known_namespaces: HashSet<String>,
+}
+
 pub struct Compiler {
     expressions: Vec<Expression>,
     chunks: Vec<Chunk>,
@@ -332,6 +343,34 @@ impl Compiler {
     /// through aliases declared by previously evaluated units.
     pub fn set_compat_aliases(&mut self, aliases: HashMap<String, String>) {
         self.compat_aliases = aliases;
+    }
+
+    /// The compiler-local module state a compile unit accumulates as its
+    /// top-level forms are walked: the `(module …)` declaration, `:as` /
+    /// `:refer` bindings and the namespaces made known so far. When the VM
+    /// splits a unit at top-level `import` boundaries (spec §4: import's
+    /// compile-time half) each continuation segment gets a fresh compiler
+    /// re-seeded from the VM, and this context is what threads the unit's
+    /// module identity across those segment compilers.
+    pub fn take_module_context(&mut self) -> ModuleCompileContext {
+        ModuleCompileContext {
+            current_module: std::mem::replace(
+                &mut self.current_module,
+                super::modules::IMPLICIT_MODULE.to_string(),
+            ),
+            module_declared: self.module_declared,
+            import_aliases: std::mem::take(&mut self.import_aliases),
+            refers: std::mem::take(&mut self.refers),
+            known_namespaces: std::mem::take(&mut self.known_namespaces),
+        }
+    }
+
+    pub fn set_module_context(&mut self, context: ModuleCompileContext) {
+        self.current_module = context.current_module;
+        self.module_declared = context.module_declared;
+        self.import_aliases = context.import_aliases;
+        self.refers = context.refers;
+        self.known_namespaces = context.known_namespaces;
     }
 
     pub fn take_warnings(&mut self) -> Vec<String> {
@@ -2373,6 +2412,11 @@ impl Compiler {
     }
 
     pub fn compile(&mut self) -> Result<Vec<Chunk>, CompilerError> {
+        // A continuation segment (module context injected before compile,
+        // see `set_module_context`) already belongs to its unit's module;
+        // stamp the entry chunk the way the `(module …)` form re-stamps it
+        // in the segment that actually contains the declaration.
+        let entry_module = self.declared_module();
         _ = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -2381,7 +2425,7 @@ impl Compiler {
             upvalues: vec![],
             source_symbol: None,
             source_file: self.source_file.clone(),
-            source_module: None,
+            source_module: entry_module,
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
