@@ -1,6 +1,38 @@
 ;; Shared UI state + cursor/page primitives. Loads before the render-root files below so their defstates and defs exist when those files compile.
-;; Extracted from ui/main.lisp (module-system spec slice S2). Headerless on
-;; purpose: implicit eseq.vanilla until per-file (module …) headers land in S3.
+;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
+;;
+;; This is the vanilla UI's shared-state hub: ~20 lisp files and several Rust
+;; call sites reach its names by their flat spellings. It therefore converts
+;; with NO renames and a full set of *identity* compat aliases (the
+;; custom-ui-lego precedent). Identity aliases serve both rungs at once — an
+;; unconverted vanilla caller matches the alias key flat, and a converted
+;; module's bare reference qualifies against itself, misses, and lands on the
+;; same alias by base name. Every aliased name here is a function or a
+;; `defstate`, both of which are immune to hazard (m): function slots are
+;; written once by their `def`, and `defstate` resolves through
+;; `state_bindings` (whose keyspace the alias also covers).
+;;
+;; The one exception is `cursor-step` — see its pin below.
+(module eseq.seq-core-state)
+
+(module-compat-alias selected-bus selected-bus)
+(module-compat-alias selected-bus-name selected-bus-name)
+(module-compat-alias seq-has-selected-bus? seq-has-selected-bus?)
+(module-compat-alias samples-sidebar-visible samples-sidebar-visible)
+(module-compat-alias mixer-panel-visible mixer-panel-visible)
+(module-compat-alias lower-panel-visible lower-panel-visible)
+(module-compat-alias patch-macros-panel-visible patch-macros-panel-visible)
+(module-compat-alias param-mode param-mode)
+(module-compat-alias page-size page-size)
+(module-compat-alias cursor-step-value cursor-step-value)
+(module-compat-alias set-cursor-step-value set-cursor-step-value)
+(module-compat-alias cursor-num-steps cursor-num-steps)
+(module-compat-alias current-step current-step)
+(module-compat-alias page-count page-count)
+(module-compat-alias visible-page visible-page)
+(module-compat-alias playhead-page playhead-page)
+(module-compat-alias page-offset page-offset)
+(module-compat-alias cool-off-follow cool-off-follow)
 
 (defstate selected-bus -1)
 
@@ -24,7 +56,17 @@
 
 ;; Step cursor helpers are used by the FX step buffer root, so define them
 ;; before loading render roots.
-(def cursor-step 0)
+;;
+;; PINNED to eseq.vanilla (spec §3 escape hatch). `cursor-step` is the one name
+;; in this file that is a *mutable plain def* — precisely hazard (m)'s exposure
+;; — and it is spelled flat from outside lisp in two ways that an alias cannot
+;; cover: production Rust reads it with
+;; `rt.global_value("cursor-step")` (src/ui/state_values/param_fields_and_sync.rs:1299),
+;; and a Rust test seeds it with a headerless `(def cursor-step N)`
+;; (src/ui/host_commands/step_history.rs:1632) — a re-def that would strand any
+;; healed module slot on the old cell. Pinning keeps the single flat slot every
+;; one of those spellings already resolves to, so nothing outside changes.
+(def eseq.vanilla/cursor-step 0)
 
 ;; Owner-side reader for the mutable global above (module spec §10 hazard m).
 ;; A converted module's bare `cursor-step` interns its own
@@ -34,7 +76,10 @@
 ;; the module's view at whatever the value was when it first read.  Reading
 ;; through a function is immune: function slots are written once, by their
 ;; `def`, so the heal never gets unlinked.  ui/sequencer.lisp is the caller.
-(def cursor-step-value () cursor-step)
+;; NB: every in-file reference to the pinned global must use the
+;; `eseq.vanilla/` spelling — a bare `cursor-step` here would intern this
+;; module's own `eseq.seq-core-state/cursor-step`, a different slot.
+(def cursor-step-value () eseq.vanilla/cursor-step)
 
 (def set-cursor-step-value (step)
   (let ((parameter-step
@@ -42,7 +87,7 @@
             (or SEQ.fx-step-parameter-step step)
             step)))
     (do
-      (set! cursor-step step)
+      (set! eseq.vanilla/cursor-step step)
       (reactive-set "SEQ" "fx-step-cursor-number" (+ step 1))
       (reactive-set "SEQ" "fx-step-parameter-step" parameter-step)
       (reactive-set "SEQ" "fx-step-value-transpose" (nth SEQ.transposes parameter-step))
@@ -55,18 +100,21 @@
     SEQ.tp-num-steps))
 
 (def current-step ()
-  (mod cursor-step (max 1 (cursor-num-steps))))
+  (mod eseq.vanilla/cursor-step (max 1 (cursor-num-steps))))
 
 (def page-count ()
   (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
 
-(def current-page ()
+;; Private: the app-wide sweep found no caller outside this file, and
+;; `current-page` is one of the three names hazard (k) calls out by name as
+;; collision-famous. `%` keeps it out of the flat keyspace entirely.
+(def %current-page ()
   (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
 
 (def visible-page ()
   (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
     (playhead-page)
-    (current-page)))
+    (%current-page)))
 
 (def playhead-page ()
   (min SEQ.playhead-page
