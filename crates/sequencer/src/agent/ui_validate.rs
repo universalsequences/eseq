@@ -228,10 +228,11 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
     let Expression::List(items) = expr else {
         return Ok(());
     };
-    let head = match items.first() {
+    let qualified_head = match items.first() {
         Some(Expression::Symbol(head)) => head.as_str(),
         _ => "",
     };
+    let head = qualified_head.rsplit('/').next().unwrap_or(qualified_head);
     validate_known_ui_helper_arity(head, items.len().saturating_sub(1))?;
 
     if head == "scroll" {
@@ -462,7 +463,8 @@ fn collect_ui_validation_refs(
         return;
     };
 
-    match head.as_str() {
+    let head = head.rsplit('/').next().unwrap_or(head);
+    match head {
         symbol if symbol == root.symbol() => *root_count += 1,
         "param" | "ui-param-control" | "ui-param-knob" | "ui-param-knob-c" | "ui-lego-knob"
         | "ui-lego-num" | "ui-lego-option" | "ui-lego-row" => {
@@ -670,7 +672,7 @@ mod tests {
         assert!(err.contains("empty parameter name"));
         assert!(err.contains("ui-lego-adsr-s"));
         assert!(err
-            .contains("Use `ui-adsr-switch` only when both ADSR slots reference real DSP params"));
+            .contains("Use `eseq.effects.custom-ui-lego/ui-adsr-switch` only when both ADSR slots reference real DSP params"));
     }
 
     #[test]
