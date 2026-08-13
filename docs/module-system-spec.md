@@ -1962,6 +1962,37 @@ stays as-is; real macro hygiene is out of scope for this spec.
   share the same reactive node after aliases disappear. Capture those fixtures,
   rather than treating a successful parse as evidence that the value flowed.
 
+  ### Content call-site sweep outcome (eseq-mods.11, 2026-08-13)
+
+  Rewritten and reader-parsed: 66 instrument files (5,559 symbols), all 30
+  effect UIs (539), one MIDI FX UI (11), 21 scripts (28), and 17 capture
+  fixtures (40). Defmacros and themes had no old spellings. The acceptance
+  checker reports **zero** over all 210 eligible tracked files. The protected
+  `instruments/monomachine/vox/ui.lisp` remains a separately tracked 101-hit
+  follow-up (`eseq-mods.14`); no other protected dirty root has a tracked
+  in-scope hit.
+
+  Capture verified the risky qualified-state paths: macro mapping highlights,
+  rack macros, scene push, arrangement trim ghost, lit instrument keys, and the
+  Multiverb modulation pane all rendered from their direct qualified writes.
+  The Multiverb fixture also exposed and fixed a pre-existing incomplete
+  identity setup: it now sets the effect track and rack-slot fields as well as
+  chain/slot/bus, so the intended mods pane actually opens. Three representative
+  rewritten instrument families passed `instrument_probe` with finite nonzero
+  output. `tools/audition/audition.py` is currently unusable independently of
+  this sweep: it still reads the removed `src/lisp_host.rs`, then expects the
+  retired `dgen-c-v2-host-sample-rate` ABI instead of `dgen-host-abi-v1`.
+
+  The compatibility-table deletion is intentionally still blocked. Exact
+  whole-file Rust-string accounting finds 425/720 aliases still named by Rust:
+  383 in `state_values/tests.rs`, 12 in the `.10`-listed codegen files, and 165
+  in other Rust (with overlap); 295 have no Rust string reference. Across all
+  repository Lisp/Rust consumers outside each alias's own declaration, 613
+  aliases remain referenced and 107 are now repo-unreferenced. That is `.10`'s
+  remaining work, not this sweep. External user content is protected by the
+  dedicated migration-tool blocker `eseq-mods.13` (pre-load warning plus
+  explicit dry-run/atomic rewrite); silently rewriting user files was rejected.
+
   ### What remains for slice 3
 
   **Nothing — slice 3 is complete.** Every non-fixture file under
