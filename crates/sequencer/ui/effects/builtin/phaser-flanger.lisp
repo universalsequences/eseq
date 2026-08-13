@@ -6,11 +6,48 @@
 ;; modes: their own TIME), then
 ;; the LFO section (free Hz knob or sync grid + shape), the sweep section
 ;; (amount / feedback / Ø / stereo), and output (warmth / dry-wet / output).
+(module eseq.effects.builtin.phaser-flanger)
 
-(def phaser-flanger-orange () (rgba 1.00 0.62 0.25 1.0))
-(def phaser-flanger-cyan   () (rgba 0.45 0.78 0.95 1.0))
+(import eseq.effects.param-controls :refer
+  (fx-param-numeric-value
+   fx-param-on-for?
+   fx-param-value-for
+   fx-set-effect-value
+   fx-toggle-effect-value
+   instrument-param-base-value
+   param-base-max-prop
+   param-base-min-prop
+   param-base-value-prop
+   param-control-key-mode
+   param-control-max
+   param-control-min
+   param-knob-mod-depth-prop
+   param-knob-mod-slot-prop
+   param-mod-wrapper
+   param-plock-active?
+   param-plock-color-b
+   param-plock-color-g
+   param-plock-color-r
+   param-plock-default
+   param-plock-text-color
+   param-selected-mod-slot-prop
+   param-set-control-value
+   param-set-option))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+(import eseq.effects.builtin.filter-core :refer
+  (builtin-fx-param
+   builtin-fx-set-effect-option
+   builtin-fx-filter-mini-number
+   builtin-fx-filter-mini-percent))
 
-(def builtin-fx-phaser-flanger-source (fx)
+;; Migration alias (module spec §10): src/ui/state_values/tests.rs evals the
+;; analyzer-source builder by its flat name (read-only, alias-covered).
+(module-compat-alias builtin-fx-phaser-flanger-source analyzer-source)
+
+(def %orange () (rgba 1.00 0.62 0.25 1.0))
+(def %cyan   () (rgba 0.45 0.78 0.95 1.0))
+
+(def analyzer-source (fx)
   (if (get fx :rack-fx)
     (dict :kind :rack-effect :index (get fx :track-idx)
           :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
@@ -20,7 +57,7 @@
 
 ;; Mod-wrapped knobs (same pattern as the Space Echo knobs so amount /
 ;; feedback / dry-wet pick up modulation rings and plock handling).
-(def builtin-fx-phaser-flanger-knob (fx label-text p decimals)
+(def %knob (fx label-text p decimals)
   (param-mod-wrapper fx p (str "phaser-flanger-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "phaser-flanger-param-" (get p :idx) (param-control-key-mode fx p))
       (knob-number :label label-text
@@ -43,7 +80,7 @@
         :width 5.35 :height 3.55 :knob-size 2.85
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
-(def builtin-fx-phaser-flanger-percent-knob (fx label-text p)
+(def %percent-knob (fx label-text p)
   (param-mod-wrapper fx p (str "phaser-flanger-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "phaser-flanger-param-" (get p :idx) (param-control-key-mode fx p))
       (knob-number :label label-text
@@ -68,11 +105,11 @@
 
 ;; ── Mode section (display + Phaser/Flanger/Doubler + per-mode controls) ──
 
-(def builtin-fx-phaser-flanger-mode-button (fx p index label-text)
+(def %mode-button (fx p index label-text)
   (let ((selected (= (round (fx-param-numeric-value p)) index)))
     (button label-text
       :width 4.85 :height 1.15 :padding 0 :font-size 8.5
-      :background-color (if selected (phaser-flanger-orange) :mixer-control-bg)
+      :background-color (if selected (%orange) :mixer-control-bg)
       :color (if selected :black :dim)
     :border-color :transparent
       :plock-active (if (param-plock-active? fx p) 1 0)
@@ -81,16 +118,16 @@
       :plock-color-b (param-plock-color-b)
       :on-click |x y r| (fx-set-effect-value fx p index))))
 
-(def builtin-fx-phaser-flanger-mode-row (fx p)
+(def %mode-row (fx p)
   (h-stack :gap 0.16
-    (builtin-fx-phaser-flanger-mode-button fx p 0 "Phaser")
-    (builtin-fx-phaser-flanger-mode-button fx p 1 "Flanger")
-    (builtin-fx-phaser-flanger-mode-button fx p 2 "Doubler")))
+    (%mode-button fx p 0 "Phaser")
+    (%mode-button fx p 1 "Flanger")
+    (%mode-button fx p 2 "Doubler")))
 
-(def builtin-fx-phaser-flanger-display (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+(def %display (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
   (phaser-notch
     :width 14.9 :height 3.05
-    :source (builtin-fx-phaser-flanger-source fx)
+    :source (analyzer-source fx)
     :tap-point :post-fx
     :fft-size 4096 :time-slices 64 :min-db -84 :max-db 0 :smoothing 0.72
     ;; These must be the base-value bindings, not the snapshot :value fields.
@@ -111,7 +148,7 @@
     :lfo-shape (instrument-param-base-value shape-p)
     :bpm (bind-seq "bpm")))
 
-(def builtin-fx-phaser-flanger-notches-control (fx p)
+(def %notches-control (fx p)
   (param-mod-wrapper fx p (str "phaser-flanger-param-" (get p :idx) "-mod-wrapper")
     (subtree :key "phaser-flanger-notches-control"
       (h-stack :gap 0.18 :align :baseline
@@ -126,7 +163,7 @@
           :on-change (lambda (v) (param-set-control-value fx p (round v)))
           :width 4.6 :height 1.0)))))
 
-(def builtin-fx-phaser-flanger-circuit-control (fx p)
+(def %circuit-control (fx p)
   (subtree :key "phaser-flanger-circuit-control"
     (h-stack :gap 0.18 :align :center
       (label "circ" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
@@ -139,36 +176,36 @@
         :plock-color-b (param-plock-color-b)
         :width 6.4 :height 1.05 :font-size 9.0))))
 
-(def builtin-fx-phaser-flanger-mode-controls (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p)
+(def %mode-controls (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p)
   (let ((m (round (fx-param-numeric-value mode-p))))
     (if (= m 0)
       (v-stack :gap 0.16 :align :center
         (h-stack :gap 0.45 :align :start
           (v-stack :gap 0.22 :align :baseline
-            (builtin-fx-phaser-flanger-notches-control fx notches-p)
+            (%notches-control fx notches-p)
             (builtin-fx-filter-mini-percent fx "sprd" spread-p))
           (v-stack :gap 0.22 :align :baseline
             (builtin-fx-filter-mini-number fx "cntr" center-p)
             (builtin-fx-filter-mini-number fx "blnd" blend-p)))
-        (builtin-fx-phaser-flanger-circuit-control fx circuit-p))
+        (%circuit-control fx circuit-p))
       (if (= m 1)
         (builtin-fx-filter-mini-number fx "time" flt-p)
         (builtin-fx-filter-mini-number fx "time" dbt-p)))))
 
-(def builtin-fx-phaser-flanger-mode-box (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+(def %mode-box (fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
   (box :width 16.0 :height 9.55 :padding 0.36
        :background-color :bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
-      (builtin-fx-phaser-flanger-display fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
-      (builtin-fx-phaser-flanger-mode-row fx mode-p)
-      (builtin-fx-phaser-flanger-mode-controls fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p))))
+      (%display fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+      (%mode-row fx mode-p)
+      (%mode-controls fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p))))
 
 ;; ── LFO section (free/sync rate + shape) ──
 
-(def builtin-fx-phaser-flanger-sync-button (fx p)
+(def %sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (fx-param-on-for? fx p) (phaser-flanger-orange) :mixer-control-bg)
+    :background-color (if (fx-param-on-for? fx p) (%orange) :mixer-control-bg)
     :border-color :transparent
     :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
@@ -177,10 +214,10 @@
     :plock-color-b (param-plock-color-b)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
-(def builtin-fx-phaser-flanger-div-button (fx p label-text)
+(def %div-button (fx p label-text)
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (phaser-flanger-orange) :mixer-control-bg)
+    :background-color (if (= (get p :text-value) label-text) (%orange) :mixer-control-bg)
     :border-color :transparent
     :color (if (= (get p :text-value) label-text) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
@@ -189,31 +226,31 @@
     :plock-color-b (param-plock-color-b)
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
-(def builtin-fx-phaser-flanger-div-grid (fx p)
+(def %div-grid (fx p)
   (v-stack :gap 0.11
     (h-stack :gap 0.12
-      (builtin-fx-phaser-flanger-div-button fx p "1/32")
-      (builtin-fx-phaser-flanger-div-button fx p "1/16"))
+      (%div-button fx p "1/32")
+      (%div-button fx p "1/16"))
     (h-stack :gap 0.12
-      (builtin-fx-phaser-flanger-div-button fx p "1/16t")
-      (builtin-fx-phaser-flanger-div-button fx p "1/8"))
+      (%div-button fx p "1/16t")
+      (%div-button fx p "1/8"))
     (h-stack :gap 0.12
-      (builtin-fx-phaser-flanger-div-button fx p "1/8t")
-      (builtin-fx-phaser-flanger-div-button fx p "1/8."))
+      (%div-button fx p "1/8t")
+      (%div-button fx p "1/8."))
     (h-stack :gap 0.12
-      (builtin-fx-phaser-flanger-div-button fx p "1/4")
-      (builtin-fx-phaser-flanger-div-button fx p "1/4t"))
+      (%div-button fx p "1/4")
+      (%div-button fx p "1/4t"))
     (h-stack :gap 0.12
-      (builtin-fx-phaser-flanger-div-button fx p "1/4.")
-      (builtin-fx-phaser-flanger-div-button fx p "1/2"))
+      (%div-button fx p "1/4.")
+      (%div-button fx p "1/2"))
     (h-stack :gap 0.12
-      (builtin-fx-phaser-flanger-div-button fx p "1")
+      (%div-button fx p "1")
       (box :width 2.72 :height 0.82))))
 
-(def builtin-fx-phaser-flanger-shape-button (fx p label-text)
+(def %shape-button (fx p label-text)
   (button label-text
     :width 3.85 :height 0.92 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (phaser-flanger-cyan) :mixer-control-bg)
+    :background-color (if (= (get p :text-value) label-text) (%cyan) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
     :border-color :transparent
     :plock-active (if (param-plock-active? fx p) 1 0)
@@ -222,33 +259,33 @@
     :plock-color-b (param-plock-color-b)
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
-(def builtin-fx-phaser-flanger-shape-column (fx p)
+(def %shape-column (fx p)
   (v-stack :gap 0.11 :align :center
-    (builtin-fx-phaser-flanger-shape-button fx p "sine")
-    (builtin-fx-phaser-flanger-shape-button fx p "triangle")
-    (builtin-fx-phaser-flanger-shape-button fx p "ramp")
-    (builtin-fx-phaser-flanger-shape-button fx p "square")))
+    (%shape-button fx p "sine")
+    (%shape-button fx p "triangle")
+    (%shape-button fx p "ramp")
+    (%shape-button fx p "square")))
 
-(def builtin-fx-phaser-flanger-lfo-box (fx sync-p rate-p div-p shape-p)
+(def %lfo-box (fx sync-p rate-p div-p shape-p)
   (box :width 10.6 :height 9.55 :padding 0.30
        :background-color :bg :corner-radius 16
     (v-stack :gap 0.16 :align :center
       (label "LFO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
-      (builtin-fx-phaser-flanger-sync-button fx sync-p)
+      (%sync-button fx sync-p)
       (h-stack :gap 0.30 :align :start
         (if (fx-param-on-for? fx sync-p)
-          (builtin-fx-phaser-flanger-div-grid fx div-p)
+          (%div-grid fx div-p)
           (v-stack :gap 0.30 :align :center
             (box :height 0.8)
-            (builtin-fx-phaser-flanger-knob fx "freq" rate-p 2)))
-        (builtin-fx-phaser-flanger-shape-column fx shape-p)))))
+            (%knob fx "freq" rate-p 2)))
+        (%shape-column fx shape-p)))))
 
 ;; ── Sweep section (amount / feedback / Ø / stereo) ──
 
-(def builtin-fx-phaser-flanger-invert-button (fx p)
+(def %invert-button (fx p)
   (button "Ø"
     :width 1.45 :height 1.05 :padding 0 :font-size 9.5
-    :background-color (if (fx-param-on-for? fx p) (phaser-flanger-orange) :mixer-control-bg)
+    :background-color (if (fx-param-on-for? fx p) (%orange) :mixer-control-bg)
     :color (if (fx-param-on-for? fx p) :black :dim)
     :plock-active (if (param-plock-active? fx p) 1 0)
     :plock-color-r (param-plock-color-r)
@@ -256,31 +293,31 @@
     :plock-color-b (param-plock-color-b)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
-(def builtin-fx-phaser-flanger-sweep-box (fx amount-p feedback-p invert-p stereo-p)
+(def %sweep-box (fx amount-p feedback-p invert-p stereo-p)
   (box :width 10.0 :height 9.55 :padding 0.36
        :background-color :bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "SWEEP" :font-size 8.0 :width 9.0 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (builtin-fx-phaser-flanger-percent-knob fx "amount" amount-p)
-        (builtin-fx-phaser-flanger-percent-knob fx "feedback" feedback-p))
+        (%percent-knob fx "amount" amount-p)
+        (%percent-knob fx "feedback" feedback-p))
       (h-stack :gap 0.30 :align :center
         (label "polarity" :font-size 8.5 :width 3.4 :color :dim :bg :transparent)
-        (builtin-fx-phaser-flanger-invert-button fx invert-p))
+        (%invert-button fx invert-p))
       (builtin-fx-filter-mini-number fx "ster" stereo-p))))
 
 ;; ── Output section ──
 
-(def builtin-fx-phaser-flanger-out-box (fx warmth-p mix-p output-p)
+(def %out-box (fx warmth-p mix-p output-p)
   (box :width 5.3 :height 9.55 :padding 0.30
        :background-color :bg :corner-radius 7
     (v-stack :gap 0.10 :align :center
       (label "OUT" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
-      (builtin-fx-phaser-flanger-knob fx "output" output-p 1)
-      (builtin-fx-phaser-flanger-percent-knob fx "warmth" warmth-p)
-      (builtin-fx-phaser-flanger-percent-knob fx "dry/wet" mix-p))))
+      (%knob fx "output" output-p 1)
+      (%percent-knob fx "warmth" warmth-p)
+      (%percent-knob fx "dry/wet" mix-p))))
 
-(def builtin-fx-phaser-flanger-ui (fx)
+(def panel-ui (fx)
   (let ((params (get fx :params)))
     (let ((mode-p (builtin-fx-param params "mode"))
           (circuit-p (builtin-fx-param params "phaser circuit"))
@@ -305,8 +342,8 @@
                sync-p rate-p div-p shape-p amount-p feedback-p invert-p
                stereo-p warmth-p mix-p output-p)
         (h-stack :gap 0.35 :align :start
-          (builtin-fx-phaser-flanger-mode-box fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
-          (builtin-fx-phaser-flanger-lfo-box fx sync-p rate-p div-p shape-p)
-          (builtin-fx-phaser-flanger-sweep-box fx amount-p feedback-p invert-p stereo-p)
-          (builtin-fx-phaser-flanger-out-box fx warmth-p mix-p output-p))
+          (%mode-box fx mode-p circuit-p notches-p center-p spread-p blend-p flt-p dbt-p sync-p rate-p div-p shape-p amount-p stereo-p)
+          (%lfo-box fx sync-p rate-p div-p shape-p)
+          (%sweep-box fx amount-p feedback-p invert-p stereo-p)
+          (%out-box fx warmth-p mix-p output-p))
         (fx-param-grid params fx)))))

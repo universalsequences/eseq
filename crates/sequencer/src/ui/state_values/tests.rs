@@ -7061,21 +7061,21 @@
         let synth = find_layout_node_by_debug_name(&layout, "fallback-synth-wrapper")
             .unwrap_or_else(|| panic!("fallback synth wrapper; layout={layout_summaries:#?}"));
         let variant_chip =
-            find_layout_node_by_stable_key(&layout, "instrument-key-lock-chip-variant-A")
+            find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-lock-chip-variant-A")
                 .unwrap_or_else(|| panic!("key-lock variant chip; layout={layout_summaries:#?}"));
-        let white_key = find_layout_node_by_stable_key(&layout, "instrument-key-60")
+        let white_key = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-60")
             .unwrap_or_else(|| panic!("white key; layout={layout_summaries:#?}"));
-        let black_key = find_layout_node_by_stable_key(&layout, "instrument-key-61")
+        let black_key = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-61")
             .unwrap_or_else(|| panic!("black key; layout={layout_summaries:#?}"));
-        let variant_key = find_layout_node_by_stable_key(&layout, "instrument-key-69")
+        let variant_key = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-69")
             .unwrap_or_else(|| panic!("key with variant strip; layout={layout_summaries:#?}"));
-        let variant_strip = find_layout_node_by_stable_key(&layout, "instrument-key-strip-69")
+        let variant_strip = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-strip-69")
             .unwrap_or_else(|| panic!("key-lock variant strip; layout={layout_summaries:#?}"));
         let active_indicator =
-            find_layout_node_by_stable_key(&layout, "instrument-key-activity-69")
+            find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-activity-69")
                 .unwrap_or_else(|| panic!("active note indicator; layout={layout_summaries:#?}"));
         let inactive_indicator =
-            find_layout_node_by_stable_key(&layout, "instrument-key-activity-60")
+            find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-activity-60")
                 .unwrap_or_else(|| panic!("inactive note indicator; layout={layout_summaries:#?}"));
 
         assert!(
@@ -7140,10 +7140,10 @@
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
         let updated_layout = editor.widget_layout().expect("updated keys tab layout");
         let now_active =
-            find_layout_node_by_stable_key(&updated_layout, "instrument-key-activity-60")
+            find_layout_node_by_stable_key_suffix(&updated_layout, "/instrument-key-activity-60")
                 .expect("reactively active note indicator");
         let now_inactive =
-            find_layout_node_by_stable_key(&updated_layout, "instrument-key-activity-69")
+            find_layout_node_by_stable_key_suffix(&updated_layout, "/instrument-key-activity-69")
                 .expect("reactively inactive note indicator");
         assert!(
             matches!(now_active.props.get("text"), Some(Value::String(text)) if text == "●"),
@@ -11471,12 +11471,21 @@
             ],
             true,
         );
+        // This test toggles seq-has-selection? mid-run, AFTER converted
+        // modules (eseq.effects.param-controls) have healed their global
+        // slot for the name. A lisp `(def …)` stub StoreGlobals a fresh
+        // cell into the eseq.vanilla slot and strands the healed module
+        // slot on the old value (spec §10 hazard (m)); register_native
+        // mutates the shared cell in place, so every healed reader
+        // tracks the toggles below.
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
             .eval_str(
                 r#"
                 (def selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
                 (def sbrowser-editor-name "")
                 (def sbrowser-sample-selected-path () "")
                 (def sbrowser-add-selected-rack-layer () false)
@@ -12014,8 +12023,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(def seq-has-selection? () true)")
-            .expect("enable selected-step mode");
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
             .invoke(macro_on_change, vec![Value::Number(0.73)])
@@ -12081,8 +12089,7 @@
         }
         editor
             .runtime_mut()
-            .eval_str("(def seq-has-selection? () false)")
-            .expect("restore unselected mode");
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
             .eval_str("(rack-panel-toggle-macros)")
@@ -12203,10 +12210,10 @@
             .widget_layout()
             .expect("rack delete-target layout should be available");
         let delete_target_row =
-            find_layout_node_by_stable_key(&delete_target_layout, "rack-slot-row-0")
+            find_layout_node_by_stable_key_suffix(&delete_target_layout, "/rack-slot-row-0")
                 .expect("rack slot row should remain visible");
         let delete_target_label =
-            find_layout_node_by_stable_key(&delete_target_layout, "rack-slot-label-0")
+            find_layout_node_by_stable_key_suffix(&delete_target_layout, "/rack-slot-label-0")
                 .expect("rack slot label should remain visible");
         assert!(
             delete_target_label.rect.width > 1.0 && delete_target_label.rect.height > 0.5,
@@ -12369,10 +12376,12 @@
                     && matches!(payload.get("effect-slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0)
         ));
 
+        // Re-register the native rather than eval a flat `def`: the def's
+        // StoreGlobal replaces the flat slot and strands the healed slot
+        // that `eseq.effects.param-controls` reads the name through.
         editor
             .runtime_mut()
-            .eval_str("(def seq-has-selection? () true)")
-            .expect("enable selected-step rack FX authoring");
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
             .eval_str(
@@ -12393,8 +12402,7 @@
         ));
         editor
             .runtime_mut()
-            .eval_str("(def seq-has-selection? () false)")
-            .expect("restore default rack FX authoring mode");
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
 
         editor
             .runtime_mut()
@@ -12837,12 +12845,12 @@
             "first drum rack pad bank label should render; layout={layout_summaries:#?}"
         );
         assert_eq!(
-            count_stable_key_prefix(&layout, "drum-rack-pad-"),
+            count_stable_key_prefix(&layout, "eseq.effects.instrument-panel/drum-rack-pad-"),
             16,
             "drum rack should render exactly 16 pads"
         );
         assert!(
-            count_stable_key_prefix(&layout, "drum-rack-bank-") >= 2,
+            count_stable_key_prefix(&layout, "eseq.effects.instrument-panel/drum-rack-bank-") >= 2,
             "drum rack should render octave pad bank selector cells"
         );
         let c4 = find_layout_node_by_text(&layout, "C4")
@@ -12856,14 +12864,15 @@
                 panic!("selected drum pad sampler panel; layout={layout_summaries:#?}")
             });
         assert_finite_nonzero_rect(selected_sampler_panel, "selected drum pad sampler panel");
-        let pad_0 =
-            find_layout_node_by_stable_key(&layout, "drum-rack-pad-0").expect("C4 drum rack pad");
-        let pad_15 =
-            find_layout_node_by_stable_key(&layout, "drum-rack-pad-15").expect("D#5 drum rack pad");
+        let pad_0 = find_layout_node_by_stable_key_suffix(&layout, "/drum-rack-pad-0")
+            .expect("C4 drum rack pad");
+        let pad_15 = find_layout_node_by_stable_key_suffix(&layout, "/drum-rack-pad-15")
+            .expect("D#5 drum rack pad");
         assert_finite_nonzero_rect(pad_0, "C4 drum rack pad");
         assert_finite_nonzero_rect(pad_15, "D#5 drum rack pad");
         for pad_note in 0..16 {
-            let pad = find_layout_node_by_stable_key(&layout, &format!("drum-rack-pad-{pad_note}"))
+            let pad =
+                find_layout_node_by_stable_key_suffix(&layout, &format!("/drum-rack-pad-{pad_note}"))
                 .unwrap_or_else(|| panic!("missing visible drum rack pad {pad_note}"));
             assert_finite_nonzero_rect(pad, &format!("drum rack pad {pad_note}"));
             assert!(
@@ -13034,9 +13043,9 @@
             find_layout_node_by_text(&banked_layout, "D#6").is_some(),
             "banked drum rack should render D#6 pad label; layout={banked_summaries:#?}"
         );
-        let c2_pad = find_layout_node_by_stable_key(&banked_layout, "drum-rack-pad-12")
+        let c2_pad = find_layout_node_by_stable_key_suffix(&banked_layout, "/drum-rack-pad-12")
             .expect("C5 drum rack pad in second bank");
-        let d_sharp_3_pad = find_layout_node_by_stable_key(&banked_layout, "drum-rack-pad-27")
+        let d_sharp_3_pad = find_layout_node_by_stable_key_suffix(&banked_layout, "/drum-rack-pad-27")
             .expect("D#6 drum rack pad in second bank");
         assert_finite_nonzero_rect(c2_pad, "C5 drum rack pad");
         assert_finite_nonzero_rect(d_sharp_3_pad, "D#6 drum rack pad");
@@ -17453,13 +17462,13 @@
             find_layout_node_by_debug_name(track_params_panel, "track-groove-parameters-panel")
                 .expect("groove track parameters panel");
         assert!(
-            find_layout_node_by_stable_key(primary_panel, "fx-track-timebase").is_none(),
+            find_layout_node_by_stable_key_suffix(primary_panel, "/track-timebase").is_none(),
             "track timebase dropdown should not render in the primary track parameter row"
         );
         let timebase_label =
             find_layout_node_by_text(groove_panel, "timebase").expect("timebase label");
         assert_finite_nonzero_rect(timebase_label, "timebase label");
-        let timebase = find_layout_node_by_stable_key(groove_panel, "fx-track-timebase")
+        let timebase = find_layout_node_by_stable_key_suffix(groove_panel, "/track-timebase")
             .expect("track timebase dropdown");
         assert_finite_nonzero_rect(timebase, "track timebase dropdown");
         assert_eq!(
@@ -17468,11 +17477,11 @@
             "track timebase dropdown should show the current display timebase"
         );
         for (key, label) in [
-            ("fx-track-timebase", "timebase dropdown"),
-            ("fx-track-swing", "swing number picker"),
-            ("fx-track-swing-resolution", "swing-resolution dropdown"),
+            ("/track-timebase", "timebase dropdown"),
+            ("/track-swing", "swing number picker"),
+            ("/track-swing-resolution", "swing-resolution dropdown"),
         ] {
-            let control = find_layout_node_by_stable_key(groove_panel, key)
+            let control = find_layout_node_by_stable_key_suffix(groove_panel, key)
                 .unwrap_or_else(|| panic!("{label} should render"));
             assert_finite_nonzero_rect(control, label);
             assert_eq!(layout_prop_number(control, "plock-active"), Some(1.0));
@@ -17541,7 +17550,7 @@
         }
 
         let layout = editor.widget_layout().expect("track panel layout");
-        let timebase = find_layout_node_by_stable_key(&layout, "fx-track-timebase")
+        let timebase = find_layout_node_by_stable_key_suffix(&layout, "/track-timebase")
             .expect("track timebase dropdown");
         let callback = timebase
             .props
@@ -17613,21 +17622,21 @@
         let layout = editor.widget_layout().expect("step panel layout");
         let step_params_panel = find_layout_node_by_debug_name(&layout, "step-parameters-panel")
             .expect("step parameters panel");
-        let track_badge = find_layout_node_by_stable_key(step_params_panel, "fx-step-track-badge")
+        let track_badge = find_layout_node_by_stable_key_suffix(step_params_panel, "/step-track-badge")
             .expect("step panel track badge");
         assert_finite_nonzero_rect(track_badge, "step panel track badge");
         assert!(
             track_badge.props.contains_key("background-color"),
             "step panel track badge should carry the mixer track color"
         );
-        let cursor_label = find_layout_node_by_stable_key(step_params_panel, "fx-step-cursor-label")
+        let cursor_label = find_layout_node_by_stable_key_suffix(step_params_panel, "/step-cursor-label")
             .expect("cursor step label");
         assert_finite_nonzero_rect(cursor_label, "cursor step label");
         assert_eq!(layout_prop_number(cursor_label, "value"), Some(3.0));
         assert_eq!(cursor_label.props.get("prefix"), Some(&Value::String("step ".to_string())));
-        let selection_count = find_layout_node_by_stable_key(
+        let selection_count = find_layout_node_by_stable_key_suffix(
             step_params_panel,
-            "fx-step-selection-count-label",
+            "/step-selection-count-label",
         )
         .expect("selected-step count label");
         assert_finite_nonzero_rect(selection_count, "selected-step count label");
@@ -17638,12 +17647,12 @@
         );
 
         for (key, label, expected_min, expected_max, expected_value) in [
-            ("fx-step-param-transpose", "transpose picker", -48.0, 48.0, 7.0),
-            ("fx-step-param-velocity", "velocity picker", 0.0, 1.0, 0.75),
-            ("fx-step-param-duration", "duration picker", 0.0, 128.0, 2.5),
+            ("/step-param-transpose", "transpose picker", -48.0, 48.0, 7.0),
+            ("/step-param-velocity", "velocity picker", 0.0, 1.0, 0.75),
+            ("/step-param-duration", "duration picker", 0.0, 128.0, 2.5),
         ] {
             let picker =
-                find_layout_node_by_stable_key(step_params_panel, key).unwrap_or_else(|| {
+                find_layout_node_by_stable_key_suffix(step_params_panel, key).unwrap_or_else(|| {
                     panic!("{label} should be present in the step parameters panel")
                 });
             assert_finite_nonzero_rect(picker, label);
@@ -17686,11 +17695,11 @@
         );
         assert_eq!(layout_prop_number(cursor_label, "value"), Some(4.0));
         for (key, expected_value) in [
-            ("fx-step-param-transpose", -5.0),
-            ("fx-step-param-velocity", 0.3),
-            ("fx-step-param-duration", 0.75),
+            ("/step-param-transpose", -5.0),
+            ("/step-param-velocity", 0.3),
+            ("/step-param-duration", 0.75),
         ] {
-            let picker = find_layout_node_by_stable_key(step_params_panel, key)
+            let picker = find_layout_node_by_stable_key_suffix(step_params_panel, key)
                 .unwrap_or_else(|| panic!("{key} after cursor move"));
             assert_eq!(
                 layout_prop_number(picker, "value"),
@@ -17720,9 +17729,9 @@
                     Ok(Value::Bool(true))
                 });
         }
-        let velocity_on_change = find_layout_node_by_stable_key(
+        let velocity_on_change = find_layout_node_by_stable_key_suffix(
             step_params_panel,
-            "fx-step-param-velocity",
+            "/step-param-velocity",
         )
         .and_then(|picker| picker.props.get("on-change"))
         .cloned()
@@ -17748,7 +17757,7 @@
             Value::Number(0.4),
         );
         assert_eq!(layout_prop_number(selection_count, "value"), Some(9.0));
-        let velocity = find_layout_node_by_stable_key(step_params_panel, "fx-step-param-velocity")
+        let velocity = find_layout_node_by_stable_key_suffix(step_params_panel, "/step-param-velocity")
             .expect("velocity picker");
         assert_eq!(
             layout_prop_number(velocity, "value"),
@@ -18025,7 +18034,7 @@
             Some(Value::Bool(true)),
             "the test fixture should remain a drum rack when the step panel renders"
         );
-        let sound_picker = find_layout_node_by_stable_key(&layout, "fx-step-param-sound")
+        let sound_picker = find_layout_node_by_stable_key_suffix(&layout, "/step-param-sound")
             .expect("step inspector should expose a named drum sound picker");
         assert_finite_nonzero_rect(sound_picker, "step inspector drum sound picker");
         editor
@@ -18413,7 +18422,7 @@
         editor.set_layout_viewport(80, 16);
 
         let layout = editor.widget_layout().expect("step panel layout");
-        let transpose = find_layout_node_by_stable_key(&layout, "fx-step-param-transpose")
+        let transpose = find_layout_node_by_stable_key_suffix(&layout, "/step-param-transpose")
             .expect("transpose picker");
         editor
             .runtime_mut()
@@ -20245,7 +20254,7 @@
         editor.set_layout_viewport(80, 60);
         editor.refresh_visible_layouts_for_buffer_named("*plock-panel-test*");
         let layout = editor.widget_layout().expect("track panel layout");
-        let label = find_layout_node_by_stable_key(&layout, "track-plock-row-0-param")
+        let label = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-row-0-param")
             .expect("selected neuron p-lock param cell should render");
 
         assert_finite_nonzero_rect(label, "selected neuron p-lock label");
@@ -20374,11 +20383,11 @@
         let layout = editor.widget_layout().expect("track p-lock table layout");
         let panel = find_layout_node_by_debug_name(&layout, "track-plocks-panel")
             .expect("p-lock panel should render");
-        let table = find_layout_node_by_stable_key(&layout, "track-plock-table")
+        let table = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-table")
             .expect("p-lock table should render");
-        let variant_strip = find_layout_node_by_stable_key(&layout, "track-plock-variant-strip")
+        let variant_strip = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-variant-strip")
             .expect("variant strip should render");
-        let current_chip = find_layout_node_by_stable_key(&layout, "track-plock-chip-variant-B")
+        let current_chip = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-chip-variant-B")
             .expect("current variant chip should render");
 
         assert_finite_nonzero_rect(table, "p-lock table");
@@ -20390,13 +20399,13 @@
 
         for idx in 0..3 {
             let param =
-                find_layout_node_by_stable_key(&layout, &format!("track-plock-row-{idx}-param"))
+                find_layout_node_by_stable_key_suffix(&layout, &format!("/track-plock-row-{idx}-param"))
                     .unwrap_or_else(|| panic!("row {idx} param cell should render"));
             let lock =
-                find_layout_node_by_stable_key(&layout, &format!("track-plock-row-{idx}-lock"))
+                find_layout_node_by_stable_key_suffix(&layout, &format!("/track-plock-row-{idx}-lock"))
                     .unwrap_or_else(|| panic!("row {idx} lock cell should render"));
             let default =
-                find_layout_node_by_stable_key(&layout, &format!("track-plock-row-{idx}-def"))
+                find_layout_node_by_stable_key_suffix(&layout, &format!("/track-plock-row-{idx}-def"))
                     .unwrap_or_else(|| panic!("row {idx} default cell should render"));
             assert_finite_nonzero_rect(param, &format!("row {idx} param cell"));
             assert_finite_nonzero_rect(lock, &format!("row {idx} lock cell"));
@@ -20418,7 +20427,7 @@
             assert_layout_inside(default, panel, &format!("row {idx} default cell"));
         }
 
-        let long_value = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock").unwrap();
+        let long_value = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-row-0-lock").unwrap();
         assert!(
             long_value.rect.width >= 6.2,
             "long signed values need enough lock-column width to avoid drawing into DEF; got {:?}",
@@ -20481,7 +20490,7 @@
 
         let lock_widget_id = {
             let layout = editor.widget_layout().expect("p-lock panel layout");
-            let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+            let lock = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-row-0-lock")
                 .expect("bound p-lock row lock cell");
             assert_eq!(
                 layout_prop_number(lock, "value"),
@@ -20500,7 +20509,7 @@
         editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
 
         let layout = editor.widget_layout().expect("p-lock panel layout");
-        let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+        let lock = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-row-0-lock")
             .expect("bound p-lock row lock cell survives the value change");
         assert_eq!(
             layout_prop_number(lock, "value"),
@@ -20578,7 +20587,7 @@
         editor.set_layout_viewport(28, 24);
         editor.refresh_visible_layouts_for_buffer_named("*plock-panel-preview-test*");
         let layout = editor.widget_layout().expect("track p-lock preview layout");
-        let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+        let lock = find_layout_node_by_stable_key_suffix(&layout, "/track-plock-row-0-lock")
             .expect("preview lock cell should render");
 
         assert_finite_nonzero_rect(lock, "preview p-lock value label");
@@ -27594,7 +27603,7 @@
             instrument_panel_header.rect
         );
 
-        let header = find_layout_node_by_stable_key(&layout, "process-panel-header-42")
+        let header = find_layout_node_by_stable_key_suffix(&layout, "/header-42")
             .expect("process slot header should render");
         assert_finite_nonzero_rect(header, "process slot header");
         editor
@@ -27644,22 +27653,22 @@
             .expect("selected process panel layout should build");
         let selected_panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
             .expect("selected process chain panel should render");
-        let port_button = find_layout_node_by_stable_key(&layout, "process-panel-map-42-shape")
+        let port_button = find_layout_node_by_stable_key_suffix(&layout, "/map-42-shape")
             .expect("selected process slot should render its mappable port button");
         assert_finite_nonzero_rect(port_button, "process port map button");
         assert_layout_inside(port_button, selected_panel, "process port map button");
         for (key, label) in [
-            ("process-panel-enabled-42", "process bypass toggle"),
-            ("process-panel-edit-42", "process edit button"),
-            ("process-panel-end-drop-zone", "process end drop zone"),
+            ("/enabled-42", "process bypass toggle"),
+            ("/edit-42", "process edit button"),
+            ("/end-drop-zone", "process end drop zone"),
         ] {
-            let node = find_layout_node_by_stable_key(&layout, key)
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
                 .unwrap_or_else(|| panic!("{label} should render"));
             assert_finite_nonzero_rect(node, label);
             assert_layout_inside(node, selected_panel, label);
         }
         assert!(
-            find_layout_node_by_stable_key(&layout, "process-panel-remove-42").is_none(),
+            find_layout_node_by_stable_key_suffix(&layout, "/remove-42").is_none(),
             "process rows should use the *fx* Backspace/Delete action instead of an inline remove button"
         );
         let slot_header_row =
@@ -27795,7 +27804,7 @@
 
         let select_process = |editor: &mut eseqlisp::Editor| {
             let layout = editor.widget_layout().expect("process selection layout");
-            let header = find_layout_node_by_stable_key(&layout, "process-panel-header-42")
+            let header = find_layout_node_by_stable_key_suffix(&layout, "/header-42")
                 .expect("process header should render");
             editor
                 .runtime_mut()
@@ -27821,8 +27830,9 @@
         ));
 
         let layout = editor.widget_layout().expect("selected process layout");
-        let process_scroll = find_layout_node_by_stable_key(&layout, "process-chain-scroll-0")
-            .expect("process scroll surface should render");
+        let process_scroll =
+            find_layout_node_by_stable_key_suffix(&layout, "/process-chain-scroll-0")
+                .expect("process scroll surface should render");
         editor
             .runtime_mut()
             .invoke(
@@ -33882,8 +33892,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(def seq-has-selection? () true)")
-            .expect("enable selected-step p-lock authoring");
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
         let on_change = circuit_dropdown
             .props
             .get("on-change")

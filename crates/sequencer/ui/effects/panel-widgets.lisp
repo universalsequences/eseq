@@ -1,38 +1,54 @@
 ;; Shared shader widgets and selected-effect actions for the FX strip.
-(def fx-select-effect (slot)
+(module eseq.effects.panel-widgets)
+
+(import eseq.effects.track-panels :as tp)
+
+(import eseq.effects.process-panel :as pp)
+
+;; Aliases for Rust tests that eval the old flat spellings
+;; (src/ui/state_values/tests.rs). The buffers.lisp flat edges
+;; (fx-has-selected-bus?) retired with eseq.effects.buffers, which imports
+;; this module.
+(module-compat-alias fx-select-effect select-effect)
+(module-compat-alias fx-select-midi-effect select-midi-effect)
+(module-compat-alias fx-select-bus-effect select-bus-effect)
+(module-compat-alias fx-select-rack-effect select-rack-effect)
+(module-compat-alias fx-delete-selected-effect delete-selected-effect)
+
+(def select-effect (slot)
   (do
-    (process-panel-clear-selection)
+    (pp/clear-selection)
     (seq-set-delete-target :fx-effect (dict :chain "audio" :slot slot))))
 
-(def fx-select-midi-effect (slot)
+(def select-midi-effect (slot)
   (do
-    (process-panel-clear-selection)
+    (pp/clear-selection)
     (seq-set-delete-target :fx-effect (dict :chain "midi" :slot slot))))
 
-(def fx-select-bus-effect (bus slot)
+(def select-bus-effect (bus slot)
   (do
-    (process-panel-clear-selection)
+    (pp/clear-selection)
     (seq-set-delete-target :fx-effect (dict :chain "bus" :bus bus :slot slot))))
 
-(def fx-select-rack-effect (track rack-slot effect-slot)
+(def select-rack-effect (track rack-slot effect-slot)
   (do
-    (process-panel-clear-selection)
+    (pp/clear-selection)
     (seq-set-delete-target :fx-effect
       (dict :chain "rack"
             :track track
             :rack-slot rack-slot
             :effect-slot effect-slot))))
 
-(def fx-has-selected-bus? ()
+(def has-selected-bus? ()
   (and (>= selected-bus 0)
        (< selected-bus (len SEQ.bus-names))
        (< selected-bus (len SEQ.bus-effects))))
 
-(def fx-delete-selected-effect ()
-  (if (process-panel-delete-selected)
+(def delete-selected-effect ()
+  (if (pp/delete-selected)
     true
-    (if (fx-plock-row-selected?)
-      (fx-delete-selected-plock-row)
+    (if (tp/plock-row-selected?)
+      (tp/delete-selected-plock-row)
       (seq-delete-active-target))))
 
 (defwidget fx-panel-bg

@@ -2,6 +2,24 @@
 ;; This panel deliberately has no empty state: a track without an attached
 ;; process should not imply that a process stage exists in its signal path.
 
+(module eseq.effects.process-panel)
+
+(import eseq.effects.state :as st
+  :refer (process-panel-selected-track process-panel-selected-instance-id))
+(import eseq.effects.param-controls :as pc)
+(import eseq.effects.panel-widgets :as pw)
+(import eseq.effects.panel-frame :as pf)
+
+;; Aliases for unconverted lisp callers (capture-fixtures/process-panel.lisp)
+;; and Rust tests that eval the old flat spellings
+;; (src/ui/state_values/tests.rs). The buffers.lisp aliases
+;; (process-panel-open-selected-source, process-chain-panel) retired with
+;; eseq.effects.buffers, which imports this module and binds its RET handler
+;; pre-qualified.
+(module-compat-alias process-panel-clear-selection clear-selection)
+(module-compat-alias process-panel-select-slot select-slot)
+(module-compat-alias process-panel-selected-slot selected-slot)
+
 (defwidget process-panel-enabled-dot
   :width 1.35 :height 0.9
   :paint-margin 0.1
@@ -14,9 +32,9 @@
         (rgba 1.0 0.8 0.12 1.0)
         (rgba 0 0 0 1.0)))))
 
-(def process-panel-clear-selection ()
+(def clear-selection ()
   (do
-    (process-map-clear)
+    (pc/process-map-clear)
     (if (or (not (= process-panel-selected-track -1))
             (not (= process-panel-selected-instance-id 0)))
       (do
@@ -24,21 +42,21 @@
         (set! process-panel-selected-instance-id 0))
       false)))
 
-(def process-panel-slot-selected? (slot)
+(def %slot-selected? (slot)
   (and (= process-panel-selected-track SEQ.current-track)
        (= process-panel-selected-instance-id (get slot :instance-id))))
 
-(def process-panel-select-slot (slot)
+(def select-slot (slot)
   (do
-    (if (not (process-panel-slot-selected? slot))
-      (process-map-clear)
+    (if (not (%slot-selected? slot))
+      (pc/process-map-clear)
       nil)
     (set! process-panel-selected-track SEQ.current-track)
     (set! process-panel-selected-instance-id (get slot :instance-id))
-    (fx-clear-delete-selection)))
+    (pf/fx-clear-delete-selection)))
 
-(def process-panel-selected-slot ()
-  (if (and (not (fx-has-selected-bus?))
+(def selected-slot ()
+  (if (and (not (pw/has-selected-bus?))
            (= process-panel-selected-track SEQ.current-track))
     (let ((matches
             (filter
@@ -48,43 +66,43 @@
       (if (> (len matches) 0) (nth matches 0) nil))
     nil))
 
-(def process-panel-source-read-only? (path)
+(def %source-read-only? (path)
   (string-ends-with? path "processes/builtin.lisp"))
 
-(def process-panel-open-slot-source (slot)
+(def %open-slot-source (slot)
   (let ((path (get slot :source-path)))
     (if (and path (not (= path "")))
       (host-command "open-script-source-tab"
         (dict :path path
               :label (str (get slot :process) " source")
-              :read-only (process-panel-source-read-only? path)))
+              :read-only (%source-read-only? path)))
       (status (str "No source file is registered for " (get slot :process))))))
 
-(def process-panel-open-selected-source ()
-  (let ((slot (process-panel-selected-slot)))
+(def open-selected-source ()
+  (let ((slot (selected-slot)))
     (if slot
       (do
-        (process-panel-open-slot-source slot)
+        (%open-slot-source slot)
         true)
       false)))
 
-(def process-panel-delete-selected ()
-  (let ((slot (process-panel-selected-slot)))
+(def delete-selected ()
+  (let ((slot (selected-slot)))
     (if slot
       (do
         (seq-remove-process-slot SEQ.current-track (get slot :instance-id))
-        (process-panel-clear-selection)
+        (clear-selection)
         true)
       false)))
 
-(def process-panel-toggle-enabled (slot)
+(def %toggle-enabled (slot)
   (seq-set-process-slot-enabled
     SEQ.current-track
     (get slot :instance-id)
     (not (get slot :enabled))))
 
-(def process-panel-port-status-color (slot port)
-  (if (process-map-port-active? SEQ.current-track slot port)
+(def %port-status-color (slot port)
+  (if (pc/process-map-port-active? SEQ.current-track slot port)
     (rgba 0.95 0.48 0.18 0.22)
     (if (= (get port :status) "bound")
       (rgba 0.34 0.36 0.38 0.42)
@@ -92,33 +110,33 @@
         (rgba 0.25 0.27 0.31 0.42)
         (rgba 0.18 0.19 0.21 0.42)))))
 
-(def process-panel-port-action-label (slot port)
-  (if (process-map-port-active? SEQ.current-track slot port)
+(def %port-action-label (slot port)
+  (if (pc/process-map-port-active? SEQ.current-track slot port)
     "armed"
     (if (get port :bindable) "map" "unavailable")))
 
-(def process-panel-port-row (slot port)
+(def %port-row (slot port)
   (box
-    :key (str "process-panel-port-" (get slot :instance-id) "-" (get port :name))
+    :key (str "port-" (get slot :instance-id) "-" (get port :name))
     :width :fill :padding 0.10 :corner-radius 5
-    :background-color (process-panel-port-status-color slot port)
+    :background-color (%port-status-color slot port)
     (v-stack :gap 0.08
         (h-stack :width :fill :gap 0.25 :align :baseline
         (label (get port :label)
           :width 5.0 :font-size 8.5 :color :white :bg :transparent)
         (label (get port :status)
           :width 4.0 :font-size 8.0 :color :dim :bg :transparent)
-        (button (process-panel-port-action-label slot port)
-          :key (str "process-panel-map-" (get slot :instance-id) "-" (get port :name))
+        (button (%port-action-label slot port)
+          :key (str "map-" (get slot :instance-id) "-" (get port :name))
           :width 5.0 :height 0.92 :padding 0 :font-size 8.4
           :background-color :transparent :border-color :transparent :color :white
           :on-click (lambda (event)
             (if (get port :bindable)
-              (process-map-arm-port SEQ.current-track slot port)
+              (pc/process-map-arm-port SEQ.current-track slot port)
               nil)))
         (if (get port :clearable)
           (button "clear"
-            :key (str "process-panel-clear-" (get slot :instance-id) "-" (get port :name))
+            :key (str "clear-" (get slot :instance-id) "-" (get port :name))
             :width 3.5 :height 0.92 :padding 0 :font-size 8.2
             :background-color :transparent :border-color :transparent :color :dim
             :on-click (lambda (event)
@@ -127,14 +145,14 @@
                   SEQ.current-track
                   (get slot :instance-id)
                   (get port :name))
-                (process-map-clear))))
+                (pc/process-map-clear))))
           (box :width 3.5 :height 0.92)))
       (label (get port :target)
         :width :fill :font-size 8.2 :color :dim :bg :transparent))))
 
-(def process-panel-inlet-row (slot inlet)
+(def %inlet-row (slot inlet)
   (h-stack
-    :key (str "process-panel-inlet-" (get slot :instance-id) "-" (get inlet :name))
+    :key (str "inlet-" (get slot :instance-id) "-" (get inlet :name))
     :width :fill :gap 0.35 :align :center
     (v-stack :width 8.0 :gap 0
       (label (get inlet :label)
@@ -144,7 +162,7 @@
           :font-size 7.5 :color :dim :bg :transparent)
         (box :height 0)))
     (number-picker
-      :key (str "process-panel-inlet-control-" (get slot :instance-id) "-" (get inlet :name))
+      :key (str "inlet-control-" (get slot :instance-id) "-" (get inlet :name))
       :value (get inlet :value)
       :min (get inlet :min)
       :max (get inlet :max)
@@ -158,13 +176,13 @@
           value))
       :width 6.2 :height 1.0)))
 
-(def process-panel-mappable-ports (slot)
+(def %mappable-ports (slot)
   (filter (lambda (port) (get port :mappable))
     (if (get slot :ports) (get slot :ports) '())))
 
-(def process-panel-slot-editor (slot)
+(def %slot-editor (slot)
   (let ((inlets (if (get slot :inlets) (get slot :inlets) '()))
-        (ports (process-panel-mappable-ports slot)))
+        (ports (%mappable-ports slot)))
     (box :width :fill :padding 0.28
       :debug-name (str "process-panel-slot-editor-" (get slot :instance-id))
       :background-color :instrument-control-bg
@@ -174,29 +192,29 @@
             :width :fill :font-size 8.0 :color :dim :bg :transparent)
           (box :height 0))
         (each inlets |inlet|
-          (process-panel-inlet-row slot inlet))
+          (%inlet-row slot inlet))
         (each ports |port|
-          (process-panel-port-row slot port))
+          (%port-row slot port))
         (if (and (= (len inlets) 0) (= (len ports) 0))
           (label "No inline controls"
             :font-size 8.2 :color :dim :bg :transparent)
           (box :height 0))))))
 
-(def process-panel-drag-payload (slot)
+(def %drag-payload (slot)
   (dict :kind "process-instance"
         :track SEQ.current-track
         :instance-id (get slot :instance-id)))
 
-(def process-panel-drop-meta (slot)
+(def %drop-meta (slot)
   (dict :kind "process-slot"
         :track SEQ.current-track
         :before-instance-id (get slot :instance-id)))
 
-(def process-panel-drop-at-end-meta ()
+(def %drop-at-end-meta ()
   (dict :kind "process-slot-end"
         :track SEQ.current-track))
 
-(def process-panel-drop (event)
+(def %drop (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (if (and (= (get payload :kind) "process-instance")
@@ -209,22 +227,22 @@
           (get target :before-instance-id)))
       (status "Move processes within the same track chain"))))
 
-(def process-panel-slot-header (slot index)
-  (box :key (str "process-panel-header-" (get slot :instance-id))
+(def %slot-header (slot index)
+  (box :key (str "header-" (get slot :instance-id))
     :width :fill :height 1.34 :padding 0.10
     :background-color
-      (if (process-panel-slot-selected? slot)
+      (if (%slot-selected? slot)
         (rgba 0.30 0.32 0.34 1.0)
         (rgba 1 1 1 0.025))
-    :on-click (lambda (event) (process-panel-select-slot slot))
-    :on-double-click (lambda (event) (process-panel-open-slot-source slot))
+    :on-click (lambda (event) (select-slot slot))
+    :on-double-click (lambda (event) (%open-slot-source slot))
     (h-stack :debug-name (str "process-panel-slot-header-row-" (get slot :instance-id))
       :width :fill :gap 0.30 :align :baseline
       (label (str (+ index 1))
         :width 1.25 :font-size 8.5 :color :dim :bg :transparent)
-      (box :key (str "process-panel-enabled-" (get slot :instance-id))
+      (box :key (str "enabled-" (get slot :instance-id))
         :width 1.35 :height 1.05 :padding 0
-        :on-click (lambda (event) (process-panel-toggle-enabled slot))
+        :on-click (lambda (event) (%toggle-enabled slot))
         (process-panel-enabled-dot
           :active (if (get slot :enabled) 1 0)))
       (label (substring (get slot :process) 0 (min 24 (len (get slot :process))))
@@ -240,47 +258,47 @@
         (label "BYPASS" :width 4.2 :font-size 7.5 :color :dim :bg :transparent)
         (box :width 0))
       (button "edit"
-        :key (str "process-panel-edit-" (get slot :instance-id))
+        :key (str "edit-" (get slot :instance-id))
         :width 3.2 :height 0.9 :padding 0 :font-size 8
         :background-color :transparent :border-color :transparent :color :dim
-        :on-click (lambda (event) (process-panel-open-slot-source slot))))))
+        :on-click (lambda (event) (%open-slot-source slot))))))
 
-(def process-panel-slot (slot index)
+(def %slot (slot index)
   (subtree :key (str "process-panel-slot-" (get slot :instance-id))
-    (box :key (str "process-panel-slot-drop-" (get slot :instance-id))
+    (box :key (str "slot-drop-" (get slot :instance-id))
       :width :fill :padding 0 :corner-radius 5
       :debug-name (str "process-panel-slot-" index)
-      :border-width (if (process-panel-slot-selected? slot) 0.8 0.35)
+      :border-width (if (%slot-selected? slot) 0.8 0.35)
       :border-color
-        (if (process-panel-slot-selected? slot)
+        (if (%slot-selected? slot)
           (rgba 0.48 0.50 0.52 1.0)
           (rgba 1 1 1 0.10))
       :drag-type "process-instance"
-      :drag-payload (process-panel-drag-payload slot)
+      :drag-payload (%drag-payload slot)
       :drop-types (list "process-instance")
-      :drop-meta (process-panel-drop-meta slot)
+      :drop-meta (%drop-meta slot)
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-hover-background-color (rgba 0.22 0.23 0.25 0.42)
-      :on-drop (lambda (event) (process-panel-drop event))
+      :on-drop (lambda (event) (%drop event))
       (v-stack :width :fill :gap 0
-        (process-panel-slot-header slot index)
-        (if (process-panel-slot-selected? slot)
-          (process-panel-slot-editor slot)
+        (%slot-header slot index)
+        (if (%slot-selected? slot)
+          (%slot-editor slot)
           (box :height 0))))))
 
-(def process-panel-end-drop-zone ()
-  (box :key "process-panel-end-drop-zone"
+(def %end-drop-zone ()
+  (box :key "end-drop-zone"
     :width :fill :height 0.55 :padding 0 :corner-radius 3
     :border-width 0.35 :border-color (rgba 1 1 1 0.08)
     :drop-types (list "process-instance")
-    :drop-meta (process-panel-drop-at-end-meta)
+    :drop-meta (%drop-at-end-meta)
     :drop-hover-border-color :mixer-strip-selected-border
     :drop-hover-background-color (rgba 0.22 0.23 0.25 0.42)
-    :on-click (lambda (event) (process-panel-clear-selection))
-    :on-drop (lambda (event) (process-panel-drop event))))
+    :on-click (lambda (event) (clear-selection))
+    :on-drop (lambda (event) (%drop event))))
 
 (def process-chain-panel ()
-  (box :width 26 :height fx-fixed-panel-height :padding 0
+  (box :width 26 :height st/fx-fixed-panel-height :padding 0
     :debug-name "process-chain-panel"
     :background "fx-panel-bg"
     :color :instrument-panel-bg
@@ -290,9 +308,9 @@
     (v-stack :width :fill :height :fill :gap 0
       (box :debug-name "process-panel-header-box"
         :width :fill :height 1 :padding 0 :v-align :center :h-align :start
-        :on-click (lambda (event) (process-panel-clear-selection))
+        :on-click (lambda (event) (clear-selection))
         (h-stack :width :fill :gap 0.5 :align :center
-          (fx-panel-header-leading-spacer)
+          (pf/fx-panel-header-leading-spacer)
           (label "PROCESS"
             :font-size 11 :color :white :bg :transparent)
           (box :flex 1 :height 0.1)
@@ -301,8 +319,8 @@
           (box :width 0.4 :height 0.1)))
       (scroll :key (str "process-chain-scroll-" SEQ.current-track)
         :width :fill :flex 1
-        :on-click (lambda (event) (process-panel-clear-selection))
+        :on-click (lambda (event) (clear-selection))
         (v-stack :width :fill :padding 0.24 :gap 0.16
           (each SEQ.process-slots |slot index|
-            (process-panel-slot slot index))
-          (process-panel-end-drop-zone))))))
+            (%slot slot index))
+          (%end-drop-zone))))))

@@ -1,11 +1,34 @@
 ;; Common panel framing, headers, and effect selection helpers.
+(module eseq.effects.panel-frame)
+
+(import eseq.effects.panel-widgets :as pw)
+(import eseq.effects.effect-panels :as ep)
+(import eseq.effects.param-controls :as pc)
+(import eseq.effects.process-panel :as pp)
+(import eseq.effects.track-panels :as tp)
+
+;; Migration aliases (module spec §10). This is the cycle hub of effects/:
+;; the still-unconverted instrument-panel, sampler-panel, modulator-panel and
+;; panel-bodies call these names by their flat spelling, and bare callers
+;; cannot see qualified names, so every alias is an identity alias. The two
+;; copy-values entry points are also eval'd by name from Rust test harnesses
+;; (src/ui/state_values/tests.rs). Deleted as the caller files convert.
+;; Converted callers (effect-panels, process-panel, param-controls,
+;; effect-modulation, filter-core, str8-delay) import this module instead.
+(module-compat-alias fx-panel-body fx-panel-body)
+(module-compat-alias fx-panel-header-leading-spacer fx-panel-header-leading-spacer)
+(module-compat-alias header-actions-menu header-actions-menu)
+(module-compat-alias instrument-header-actions-menu instrument-header-actions-menu)
+(module-compat-alias fx-copy-values-to-all-scenes fx-copy-values-to-all-scenes)
+(module-compat-alias instrument-copy-values-to-all-scenes instrument-copy-values-to-all-scenes)
+
 (def fx-panel-body (debug-name children)
   (box
-    (v-stack :gap 0 
+    (v-stack :gap 0
       children)
     :debug-name debug-name
     :on-click (lambda (info) (fx-clear-selected-effect))
-    :padding 0 
+    :padding 0
     :flex 1
     :v-align :start
     :h-align :start))
@@ -46,7 +69,7 @@
     :hover-bg :dropdown-hover-bg
     :on-change (lambda (item) (action item))))
 
-(def fx-header-actions-menu (fx)
+(def %fx-header-actions-menu (fx)
   (header-actions-menu
     (str "effect-header-actions-" (fx-effect-chain-kind fx) "-"
          (if (get fx :bus-fx) (get fx :bus-idx) (get fx :track-idx)) "-"
@@ -54,15 +77,15 @@
     (list "Copy current values to all scenes")
     (lambda (item) (fx-copy-values-to-all-scenes fx))))
 
-(def instrument-group-rack (inst)
+(def %instrument-group-rack (inst)
   (host-command "group-track-to-instrument-rack"
     (dict :track (get inst :track))))
 
-(def instrument-edit-source (inst)
+(def %instrument-edit-source (inst)
   (host-command "enter-edit-instrument"
     (dict :name (if (get inst :name) (get inst :name) SEQ.sidebar-instrument-name))))
 
-(def instrument-header-action-options (inst)
+(def %instrument-header-action-options (inst)
   (append
     (append
       (list "Copy current values to all scenes")
@@ -76,11 +99,11 @@
       (list "Edit")
       (list))))
 
-(def instrument-run-header-action (inst item)
+(def %instrument-run-header-action (inst item)
   (if (= item "Group Rack")
-    (instrument-group-rack inst)
+    (%instrument-group-rack inst)
     (if (= item "Edit")
-      (instrument-edit-source inst)
+      (%instrument-edit-source inst)
       (instrument-copy-values-to-all-scenes inst))))
 
 (def instrument-header-actions-menu (inst)
@@ -88,18 +111,18 @@
     (str "instrument-header-actions-"
          (get inst :track) "-"
          (if (= (get inst :rack-slot) nil) "main" (get inst :rack-slot)))
-    (instrument-header-action-options inst)
-    (lambda (item) (instrument-run-header-action inst item))))
+    (%instrument-header-action-options inst)
+    (lambda (item) (%instrument-run-header-action inst item))))
 
-(def fx-effect-drag-kind (fx)
+(def %fx-effect-drag-kind (fx)
   (if (get fx :rack-fx)
     "rack-effect-instance"
     (if (get fx :midi-fx)
     "midi-effect-instance"
     (if (get fx :bus-fx) "bus-effect-instance" "audio-effect-instance"))))
 
-(def fx-effect-drag-payload (fx title)
-  (dict :kind (fx-effect-drag-kind fx)
+(def %fx-effect-drag-payload (fx title)
+  (dict :kind (%fx-effect-drag-kind fx)
         :chain (fx-effect-chain-kind fx)
         :track (if (get fx :rack-fx) (get fx :track-idx) SEQ.current-track)
         :rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1)
@@ -129,32 +152,32 @@
   (box :width :fill :height 1 :padding 0 :v-align :center :h-align :start
     :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
     :drag-type "effect-instance"
-    :drag-payload (fx-effect-drag-payload fx title)
+    :drag-payload (%fx-effect-drag-payload fx title)
     :on-click (lambda (info)
       (if (get fx :midi-fx)
-        (fx-select-midi-effect (get fx :slot-idx))
+        (pw/select-midi-effect (get fx :slot-idx))
         (if (get fx :rack-fx)
-          (fx-select-rack-effect
+          (pw/select-rack-effect
             (get fx :track-idx)
             (get fx :rack-slot)
             (get fx :slot-idx))
           (if (get fx :bus-fx)
-          (fx-select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
-          (fx-select-effect (get fx :slot-idx))))))
+          (pw/select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
+          (pw/select-effect (get fx :slot-idx))))))
     (h-stack :gap 0.5 :align :center :width :fill
       (fx-panel-header-leading-spacer)
-      (fx-enabled-toggle (enabled-param params) fx
+      (ep/enabled-toggle (ep/enabled-param params) fx
         (if (get fx :midi-fx)
           (str "midi-fx-enabled-" (get fx :slot-idx))
           (if (get fx :bus-fx)
             (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
             (str "audio-fx-enabled-" (get fx :slot-idx)))))
       (label title :font-size 11 :color :white :bg :transparent)
-      (if (fx-has-modulators? fx)
-        (effect-mods-toggle-button fx)
+      (if (pc/fx-has-modulators? fx)
+        (ep/effect-mods-toggle-button fx)
         (box))
       (box :flex 1 :height 0.15)
-      (if (get fx :rack-fx) (box) (fx-header-actions-menu fx))
+      (if (get fx :rack-fx) (box) (%fx-header-actions-menu fx))
       (if (and (not (get fx :rack-fx)) (not (get fx :midi-fx)) (not (get fx :builtin)))
         (button "edit" :background-color :black :width 4 :height 0.75 :align :center :font-size 10
           :on-click (lambda (info)
@@ -169,12 +192,13 @@
 
 (def fx-clear-delete-selection ()
   (do
-    (if (not (= fx-selected-plock-row -1))
-      (set! fx-selected-plock-row -1)
+    (if (not (= tp/selected-plock-row -1))
+      (set! tp/selected-plock-row -1)
       false)
+    ;; seq-clear-delete-target is a Rust native (src/ui/natives.rs) — bare.
     (seq-clear-delete-target)))
 
 (def fx-clear-selected-effect ()
   (do
-    (process-panel-clear-selection)
+    (pp/clear-selection)
     (fx-clear-delete-selection)))

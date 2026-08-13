@@ -1,5 +1,28 @@
 ;; Filter built-in FX panel.
-(def builtin-fx-filter-ui (fx)
+(module eseq.effects.builtin.filter-panel)
+
+(import eseq.effects.builtin.filter-core :refer
+  (builtin-fx-param
+   builtin-fx-param-subtree-key
+   builtin-fx-filter-band
+   builtin-fx-filter-cutoff-knob
+   builtin-fx-filter-resonance-knob
+   builtin-fx-filter-mini-percent
+   builtin-fx-filter-mini-option
+   builtin-fx-filter-mini-number
+   builtin-fx-filter-sync-label
+   builtin-fx-handle-filter-curve-action
+   builtin-fx-set-effect-option))
+(import eseq.effects.param-controls :refer
+  (fx-param-on-for?
+   fx-set-effect-value
+   param-plock-active?
+   param-plock-color-r
+   param-plock-color-g
+   param-plock-color-b))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+
+(def panel (fx)
   (let ((params (get fx :params)))
     (let ((mode-p (builtin-fx-param params "mode"))
         (cutoff-p (builtin-fx-param params "cutoff"))

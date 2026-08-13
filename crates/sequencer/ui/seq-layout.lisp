@@ -4,6 +4,8 @@
 
 (module eseq.seq-layout)
 
+(import eseq.effects.param-controls :as pc)
+
 ;; Migration aliases (module spec §10): the names an unconverted caller — or
 ;; Rust — still spells flat. `apply-fx-layout` is the production startup
 ;; expression (`STARTUP_GRID_LAYOUT_EXPR`, src/ui/editor_setup.rs) and the two
@@ -70,14 +72,14 @@
     min-width max-width min-height max-height))
 
 (def %samples-sidebar-layout-spec ()
-  (if (param-macro-mapping-active?)
+  (if (pc/param-macro-mapping-active?)
     (%collapsible-panel-layout-spec "*macro-mappings*"
       (lambda () (macro-clear-mapping-arm))
       46 64 nil nil)
     (%samples-panel-layout-spec 34 42 nil nil)))
 
 (def %sidebar-ratio ()
-  (if (param-macro-mapping-active?) 0.34 0.2))
+  (if (pc/param-macro-mapping-active?) 0.34 0.2))
 
 (def %main-and-mixer-layout-spec ()
   (if mixer-panel-visible

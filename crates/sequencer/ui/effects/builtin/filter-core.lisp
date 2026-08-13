@@ -1,5 +1,42 @@
 ;; Shared built-in FX helpers and Filter curve/control primitives.
 ;; Custom UI bodies for built-in audio effects.
+(module eseq.effects.builtin.filter-core)
+
+(import eseq.effects.param-controls :refer
+  (custom-ui-option-index
+   fx-param-on-for?
+   fx-param-value-for
+   fx-set-effect-value
+   param-control-max
+   param-control-min
+   param-mod-wrapper
+   param-plock-active?
+   param-plock-color-b
+   param-plock-color-g
+   param-plock-color-r
+   param-plock-default
+   param-plock-text-color
+   param-set-control-value))
+
+(import eseq.effects.panel-frame :refer (fx-clear-selected-effect))
+
+;; Migration aliases (module spec §10). Every one of the 15 built-in effect
+;; panels is still unconverted and calls these names by their flat spelling,
+;; so — like eseq.effects.param-controls — every public name keeps its
+;; spelling and every alias is an identity alias. They are deleted as the
+;; panel files convert. `%`-private helpers get no alias.
+(module-compat-alias builtin-fx-param builtin-fx-param)
+(module-compat-alias builtin-fx-param-subtree-key builtin-fx-param-subtree-key)
+(module-compat-alias builtin-fx-filter-band builtin-fx-filter-band)
+(module-compat-alias builtin-fx-set-effect-option builtin-fx-set-effect-option)
+(module-compat-alias builtin-fx-handle-filter-curve-action builtin-fx-handle-filter-curve-action)
+(module-compat-alias builtin-fx-filter-sync-label builtin-fx-filter-sync-label)
+(module-compat-alias builtin-fx-filter-mini-number builtin-fx-filter-mini-number)
+(module-compat-alias builtin-fx-filter-mini-cutoff builtin-fx-filter-mini-cutoff)
+(module-compat-alias builtin-fx-filter-cutoff-knob builtin-fx-filter-cutoff-knob)
+(module-compat-alias builtin-fx-filter-resonance-knob builtin-fx-filter-resonance-knob)
+(module-compat-alias builtin-fx-filter-mini-percent builtin-fx-filter-mini-percent)
+(module-compat-alias builtin-fx-filter-mini-option builtin-fx-filter-mini-option)
 
 ;; NOTE: no drag "live echo" state here on purpose. The curve editor renders
 ;; its own in-flight drag from widget-local state (LIVE_BANDS in
@@ -16,7 +53,7 @@
 ;; so each one lives in its own subtree — a p-lock change reruns only the
 ;; affected controls instead of the whole effect panel. Keys carry the chain
 ;; identity so two panels with the same param index can never collide.
-(def builtin-fx-param-subtree-scope (fx)
+(def %param-subtree-scope (fx)
   (if (get fx :rack-fx)
     (str "rack-" (get fx :track-idx) "-" (get fx :rack-slot) "-" (get fx :slot-idx))
     (if (get fx :bus-fx)
@@ -26,9 +63,9 @@
         (str "audio-" (get fx :slot-idx))))))
 
 (def builtin-fx-param-subtree-key (fx p tag)
-  (str "builtin-fx-" tag "-" (builtin-fx-param-subtree-scope fx) "-param-" (get p :idx)))
+  (str "builtin-fx-" tag "-" (%param-subtree-scope fx) "-param-" (get p :idx)))
 
-(def builtin-fx-filter-mode-type (mode-label)
+(def %filter-mode-type (mode-label)
   (if (= mode-label "highpass")
     "highpass"
     (if (= mode-label "bandpass")
@@ -37,23 +74,23 @@
         "notch"
         "lowpass"))))
 
-(def builtin-fx-filter-cutoff-value (fx cutoff-p)
+(def %filter-cutoff-value (fx cutoff-p)
   (fx-param-value-for fx cutoff-p))
 
-(def builtin-fx-filter-resonance-value (fx resonance-p)
+(def %filter-resonance-value (fx resonance-p)
   (fx-param-value-for fx resonance-p))
 
 (def builtin-fx-filter-band (fx mode-p cutoff-p resonance-p)
   (dict
     :id 0
-    :type (builtin-fx-filter-mode-type (get mode-p :text-value))
-    :freq (builtin-fx-filter-cutoff-value fx cutoff-p)
+    :type (%filter-mode-type (get mode-p :text-value))
+    :freq (%filter-cutoff-value fx cutoff-p)
     :freq-min (param-control-min fx cutoff-p)
     :freq-max (param-control-max fx cutoff-p)
     :gain 0
     :gain-min -12
     :gain-max 12
-    :q (builtin-fx-filter-resonance-value fx resonance-p)
+    :q (%filter-resonance-value fx resonance-p)
     :q-min (get resonance-p :min)
     :q-max (get resonance-p :max)
     :enabled true
@@ -88,7 +125,7 @@
                 :commit (= (get event :type) :commit-band)))))
     nil))
 
-(def builtin-fx-filter-readout (fx label-text p value width)
+(def %filter-readout (fx label-text p value width)
   (subtree :key (builtin-fx-param-subtree-key fx p "readout")
     (h-stack :gap 0.18 :align :baseline
       (label label-text :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
@@ -102,7 +139,7 @@
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width width :height 0.95))))
 
-(def builtin-fx-filter-number (fx label-text p width decimals)
+(def %filter-number (fx label-text p width decimals)
   (subtree :key (builtin-fx-param-subtree-key fx p "num")
     (h-stack :gap 0.22 :align :baseline
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
@@ -116,7 +153,7 @@
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width width :height 1.05))))
 
-(def builtin-fx-filter-percent (fx label-text p width)
+(def %filter-percent (fx label-text p width)
   (subtree :key (builtin-fx-param-subtree-key fx p "pct")
     (h-stack :gap 0.22 :align :baseline
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
@@ -130,7 +167,7 @@
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width width :height 1.05))))
 
-(def builtin-fx-filter-option (fx label-text p width)
+(def %filter-option (fx label-text p width)
   (subtree :key (builtin-fx-param-subtree-key fx p "opt")
     (h-stack :gap 0.22 :align :center
       (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
@@ -146,7 +183,7 @@
 (def builtin-fx-filter-sync-label (fx p)
   (if (fx-param-on-for? fx p) "sync" "free"))
 
-(def builtin-fx-filter-sync-control (fx p)
+(def %filter-sync-control (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "sync")
     (h-stack :gap 0.22 :align :center
       (label "sync" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
@@ -179,7 +216,7 @@
     (subtree :key (builtin-fx-param-subtree-key fx p "mini-cut")
       (h-stack :gap 0.18 :align :baseline
         (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-        (number-picker :value (builtin-fx-filter-cutoff-value fx p)
+        (number-picker :value (%filter-cutoff-value fx p)
           :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
           :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
           :plock-active (if (param-plock-active? fx p) 1 0)
@@ -189,11 +226,11 @@
           :on-change (lambda (v) (param-set-control-value fx p v))
           :width 4.6 :height 1.0)))))
 
-(def builtin-fx-filter-mini-resonance (fx p)
+(def %filter-mini-resonance (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "mini-res")
     (h-stack :gap 0.18 :align :baseline
       (label "res" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-      (number-picker :value (builtin-fx-filter-resonance-value fx p)
+      (number-picker :value (%filter-resonance-value fx p)
         :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
         :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
         :plock-active (if (param-plock-active? fx p) 1 0)
@@ -207,7 +244,7 @@
   (param-mod-wrapper fx p (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (builtin-fx-param-subtree-key fx p "cut-knob")
       (knob-number :label "cut"
-        :value (builtin-fx-filter-cutoff-value fx p)
+        :value (%filter-cutoff-value fx p)
         :min (param-control-min fx p) :max (param-control-max fx p) :decimals 0
         :font-size 9.5 :label-font-size 9.5
         :text-color (param-plock-text-color fx p) :label-color :dim
@@ -222,7 +259,7 @@
 (def builtin-fx-filter-resonance-knob (fx p)
   (subtree :key (builtin-fx-param-subtree-key fx p "res-knob")
     (knob-number :label "res"
-      :value (builtin-fx-filter-resonance-value fx p)
+      :value (%filter-resonance-value fx p)
       :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
       :font-size 9.5 :label-font-size 9.5
       :text-color (param-plock-text-color fx p) :label-color :dim

@@ -1,5 +1,34 @@
 ;; DJ Mixer built-in FX panel.
-(def builtin-fx-dj-mixer-knob (fx label-text p decimals)
+(module eseq.effects.builtin.dj-mixer)
+
+(import eseq.effects.builtin.filter-core :refer
+  (builtin-fx-param
+   builtin-fx-set-effect-option))
+(import eseq.effects.param-controls :refer
+  (fx-param-on?
+   fx-param-value-for
+   fx-toggle-effect-value
+   param-base-max-prop
+   param-base-min-prop
+   param-base-value-prop
+   param-control-key-mode
+   param-control-max
+   param-control-min
+   param-knob-mod-depth-prop
+   param-knob-mod-slot-prop
+   param-mod-wrapper
+   param-mods-open?
+   param-plock-active?
+   param-plock-color-b
+   param-plock-color-g
+   param-plock-color-r
+   param-plock-default
+   param-plock-text-color
+   param-selected-mod-slot-prop
+   param-set-control-value))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+
+(def %knob (fx label-text p decimals)
   (param-mod-wrapper fx p (str "dj-mixer-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "dj-mixer-param-" (get p :idx) (param-control-key-mode fx p))
       (knob-number :label label-text
@@ -22,16 +51,16 @@
         :width 5.6 :height 2.65 :knob-size 1.9
         :on-change (lambda (v) (param-set-control-value fx p v))))))
 
-(def builtin-fx-dj-mixer-toggle-active? (fx p)
+(def %toggle-active? (fx p)
   (> (reactive-value (fx-param-value-for fx p)) 0.5))
 
-(def builtin-fx-dj-mixer-toggle-mod-mode? (fx p)
+(def %toggle-mod-mode? (fx p)
   (and (param-mods-open? fx) (get p :modulatable)))
 
-(def builtin-fx-dj-mixer-toggle-button (fx p label-text)
+(def %toggle-button (fx p label-text)
   (param-mod-wrapper fx p (str "dj-mixer-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "dj-mixer-param-" (get p :idx) (param-control-key-mode fx p))
-      (let ((mod-mode (builtin-fx-dj-mixer-toggle-mod-mode? fx p)))
+      (let ((mod-mode (%toggle-mod-mode? fx p)))
         (button label-text
           :width 5.6 :height 1.2 :padding 0 :font-size 11.0
           :active (fx-param-value-for fx p)
@@ -44,12 +73,12 @@
           :plock-color-g (param-plock-color-g)
           :plock-color-b (param-plock-color-b)
           :on-click |x y r|
-            (let ((active (builtin-fx-dj-mixer-toggle-active? fx p)))
+            (let ((active (%toggle-active? fx p)))
               (if mod-mode
                 (param-set-control-value fx p (if active 0 1))
                 (fx-toggle-effect-value fx p))))))))
 
-(def builtin-fx-dj-mixer-sync-button (fx p)
+(def %sync-button (fx p)
   (button "Sync"
     :width 5.6 :height 1.2 :padding 0 :font-size 11.0
     :background-color (if (fx-param-on? p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
@@ -60,7 +89,7 @@
     :plock-color-b (param-plock-color-b)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
 
-(def builtin-fx-dj-mixer-div-button (fx p label-text)
+(def %div-button (fx p label-text)
   (button label-text
     :width 2.72 :height 0.92 :padding 0 :font-size 8.0
     :background-color (if (= (get p :text-value) label-text) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
@@ -71,28 +100,28 @@
     :plock-color-b (param-plock-color-b)
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
-(def builtin-fx-dj-mixer-div-grid (fx p)
+(def %div-grid (fx p)
   (v-stack :gap 0.11
     (h-stack :gap 0.12
-      (builtin-fx-dj-mixer-div-button fx p "1/16")
-      (builtin-fx-dj-mixer-div-button fx p "1/8"))
+      (%div-button fx p "1/16")
+      (%div-button fx p "1/8"))
     (h-stack :gap 0.12
-      (builtin-fx-dj-mixer-div-button fx p "1/4")
-      (builtin-fx-dj-mixer-div-button fx p "1/2"))
+      (%div-button fx p "1/4")
+      (%div-button fx p "1/2"))
     (h-stack :gap 0.12
-      (builtin-fx-dj-mixer-div-button fx p "1 bar")
-      (builtin-fx-dj-mixer-div-button fx p "2 bars"))))
+      (%div-button fx p "1 bar")
+      (%div-button fx p "2 bars"))))
 
-(def builtin-fx-dj-mixer-length-section (fx sync-p div-p length-p)
+(def %length-section (fx sync-p div-p length-p)
   (box :width 6.4 :height 7.45 :padding 0.28
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.22 :align :center
-      (builtin-fx-dj-mixer-sync-button fx sync-p)
+      (%sync-button fx sync-p)
       (if (fx-param-on? sync-p)
-        (builtin-fx-dj-mixer-div-grid fx div-p)
-        (builtin-fx-dj-mixer-knob fx "length" length-p 3)))))
+        (%div-grid fx div-p)
+        (%knob fx "length" length-p 3)))))
 
-(def builtin-fx-dj-mixer-ui (fx)
+(def panel (fx)
   (let ((params (get fx :params)))
     (let ((enabled-p (builtin-fx-param params "enabled"))
           (speed-p (builtin-fx-param params "speed"))
@@ -103,18 +132,18 @@
           (warp-p (builtin-fx-param params "warp")))
       (if (and speed-p length-p loop-p sync-p div-p warp-p)
         (h-stack :gap 0.35 :align :start
-          (builtin-fx-dj-mixer-length-section fx sync-p div-p length-p)
+          (%length-section fx sync-p div-p length-p)
           (box :width 6.4 :height 7.45 :padding 0.28
                :background-color :fx-inner-panel-bg :corner-radius 7
             (v-stack :gap 0.26 :align :center
-              (builtin-fx-dj-mixer-knob fx "speed" speed-p 2)
-              (builtin-fx-dj-mixer-knob fx "warp" warp-p 2)))
+              (%knob fx "speed" speed-p 2)
+              (%knob fx "warp" warp-p 2)))
           (box :width 6.4 :height 7.45 :padding 0.28
                :background-color :fx-inner-panel-bg :corner-radius 7
             (v-stack :gap 0.26 :align :center
-              (builtin-fx-dj-mixer-toggle-button fx loop-p "Loop")
+              (%toggle-button fx loop-p "Loop")
               (box :height 0.32 :width 5.6)
               (if enabled-p
-                (builtin-fx-dj-mixer-toggle-button fx enabled-p "On")
+                (%toggle-button fx enabled-p "On")
                 (box :width 0 :height 0)))))
         (fx-param-grid params fx)))))

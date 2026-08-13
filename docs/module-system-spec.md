@@ -1259,17 +1259,241 @@ stays as-is; real macro hygiene is out of scope for this spec.
 
   Running conversion count: **13 files, and the big four are converted.**
 
+  ### S3b pilot tally — `effects/effect-modulation.lisp` (2026-08-12), import's first production use
+
+  `ui/effects/effect-modulation.lisp` → `eseq.effects.effect-modulation`, the
+  first nested module name and the first converted file to reach another
+  converted module through `import` instead of the compat-alias rung:
+  `(import eseq.effects.state :as st :refer (effect-selected-mod-slot))`
+  exercises, in real metal_seq renders, an `:as`-qualified read of another
+  module's def (`st/fx-panel-body-content-height`), and a `:refer`red
+  `defstate` both read and `set!` (the refer rung of
+  `Compiler::state_binding_for`). 14 defs: 13 `%`-private, 1 public rename
+  (`effect-mod-control-panel` → `mod-control-panel`), **1 compat alias** — the
+  S3b rule is aliases only for unconverted callers (here
+  `panel-bodies.lisp`), never for converted→converted edges. The subtree
+  `:key` and all `:debug-name` strings stay byte-identical (hazard e; the
+  Rust assertions on this file are all debug-names, which do not qualify).
+
+  **Infra fix the pilot forced: import could not resolve `eseq.*` modules
+  against the production layout.** `module_file_candidates` produced
+  `@/effects/state.lisp` and importing-file-relative spellings, but `@/` is
+  the source-manager cwd — `crates/sequencer` in production
+  (`enter_sequencer_dir`), whose distro root is the `ui/` subdirectory. So
+  the load branch of `__import-module` — unit-tested only with synthetic
+  flat layouts — would have failed for every `eseq.*` module the moment a
+  manifest stopped pre-loading it (i.e. at eseq-mods.9); load-once was
+  masking the gap. Fixed by adding `@/ui/{flat,nested}` candidates (tried
+  first), plus `SourceManager::set_cwd` so a test can pin resolution against
+  a synthetic root without touching the process cwd. Test:
+  `import_resolves_nested_eseq_module_under_the_ui_root` (vm.rs).
+
+  Gate baseline note: the metal_seq gate now reads **586 passed / 2
+  pre-existing failures** (`metal_seq_browser_new_instrument_editor_uses_-
+  finalize_copy`, `metal_seq_sound_palette_overlay_layout` — both fail
+  identically on the pre-conversion tree).
+
+  Running conversion count: 14 files.
+
+  ### S3b wave 1 tally (2026-08-12) — param-controls, drag-drop, panel-widgets, custom-ui-sections, instrument-sources
+
+  Five parallel conversions: `eseq.effects.param-controls` (116 defs, 52
+  `%`-private, 0 renames — hub-file precedent, 63 identity aliases for the
+  ~28 unconverted callers; imports eseq.macro-state + eseq.effects.state and
+  rewrote its two converted callers, effect-modulation and seq-layout, to
+  import it), `eseq.effects.drag-drop` (3 defs, 2 renames + aliases),
+  `eseq.effects.panel-widgets` (9 defs, 6 renames + aliases, 3 `defwidget`
+  names flat), `eseq.effects.custom-ui-sections` (16 defs, 10 identity
+  aliases, hazard (i) fired: `custom-ui-selected-section` pinned — written by
+  `custom_ui.rs` codegen at `:425`/`:682`; its own read uses the qualified
+  escape-hatch spelling), `eseq.effects.instrument-sources` (2 defs, both
+  `%`-private, `:refer` onto eseq.effects.state's defstate).
+
+  **New infra finding — hazard (m) applies to natives, and to test stubs of
+  them.** `eseq.effects.param-controls` reads `seq-has-selection?` (a Rust
+  native) bare; `metal_seq_fx_lisp_lays_out_rack_panel_chain_list` toggles
+  that name mid-test with headerless `(def seq-has-selection? () …)` evals.
+  Each such def StoreGlobals a fresh cell into the `eseq.vanilla` slot and
+  strands the module's healed slot on the previous cell — the module froze
+  on a stale value with no error (m's signature). Two-part fix, both
+  generalize: (1) **`VM::register_native_with_vm` now mutates an existing
+  cell in place** instead of replacing the slot `Option`, so healed alias
+  slots track native re-registration (snapshots deep-clone cells, so
+  transactional rollback is unaffected); test
+  `native_reregistration_reaches_a_healed_module_slot` (vm.rs). (2) Test
+  stubs that TOGGLE a native mid-run must use `register_native`, not lisp
+  `def` — the toggling evals in `state_values/tests.rs` were converted.
+  One-shot prelude `def` stubs that never toggle are unaffected (the module
+  slot heals once to the stub's cell). Rule of thumb for later waves: a
+  converted module may read a native bare, but if any test rebinds that
+  native mid-test by lisp `def`, convert the test to `register_native`.
+
+  Gate: 586 passed / 2 pre-existing. Running conversion count: 19 files.
+
+  ### S3b wave 2 tally (2026-08-12) — filter-core, param-grid, track-panels, process-panel
+
+  `eseq.effects.builtin.filter-core` (first four-segment name; 22 defs, 12
+  identity aliases for the 15 unconverted builtin panels, one 15-name
+  `:refer` from param-controls, every `:key` a subtree key),
+  `eseq.effects.param-grid` (68 defs, 65 `%`-private, 3 identity aliases;
+  rewrote its two converted callers to imports),
+  `eseq.effects.track-panels` (42 defs, 7 renames + aliases; hazard (k)
+  caught `fx-step-param-value` colliding with step-grid-interactions'
+  `step-param-value`; ~32 key-assertion rewrites incl. one exact-match
+  `focus_widget_by_stable_key` requalified),
+  `eseq.effects.process-panel` (24 defs, 5 renames + aliases; `:key`s
+  stripped of their prefix, six suffix-matcher rewrites).
+
+  **New rule — do not `import` a UI-root module from library code.**
+  track-panels initially imported `eseq.mixer` for
+  `muted?`/`track-color-*`/`track-collapsed-label`. `import` *evaluates* the
+  target, and `mixer.lisp` registers `(effect-buffer "*mixer*")`,
+  `"*patch-mixer*"` and `seq-mixer-mode` at top level — so 60 metal_seq
+  tests that load only `ui/effects.lisp` suddenly grew a mixer buffer
+  rendering against SEQ stubs they never provided (`substring` on a nil
+  track name). Reverted to the pre-existing alias-mediated flat spellings
+  (`mixer-v2-*`), with a comment at the use site. The boundary: a module
+  whose top-level evaluation registers UI roots (`effect-buffer`,
+  `define-mode`+`set-buffer-mode-for`, keymaps) is an *application* module —
+  reachable during migration through its compat aliases only. The endgame
+  fix is splitting such helpers into a library module (mixer's
+  track-color/mute helpers are the first candidate); until then the four
+  converted roots (mixer, browser, sequencer, arrangement) must not be
+  import targets.
+
+  **First converted-module import cycle, and manifest double-eval.**
+  panel-widgets ↔ process-panel import each other; load-once
+  (`declared_modules`) terminates the cycle correctly. But an import
+  cascade now pre-loads later manifest entries (panel-widgets at
+  `effects.lisp:11` pulls param-controls and process-panel), and the
+  manifest's raw `load` lines then re-evaluate them — `load` deliberately
+  has no dedupe (§4). Benign today (re-defs and alias registrations are
+  idempotent; the affected files' defstates are module-internal), and the
+  whole issue dissolves with the manifests at eseq-mods.9; worth knowing
+  when reading startup traces, and a reason not to delay .9 long.
+
+  Gate: 586 passed / 2 pre-existing. Running conversion count: 23 files.
+
+  ### S3b wave 3 tally (2026-08-12) — effect-panels, custom-ui-runtime, instrument-modulation + 12 builtin panels
+
+  Fifteen parallel conversions, gate green on the first run. The 12 builtin
+  panels (`eseq.effects.builtin.{eq8, str8-delay, space-echo, multiverb,
+  dimension, phaser-flanger, roar, filter-panel, dynamics, multiband,
+  dj-mixer, filterbank}`) are near-uniform: almost everything `%`-private,
+  one or two aliases for the flat `audio-fx.lisp` dispatch (plus the odd
+  Rust test eval), imports of filter-core/param-controls/param-grid, and
+  **every `:key` in all 12 is a subtree key** — zero Rust assertion
+  rewrites across the whole set. `eseq.effects.instrument-modulation` (22
+  defs; hazard (k) fired live: the stripped `source-type` collided with a
+  local `let` head, renamed to `kind`). `eseq.effects.effect-panels` (18
+  defs, 3 defwidgets flat, 10 aliases). `eseq.effects.custom-ui-runtime`
+  (41 defs, 34 identity aliases — it IS the generated-custom-UI vocabulary;
+  ~20 reads of the vanilla-pinned `synth-ui-current-*` family requalified
+  to the escape-hatch spelling; second import cycle, sections↔runtime).
+
+  Notable new findings:
+  - **Rust tests that slice lisp source TEXT.** `state_values/tests.rs`
+    `lisp_def_slice`s `effect-panels.lisp` between two literal
+    `(def instrument-toggle-mods-view` / `(def instrument-mods-toggle-button`
+    headers and evals the slice headerless. Those defs must keep flat names
+    and alias-mediated bodies, and even an explanatory COMMENT containing
+    the marker string hijacks the first-occurrence search. Grep a
+    converting file's def headers against raw-string Rust before renaming.
+  - Hazard (k) native/widget collisions are common on strips: `source` is
+    a native (eq8, phaser-flanger renamed around it), `knob`/`toggle`/
+    `gate-led` are builtin widget names (filterbank kept them `%`-private).
+    The four-list sweep catches all of these — it is not optional.
+
+  Gate: 586 passed / 2 pre-existing. Running conversion count: 38 files.
+
+  ### S3b wave 4 tally (2026-08-12) — panel-frame, panel-bodies, custom-ui-controls, custom-effect-ui, compressor, tape, convolution-reverb
+
+  Seven conversions, gate green first run. `eseq.effects.panel-frame` (19
+  defs, identity-alias hub; its main work was rewriting SIX converted
+  callers to imports — the cycle hub's bare back-edges from waves 1–3 all
+  retired; two new mutual import cycles, panel-frame↔param-controls and
+  panel-frame↔effect-panels, both load-once-terminated).
+  `eseq.effects.panel-bodies` (45 defs, 8 identity aliases; **the
+  codegen-re-def variant of hazard (m) named precisely**: the
+  `custom-instrument-synth-ui`/`custom-midi-fx-ui`/`custom-audio-fx-ui`
+  dispatchers are re-def'd headerless by `custom_ui.rs` on every custom-UI
+  rebuild, so a module's bare call would strand on the first rebuild — all
+  such calls use the `eseq.vanilla/` escape-hatch spelling; also caught a
+  capture fixture that *redefines* `instrument-key-note-active?` headerless,
+  correctly alias-covered since aliases apply to writes).
+  `eseq.effects.custom-ui-controls` and `eseq.effects.custom-effect-ui`
+  (generated-vocabulary hubs: identity aliases because ~20 generated
+  `instruments/**/ui.lisp` and on-disk `effects/*/ui.lisp` files call them
+  flat; runtime↔custom-effect-ui closes the third import cycle).
+  `eseq.effects.builtin.{compressor, tape, convolution-reverb}` — tape and
+  convolution-reverb are the first consumers of another builtin module's
+  RENAMED spellings (`dyn/percent-knob` etc.), retiring dynamics' aliases
+  down to `tape`-era debt.
+
+  Gate: 586 passed / 2 pre-existing. Running conversion count: 45 files.
+  Remaining in effects/: custom-ui-lego, audio-fx, instrument-panel,
+  sampler-panel, modulator-panel (wave 5), buffers (wave 6).
+
+  ### S3b wave 5 tally (2026-08-12) — custom-ui-lego, audio-fx, and the panel-trio cycle
+
+  `eseq.effects.custom-ui-lego` (106 defs — the generated-custom-UI layout
+  vocabulary: 83 identity aliases forced by ~40 generated
+  `instruments/**/ui.lisp` files, `custom_ui.rs` codegen, and
+  `ui_validate.rs`'s accept-list; 22 `%`-private; big `:refer`s keep ~200
+  call sites byte-identical). `eseq.effects.builtin.audio-fx` (the
+  dispatcher: imports all 15 panels at their post-rename spellings, and its
+  conversion **retired ~19 dead aliases** across the panel files — the
+  first alias-shrink payoff of the batch; kept only the three
+  Rust-test-eval'd ones plus filter-core's). The
+  instrument-panel/sampler-panel/modulator-panel **reference cycle was
+  converted by a single agent** wiring the three-way imports directly —
+  modulator-panel needed zero aliases (its one caller is converted), the
+  other two kept identity aliases for Rust test evals, `buffers.lisp`, one
+  capture fixture, and `sampler-reset-view`, which **production** Rust
+  evals by name (`reactive_sync.rs:2369`). Second and third instances of
+  the wave-3 text-slice hazard (`editor/tests.rs` greps for
+  `(def sampler-param-knob`) — the def keeps its flat public spelling with
+  a comment. The defhook corollary (hazard e) fired for real:
+  `rack-macro-arm`'s bare hook calls became `(run-hook …)`.
+
+  Gate: 586 passed / 2 pre-existing. Running conversion count: 50 files.
+
+  ### S3b wave 6 tally (2026-08-12) — buffers.lisp, and effects/ is done
+
+  `ui/effects/buffers.lisp` → `eseq.effects.buffers` (8 defs, 3 aliases —
+  including the batch's first **mode-keyspace alias actually minted**,
+  `seq-plock-panel-mode`, for headerless `step-buffer.lisp`'s
+  `set-buffer-mode-for`; the stage-4 rung finally exercised in production).
+  Its three `mode-bind-key` handler strings naming other modules' defs were
+  rewritten **pre-qualified** (`eseq.effects.panel-widgets/delete-selected-effect`
+  etc.) — `qualify_registration_name` passes qualified spellings verbatim
+  and dispatch finds the qualified global, a cleaner shape than keeping an
+  alias for a handler string. Being the last unconverted consumer, its
+  conversion retired **9 more aliases** across instrument-panel,
+  process-panel, panel-widgets and track-panels. The file registers
+  `effect-buffer` roots at top level, so its header carries the wave-2
+  warning: never import it.
+
+  **effects/ is fully converted**: 39 of its 40 files carry module headers.
+  Headerless by design:
+  `effects.lisp` + `builtin-effects.lisp` (load manifests, dissolve at
+  eseq-mods.9) and `effects/step-buffer.lisp` (pure side-effect root).
+  Gate: 586 / 2 pre-existing; full `cargo test -p sequencer` 1720 / 2
+  pre-existing on HEAD too (hardcoded-44100 lint, graph-variable-reset
+  demo — verified in a clean HEAD worktree); eseqlisp 1581 green (patcher
+  dylib tests flake under parallelism, pass isolated — pre-existing).
+
+  Running conversion count: **51 files.**
+
   ### What remains for slice 3
 
-  - **121 unconverted files** under `crates/sequencer/ui`, but the shape has
-    changed completely: the big four were the files that concentrated the
-    hazards, and what is left is long-tailed and mostly small. The largest
-    unconverted units are `effects/custom-ui-lego.lisp` (1034),
-    `effects/param-controls.lisp` (993), `transport.lisp` (863) and
-    `effects/instrument-panel.lisp` (771); everything else is under 550 lines.
-    The `effects/` subtree (~50 files, including the per-builtin panels) is the
-    bulk and is where §7 nested module names (`eseq.effects.builtin.roar`) get
-    their first real workout.
+  - **~70 unconverted files** under `crates/sequencer/ui` (the non-effects
+    tail: `transport.lisp` (863) is the largest; `seq-grid-mode.lisp`,
+    `step-grid.lisp`/`step-grid-interactions.lisp`, `seq-core-state.lisp`,
+    piano-roll, browser-adjacent files, and the small long tail). effects/
+    (39 modules incl. per-builtin panels) is DONE — §7 nested names,
+    `import` (both clauses), import cycles, and the stage-4 mode rung are
+    all production-validated now.
   - **One known infra gap:** `ui/seq-grid-mode.lisp` is unblocked by stage 4 but
     still un-converted, and it is the file that will actually exercise the
     flat→qualified mode rung end to end. Its seven `mode-bind-key` handlers that

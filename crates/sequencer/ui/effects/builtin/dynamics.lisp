@@ -1,5 +1,21 @@
 ;; Dynamics, compressor, and limiter built-in FX panels.
-(def builtin-fx-dynamics-percent-knob (fx label-text p)
+(module eseq.effects.builtin.dynamics)
+
+(import eseq.effects.builtin.filter-core :refer
+  (builtin-fx-param
+   builtin-fx-set-effect-option))
+(import eseq.effects.param-controls :refer
+  (fx-param-value
+   fx-set-effect-value
+   param-plock-active?
+   param-plock-color-b
+   param-plock-color-g
+   param-plock-color-r
+   param-plock-default
+   param-plock-text-color))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+
+(def percent-knob (fx label-text p)
   (knob-number :label label-text
     :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
@@ -14,7 +30,7 @@
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
-(def builtin-fx-dynamics-number-knob (fx label-text p decimals)
+(def number-knob (fx label-text p decimals)
   (knob-number :label label-text
     :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
@@ -29,7 +45,7 @@
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
     :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
-(def builtin-fx-dynamics-option (fx label-text p width)
+(def option-row (fx label-text p width)
   (h-stack :gap 0.22 :align :center
     (label label-text :font-size 8.5 :width 4.7 :color :dim :bg :transparent)
     (dropdown :value (get p :text-value)
@@ -41,7 +57,7 @@
       :plock-color-b (param-plock-color-b)
       :width width :height 1.05 :font-size 9.5)))
 
-(def builtin-fx-dynamics-ui (fx)
+(def dynamics-ui (fx)
   (let ((params (get fx :params)))
     (let ((amount-p (builtin-fx-param params "amount"))
         (attack-p (builtin-fx-param params "attack"))
@@ -55,22 +71,22 @@
       (if (and amount-p attack-p release-p low-cut-p drive-p output-p mix-p)
         (v-stack :gap 0.34 :padding 0.1
           (h-stack :padding 0.5 :gap 0.45 :align :center
-            (builtin-fx-dynamics-option fx "atk" attack-p 5.5)
-            (builtin-fx-dynamics-option fx "rel" release-p 5.9))
-          (box 
+            (option-row fx "atk" attack-p 5.5)
+            (option-row fx "rel" release-p 5.9))
+          (box
             :padding 1
             :corner-radius 16 :background-color :black
             (v-stack :gap 0.34
               (h-stack :gap 0.5 :align :center
-                (if input-p (builtin-fx-dynamics-number-knob fx "in" input-p 1) (box :width 0 :height 0))
-                (builtin-fx-dynamics-percent-knob fx "amt" amount-p)
-                (builtin-fx-dynamics-number-knob fx "low" low-cut-p 0)
-                (if knee-p (builtin-fx-dynamics-number-knob fx "knee" knee-p 1) (box :width 0 :height 0))
+                (if input-p (number-knob fx "in" input-p 1) (box :width 0 :height 0))
+                (percent-knob fx "amt" amount-p)
+                (number-knob fx "low" low-cut-p 0)
+                (if knee-p (number-knob fx "knee" knee-p 1) (box :width 0 :height 0))
                 )
               (h-stack :gap 0.5 :align :center
-                (builtin-fx-dynamics-percent-knob fx "drive" drive-p)
-                (builtin-fx-dynamics-number-knob fx "out" output-p 1)
-                (builtin-fx-dynamics-percent-knob fx "mix" mix-p)
+                (percent-knob fx "drive" drive-p)
+                (number-knob fx "out" output-p 1)
+                (percent-knob fx "mix" mix-p)
                 )
               )
             )
@@ -79,7 +95,7 @@
 
 ;; The Compressor panel lives in ui/effects/builtin/compressor.lisp.
 
-(def builtin-fx-limiter-ui (fx)
+(def limiter-ui (fx)
   (let ((params (get fx :params)))
     (let ((input-p (builtin-fx-param params "input"))
           (ceiling-p (builtin-fx-param params "ceiling"))
@@ -88,8 +104,8 @@
       (if (and input-p ceiling-p release-p lookahead-p)
         (v-stack :gap 0.34
           (h-stack :gap 0.65 :align :center
-            (builtin-fx-dynamics-number-knob fx "input" input-p 1)
-            (builtin-fx-dynamics-number-knob fx "ceil" ceiling-p 1)
-            (builtin-fx-dynamics-number-knob fx "rel" release-p 0)
-            (builtin-fx-dynamics-number-knob fx "look" lookahead-p 1)))
+            (number-knob fx "input" input-p 1)
+            (number-knob fx "ceil" ceiling-p 1)
+            (number-knob fx "rel" release-p 0)
+            (number-knob fx "look" lookahead-p 1)))
         (fx-param-grid params fx)))))

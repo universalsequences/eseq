@@ -1,4 +1,35 @@
 ;; Built-in effect panel shell, enable controls, and instrument header controls.
+(module eseq.effects.effect-panels)
+
+(import eseq.effects.state :as st)
+(import eseq.effects.param-controls :as pc)
+(import eseq.effects.drag-drop :as dd)
+(import eseq.macro-state :as ms)
+(import eseq.effects.panel-frame :as pf)
+(import eseq.effects.panel-bodies :as pb)
+
+;; Migration aliases (module spec §10). Callers are still-unconverted lisp
+;; files — effects/panel-frame.lisp,
+;; effects/instrument-panel.lisp, effects/sampler-panel.lisp,
+;; effects/modulator-panel.lisp, effects/buffers.lisp, ui/seq-panels.lisp —
+;; plus Rust test harnesses that eval the flat spellings
+;; (src/ui/state_values/tests.rs). Bare callers cannot see qualified names,
+;; so unchanged spellings still need identity aliases. Converted callers
+;; (eseq.effects.param-grid for visible-params) import this module instead —
+;; no alias for visible-params. The aliases are deleted as callers convert.
+;; defwidget names (header, fx-enabled-dot, fx-mini-save-icon) are a flat
+;; keyspace that never qualifies (hazard e) — no aliases, no renames.
+(module-compat-alias enabled-param enabled-param)
+(module-compat-alias fx-enabled-toggle enabled-toggle)
+(module-compat-alias fx-panel fx-panel)
+(module-compat-alias midi-fx-panel midi-fx-panel)
+(module-compat-alias instrument-synth-button instrument-synth-button)
+(module-compat-alias instrument-toggle-mods-view instrument-toggle-mods-view)
+(module-compat-alias instrument-mods-toggle-button instrument-mods-toggle-button)
+(module-compat-alias instrument-keys-button instrument-keys-button)
+(module-compat-alias instrument-sound-binding-badge instrument-sound-binding-badge)
+(module-compat-alias effect-mods-toggle-button effect-mods-toggle-button)
+
 (defwidget header
   :shader
   (rgba 1 1 1 1))
@@ -18,18 +49,18 @@
   (sdf/fill (sdf/circle 0.86)
     (material :color (if (> active 0.5) (rgba 1.0 0.8 0.12 1.0) (rgba 0 0 0 1)))))
 
-(def fx-enabled-toggle (p fx subtree-key)
+(def enabled-toggle (p fx subtree-key)
   (subtree :key subtree-key
     (box :width 1.55 :height 1.35 :v-align :start :h-align :center :padding 0
       (v-stack :gap 0 :align :center
         (box :width 1.55 :height 0.04)
         (if p
           (fx-enabled-dot
-            :active (fx-param-value p)
+            :active (pc/fx-param-value p)
             :on-click |x y r|
               (if fx
-                (fx-toggle-effect-value fx p)
-                (fx-toggle-instrument-value p)))
+                (pc/fx-toggle-effect-value fx p)
+                (pc/fx-toggle-instrument-value p)))
           (box :width 1.55 :height 1.0))))))
 
 (defwidget fx-mini-save-icon
@@ -59,61 +90,61 @@
         (material :color fg-col)))))
 
 (def fx-panel (title params fx)
-  (let ((selected (fx-panel-selected? fx)))
+  (let ((selected (pb/fx-panel-selected? fx)))
   (box
     (v-stack :gap 0 :height :fill
-      (fx-panel-header title params fx)
-      (fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
+      (pf/fx-panel-header title params fx)
+      (pf/fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
         (if (get fx :midi-fx)
-          (midi-fx-panel-body fx)
-          (audio-fx-panel-body fx params))))
+          (pb/midi-fx-panel-body fx)
+          (pb/audio-fx-panel-body fx params))))
     :background "fx-panel-bg"
     :color :fx-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
-    :height fx-fixed-panel-height
+    :height st/fx-fixed-panel-height
     :debug-name (if (get fx :midi-fx)
       (str "midi-fx-panel-root-" (get fx :slot-idx) "-" (get fx :name))
       (if (get fx :bus-fx)
         (str "bus-fx-panel-root-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" title)
         (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title)))
-    :drop-types (fx-effect-drop-types fx)
-    :drop-meta (fx-effect-drop-meta fx)
+    :drop-types (pf/fx-effect-drop-types fx)
+    :drop-meta (pf/fx-effect-drop-meta fx)
     :drop-hover-border-color :blue
-    :on-drop (lambda (event) (fx-drop-on-effect event))
+    :on-drop (lambda (event) (dd/drop-on-effect event))
     :selected (if selected 1 0)
     :padding 0)))
 
 (def midi-fx-panel (title params fx)
-  (let ((selected (fx-panel-selected? fx)))
+  (let ((selected (pb/fx-panel-selected? fx)))
   (box
     (v-stack :gap 0 :height :fill
-      (fx-panel-header title params fx)
-      (fx-panel-body "midi-fx-panel-content"
+      (pf/fx-panel-header title params fx)
+      (pf/fx-panel-body "midi-fx-panel-content"
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
-          (midi-fx-panel-body fx))))
+          (pb/midi-fx-panel-body fx))))
     :background "fx-panel-bg"
     :color :fx-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
-    :height fx-fixed-panel-height
+    :height st/fx-fixed-panel-height
     :debug-name (str "midi-fx-panel-bg-" (get fx :slot-idx) "-" (get fx :name))
-    :drop-types (fx-effect-drop-types fx)
-    :drop-meta (fx-effect-drop-meta fx)
+    :drop-types (pf/fx-effect-drop-types fx)
+    :drop-meta (pf/fx-effect-drop-meta fx)
     :drop-hover-border-color :blue
-    :on-drop (lambda (event) (fx-drop-on-effect event))
+    :on-drop (lambda (event) (dd/drop-on-effect event))
     :selected (if selected 1 0)
     :padding 0)))
 
-(def instrument-tab-button (text idx width)
+(def %instrument-tab-button (text idx width)
   (box :width width :height 1.2 :align :center
-    :bg (if (= instrument-panel-tab idx) :dark-gray :transparent)
-    :on-click |x y r| (set! instrument-panel-tab idx)
+    :bg (if (= st/instrument-panel-tab idx) :dark-gray :transparent)
+    :on-click |x y r| (set! st/instrument-panel-tab idx)
     (label text :font-size 11
-      :color (if (= instrument-panel-tab idx) :white :dim)
+      :color (if (= st/instrument-panel-tab idx) :white :dim)
       :bg :transparent)))
 
-(def instrument-header-button (text active width click)
+(def %instrument-header-button (text active width click)
   (box :width width :height 1.2 :align :center
     :bg (if active :dark-gray :transparent)
     :on-click click
@@ -121,7 +152,7 @@
       :color (if active :white :dim)
       :bg :transparent)))
 
-(def instrument-header-tab-button (text active width click)
+(def %instrument-header-tab-button (text active width click)
   (v-stack :height 0.9 :gap 0
     (box :height 0.1)
     (button text
@@ -139,9 +170,18 @@
       :on-click click)))
 
 (def instrument-synth-button ()
-  (instrument-header-tab-button "synth" (and (= instrument-panel-tab 0) (not instrument-mods-open)) 4.5
-    (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open false)))))
+  (%instrument-header-tab-button "synth" (and (= st/instrument-panel-tab 0) (not st/instrument-mods-open)) 4.5
+    (lambda (info) (do (set! st/instrument-panel-tab 0) (set! st/instrument-mods-open false)))))
 
+;; src/ui/state_values/tests.rs slices the next def out of this file by its
+;; exact flat def-header text (up to the following def's header text) and
+;; evals it headerless, so the def keeps its flat name and its body keeps
+;; the flat alias-mediated spellings (instrument-panel-tab /
+;; instrument-mods-open are eseq.effects.state defstates,
+;; macro-clear-mapping-arm / rack-macro-clear-mapping-arm are
+;; eseq.macro-state aliases, process-map-clear is an
+;; eseq.effects.param-controls alias) — they must resolve both inside this
+;; module and in a vanilla eval. Do not rename either def below.
 (def instrument-toggle-mods-view ()
   (do
     (set! instrument-panel-tab 0)
@@ -153,7 +193,7 @@
     (set! instrument-mods-open (not instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
-  (instrument-header-tab-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
+  (%instrument-header-tab-button "mods" (and (= st/instrument-panel-tab 0) st/instrument-mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
 
 ;; Sound-binding badge (takes spec 16.6): which source the panel below is
@@ -167,6 +207,7 @@
       ;; Clicking the badge opens the sound palette on this track's binding
       ;; (takes spec 17.6). The badge text itself rides the `inst` map -- a
       ;; panel-scope SEQ.* read here would break the *fx* buffer.
+      ;; seq-sound-palette-open is a Rust native (src/ui/natives.rs).
       (box :key (str "sound-binding-badge-" (get inst :track))
         :bg :transparent
         :on-click |x y r| (seq-sound-palette-open (get inst :track))
@@ -174,33 +215,33 @@
           :font-size 9 :color :dim :bg :transparent)))))
 
 (def instrument-keys-button ()
-  (instrument-header-tab-button "keys" (= instrument-panel-tab 1) 4.0
-    (lambda (info) (do (set! instrument-panel-tab 1) (set! instrument-mods-open false)))))
+  (%instrument-header-tab-button "keys" (= st/instrument-panel-tab 1) 4.0
+    (lambda (info) (do (set! st/instrument-panel-tab 1) (set! st/instrument-mods-open false)))))
 
-(def effect-toggle-mods-view (fx)
-  (let ((chain (fx-effect-chain-kind fx))
+(def %effect-toggle-mods-view (fx)
+  (let ((chain (pf/fx-effect-chain-kind fx))
         (track (if (get fx :bus-fx) -1 (get fx :track-idx)))
         (slot (get fx :slot-idx))
         (rack-slot (if (get fx :rack-fx) (get fx :rack-slot) -1))
         (bus (if (get fx :bus-fx) (get fx :bus-idx) -1)))
-    (if (and effect-mods-open
-             (= effect-mods-chain chain)
-             (= effect-mods-track track)
-             (= effect-mods-slot slot)
-             (= effect-mods-rack-slot rack-slot)
-             (= effect-mods-bus bus))
-      (set! effect-mods-open false)
+    (if (and st/effect-mods-open
+             (= st/effect-mods-chain chain)
+             (= st/effect-mods-track track)
+             (= st/effect-mods-slot slot)
+             (= st/effect-mods-rack-slot rack-slot)
+             (= st/effect-mods-bus bus))
+      (set! st/effect-mods-open false)
       (do
-        (macro-clear-mapping-arm)
-        (process-map-clear)
-        (rack-macro-clear-mapping-arm)
-        (set! effect-mods-open true)
-        (set! effect-mods-chain chain)
-        (set! effect-mods-track track)
-        (set! effect-mods-slot slot)
-        (set! effect-mods-rack-slot rack-slot)
-        (set! effect-mods-bus bus)))))
+        (ms/clear-mapping-arm)
+        (pc/process-map-clear)
+        (ms/rack-clear-mapping-arm)
+        (set! st/effect-mods-open true)
+        (set! st/effect-mods-chain chain)
+        (set! st/effect-mods-track track)
+        (set! st/effect-mods-slot slot)
+        (set! st/effect-mods-rack-slot rack-slot)
+        (set! st/effect-mods-bus bus)))))
 
 (def effect-mods-toggle-button (fx)
-  (instrument-header-tab-button "mods" (effect-mods-active? fx) 4.0
-    (lambda (info) (effect-toggle-mods-view fx))))
+  (%instrument-header-tab-button "mods" (pc/effect-mods-active? fx) 4.0
+    (lambda (info) (%effect-toggle-mods-view fx))))

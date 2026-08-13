@@ -1,5 +1,10 @@
 ;; Drag/drop handlers for adding, inserting, and moving effects.
-(def fx-drop-library-effect (payload target)
+(module eseq.effects.drag-drop)
+
+(module-compat-alias fx-drop-existing-effect drop-existing-effect)
+(module-compat-alias fx-drop-on-effect drop-on-effect)
+
+(def %drop-library-effect (payload target)
   (let ((kind (get payload :kind))
         (name (get payload :name))
         (chain (get target :chain))
@@ -40,7 +45,7 @@
                 (host-command "insert-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
                   (status "That effect type does not belong in this chain"))))))))))
 
-(def fx-drop-existing-effect (payload target)
+(def drop-existing-effect (payload target)
   (let ((kind (get payload :kind))
         (source-chain (get payload :chain))
         (source-track (get payload :track))
@@ -80,7 +85,7 @@
                     :position target-chain))
             (status "Move effects within the same audio, MIDI, bus, or rack-slot chain")))))))
 
-(def fx-drop-on-effect (event)
+(def drop-on-effect (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((kind (get payload :kind)))
@@ -88,5 +93,5 @@
               (= kind "midi-effect-instance")
               (= kind "bus-effect-instance")
               (= kind "rack-effect-instance"))
-        (fx-drop-existing-effect payload target)
-        (fx-drop-library-effect payload target)))))
+        (drop-existing-effect payload target)
+        (%drop-library-effect payload target)))))

@@ -5389,7 +5389,7 @@
             ];
 
             for (label, param) in scenarios {
-                let picker_key = format!("fx-step-param-{label}");
+                let picker_key = format!("/step-param-{label}");
                 // Park the edited param mid-range first (fixture setup, not a
                 // measured edit): the picker maps drag distance onto
                 // [value..max] / [min..value], so a value already sitting at a
@@ -5432,7 +5432,7 @@
                         .widget_layout
                         .as_ref()
                         .expect("step tile layout");
-                    let node = find_layout_node_by_stable_key(layout, &picker_key)
+                    let node = find_layout_node_by_stable_key_suffix(layout, &picker_key)
                         .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
                         .unwrap_or_else(|| {
                             panic!(
@@ -8978,7 +8978,7 @@
 
                 assert!(
                     editor.focus_widget_by_stable_key(
-                        "fx-step-param-velocity",
+                        "eseq.effects.track-panels/step-param-velocity",
                         Some("number-picker")
                     ),
                     "the Escape benchmark must reproduce a focused *step* number picker"
