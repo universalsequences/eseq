@@ -1020,11 +1020,18 @@ pub(super) fn sync_track_plocks_for_neural_selection(
             !track_step_has_plock(state, track, &app.graph.effect_descriptors, step)
         })
     {
+        // The selected step has no locks, so the row table is empty — but the
+        // variant strip is track-scoped, not step-scoped. Keep publishing it so
+        // a lock-free step can still be stamped with an existing variant.
         let mut dirty = rt
             .set_reactive("SEQ", "track-plocks", Value::List(Vec::new()))
             .effects_dirty;
         dirty |= rt
-            .set_reactive("SEQ", "track-plock-variants", Value::List(Vec::new()))
+            .set_reactive(
+                "SEQ",
+                "track-plock-variants",
+                build_track_plock_variants_value(state, track, selected_steps),
+            )
             .effects_dirty;
         return dirty;
     }

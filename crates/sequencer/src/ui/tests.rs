@@ -1159,6 +1159,52 @@
     }
 
     #[test]
+    fn selecting_a_lock_free_step_still_publishes_the_track_variant_chips() {
+        let (state, app) = history_test_app();
+        state.pattern.track_params[0].set_num_steps(8);
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        state.pattern.instrument_slots[0].set_plock(2, 8, 22_050.0);
+        state.reconcile_plock_variant_registry_for_track(0);
+
+        // Step 5 has no locks of its own, but the track has a variant on step 2:
+        // the chip strip is how the user stamps that variant onto step 5.
+        let selected_steps =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([5])));
+        let mut runtime = Runtime::new();
+        super::sync_track_plocks_for_neural_selection(
+            &mut runtime,
+            &app,
+            &state,
+            0,
+            &selected_steps,
+            &std::collections::BTreeSet::new(),
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("(len SEQ.track-plocks)")
+                .expect("read p-lock rows"),
+            Some(Value::Number(0.0)),
+            "a lock-free step has no p-lock rows to show"
+        );
+        assert_eq!(
+            runtime
+                .eval_str(r#"(get (nth SEQ.track-plock-variants 0) :kind)"#)
+                .expect("read default chip"),
+            Some(Value::String("def".to_string())),
+            "the default chip must stay available on a lock-free step"
+        );
+        assert_eq!(
+            runtime
+                .eval_str(r#"(get (nth SEQ.track-plock-variants 1) :kind)"#)
+                .expect("read variant chip"),
+            Some(Value::String("variant".to_string())),
+            "the track's existing variants must stay choosable on a lock-free step"
+        );
+    }
+
+    #[test]
     fn duration_span_sync_updates_covered_steps_after_source_duration_change() {
         let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
         state.pattern.track_params[0].set_num_steps(8);
