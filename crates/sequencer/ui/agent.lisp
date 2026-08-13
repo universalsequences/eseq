@@ -46,10 +46,6 @@
 ;; All four are functions or a `defstate`, i.e. the two shapes immune to
 ;; hazard (m). This file has no mutable plain `def` and no outbound `set!` —
 ;; every `set!` below targets one of its own `defstate`s (hazard j clear).
-(module-compat-alias agent-open agent-open)
-(module-compat-alias agent-open-instrument agent-open-instrument)
-(module-compat-alias agent-submit-current agent-submit-current)
-(module-compat-alias agent-current-conv agent-current-conv)
 
 (defstate agent-current-conv 0)
 (defstate %prompt "")

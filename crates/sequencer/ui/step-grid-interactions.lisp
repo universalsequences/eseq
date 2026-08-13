@@ -39,48 +39,6 @@
 
 (import eseq.seq-core-state :as core)
 
-(module-compat-alias page-button-width page-button-width)
-(module-compat-alias page-slot-width page-slot-width)
-(module-compat-alias step-index step-index)
-(module-compat-alias step-visible? step-visible?)
-(module-compat-alias cursor-left cursor-left)
-(module-compat-alias cursor-right cursor-right)
-(module-compat-alias cursor-select-left cursor-select-left)
-(module-compat-alias cursor-select-right cursor-select-right)
-(module-compat-alias cursor-toggle cursor-toggle)
-(module-compat-alias selection-click? selection-click?)
-(module-compat-alias cmd-click? cmd-click?)
-(module-compat-alias set-track-cursor-step set-track-cursor-step)
-(module-compat-alias step-clear-drag-state step-clear-drag-state)
-(module-compat-alias step-shift-anchor step-shift-anchor)
-(module-compat-alias step-hold-select-maybe-engage step-hold-select-maybe-engage)
-(module-compat-alias step-selected? step-selected?)
-(module-compat-alias step-select-drag-start step-select-drag-start)
-(module-compat-alias step-select-drag-over-for-track step-select-drag-over-for-track)
-(module-compat-alias step-select-drag-over-for-track-no-cursor step-select-drag-over-for-track-no-cursor)
-(module-compat-alias step-select-drag-over step-select-drag-over)
-(module-compat-alias step-pointer-down-for-track step-pointer-down-for-track)
-(module-compat-alias step-pointer-down step-pointer-down)
-(module-compat-alias step-pointer-up step-pointer-up)
-(module-compat-alias step-double-click-for-track step-double-click-for-track)
-(module-compat-alias step-double-click step-double-click)
-(module-compat-alias drum-step-cursor-track drum-step-cursor-track)
-(module-compat-alias drum-step-cursor-pad drum-step-cursor-pad)
-(module-compat-alias drum-step-set-cursor drum-step-set-cursor)
-(module-compat-alias drum-step-select-drag-over drum-step-select-drag-over)
-(module-compat-alias drum-step-pointer-down drum-step-pointer-down)
-(module-compat-alias drum-step-pointer-up drum-step-pointer-up)
-(module-compat-alias drum-step-double-click drum-step-double-click)
-(module-compat-alias bus-step-double-click bus-step-double-click)
-(module-compat-alias seq-set-step-param-from-step seq-set-step-param-from-step)
-(module-compat-alias seq-set-process-lane-from-step seq-set-process-lane-from-step)
-(module-compat-alias select-all-steps select-all-steps)
-(module-compat-alias delete-selected-steps delete-selected-steps)
-(module-compat-alias duration-slider-position duration-slider-position)
-(module-compat-alias duration-slider-value duration-slider-value)
-(module-compat-alias step-param-value step-param-value)
-(module-compat-alias step-slider-param-value step-slider-param-value)
-(module-compat-alias param-decimals param-decimals)
 
 (def page-button-width 2.8)
 
@@ -106,7 +64,7 @@
       (eseq.seq-core-state/cool-off-follow)
       (set! eseq.vanilla/step-key-select-anchor nil)
       (if (eseq.seq-core-state/seq-has-selected-bus?)
-        (bus-shift-selected-steps -1)
+        (eseq.bus-grid/bus-shift-selected-steps -1)
         (seq-shift-selected-steps -1)))
     (do
       (eseq.seq-core-state/cool-off-follow)
@@ -123,7 +81,7 @@
       (eseq.seq-core-state/cool-off-follow)
       (set! eseq.vanilla/step-key-select-anchor nil)
       (if (eseq.seq-core-state/seq-has-selected-bus?)
-        (bus-shift-selected-steps 1)
+        (eseq.bus-grid/bus-shift-selected-steps 1)
         (seq-shift-selected-steps 1)))
     (do
       (eseq.seq-core-state/cool-off-follow)
@@ -140,7 +98,7 @@
 
 (def %cursor-select-step-range (start end)
   (if (eseq.seq-core-state/seq-has-selected-bus?)
-    (bus-select-step-range start end)
+    (eseq.bus-grid/bus-select-step-range start end)
     (seq-select-step-range start end)))
 
 (def %cursor-select-move (direction)
@@ -168,7 +126,7 @@
     (eseq.seq-core-state/cool-off-follow)
     (set! eseq.vanilla/step-key-select-anchor nil)
     (if (eseq.seq-core-state/seq-has-selected-bus?)
-      (bus-toggle-step (bus-current-step))
+      (eseq.bus-grid/bus-toggle-step (eseq.bus-grid/bus-current-step))
       (seq-toggle-step (eseq.seq-core-state/current-step)))))
 
 (def selection-click? (evt)
@@ -533,8 +491,8 @@
     nil))
 
 (def bus-step-double-click (step evt)
-  (if (and (not (selection-click? evt)) (bus-step-active? step))
-    (bus-toggle-step step)
+  (if (and (not (selection-click? evt)) (eseq.bus-grid/bus-step-active? step))
+    (eseq.bus-grid/bus-toggle-step step)
     nil))
 
 (def seq-set-step-param-from-step (step param value)
@@ -556,7 +514,7 @@
     value))
 
 (def seq-set-process-lane-from-step (track mode step value)
-  (let ((lane (seqv-track-process-lane track mode)))
+  (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
     (if (step-selected? step)
       (for-each
         (lambda (selected-step)
@@ -570,7 +528,7 @@
   (do
     (eseq.seq-core-state/cool-off-follow)
     (if (eseq.seq-core-state/seq-has-selected-bus?)
-      (bus-select-all-steps)
+      (eseq.bus-grid/bus-select-all-steps)
       (seq-select-all-steps))))
 
 (def seq-global-select-all-steps ()
@@ -593,7 +551,7 @@
   (do
     (eseq.seq-core-state/cool-off-follow)
     (if (eseq.seq-core-state/seq-has-selected-bus?)
-      (bus-delete-selected-steps)
+      (eseq.bus-grid/bus-delete-selected-steps)
       (seq-delete-selected-steps))))
 
 (def duration-slider-position (duration)
@@ -611,14 +569,14 @@
 ;; `param-mode` is a `defstate` owned by eseq.seq-core-state: bare is the
 ;; documented path (state_bindings, not the global ladder).
 (def step-param-value (v)
-  (if (= param-mode 3)
+  (if (= eseq.seq-core-state/param-mode 3)
     (round v)
     v))
 
 (def step-slider-param-value (v)
-  (if (= param-mode 1)
+  (if (= eseq.seq-core-state/param-mode 1)
     (duration-slider-value v)
     (step-param-value v)))
 
 (def param-decimals ()
-  (seqv-param-decimals param-mode))
+  (eseq.seqv-track-params/seqv-param-decimals eseq.seq-core-state/param-mode))

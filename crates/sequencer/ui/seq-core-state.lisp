@@ -15,24 +15,6 @@
 ;; The one exception is `cursor-step` — see its pin below.
 (module eseq.seq-core-state)
 
-(module-compat-alias selected-bus selected-bus)
-(module-compat-alias selected-bus-name selected-bus-name)
-(module-compat-alias seq-has-selected-bus? seq-has-selected-bus?)
-(module-compat-alias samples-sidebar-visible samples-sidebar-visible)
-(module-compat-alias mixer-panel-visible mixer-panel-visible)
-(module-compat-alias lower-panel-visible lower-panel-visible)
-(module-compat-alias patch-macros-panel-visible patch-macros-panel-visible)
-(module-compat-alias param-mode param-mode)
-(module-compat-alias page-size page-size)
-(module-compat-alias cursor-step-value cursor-step-value)
-(module-compat-alias set-cursor-step-value set-cursor-step-value)
-(module-compat-alias cursor-num-steps cursor-num-steps)
-(module-compat-alias current-step current-step)
-(module-compat-alias page-count page-count)
-(module-compat-alias visible-page visible-page)
-(module-compat-alias playhead-page playhead-page)
-(module-compat-alias page-offset page-offset)
-(module-compat-alias cool-off-follow cool-off-follow)
 
 (defstate selected-bus -1)
 

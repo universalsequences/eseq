@@ -35,16 +35,6 @@
 ;; rung of the late-binding heal resolves it through the identity alias —
 ;; no compile-time surface needed, hence no import.
 
-(module-compat-alias piano-roll-view-start piano-roll-view-start)
-(module-compat-alias piano-roll-view-duration piano-roll-view-duration)
-(module-compat-alias piano-roll-lane-scroll piano-roll-lane-scroll)
-(module-compat-alias piano-roll-lane-height piano-roll-lane-height)
-(module-compat-alias piano-roll-arrangement-mode? piano-roll-arrangement-mode?)
-(module-compat-alias piano-roll-max-lane-scroll piano-roll-max-lane-scroll)
-(module-compat-alias piano-roll-request-fit-for-track piano-roll-request-fit-for-track)
-(module-compat-alias piano-roll-request-fit piano-roll-request-fit)
-(module-compat-alias piano-roll-apply-pending-fit piano-roll-apply-pending-fit)
-(module-compat-alias piano-roll-action piano-roll-action)
 
 (defstate %tool :pointer)
 (defstate piano-roll-view-start 0)
@@ -98,7 +88,7 @@
 
 (def %content-height ()
   (max 1
-    (- piano-roll-default-pane-height
+    (- eseq.seq-step-tabs/piano-roll-default-pane-height
       %header-height)))
 
 (def %visible-lane-count ()
@@ -279,7 +269,7 @@
         :live
         (do
           ;; eseq.seq-core-state, reached bare through its identity alias.
-          (cool-off-follow)
+          (eseq.seq-core-state/cool-off-follow)
           (seq-set-track-param :num-steps event.length))
         :pattern
         (host-command "focus-set-num-steps"
@@ -355,7 +345,7 @@
       :window-repeat SEQ.focus-window-repeat
       :lane-scroll piano-roll-lane-scroll
       :lane-height (%lane-height-value)
-      :scroll-viewport-height piano-roll-default-pane-height
+      :scroll-viewport-height eseq.seq-step-tabs/piano-roll-default-pane-height
       :snap 1
       :min-duration 0.03125
       :create-duration %create-duration
@@ -468,7 +458,7 @@
                 (dict :track SEQ.current-track :length v))
               (do
                 ;; eseq.seq-core-state, reached bare through its identity alias.
-                (cool-off-follow)
+                (eseq.seq-core-state/cool-off-follow)
                 (seq-set-track-param :num-steps v))))))
       :width 5 :height 1.0 :font-size 8)))
 

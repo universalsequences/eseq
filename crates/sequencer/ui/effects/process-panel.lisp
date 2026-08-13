@@ -5,7 +5,7 @@
 (module eseq.effects.process-panel)
 
 (import eseq.effects.state :as st
-  :refer (process-panel-selected-track process-panel-selected-instance-id))
+  :refer (eseq.effects.state/process-panel-selected-track eseq.effects.state/process-panel-selected-instance-id))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.panel-frame :as pf)
@@ -16,9 +16,6 @@
 ;; (process-panel-open-selected-source, process-chain-panel) retired with
 ;; eseq.effects.buffers, which imports this module and binds its RET handler
 ;; pre-qualified.
-(module-compat-alias process-panel-clear-selection clear-selection)
-(module-compat-alias process-panel-select-slot select-slot)
-(module-compat-alias process-panel-selected-slot selected-slot)
 
 (defwidget process-panel-enabled-dot
   :width 1.35 :height 0.9
@@ -35,33 +32,33 @@
 (def clear-selection ()
   (do
     (pc/process-map-clear)
-    (if (or (not (= process-panel-selected-track -1))
-            (not (= process-panel-selected-instance-id 0)))
+    (if (or (not (= eseq.effects.state/process-panel-selected-track -1))
+            (not (= eseq.effects.state/process-panel-selected-instance-id 0)))
       (do
-        (set! process-panel-selected-track -1)
-        (set! process-panel-selected-instance-id 0))
+        (set! eseq.effects.state/process-panel-selected-track -1)
+        (set! eseq.effects.state/process-panel-selected-instance-id 0))
       false)))
 
 (def %slot-selected? (slot)
-  (and (= process-panel-selected-track SEQ.current-track)
-       (= process-panel-selected-instance-id (get slot :instance-id))))
+  (and (= eseq.effects.state/process-panel-selected-track SEQ.current-track)
+       (= eseq.effects.state/process-panel-selected-instance-id (get slot :instance-id))))
 
 (def select-slot (slot)
   (do
     (if (not (%slot-selected? slot))
       (pc/process-map-clear)
       nil)
-    (set! process-panel-selected-track SEQ.current-track)
-    (set! process-panel-selected-instance-id (get slot :instance-id))
+    (set! eseq.effects.state/process-panel-selected-track SEQ.current-track)
+    (set! eseq.effects.state/process-panel-selected-instance-id (get slot :instance-id))
     (pf/fx-clear-delete-selection)))
 
 (def selected-slot ()
   (if (and (not (pw/has-selected-bus?))
-           (= process-panel-selected-track SEQ.current-track))
+           (= eseq.effects.state/process-panel-selected-track SEQ.current-track))
     (let ((matches
             (filter
               (lambda (slot)
-                (= (get slot :instance-id) process-panel-selected-instance-id))
+                (= (get slot :instance-id) eseq.effects.state/process-panel-selected-instance-id))
               SEQ.process-slots)))
       (if (> (len matches) 0) (nth matches 0) nil))
     nil))

@@ -22,7 +22,6 @@
 ;; src/ui/state_values/tests.rs eval it bare (reads only, so the alias covers
 ;; them). The converted eseq.effects.panel-bodies imports this module instead.
 ;; Deleted when those tests move to the qualified spelling.
-(module-compat-alias builtin-audio-fx-ui builtin-audio-fx-ui)
 
 (def builtin-audio-fx-ui (fx)
   (if (= (get fx :name) "Filter")

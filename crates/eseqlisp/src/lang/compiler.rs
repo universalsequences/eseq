@@ -142,13 +142,6 @@ pub struct Compiler {
     /// Namespaces made known by qualified `def` targets in this unit (the
     /// §3 escape hatch may define into a module before it exists).
     known_namespaces: std::collections::HashSet<String>,
-    /// Migration compat aliases (spec §10 slice 3): old flat name → its
-    /// new qualified home, declared by `(module-compat-alias old new)`.
-    /// Seeded from the VM's accumulated table per compile unit; consulted
-    /// in the bare-name ladder ahead of the flat entry so a converted
-    /// symbol's stale flat slot cannot shadow its new home mid-session.
-    /// The whole table is deleted at the end of the migration.
-    compat_aliases: HashMap<String, String>,
     /// Non-fatal compile diagnostics (`%`-privacy references, escape-hatch
     /// defs). Drained by the VM into the diagnostics channel.
     warnings: Vec<String>,
@@ -294,7 +287,6 @@ impl Compiler {
             import_aliases: HashMap::new(),
             refers: HashMap::new(),
             known_namespaces: std::collections::HashSet::new(),
-            compat_aliases: HashMap::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
             macros: HashMap::new(),
@@ -331,18 +323,10 @@ impl Compiler {
             import_aliases: HashMap::new(),
             refers: HashMap::new(),
             known_namespaces: std::collections::HashSet::new(),
-            compat_aliases: HashMap::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
             macros,
         }
-    }
-
-    /// Seed the migration compat-alias table (old flat name → qualified
-    /// home) accumulated on the VM, so this unit's bare references resolve
-    /// through aliases declared by previously evaluated units.
-    pub fn set_compat_aliases(&mut self, aliases: HashMap<String, String>) {
-        self.compat_aliases = aliases;
     }
 
     /// The compiler-local module state a compile unit accumulates as its
@@ -390,17 +374,7 @@ impl Compiler {
     /// Namespace-aware macro lookup (spec §3): qualified names rewrite
     /// through import aliases then hit the table exactly (with a flat
     /// fallback for legacy hand-rolled keys); bare names prefer the
-    /// current module, then `:refer`s, then migration compat aliases, then
-    /// the flat table (all macros defined in headerless files stay
-    /// flat-keyed until slice 3).
-    ///
-    /// The alias step (spec §10 slice 3) mirrors `resolve_global_name`:
-    /// `Compiler::macros` is a third flat keyspace next to the globals and
-    /// the `defstate` bindings, so a converted file's renamed macros would
-    /// otherwise strand every unconverted caller's old flat spelling. It
-    /// sits ahead of the flat entry for the same reason it does there — a
-    /// stale pre-conversion flat `MacroDef`, still in the table after a hot
-    /// reload, must not shadow the macro's new qualified home.
+    /// current module, then `:refer`s, then the flat table.
     pub fn lookup_macro(&self, name: &str) -> Option<&MacroDef> {
         if let Some((ns, base)) = super::modules::split_qualified(name) {
             let full_ns = self
@@ -419,11 +393,6 @@ impl Compiler {
                 self.refers
                     .get(name)
                     .and_then(|qualified| self.macros.get(qualified))
-            })
-            .or_else(|| {
-                self.compat_aliases
-                    .get(name)
-                    .and_then(|target| self.macros.get(target))
             })
             .or_else(|| self.macros.get(name))
     }
@@ -1355,13 +1324,6 @@ impl Compiler {
         if let Some(target) = self.refers.get(name) {
             return target.clone();
         }
-        // Migration compat alias (spec §10 slice 3): a converted symbol's
-        // old flat name resolves to its new qualified home; reads AND
-        // writes follow the alias, so an unconverted redefiner keeps
-        // last-writer-wins semantics against the new home.
-        if let Some(target) = self.compat_aliases.get(name) {
-            return target.clone();
-        }
         if self.global_symbols.iter().any(|s| *s == qualified) {
             return qualified;
         }
@@ -1427,8 +1389,8 @@ impl Compiler {
     }
 
     /// State-binding lookup mirroring the §3 resolution ladder over the
-    /// (possibly qualified) `state_bindings` keyspace: exact key → alias
-    /// rewrite for qualified names → current-module key → `:refer` target.
+    /// (possibly qualified) `state_bindings` keyspace: exact key →
+    /// current-module key → `:refer` target.
     fn state_binding_for(&self, name: &str) -> Option<u32> {
         if let Some(id) = self.state_bindings.get(name) {
             return Some(*id);
@@ -1465,15 +1427,7 @@ impl Compiler {
         {
             return Some(*id);
         }
-        // Migration compat alias (spec §10 slice 3): `defstate` keys are a
-        // second keyspace, so a converted state's old flat name has to follow
-        // the alias here too. Without this an unconverted `(set! old-name v)`
-        // resolves the *global* through the alias but misses the state
-        // binding, emitting StoreGlobal over the slot holding the NodeRef.
-        self.compat_aliases
-            .get(name)
-            .and_then(|target| self.state_bindings.get(target))
-            .copied()
+        None
     }
 
     fn warn_once(&mut self, message: String) {
@@ -1928,61 +1882,6 @@ impl Compiler {
                 }
                 self.emit(OpCode::PushNil);
                 return Ok(());
-            }
-            // (module-compat-alias old new) — migration compat alias
-            // (spec §10 slice 3): the old FLAT name resolves to the new
-            // qualified home for unconverted callers. Recorded compile-side
-            // for the rest of this unit and registered on the VM (via
-            // __compat-alias) for every later unit; deleted wholesale at
-            // the end of the migration.
-            if s == "module-compat-alias" {
-                if self.scopes.len() > 1 {
-                    self.errors
-                        .push("(module-compat-alias …) must appear at top level".to_string());
-                    self.emit(OpCode::PushNil);
-                    return Ok(());
-                }
-                let (Some(Expression::Symbol(old)), Some(Expression::Symbol(new)), 3) =
-                    (list.get(1), list.get(2), list.len())
-                else {
-                    self.errors.push(
-                        "(module-compat-alias old new) expects two symbols".to_string(),
-                    );
-                    self.emit(OpCode::PushNil);
-                    return Ok(());
-                };
-                if super::modules::is_qualified(old) {
-                    self.errors.push(format!(
-                        "module-compat-alias: old name '{old}' must be flat (the alias \
-                         maps a legacy flat name to its qualified home)"
-                    ));
-                    self.emit(OpCode::PushNil);
-                    return Ok(());
-                }
-                let target = if let Some((ns, base)) = super::modules::split_qualified(new) {
-                    let full_ns = self
-                        .import_aliases
-                        .get(ns)
-                        .map(String::as_str)
-                        .unwrap_or(ns);
-                    super::modules::qualify(full_ns, base)
-                } else if self.declared_module().is_some() {
-                    super::modules::qualify(&self.current_module, new)
-                } else {
-                    self.errors.push(format!(
-                        "module-compat-alias: target '{new}' must be qualified (or \
-                         declared inside a module so it can qualify implicitly)"
-                    ));
-                    self.emit(OpCode::PushNil);
-                    return Ok(());
-                };
-                self.compat_aliases.insert(old.clone(), target.clone());
-                let register = Expression::List(vec![
-                    Expression::Symbol("__compat-alias".to_string()),
-                    Expression::String(old.clone()),
-                    Expression::String(target),
-                ]);
-                return self.compile_expression(&register);
             }
             // (import NAME :as ALIAS) / (import NAME :refer (sym …)) —
             // load-once + alias/refer registration (spec §2 decision 2, §4).

@@ -1,7 +1,7 @@
 ;; Instrument modulation source selection and editor controls.
 (module eseq.effects.instrument-modulation)
 
-(import eseq.effects.state :refer (instrument-selected-mod-slot))
+(import eseq.effects.state :refer (eseq.effects.state/instrument-selected-mod-slot))
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.custom-ui-lego :as lego)
@@ -9,7 +9,6 @@
 ;; Migration alias (module spec §10): the unconverted panel-bodies.lisp and
 ;; sampler-panel.lisp call the panel entry point by its old flat name.
 ;; Converted callers (effect-modulation) import this module instead.
-(module-compat-alias instrument-mod-control-panel mod-control-panel)
 
 (def %mod-base-name (name)
   (if (string-ends-with? name " amt")
@@ -67,11 +66,11 @@
           :width 3.9 :height 1.1
           :padding 0
           :font-size 9
-          :background-color (if (= instrument-selected-mod-slot slot)
+          :background-color (if (= eseq.effects.state/instrument-selected-mod-slot slot)
             (rgba 0.95 0.48 0.18 0.82)
             :instrument-control-bg)
-          :color (if (= instrument-selected-mod-slot slot) :white :dim)
-          :on-click (lambda (info) (set! instrument-selected-mod-slot slot)))
+          :color (if (= eseq.effects.state/instrument-selected-mod-slot slot) :white :dim)
+          :on-click (lambda (info) (set! eseq.effects.state/instrument-selected-mod-slot slot)))
         (dropdown :value (if source-p (get source-p :text-value) "off")
           :options (if source-p (get source-p :options) '())
           :on-change (lambda (v) (if source-p (pc/fx-set-instrument-option source-p v) false))

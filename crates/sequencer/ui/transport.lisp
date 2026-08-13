@@ -69,16 +69,6 @@
 ;;   pattern-control-style — a write-once style `def` read bare by
 ;;   ui/step-grid.lisp (eseq.step-grid) and ui/sequencer.lisp (eseq.sequencer).
 ;;   Neither may import a UI root, so the alias is the supported edge.
-(module-compat-alias transport-stop transport-stop)
-(module-compat-alias seq-set-scene-launch-quantize seq-set-scene-launch-quantize)
-(module-compat-alias seq-set-record-quantize seq-set-record-quantize)
-(module-compat-alias seq-switch-pattern seq-switch-pattern)
-(module-compat-alias seq-reorder-scene-drop seq-reorder-scene-drop)
-(module-compat-alias scene-push-target scene-push-target)
-(module-compat-alias scene-push-value scene-push-value)
-(module-compat-alias scene-push-begin scene-push-begin)
-(module-compat-alias scene-push-drag scene-push-drag)
-(module-compat-alias pattern-control-style pattern-control-style)
 
 ;; ── Shared container backgrounds ──
 ;; `defwidget` names live in their own flat keyspace (hazard e) and are left
@@ -538,7 +528,7 @@
 (def transport-stop ()
   (do
     (if SEQ.playing (seq-toggle-play) nil)
-    (set-arrangement-cursor 0 -1)))
+    (eseq.arrangement/set-cursor 0 -1)))
 
 (defwidget play-icon
   :width 2.5 :height 1.8
@@ -712,27 +702,27 @@
     
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
-        :on-click |x y r| (seq-toggle-samples-sidebar)
+        :on-click |x y r| (eseq.seq-panels/seq-toggle-samples-sidebar)
         :style %transport-icon-style
-        :active (if samples-sidebar-visible 1 0)))
+        :active (if eseq.seq-core-state/samples-sidebar-visible 1 0)))
     
     (subtree :key "transport-mixer-panel-button"
       (mix-panel-icon
-        :on-click |x y r| (seq-toggle-mixer-panel)
+        :on-click |x y r| (eseq.seq-panels/seq-toggle-mixer-panel)
         :style %transport-icon-style
-        :active (if mixer-panel-visible 1 0)))
+        :active (if eseq.seq-core-state/mixer-panel-visible 1 0)))
     
     (subtree :key "transport-fx-panel-button"
       (fx-panel-icon
-        :on-click |x y r| (seq-toggle-fx-panel)
+        :on-click |x y r| (eseq.seq-panels/seq-toggle-fx-panel)
         :style %transport-icon-style
-        :active (if lower-panel-visible 1 0)))
+        :active (if eseq.seq-core-state/lower-panel-visible 1 0)))
     
     (subtree :key "transport-save-button"
       (save-icon
-        :on-click |x y r| (sbrowser-open-project-save)
+        :on-click |x y r| (eseq.browser/open-project-save)
         :style %transport-icon-style
-        :active (if (sbrowser-project-save-mode?) 1 0)))
+        :active (if (eseq.browser/project-save-mode?) 1 0)))
     
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
@@ -938,11 +928,11 @@
     (box :width 0 :flex 1)
     (subtree :key "transport-session-view-button"
       (session-view-icon
-        :on-click |x y r| (seq-show-sequencer-main)
+        :on-click |x y r| (eseq.seq-panels/seq-show-sequencer-main)
         :style %transport-icon-style
         :active (if (tabs/seq-arrangement-view?) 0 1)))
     (subtree :key "transport-arrangement-view-button"
       (arrangement-view-icon
-        :on-click |x y r| (seq-open-arrangement)
+        :on-click |x y r| (eseq.seq-panels/seq-open-arrangement)
         :style %transport-icon-style
         :active (if (tabs/seq-arrangement-view?) 1 0)))))

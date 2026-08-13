@@ -75,5 +75,5 @@
                     :max-ms (if rise-p (get rise-p :max) 5000)
                     :background-color :instrument-control-bg
                     :grid-color :dim
-                    :curve-color (ui-accent-orange)
+                    :curve-color (eseq.effects.custom-ui-lego/ui-accent-orange)
                     :fill-color (rgba 1.0 0.48 0.18 0.16)))))))))))

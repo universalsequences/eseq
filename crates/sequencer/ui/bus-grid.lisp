@@ -43,85 +43,58 @@
 (import eseq.seqv-track-params)
 (import eseq.seq-grid-mode)
 
-(module-compat-alias bus-seq-list bus-seq-list)
-(module-compat-alias bus-seq-playhead bus-seq-playhead)
-(module-compat-alias bus-seq-timebase bus-seq-timebase)
-(module-compat-alias bus-seq-param-values bus-seq-param-values)
-(module-compat-alias bus-seq-param-name bus-seq-param-name)
-(module-compat-alias bus-seq-param-min bus-seq-param-min)
-(module-compat-alias bus-seq-param-max bus-seq-param-max)
-(module-compat-alias bus-page-count bus-page-count)
-(module-compat-alias bus-current-step bus-current-step)
-(module-compat-alias bus-current-page bus-current-page)
-(module-compat-alias bus-step-index bus-step-index)
-(module-compat-alias bus-step-visible? bus-step-visible?)
-(module-compat-alias bus-page-panel-width bus-page-panel-width)
-(module-compat-alias bus-goto-page bus-goto-page)
-(module-compat-alias bus-set-step-param bus-set-step-param)
-(module-compat-alias bus-set-selected-step-param bus-set-selected-step-param)
-(module-compat-alias bus-toggle-step bus-toggle-step)
-(module-compat-alias bus-step-active? bus-step-active?)
-(module-compat-alias bus-select-step-range bus-select-step-range)
-(module-compat-alias bus-select-all-steps bus-select-all-steps)
-(module-compat-alias bus-delete-selected-steps bus-delete-selected-steps)
-(module-compat-alias bus-shift-selected-steps bus-shift-selected-steps)
-(module-compat-alias bus-step-select-drag-start bus-step-select-drag-start)
-(module-compat-alias bus-step-select-drag-over bus-step-select-drag-over)
-(module-compat-alias bus-step-pointer-down bus-step-pointer-down)
-(module-compat-alias bus-step-pointer-up bus-step-pointer-up)
-(module-compat-alias bus-set-sequencer-label bus-set-sequencer-label)
 
 (def bus-seq-list (lists)
   (if (core/seq-has-selected-bus?)
-    (nth lists selected-bus)
+    (nth lists eseq.seq-core-state/selected-bus)
     '()))
 
 (def bus-seq-playhead ()
   (if (core/seq-has-selected-bus?)
-    (nth SEQ.bus-playheads selected-bus)
+    (nth SEQ.bus-playheads eseq.seq-core-state/selected-bus)
     0))
 
 (def %bus-seq-num-steps ()
   (if (core/seq-has-selected-bus?)
-    (nth SEQ.bus-num-steps selected-bus)
+    (nth SEQ.bus-num-steps eseq.seq-core-state/selected-bus)
     16))
 
 (def bus-seq-timebase ()
   (if (core/seq-has-selected-bus?)
-    (nth SEQ.bus-timebases selected-bus)
+    (nth SEQ.bus-timebases eseq.seq-core-state/selected-bus)
     "16"))
 
 (def %bus-seq-swing ()
   (if (core/seq-has-selected-bus?)
-    (nth SEQ.bus-swings selected-bus)
+    (nth SEQ.bus-swings eseq.seq-core-state/selected-bus)
     50))
 
 (def %bus-seq-swing-resolution ()
   (if (core/seq-has-selected-bus?)
-    (nth SEQ.bus-swing-resolutions selected-bus)
+    (nth SEQ.bus-swing-resolutions eseq.seq-core-state/selected-bus)
     "1/16"))
 
 (def bus-seq-param-values ()
-  (if (= param-mode 1) (bus-seq-list SEQ.bus-durations)
-    (if (= param-mode 2) (bus-seq-list SEQ.bus-syncs)
+  (if (= eseq.seq-core-state/param-mode 1) (bus-seq-list SEQ.bus-durations)
+    (if (= eseq.seq-core-state/param-mode 2) (bus-seq-list SEQ.bus-syncs)
       (bus-seq-list SEQ.bus-velocities))))
 
 (def bus-seq-param-name ()
-  (if (= param-mode 1) "Duration"
-    (if (= param-mode 2) "Sync"
+  (if (= eseq.seq-core-state/param-mode 1) "Duration"
+    (if (= eseq.seq-core-state/param-mode 2) "Sync"
       "Gate Amount")))
 
 (def %bus-seq-param-key ()
-  (if (= param-mode 1) "duration"
-    (if (= param-mode 2) "sync"
+  (if (= eseq.seq-core-state/param-mode 1) "duration"
+    (if (= eseq.seq-core-state/param-mode 2) "sync"
       "velocity")))
 
 (def bus-seq-param-min ()
-  (if (= param-mode 1) 0.1 0))
+  (if (= eseq.seq-core-state/param-mode 1) 0.1 0))
 
 (def bus-seq-param-max ()
-  (if (= param-mode 1) 2
-    (if (= param-mode 2) (- (len SEQ.sync-labels) 1)
+  (if (= eseq.seq-core-state/param-mode 1) 2
+    (if (= eseq.seq-core-state/param-mode 2) (- (len SEQ.sync-labels) 1)
       1)))
 
 (def bus-page-count ()
@@ -153,49 +126,49 @@
 
 (def bus-set-step-param (step value)
   (host-command "set-bus-step-param"
-    (dict :bus selected-bus :step step :param (%bus-seq-param-key) :value value)))
+    (dict :bus eseq.seq-core-state/selected-bus :step step :param (%bus-seq-param-key) :value value)))
 
 (def bus-set-selected-step-param (value)
   (host-command "set-selected-bus-step-param"
-    (dict :bus selected-bus :param (%bus-seq-param-key) :value value)))
+    (dict :bus eseq.seq-core-state/selected-bus :param (%bus-seq-param-key) :value value)))
 
 (def bus-toggle-step (step)
   (do
     (core/cool-off-follow)
     (core/set-cursor-step-value step)
-    (host-command "toggle-bus-step" (dict :bus selected-bus :step step))))
+    (host-command "toggle-bus-step" (dict :bus eseq.seq-core-state/selected-bus :step step))))
 
 (def %bus-set-step-active (step active)
   (do
     (core/cool-off-follow)
     (core/set-cursor-step-value step)
     (host-command "set-bus-step-active"
-      (dict :bus selected-bus :step step :active active))))
+      (dict :bus eseq.seq-core-state/selected-bus :step step :active active))))
 
 (def bus-step-active? (step)
   (nth (bus-seq-list SEQ.bus-steps) step))
 
 (def bus-select-step-range (start end)
   (host-command "select-bus-step-range"
-    (dict :bus selected-bus :start start :end end)))
+    (dict :bus eseq.seq-core-state/selected-bus :start start :end end)))
 
 (def %bus-select-step (step)
   (host-command "select-bus-step"
-    (dict :bus selected-bus :step step)))
+    (dict :bus eseq.seq-core-state/selected-bus :step step)))
 
 (def bus-select-all-steps ()
-  (host-command "select-all-bus-steps" (dict :bus selected-bus)))
+  (host-command "select-all-bus-steps" (dict :bus eseq.seq-core-state/selected-bus)))
 
 (def bus-delete-selected-steps ()
-  (host-command "delete-selected-bus-steps" (dict :bus selected-bus)))
+  (host-command "delete-selected-bus-steps" (dict :bus eseq.seq-core-state/selected-bus)))
 
 (def %bus-move-step-drag (start target)
   (host-command "move-bus-step-drag"
-    (dict :bus selected-bus :start start :target target)))
+    (dict :bus eseq.seq-core-state/selected-bus :start start :target target)))
 
 (def bus-shift-selected-steps (direction)
   (host-command "shift-selected-bus-steps"
-    (dict :bus selected-bus :direction direction)))
+    (dict :bus eseq.seq-core-state/selected-bus :direction direction)))
 
 ;; Every `eseq.vanilla/step-*` below is one of the eleven shared drag-state
 ;; cells pinned by ui/step-grid-interactions.lisp — see the header. Bare
@@ -306,8 +279,8 @@
 
 (def %bus-set-sequencer-param (param value)
   (host-command "set-bus-sequencer-param"
-    (dict :bus selected-bus :param param :value value)))
+    (dict :bus eseq.seq-core-state/selected-bus :param param :value value)))
 
 (def bus-set-sequencer-label (param label)
   (host-command "set-bus-sequencer-param"
-    (dict :bus selected-bus :param param :label label)))
+    (dict :bus eseq.seq-core-state/selected-bus :param param :label label)))

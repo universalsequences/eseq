@@ -1,8 +1,6 @@
 ;; Drag/drop handlers for adding, inserting, and moving effects.
 (module eseq.effects.drag-drop)
 
-(module-compat-alias fx-drop-existing-effect drop-existing-effect)
-(module-compat-alias fx-drop-on-effect drop-on-effect)
 
 (def %drop-library-effect (payload target)
   (let ((kind (get payload :kind))

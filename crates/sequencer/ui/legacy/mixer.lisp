@@ -63,7 +63,7 @@
           :light (vec3 0.0 -1.0 1.5) :shininess 82.0)
         :color 
         (* (if (= active 1) 1.0 (+ 0.2 (smoothstep -0.4 0.1 d)))
-          (aqua-color 
+          (eseq.materials/color
             (rgba 
               (if (= active 1) 0.85 0.5)
               (if (= active 1) 0.05 0.5) 
@@ -183,45 +183,45 @@
             (box :background "track-container"
               :padding 0.5
               :even (mod i 2)
-              :selected (if (and (< selected-bus 0) (= SEQ.current-track i)) 1 0)
+              :selected (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) 1 0)
 
               (h-stack :gap 0.5 :align :center
                 (box :width 2 :height 1.5
                   :background "rec-arm-dot"
                   :key (str "track-arm-" i)
                   :active (if (nth SEQ.record-armed i) 1 0)
-                  :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-record-arm i)))
+                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-record-arm i)))
                 (button (str (+ i 1))
                   :key (str "track-mute-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
                   :background-color (%mute-button-bg (nth SEQ.track-mutes i))
                   :color (if (nth SEQ.track-mutes i) :gray :blue)
-                  :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-track-mute i)))
+                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-mute i)))
                 (button "S"
                   :key (str "track-solo-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
                   :background-color (%solo-button-bg (nth SEQ.track-solos i))
                   :color (if (nth SEQ.track-solos i) :white :gray)
-                  :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-track-solo i)))
+                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-solo i)))
                 (box :width 8.6 :height 1
                   :key (str "track-select-" i)
-                  :bg (if (and (< selected-bus 0) (= SEQ.current-track i)) :blue :dark-gray)
-                  :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
+                  :bg (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :blue :dark-gray)
+                  :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track i))
                   (label (substring name 0 12) :font-size 11 :width 8.6
                     :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
                              :dark-gray
-                             (if (and (< selected-bus 0) (= SEQ.current-track i)) :white :gray))
+                             (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :white :gray))
                     :bg :transparent))
                 (box :width 5.2
                   (v-stack :gap 0.18
                     (hslider :min 0 :max 1 :width 5
                       :key (str "track-volume-" i)
                       :value (nth SEQ.track-volumes i)
-                      :material (aqua-slider-material)
-                      :on-change (lambda (v) (do (set! selected-bus -1) (seq-set-track-volume i v))))
+                      :material (eseq.materials/slider-material)
+                      :on-change (lambda (v) (do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track-volume i v))))
                     (subtree :key (str "mixer-track-meter-" i)
                       (mixer-track-meter :level (%track-peak i)))))
-                (if (and (< selected-bus 0) (= SEQ.current-track i) (> SEQ.num-tracks 1))
+                (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i) (> SEQ.num-tracks 1))
                   (box :width 1.6 :height 1.2 :align :center
                     :bg :transparent
                     :key (str "track-delete-" i)
@@ -236,7 +236,7 @@
             (box :background "track-container"
               :padding 0.5
               :even (mod row 2)
-              :selected (if (= selected-bus i) 1 0)
+              :selected (if (= eseq.seq-core-state/selected-bus i) 1 0)
               (h-stack :gap 0.5 :align :center
                 (label "" :width 2 :height 1.5 :bg :transparent)
                 (button (%bus-row-label i)
@@ -253,15 +253,15 @@
                   :on-click |x y r| (seq-toggle-bus-solo i))
                 (box :width 8.6 :height 1
                   :key (str "bus-select-" i)
-                  :bg (if (= selected-bus i) :blue :dark-gray)
-                  :on-click |x y r| (do (seq-clear-selection) (set! selected-bus i))
+                  :bg (if (= eseq.seq-core-state/selected-bus i) :blue :dark-gray)
+                  :on-click |x y r| (do (seq-clear-selection) (set! eseq.seq-core-state/selected-bus i))
                   (label (substring name 0 12) :font-size 11 :width 8.6
-                    :color (if (= selected-bus i) :white :gray)
+                    :color (if (= eseq.seq-core-state/selected-bus i) :white :gray)
                     :bg :transparent))
                 (box :width 5.2
                   (hslider :min 0 :max 1 :width 5
                     :key (str "bus-volume-" i)
                     :value (nth SEQ.bus-volumes i)
-                    :material (aqua-slider-material)
+                    :material (eseq.materials/slider-material)
                     :on-change (lambda (v) (seq-set-bus-volume i v))))
                 (label "" :width 1.6 :bg :transparent))))))))))

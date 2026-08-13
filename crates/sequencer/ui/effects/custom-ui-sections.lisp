@@ -17,16 +17,6 @@
 ;; the spellings stay put and the alias is the flat->qualified bridge.
 ;; `ui-select-section` has no in-repo caller but is part of the generated-UI
 ;; vocabulary (two Rust harnesses stub it), so it keeps its public alias.
-(module-compat-alias custom-ui-selected-sections custom-ui-selected-sections)
-(module-compat-alias custom-ui-set-active-adsr custom-ui-set-active-adsr)
-(module-compat-alias custom-ui-adsr-stage-active? custom-ui-adsr-stage-active?)
-(module-compat-alias custom-ui-selected-section-for-current-scope custom-ui-selected-section-for-current-scope)
-(module-compat-alias custom-ui-select-section-in-scope custom-ui-select-section-in-scope)
-(module-compat-alias ui-select-section ui-select-section)
-(module-compat-alias ui-section-select-callback ui-section-select-callback)
-(module-compat-alias ui-panel-bg ui-panel-bg)
-(module-compat-alias ui-section ui-section)
-(module-compat-alias ui-panel ui-panel)
 
 (defstate custom-ui-selected-sections '())
 (defstate %active-adsr false)

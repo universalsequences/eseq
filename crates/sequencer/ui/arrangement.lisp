@@ -14,41 +14,6 @@
 ;; scene ghost directly — the rest are entry points the Rust arrangement
 ;; tests drive by name (ui/tests.rs and ui/state_values/tests.rs).  Deleted
 ;; as each consumer converts.
-(module-compat-alias arrangement-channel channel)
-(module-compat-alias arrangement-clip-color clip-color)
-(module-compat-alias arrangement-clip-cycle clip-cycle)
-(module-compat-alias arrangement-clip-sound-dot clip-sound-dot)
-(module-compat-alias arrangement-content-length content-length)
-(module-compat-alias arrangement-content-length-min content-length-min)
-(module-compat-alias arrangement-cursor-time cursor-time)
-(module-compat-alias arrangement-cursor-track cursor-track)
-(module-compat-alias arrangement-drop-scene drop-scene)
-(module-compat-alias arrangement-ghost ghost)
-(module-compat-alias arrangement-lane-cursor-time lane-cursor-time)
-(module-compat-alias arrangement-lane-pattern-events lane-pattern-events)
-(module-compat-alias arrangement-lane-region-rect lane-region-rect)
-(module-compat-alias arrangement-lane-selection lane-selection)
-(module-compat-alias arrangement-pattern-dots pattern-dots)
-(module-compat-alias arrangement-region-ghost region-ghost)
-(module-compat-alias arrangement-region-other-track region-other-track)
-(module-compat-alias arrangement-scene-action scene-action)
-(module-compat-alias arrangement-scene-items scene-items)
-(module-compat-alias arrangement-scene-name scene-name)
-(module-compat-alias arrangement-scroll-extent scroll-extent)
-(module-compat-alias arrangement-selected-track selected-track)
-(module-compat-alias arrangement-selection selection)
-(module-compat-alias arrangement-track-action track-action)
-(module-compat-alias arrangement-track-clips track-clips)
-(module-compat-alias arrangement-track-drag track-drag)
-(module-compat-alias arrangement-track-drag-kind track-drag-kind)
-(module-compat-alias arrangement-track-items track-items)
-(module-compat-alias arrangement-track-row-pitch track-row-pitch)
-(module-compat-alias arrangement-track-selection track-selection)
-(module-compat-alias arrangement-view-duration view-duration)
-(module-compat-alias arrangement-view-start view-start)
-(module-compat-alias arrangement-visible-ordinal visible-ordinal)
-(module-compat-alias set-arrangement-cursor set-cursor)
-(module-compat-alias set-arrangement-view-start set-view-start)
 
 ;; Declared dependencies (spec §4). `import` is a *runtime* form — it runs
 ;; after this file is compiled — so it guarantees only that the target is
@@ -136,7 +101,7 @@
         (%publish-lane-region-ghost i kind
           (get region :start) (get region :end) delta)
         (%clear-lane-ghost i)))
-    (seq-visible-track-indices)))
+    (eseq.track-collapse/visible-track-indices)))
 
 (def %clear-region-ghost ()
   (%publish-region-ghost nil 0 0))
@@ -146,14 +111,14 @@
     (lambda (i)
       (reactive-set "SEQV" (channel "selected-clip" i)
         (if (= i track) clip-id -1)))
-    (seq-visible-track-indices)))
+    (eseq.track-collapse/visible-track-indices)))
 
 (def %publish-cursor (time track)
   (map
     (lambda (i)
       (reactive-set "SEQV" (channel "cursor" i)
         (if (= i track) time -1)))
-    (seq-visible-track-indices)))
+    (eseq.track-collapse/visible-track-indices)))
 
 ;; Seed every channel a lane can bind before the first layout, so unbound
 ;; slots do not read as "clip 0 selected" or "cursor at beat 0".
@@ -891,7 +856,7 @@
 ;; vertical travel to a count of track rows, step that many places through the
 ;; visible order, and map back to a model index.
 (def region-other-track (i row-delta)
-  (let ((visible (seq-visible-track-indices)))
+  (let ((visible (eseq.track-collapse/visible-track-indices)))
     (if (= (len visible) 0)
       i
       (let ((ordinal (visible-ordinal visible i)))
@@ -911,7 +876,7 @@
 ;; (spec 4.2): the scene lane spans the whole arrangement, so its vertical
 ;; travel carries no track information.
 (def %region-all-tracks (event)
-  (let ((visible (seq-visible-track-indices)))
+  (let ((visible (eseq.track-collapse/visible-track-indices)))
     (if (= (len visible) 0)
       nil
       (dict
@@ -1314,7 +1279,7 @@
                   nil
                   (%find-track-clip i (nth ids 0)))))
       (do
-        (seqv-select-track-for-edit i)
+        (eseq.sequencer/select-track-for-edit i)
         (set! selection '())
         (set! %selection-rect nil)
         ;; A clip and a region are mutually exclusive (region spec 4.1);
@@ -1342,7 +1307,7 @@
 
 (def %track-clear-selection (i event)
   (do
-    (seqv-select-track-for-edit i)
+    (eseq.sequencer/select-track-for-edit i)
     (set! track-selection '())
     (%publish-selection -1 -1)
     (%region-clear)
@@ -1363,7 +1328,7 @@
       (let ((clip (%track-select i event)))
         (if (= clip nil)
           nil
-          (seq-open-arrangement-piano-roll-bottom-for-track i)))
+          (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track i)))
       ;; Background double-click: follow the same empty-space selection path
       ;; as the first click, then atomically mint a real silent take + clip.
       ;; The host command selects the new clip when it commits, so the
@@ -1374,7 +1339,7 @@
         (do
           (%track-select i (dict :ids '() :time start))
           (seq-arrangement-empty-take-create i start end)
-          (seq-open-arrangement-piano-roll-bottom-for-track i)))
+          (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track i)))
       ;; Degenerate zero-movement release, or a click on empty lane space:
       ;; in FX mode a clip BODY remains a region/cursor surface. In the
       ;; arrangement piano-roll mode the widget includes the body clip id,
@@ -1383,14 +1348,14 @@
       ;; "No clip selected".
       :clear-selection
       (let ((ids (%real-clip-ids i (or (get event :ids) '()))))
-        (if (and (piano-roll-arrangement-mode?)
-              (= lower-panel-buffer "*piano-roll*")
+        (if (and (eseq.piano-roll/piano-roll-arrangement-mode?)
+              (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
               (> (len ids) 0))
           (%track-select i event)
           (%track-clear-selection i event)))
       :set-cursor
       (do
-        (seqv-select-track-for-edit i)
+        (eseq.sequencer/select-track-for-edit i)
         (set-cursor (get event :time) i))
       ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
       ;; the ghost only; the release commits the Rust-owned region.
@@ -1613,10 +1578,10 @@
       (box
         :key (str "track-header-" i)
         :height :fill :width %header-width
-        :selected (seqv-track-selected-binding i)
+        :selected (eseq.sequencer/track-selected-binding i)
         :background-color :buffer-bg
         :selected-background-color :mixer-strip-selected-bg
-        (seqv-track-header i))
+        (eseq.sequencer/track-header i))
       (%track-lane i))))
 
 ;; Rows stack with :gap 0 so the timeline instances are vertically flush —
@@ -1656,7 +1621,7 @@
             (if (and (not (= bound nil)) (= (nth bound 0) i))
               (nth bound 1)
               -1)))
-        (seq-visible-track-indices)))
+        (eseq.track-collapse/visible-track-indices)))
     (let ((region SEQ.song-region))
       (map
         (lambda (i)
@@ -1670,7 +1635,7 @@
                 (nth region 3))
               (reactive-set "SEQV" (channel "region-on" i) 1))
             (reactive-set "SEQV" (channel "region-on" i) 0)))
-        (seq-visible-track-indices)))
+        (eseq.track-collapse/visible-track-indices)))
     (reactive-set "SEQV" "arr-content-length" (content-length))))
 
 (effect-buffer "*arrangement*"
@@ -1691,7 +1656,7 @@
     ;; toolbar/badge gestures; renders as a centered modal over the whole
     ;; frame (modal spec §4) with zero footprint here while closed.
     (subtree :key "arr-sound-palette"
-      (sound-palette-panel))
+      (eseq.sound-palette/panel))
     (subtree :key "arr-scene-row"
       (box :width :fill
         (h-stack :width :fill :align :start
@@ -1702,6 +1667,6 @@
     (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "track-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.0
-        (each (seq-visible-track-indices) |i|
+        (each (eseq.track-collapse/visible-track-indices) |i|
           (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
             (%track-row i)))))))

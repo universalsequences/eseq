@@ -7,13 +7,6 @@
 ;; unconverted. `toggle-collapsed-ui` has no caller today, but it is
 ;; command-shaped (the kind of name a `bind-key`/`:on-key` string reaches by
 ;; spelling), so it keeps an alias too.
-(module-compat-alias seq-track-collapsed? collapsed?)
-(module-compat-alias seq-visible-track-indices visible-track-indices)
-(module-compat-alias seq-track-custom-instrument? custom-instrument?)
-(module-compat-alias seq-track-replaceable-instrument? replaceable-instrument?)
-(module-compat-alias seq-track-sound-replaceable? sound-replaceable?)
-(module-compat-alias seq-track-type-icon type-icon)
-(module-compat-alias seq-toggle-track-collapsed-ui toggle-collapsed-ui)
 
 (def collapsed? (track)
   (and (< track (len SEQ.track-collapsed))

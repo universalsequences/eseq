@@ -20,14 +20,6 @@
 ;; Converted callers (eseq.effects.effect-panels for midi-fx-panel-body,
 ;; audio-fx-panel-body, fx-panel-selected?) import this module instead —
 ;; no alias for names only they reference. Deleted as callers convert.
-(module-compat-alias instrument-key-note-active? instrument-key-note-active?)
-(module-compat-alias instrument-key-note-variant-row instrument-key-note-variant-row)
-(module-compat-alias instrument-key-lock-variant-items instrument-key-lock-variant-items)
-(module-compat-alias instrument-key-lock-chip-current? instrument-key-lock-chip-current?)
-(module-compat-alias instrument-key-lock-chip-click instrument-key-lock-chip-click)
-(module-compat-alias instrument-key-select-note instrument-key-select-note)
-(module-compat-alias instrument-synth-panel-body instrument-synth-panel-body)
-(module-compat-alias audio-fx-panel-body audio-fx-panel-body)
 
 (def %instrument-key-note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
 (def %instrument-key-count 12)
@@ -142,7 +134,7 @@
   (do
     ;; cool-off-follow is owned by the unconverted ui/seq-core-state.lisp —
     ;; bare, the stage-3 heal covers the read.
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (host-command "stamp-key-lock-variant"
       (dict :label (get chip :label)
             :notes st/instrument-key-lock-selected-notes))))

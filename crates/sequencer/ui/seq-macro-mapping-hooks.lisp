@@ -19,14 +19,14 @@
 (add-hook "macro-mapping-sidebar-open-hook" "seq-shell"
   (lambda ()
     (do
-      (set! sidebar-was-visible samples-sidebar-visible)
-      (set! samples-sidebar-visible true))))
+      (set! sidebar-was-visible eseq.seq-core-state/samples-sidebar-visible)
+      (set! eseq.seq-core-state/samples-sidebar-visible true))))
 
 (add-hook "macro-mapping-sidebar-refresh-hook" "seq-shell"
-  (lambda () (seq-refresh-current-layout)))
+  (lambda () (eseq.seq-layout/refresh-current-layout)))
 
 (add-hook "macro-mapping-sidebar-close-hook" "seq-shell"
   (lambda ()
     (do
-      (set! samples-sidebar-visible sidebar-was-visible)
-      (seq-refresh-current-layout))))
+      (set! eseq.seq-core-state/samples-sidebar-visible sidebar-was-visible)
+      (eseq.seq-layout/refresh-current-layout))))

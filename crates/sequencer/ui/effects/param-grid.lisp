@@ -2,7 +2,7 @@
 (module eseq.effects.param-grid)
 
 (import eseq.effects.param-controls :as pc)
-(import eseq.effects.state :refer (instrument-panel-tab))
+(import eseq.effects.state :refer (eseq.effects.state/instrument-panel-tab))
 (import eseq.effects.effect-panels :refer (visible-params))
 
 ;; Migration aliases (module spec §10). Identity aliases only: this file's
@@ -16,9 +16,6 @@
 ;; import this module instead. The aliases are deleted as callers convert.
 ;; Everything else is %-private. Subtree :key strings and :debug-name strings
 ;; are byte-identical (hazard e) — they are flat keyspaces that never qualify.
-(module-compat-alias fx-param-row fx-param-row)
-(module-compat-alias fx-param-grid fx-param-grid)
-(module-compat-alias fx-list-contains? fx-list-contains?)
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
@@ -66,7 +63,7 @@
           (label "" :width 7.8 :bg :transparent)
           (hslider :width 7.8 :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
                    :value (pc/fx-param-value-for fx p)
-                   :material (aqua-slider-material)
+                   :material (eseq.materials/slider-material)
                    :plock-active (if (pc/param-plock-active? fx p) 1 0)
                    :plock-color-r (pc/param-plock-color-r)
                    :plock-color-g (pc/param-plock-color-g)
@@ -81,7 +78,7 @@
       (if (get fx :bus-fx)
         (str "bus-fx-slot-" (get fx :bus-idx) "-" (get fx :slot-idx) "-param-" (get p :idx))
         (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))))
-    (str "instrument-tab-" instrument-panel-tab "-chunk-" ci "-param-" (get p :idx))))
+    (str "instrument-tab-" eseq.effects.state/instrument-panel-tab "-chunk-" ci "-param-" (get p :idx))))
 
 (def %flat-grid (params fx)
   (h-stack :gap 1.5 :padding 0.525
@@ -105,7 +102,7 @@
       (if (get fx :bus-fx)
         (str "bus-fx-" (get fx :bus-idx) "-slot-" (get fx :slot-idx))
         (str "audio-fx-slot-" (get fx :slot-idx))))
-    (str "instrument-tab-" instrument-panel-tab)))
+    (str "instrument-tab-" eseq.effects.state/instrument-panel-tab)))
 
 (def %set-selected-section (scope-key section)
   (set! %selected-sections

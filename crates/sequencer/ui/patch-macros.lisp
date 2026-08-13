@@ -24,7 +24,6 @@
 
 ;; The Rust sidebar tests call `(patch-macros-items)` by its flat spelling from
 ;; a headerless eval; it is a function, so an identity alias covers it safely.
-(module-compat-alias patch-macros-items patch-macros-items)
 
 ;; The search box is a named state definition — `(def x (state …))` compiles
 ;; through the same path as `defstate`, so it lives in the `state_bindings`
@@ -32,7 +31,6 @@
 ;; eseq.vanilla pin. A Rust test drives it with a headerless
 ;; `(set! patch-macros-filter …)`; that flat write follows this alias into the
 ;; qualified state binding and emits StoreState on the very same node.
-(module-compat-alias patch-macros-filter patch-macros-filter)
 
 (def patch-macros-filter (state ""))
 

@@ -21,24 +21,16 @@
 ;; bare call resolves through this table, since seq-layout.lisp loads first);
 ;; the two `*-layout-spec` entries are evaled by name from Rust tests. The
 ;; `apply-*` names are also the M-x-visible spellings.
-(module-compat-alias seq-apply-fx-layout apply-fx-layout)
-(module-compat-alias seq-apply-piano-roll-layout apply-piano-roll-layout)
-(module-compat-alias seq-apply-lower-panel-layout apply-lower-panel-layout)
-(module-compat-alias seq-apply-instrument-patcher-layout apply-instrument-patcher-layout)
-(module-compat-alias seq-apply-instrument-patcher-source-layout apply-instrument-patcher-source-layout)
-(module-compat-alias seq-refresh-current-layout refresh-current-layout)
-(module-compat-alias seq-lower-panel-layout-spec lower-panel-layout-spec)
-(module-compat-alias seq-step-and-track-panel-layout-spec step-and-track-panel-layout-spec)
 
 (def step-and-track-panel-layout-spec ()
   (list :cols :gap 1
-    0.78 (seq-main-step-tile-layout-spec)
+    0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
     0.22 (list :rows :gap 1
       0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28)
       0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
 
 (def main-panel-layout-spec ()
-  (if (seq-arrangement-view?)
+  (if (eseq.seq-step-tabs/seq-arrangement-view?)
     (list :buf "*arrangement*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
     (step-and-track-panel-layout-spec)))
 
@@ -57,30 +49,30 @@
 
 (def %samples-panel-layout-spec (min-width max-width min-height max-height)
   (%collapsible-panel-layout-spec "*samples*"
-    (lambda () (seq-hide-samples-sidebar))
+    (lambda () (eseq.seq-panels/seq-hide-samples-sidebar))
     min-width max-width min-height max-height))
 
 (def %mixer-panel-layout-spec (min-width max-width min-height max-height)
   (%collapsible-panel-layout-spec "*mixer*"
-    (lambda () (seq-hide-mixer-panel))
+    (lambda () (eseq.seq-panels/seq-hide-mixer-panel))
     min-width max-width min-height max-height))
 
 ;; Patch-editor bottom bar variant of the mixer panel: a single compact
 ;; channel strip for the current track (see patch-mixer-strip in mixer.lisp).
 (def %patch-mixer-panel-layout-spec (min-width max-width min-height max-height)
   (%collapsible-panel-layout-spec "*patch-mixer*"
-    (lambda () (seq-hide-mixer-panel))
+    (lambda () (eseq.seq-panels/seq-hide-mixer-panel))
     min-width max-width min-height max-height))
 
 (def %fx-panel-layout-spec (min-width max-width min-height max-height)
   (%collapsible-panel-layout-spec "*fx*"
-    (lambda () (seq-hide-fx-panel))
+    (lambda () (eseq.seq-panels/seq-hide-fx-panel))
     min-width max-width min-height max-height))
 
 (def %samples-sidebar-layout-spec ()
   (if (pc/param-macro-mapping-active?)
     (%collapsible-panel-layout-spec "*macro-mappings*"
-      (lambda () (macro-clear-mapping-arm))
+      (lambda () (eseq.macro-state/clear-mapping-arm))
       46 64 nil nil)
     (%samples-panel-layout-spec 34 42 nil nil)))
 
@@ -88,7 +80,7 @@
   (if (pc/param-macro-mapping-active?) 0.34 0.2))
 
 (def %main-and-mixer-layout-spec ()
-  (if mixer-panel-visible
+  (if eseq.seq-core-state/mixer-panel-visible
     (list :rows :gap 1
       0.55 (main-panel-layout-spec)
       0.45 (%mixer-panel-layout-spec nil nil 14.5 14.5))
@@ -96,12 +88,12 @@
 
 (def lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (let ((main-layout
-          (if samples-sidebar-visible
+          (if eseq.seq-core-state/samples-sidebar-visible
             (list :cols :gap 1
               (%sidebar-ratio) (%samples-sidebar-layout-spec)
               (- 1.0 (%sidebar-ratio)) (%main-and-mixer-layout-spec))
             (%main-and-mixer-layout-spec))))
-    (if lower-panel-visible
+    (if eseq.seq-core-state/lower-panel-visible
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
         0.95 (list :rows :gap 1 :remember (str "sequencer-lower-panel:" lower-buffer)
@@ -115,27 +107,27 @@
 
 ;; Every patcher bottom-bar panel shares the regular fx-panel height so the
 ;; instrument preview isn't padded out by a taller neighbor.
-(def %patcher-bottom-bar-panel-height lower-fx-layout-height)
+(def %patcher-bottom-bar-panel-height eseq.seq-step-tabs/lower-fx-layout-height)
 
 (def %patcher-bottom-bar-layout-spec ()
   (let ((h %patcher-bottom-bar-panel-height))
-    (if (and samples-sidebar-visible mixer-panel-visible lower-panel-visible)
+    (if (and eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible eseq.seq-core-state/lower-panel-visible)
       (list :cols :gap 1
         0.30 (%samples-panel-layout-spec 28 28 h h)
         0.15 (%patch-mixer-panel-layout-spec 10 10 h h)
         0.55 (%fx-panel-layout-spec nil nil h h))
-      (if (and samples-sidebar-visible mixer-panel-visible)
+      (if (and eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible)
         (list :cols :gap 1
           0.6 (%samples-panel-layout-spec 28 28 h h)
           0.4 (%patch-mixer-panel-layout-spec 10 10 h h))
-      (if samples-sidebar-visible
-        (if lower-panel-visible
+      (if eseq.seq-core-state/samples-sidebar-visible
+        (if eseq.seq-core-state/lower-panel-visible
           (list :cols :gap 1
             0.5 (%samples-panel-layout-spec 28 28 h h)
             0.5 (%fx-panel-layout-spec nil nil h h))
           (%samples-panel-layout-spec 28 28 h h))
-        (if mixer-panel-visible
-          (if lower-panel-visible
+        (if eseq.seq-core-state/mixer-panel-visible
+          (if eseq.seq-core-state/lower-panel-visible
             (list :cols :gap 1
               0.4 (%patch-mixer-panel-layout-spec 10 10 h h)
               0.6 (%fx-panel-layout-spec nil nil h h))
@@ -143,20 +135,20 @@
           (%fx-panel-layout-spec nil nil h h)))))))
 
 (def %patcher-bottom-bar-visible? ()
-  (or samples-sidebar-visible mixer-panel-visible lower-panel-visible))
+  (or eseq.seq-core-state/samples-sidebar-visible eseq.seq-core-state/mixer-panel-visible eseq.seq-core-state/lower-panel-visible))
 
 ;; Macro sidebar to the left of the patch editor: defmacros in the patch +
 ;; the saved macro library (see ui/patch-macros.lisp).
 (def %patch-macros-panel-layout-spec ()
   (%collapsible-panel-layout-spec "*patch-macros*"
-    (lambda () (seq-hide-patch-macros-panel))
+    (lambda () (eseq.seq-panels/seq-hide-patch-macros-panel))
     22 26 nil nil))
 
 (def %patcher-canvas-layout-spec (patcher-buffer)
   (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))
 
 (def %patcher-main-layout-spec (patcher-buffer)
-  (if patch-macros-panel-visible
+  (if eseq.seq-core-state/patch-macros-panel-visible
     (list :cols :gap 1
       0.15 (%patch-macros-panel-layout-spec)
       0.85 (%patcher-canvas-layout-spec patcher-buffer))
@@ -174,7 +166,7 @@
 
 (def instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
   (let ((main-layout
-          (if patch-macros-panel-visible
+          (if eseq.seq-core-state/patch-macros-panel-visible
             (list :cols :gap 1
               0.14 (%patch-macros-panel-layout-spec)
               0.53 (%patcher-canvas-layout-spec patcher-buffer)
@@ -193,43 +185,43 @@
 
 (def apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
-    (set! seq-layout-mode :lower-panel)
+    (set! eseq.seq-step-tabs/seq-layout-mode :lower-panel)
     (set-layout (lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def apply-fx-layout ()
   (do
-    (set! lower-panel-buffer "*fx*")
-    (apply-lower-panel-layout "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)))
+    (set! eseq.seq-step-tabs/lower-panel-buffer "*fx*")
+    (apply-lower-panel-layout "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)))
 
 (def apply-piano-roll-layout ()
   (do
-    (set! lower-panel-buffer "*piano-roll*")
-    (apply-lower-panel-layout "*piano-roll*" 0.33 lower-fx-layout-height 50)))
+    (set! eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+    (apply-lower-panel-layout "*piano-roll*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height 50)))
 
 (def apply-instrument-patcher-layout (patcher-buffer)
   (do
-    (set! remembered-step-panel-buffer (seq-current-step-buffer))
-    (set! seq-layout-mode :instrument-patcher)
-    (set! seq-patcher-buffer patcher-buffer)
-    (set! seq-patcher-source-buffer "")
+    (set! eseq.seq-step-tabs/remembered-step-panel-buffer (eseq.seq-panels/seq-current-step-buffer))
+    (set! eseq.seq-step-tabs/seq-layout-mode :instrument-patcher)
+    (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
+    (set! eseq.seq-step-tabs/seq-patcher-source-buffer "")
     (set-layout (instrument-patcher-layout-spec patcher-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def apply-instrument-patcher-source-layout (patcher-buffer source-buffer)
   (do
-    (set! remembered-step-panel-buffer (seq-current-step-buffer))
-    (set! seq-layout-mode :instrument-patcher-source)
-    (set! seq-patcher-buffer patcher-buffer)
-    (set! seq-patcher-source-buffer source-buffer)
+    (set! eseq.seq-step-tabs/remembered-step-panel-buffer (eseq.seq-panels/seq-current-step-buffer))
+    (set! eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-source)
+    (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
+    (set! eseq.seq-step-tabs/seq-patcher-source-buffer source-buffer)
     (set-layout (instrument-patcher-source-layout-spec patcher-buffer source-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def refresh-current-layout ()
-  (if (and (= seq-layout-mode :instrument-patcher-source) (not (= seq-patcher-buffer "")) (not (= seq-patcher-source-buffer "")))
-    (apply-instrument-patcher-source-layout seq-patcher-buffer seq-patcher-source-buffer)
-    (if (and (= seq-layout-mode :instrument-patcher) (not (= seq-patcher-buffer "")))
-      (apply-instrument-patcher-layout seq-patcher-buffer)
-      (if (= lower-panel-buffer "*piano-roll*")
+  (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-source) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")) (not (= eseq.seq-step-tabs/seq-patcher-source-buffer "")))
+    (apply-instrument-patcher-source-layout eseq.seq-step-tabs/seq-patcher-buffer eseq.seq-step-tabs/seq-patcher-source-buffer)
+    (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")))
+      (apply-instrument-patcher-layout eseq.seq-step-tabs/seq-patcher-buffer)
+      (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
         (apply-piano-roll-layout)
         (apply-fx-layout)))))

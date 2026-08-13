@@ -7,7 +7,7 @@
 ;;
 ;;   1. `define-mode` qualifies the registry key to
 ;;      `eseq.seq-grid-mode/seq-grid-mode`, so the two flat
-;;      `(set-buffer-mode-for … "seq-grid-mode")` callers — ui/step-grid.lisp
+;;      `(set-buffer-mode-for … "eseq.seq-grid-mode/seq-grid-mode")` callers — ui/step-grid.lisp
 ;;      and ui/sequencer.lisp (both converted modules as of S3b wave 8, whose
 ;;      bare references qualify against *themselves*, miss, and fall to the
 ;;      same base-name rung) — both reach it through the identity alias below.
@@ -30,7 +30,6 @@
 (import eseq.seq-core-state :as core)
 
 ;; The mode name itself. Both callers are listed in rung 1 above.
-(module-compat-alias seq-grid-mode seq-grid-mode)
 
 ;; src/ui/input.rs:1232 evals "(double-track-pattern)" / "(halve-track-pattern)"
 ;; by their flat names for the pattern-length keyboard shortcut, so these two
@@ -44,50 +43,48 @@
 ;; lisp or Rust caller spells any of them flat. (`param-color` had no caller
 ;; at all; the only `param-name` hit is the `"param-name"` *map field* string
 ;; in src/ui/natives.rs:272, not a global reference.)
-(module-compat-alias double-track-pattern double-track-pattern)
-(module-compat-alias halve-track-pattern halve-track-pattern)
 
 (def seq-grid-handle-key (key text)
   (if (= (current-buffer-name) "*sequencer*")
-    (seqv-handle-key key text)
+    (eseq.sequencer/handle-key key text)
     (if (= key "LEFT")
-      (do (cursor-left) true)
+      (do (eseq.step-grid-interactions/cursor-left) true)
       (if (= key "RIGHT")
-        (do (cursor-right) true)
+        (do (eseq.step-grid-interactions/cursor-right) true)
         (if (= key "C-a")
-          (do (select-all-steps) true)
+          (do (eseq.step-grid-interactions/select-all-steps) true)
           (if (or (= key "BS") (= key "Delete"))
-            (do (delete-selected-steps) true)
+            (do (eseq.step-grid-interactions/delete-selected-steps) true)
             (if (= key "RET")
-              (do (cursor-toggle) true)
+              (do (eseq.step-grid-interactions/cursor-toggle) true)
               false)))))))
 
 (def goto-page (page)
   (do
     (core/cool-off-follow)
-    (set-track-cursor-step (min (* page core/page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (eseq.step-grid-interactions/set-track-cursor-step (min (* page core/page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 (def double-track-pattern ()
   (do
     (core/cool-off-follow)
     (seq-double-track-pattern)
-    (set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 (def halve-track-pattern ()
   (do
     (core/cool-off-follow)
     (seq-halve-track-pattern)
-    (set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
-(define-mode "seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
-(mode-bind-key "seq-grid-mode" "LEFT" "cursor-left")
-(mode-bind-key "seq-grid-mode" "RIGHT" "cursor-right")
-(mode-bind-key "seq-grid-mode" "C-a" "select-all-steps")
-(mode-bind-key "seq-grid-mode" "BS" "delete-selected-steps")
-(mode-bind-key "seq-grid-mode" "Delete" "delete-selected-steps")
-(mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
-(mode-bind-key "seq-grid-mode" "C-h" "seqv-collapse-all-tracks")
+(define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "LEFT" "cursor-left")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RIGHT" "cursor-right")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-a" "select-all-steps")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "BS" "delete-selected-steps")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "Delete" "delete-selected-steps")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RET" "cursor-toggle")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-h" "seqv-collapse-all-tracks")
 
 ;; `param-mode` stays BARE, deliberately, even though eseq.seq-core-state now
 ;; owns it and is imported above: it is a `defstate`, which resolves through
@@ -95,67 +92,67 @@
 ;; global ladder (hazard m's immunity clause). Its owner's identity alias
 ;; covers that keyspace too. A qualified write to another module's `defstate`
 ;; is not a path any test pins, so the documented one is the one used.
-(def set-vel-mode () (set! param-mode 0))
-(mode-bind-key "seq-grid-mode" "v" "set-vel-mode")
-(def set-dur-mode () (set! param-mode 1))
-(mode-bind-key "seq-grid-mode" "d" "set-dur-mode")
-(def set-aux-mode () (set! param-mode 2))
-(mode-bind-key "seq-grid-mode" "a" "set-aux-mode")
-(def set-transpose-mode () (set! param-mode 3))
-(mode-bind-key "seq-grid-mode" "t" "set-transpose-mode")
-(def set-pan-mode () (set! param-mode 4))
-(mode-bind-key "seq-grid-mode" "p" "set-pan-mode")
-(def set-sync-mode () (set! param-mode 5))
-(mode-bind-key "seq-grid-mode" "s" "set-sync-mode")
-(def set-delay-mode () (set! param-mode 6))
-(mode-bind-key "seq-grid-mode" "l" "set-delay-mode")
+(def set-vel-mode () (set! eseq.seq-core-state/param-mode 0))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "v" "set-vel-mode")
+(def set-dur-mode () (set! eseq.seq-core-state/param-mode 1))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "d" "set-dur-mode")
+(def set-aux-mode () (set! eseq.seq-core-state/param-mode 2))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "a" "set-aux-mode")
+(def set-transpose-mode () (set! eseq.seq-core-state/param-mode 3))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "t" "set-transpose-mode")
+(def set-pan-mode () (set! eseq.seq-core-state/param-mode 4))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "p" "set-pan-mode")
+(def set-sync-mode () (set! eseq.seq-core-state/param-mode 5))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "s" "set-sync-mode")
+(def set-delay-mode () (set! eseq.seq-core-state/param-mode 6))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "l" "set-delay-mode")
 (def set-process-lane-mode ()
   (if (> (len SEQ.process-lanes) 0)
-    (set! param-mode seqv-process-lane-mode-offset)
+    (set! eseq.seq-core-state/param-mode eseq.seqv-track-params/seqv-process-lane-mode-offset)
     nil))
-(mode-bind-key "seq-grid-mode" "x" "set-process-lane-mode")
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "x" "set-process-lane-mode")
 
 
 (def param-values ()
-  (seqv-current-param-values param-mode))
+  (eseq.seqv-track-params/seqv-current-param-values eseq.seq-core-state/param-mode))
 
 (def param-min ()
-  (seqv-param-min param-mode))
+  (eseq.seqv-track-params/seqv-param-min eseq.seq-core-state/param-mode))
 
 (def param-max ()
-  (seqv-param-max param-mode))
+  (eseq.seqv-track-params/seqv-param-max eseq.seq-core-state/param-mode))
 
 (def param-slider-min ()
-  (if (= param-mode 1) 0 (param-min)))
+  (if (= eseq.seq-core-state/param-mode 1) 0 (param-min)))
 
 (def param-slider-max ()
-  (if (= param-mode 1) 1 (param-max)))
+  (if (= eseq.seq-core-state/param-mode 1) 1 (param-max)))
 
 (def param-slider-value (step)
-  (if (= param-mode 1)
-    (duration-slider-position (nth (param-values) step))
+  (if (= eseq.seq-core-state/param-mode 1)
+    (eseq.step-grid-interactions/duration-slider-position (nth (param-values) step))
     (nth (param-values) step)))
 
 (def param-haptic-pivot-position ()
-  (if (= param-mode 1) 0.5 1))
+  (if (= eseq.seq-core-state/param-mode 1) 0.5 1))
 
 (def param-haptic-pivot-value ()
-  (if (= param-mode 1) 2 (param-max)))
+  (if (= eseq.seq-core-state/param-mode 1) 2 (param-max)))
 
 (def param-haptic-exponent ()
-  (if (= param-mode 1) 4 1))
+  (if (= eseq.seq-core-state/param-mode 1) 4 1))
 
 (def param-keyword ()
-  (seqv-param-keyword param-mode))
+  (eseq.seqv-track-params/seqv-param-keyword eseq.seq-core-state/param-mode))
 
 (def param-color ()
-  (seqv-param-color param-mode))
+  (eseq.seqv-track-params/seqv-param-color eseq.seq-core-state/param-mode))
 
 (def param-name ()
-  (seqv-param-name param-mode))
+  (eseq.seqv-track-params/seqv-param-name eseq.seq-core-state/param-mode))
 
 (def param-origin ()
-  (seqv-param-origin param-mode))
+  (eseq.seqv-track-params/seqv-param-origin eseq.seq-core-state/param-mode))
 
 (def sync-current-label ()
   (nth SEQ.sync-labels (floor (+ 0.5 (nth SEQ.syncs (core/current-step))))))

@@ -16,11 +16,6 @@
 ;; sampler-reset-view are set!/read flat by src/ui/state_values/tests.rs, and
 ;; sampler-reset-view is also invoked by production Rust
 ;; (src/ui/reactive_sync.rs eval_str "(sampler-reset-view)").
-(module-compat-alias sampler-view-start sampler-view-start)
-(module-compat-alias sampler-view-duration sampler-view-duration)
-(module-compat-alias sampler-cursor-time sampler-cursor-time)
-(module-compat-alias sampler-active-marker sampler-active-marker)
-(module-compat-alias sampler-reset-view sampler-reset-view)
 
 ;; `sbrowser-drop-sound-on-track` stays bare below: owned by eseq.browser (a
 ;; UI-root module that must not be imported from library code); reached
@@ -198,7 +193,7 @@
       :width 3.2 :height 1.5 :padding 0 :font-size 10
       :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) (rgba 0.1 0.1 0.1 0.5))
       :color (if SEQ.tp-gate :black :dim)
-      :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
+      :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
 
 (def %sampler-param-control (p)
   (let ((key (if (get p :idx)
@@ -381,7 +376,7 @@
     :on-drop (lambda (event)
       (if (pc/instrument-rack-target? inst)
         (ip/rack-selected-instrument-drop event)
-        (sbrowser-drop-sound-on-track event)))
+        (eseq.browser/drop-sound-on-track event)))
     (v-stack :gap 0 :height :fill
       (box :debug-name "sampler-header-box" :width :fill :height 1 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center :width :fill

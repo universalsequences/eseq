@@ -19,16 +19,6 @@
 ;; no alias for visible-params. The aliases are deleted as callers convert.
 ;; defwidget names (header, fx-enabled-dot, fx-mini-save-icon) are a flat
 ;; keyspace that never qualifies (hazard e) — no aliases, no renames.
-(module-compat-alias enabled-param enabled-param)
-(module-compat-alias fx-enabled-toggle enabled-toggle)
-(module-compat-alias fx-panel fx-panel)
-(module-compat-alias midi-fx-panel midi-fx-panel)
-(module-compat-alias instrument-synth-button instrument-synth-button)
-(module-compat-alias instrument-toggle-mods-view instrument-toggle-mods-view)
-(module-compat-alias instrument-mods-toggle-button instrument-mods-toggle-button)
-(module-compat-alias instrument-keys-button instrument-keys-button)
-(module-compat-alias instrument-sound-binding-badge instrument-sound-binding-badge)
-(module-compat-alias effect-mods-toggle-button effect-mods-toggle-button)
 
 (defwidget header
   :shader
@@ -184,13 +174,13 @@
 ;; module and in a vanilla eval. Do not rename either def below.
 (def instrument-toggle-mods-view ()
   (do
-    (set! instrument-panel-tab 0)
-    (if (not instrument-mods-open)
+    (set! eseq.effects.state/instrument-panel-tab 0)
+    (if (not eseq.effects.state/instrument-mods-open)
       (do
-        (macro-clear-mapping-arm)
-        (process-map-clear)
-        (rack-macro-clear-mapping-arm)))
-    (set! instrument-mods-open (not instrument-mods-open))))
+        (eseq.macro-state/clear-mapping-arm)
+        (eseq.effects.param-controls/process-map-clear)
+        (eseq.macro-state/rack-clear-mapping-arm)))
+    (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
   (%instrument-header-tab-button "mods" (and (= st/instrument-panel-tab 0) st/instrument-mods-open) 4.0

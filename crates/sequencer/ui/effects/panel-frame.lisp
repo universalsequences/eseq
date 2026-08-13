@@ -15,12 +15,6 @@
 ;; (src/ui/state_values/tests.rs). Deleted as the caller files convert.
 ;; Converted callers (effect-panels, process-panel, param-controls,
 ;; effect-modulation, filter-core, str8-delay) import this module instead.
-(module-compat-alias fx-panel-body fx-panel-body)
-(module-compat-alias fx-panel-header-leading-spacer fx-panel-header-leading-spacer)
-(module-compat-alias header-actions-menu header-actions-menu)
-(module-compat-alias instrument-header-actions-menu instrument-header-actions-menu)
-(module-compat-alias fx-copy-values-to-all-scenes fx-copy-values-to-all-scenes)
-(module-compat-alias instrument-copy-values-to-all-scenes instrument-copy-values-to-all-scenes)
 
 (def fx-panel-body (debug-name children)
   (box

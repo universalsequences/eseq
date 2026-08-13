@@ -2009,11 +2009,6 @@ pub struct VM {
     /// Current import pass. Starts at 1 so entries from a plain
     /// `eval_module_source` (no transaction) still dedupe within that pass.
     pub import_pass_epoch: u64,
-    /// Migration compat aliases (spec §10 slice 3): old flat name → its
-    /// new qualified home, declared via `(module-compat-alias old new)`.
-    /// Consulted by both resolution ladders on a bare-name miss; the whole
-    /// table (and the form) is deleted at the end of the migration.
-    pub compat_aliases: HashMap<String, String>,
 }
 
 pub struct VmStateSnapshot {
@@ -2051,7 +2046,6 @@ pub struct VmStateSnapshot {
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     imported_at_epoch: HashMap<String, u64>,
     import_pass_epoch: u64,
-    compat_aliases: HashMap<String, String>,
 }
 
 fn clone_globals_for_snapshot(
@@ -2497,27 +2491,6 @@ pub fn register_core_natives(vm: &mut VM) {
         // still `load`s files that effects/* modules import).
         let epoch = vm.import_pass_epoch;
         vm.imported_at_epoch.insert(name.clone(), epoch);
-        Value::Nil
-    });
-
-    // (module-compat-alias old new) compiles to this call (spec §10 slice
-    // 3): record old flat name → qualified home so later compile units and
-    // runtime by-name lookups resolve legacy callers through the alias.
-    vm.register_native_with_vm("__compat-alias", |args, vm| {
-        let (Some(Value::String(old)), Some(Value::String(target))) =
-            (args.first(), args.get(1))
-        else {
-            log_native_misuse("__compat-alias", "expects (old-name target-name) strings");
-            return Value::Nil;
-        };
-        if crate::modules::is_qualified(old) || !crate::modules::is_qualified(target) {
-            log_native_misuse(
-                "__compat-alias",
-                "old name must be flat and target must be qualified",
-            );
-            return Value::Nil;
-        }
-        vm.compat_aliases.insert(old.clone(), target.clone());
         Value::Nil
     });
 
@@ -3535,7 +3508,6 @@ impl VM {
             declared_modules: HashMap::new(),
             imported_at_epoch: HashMap::new(),
             import_pass_epoch: 1,
-            compat_aliases: HashMap::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
         };
@@ -3669,20 +3641,11 @@ impl VM {
             .or_else(|| self.source_manager.current_source_file())
     }
 
-    /// Names that may head a macro call in source about to be compiled:
-    /// the macro table's keys plus the migration compat aliases whose
-    /// target is a macro (spec §10 slice 3). The source-annotation pass
-    /// uses this to keep widget-provenance props off macro calls, so an
-    /// aliased old flat name must count exactly like the real key.
+    /// Names that may head a macro call in source about to be compiled.
+    /// The source-annotation pass uses this to keep widget-provenance props
+    /// off macro calls.
     fn macro_call_names(&self) -> HashSet<String> {
-        let mut names = self.macros.keys().cloned().collect::<HashSet<_>>();
-        names.extend(
-            self.compat_aliases
-                .iter()
-                .filter(|(_, target)| self.macros.contains_key(*target))
-                .map(|(old, _)| old.clone()),
-        );
-        names
+        self.macros.keys().cloned().collect()
     }
 
     /// Compile and run `code` in this VM's existing context (globals persist).
@@ -3755,7 +3718,6 @@ impl VM {
                 macros,
                 source_file,
             );
-            compiler.set_compat_aliases(self.compat_aliases.clone());
             // Continuation segments belong to the same unit: the module
             // declaration and any :as/:refer bindings compiled in earlier
             // segments carry forward.
@@ -3903,7 +3865,6 @@ impl VM {
             declared_modules: self.declared_modules.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
             import_pass_epoch: self.import_pass_epoch,
-            compat_aliases: self.compat_aliases.clone(),
         }
     }
 
@@ -3942,7 +3903,6 @@ impl VM {
         self.declared_modules = snapshot.declared_modules;
         self.imported_at_epoch = snapshot.imported_at_epoch;
         self.import_pass_epoch = snapshot.import_pass_epoch;
-        self.compat_aliases = snapshot.compat_aliases;
     }
 
     pub fn take_pending_reactive_sets(&mut self) -> Vec<(String, String, Value)> {
@@ -4004,7 +3964,6 @@ impl VM {
             macros,
             source_file,
         );
-        compiler.set_compat_aliases(self.compat_aliases.clone());
         match compiler.compile() {
             Ok(chunks) => {
                 self.chunks = chunks;
@@ -4077,17 +4036,6 @@ impl VM {
         if self.reactive_namespaces.contains(name) {
             return self.global_names.iter().position(|n| n == name);
         }
-        // Migration compat alias (spec §10 slice 3): checked before the
-        // implicit-module and flat entries, mirroring the compiler ladder —
-        // a converted symbol's stale eseq.vanilla slot (left interned from
-        // before the conversion) must not shadow the new qualified home.
-        // Targets are validated qualified at record time, so this recurses
-        // at most once (the qualified branch never consults aliases).
-        if let Some(target) = self.compat_aliases.get(name)
-            && let Some(idx) = self.resolve_global_read_index(target)
-        {
-            return Some(idx);
-        }
         let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
         self.global_names
             .iter()
@@ -4104,29 +4052,10 @@ impl VM {
     /// existed anywhere stays empty if the definition later landed in a
     /// DIFFERENT slot — a declared module's bare forward reference to a
     /// vanilla symbol defined in a later-loaded file, a flat native
-    /// registered after a reference compiled, or (spec §10 slice 3) a caller
-    /// compiled BEFORE the file it calls was converted to a module, which
-    /// interned `eseq.vanilla/old-name` (or flat `old-name`) for a symbol
-    /// that now lives at `eseq.<mod>/new-name` behind a compat alias.
+    /// registered after a reference compiled.
     ///
-    /// Ladder, deliberately ordered and mirroring `resolve_global_read_index`
-    /// (exact → alias → implicit-module → flat):
-    ///
-    /// 1. exact — already known empty, that is why we are here;
-    /// 2. **compat alias on the bare base name.** Alias keys are validated
-    ///    flat at record time (`module-compat-alias` rejects a qualified
-    ///    old name), so the base of `eseq.vanilla/old-name` and a flat
-    ///    `old-name` slot are the only two spellings that can be stale, and
-    ///    both reduce to the same lookup key. The alias rung sits ahead of
-    ///    the implicit/flat rungs for the same reason the resolution ladders
-    ///    do: a stale pre-conversion vanilla slot must not shadow the new
-    ///    home;
-    /// 3. the implicit-module spelling `eseq.vanilla/<base>`;
-    /// 4. the flat spelling `<base>`.
-    ///
-    /// Rungs 3 and 4 only apply to a qualified stale slot; a flat empty slot
-    /// heals through the alias alone (healing flat → `eseq.vanilla/…` would
-    /// cross the reactive-namespace flat exemption).
+    /// For a qualified stale slot, try the implicit-module spelling and then
+    /// the flat base name. A flat empty slot has no fallback.
     ///
     /// The healed slot is *aliased* to the found cell, so a later StoreGlobal
     /// to this index replaces the slot `Option` and unlinks the alias —
@@ -4134,11 +4063,7 @@ impl VM {
     fn late_bind_empty_global(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
         let name = self.global_names.get(idx)?.clone();
         let split = crate::modules::split_qualified(&name);
-        let base = split.map(|(_, base)| base).unwrap_or(name.as_str());
         let mut candidates: Vec<String> = Vec::new();
-        if let Some(target) = self.compat_aliases.get(base) {
-            candidates.push(target.clone());
-        }
         if let Some((ns, base)) = split {
             if ns != crate::modules::IMPLICIT_MODULE {
                 candidates.push(crate::modules::qualify(crate::modules::IMPLICIT_MODULE, base));
@@ -4230,13 +4155,7 @@ impl VM {
         {
             return Some(*node_id);
         }
-        // Migration compat alias (spec §10 slice 3): a converted `defstate`
-        // keeps answering to its old flat name for by-name readers/writers,
-        // mirroring `Compiler::state_binding_for`.
-        self.compat_aliases
-            .get(name)
-            .and_then(|target| self.state_bindings.get(target))
-            .copied()
+        None
     }
 
     pub fn read_tracked_state_value(&mut self, name: &str) -> Option<Value> {
@@ -6762,101 +6681,17 @@ counter
         assert_eq!(result, Some(Value::Number(20.0)));
     }
 
-    #[test]
-    fn compat_alias_resolves_flat_name_to_qualified_home() {
-        let mut vm = module_test_vm();
-        let source = r#"
-(module test.aliasmod)
-(def fresh-home () 42)
-(module-compat-alias legacy-alias-name fresh-home)
-(legacy-alias-name)
-"#;
-        // Same-unit: the alias is visible to later forms in the declaring
-        // unit (compiler-side table).
-        let result = vm
-            .eval_module_source(temp_lisp_path("compat-alias"), source, 1)
-            .expect("module eval");
-        assert_eq!(result, Some(Value::Number(42.0)));
-        assert_eq!(
-            vm.compat_aliases.get("legacy-alias-name").map(String::as_str),
-            Some("test.aliasmod/fresh-home")
-        );
-        // Later headerless unit: flat call resolves through the alias.
-        let later = vm.eval_str("(legacy-alias-name)").expect("aliased call");
-        assert_eq!(later, Some(Value::Number(42.0)));
-        // Runtime by-name ladder (host reads, string handlers) too.
-        assert!(vm.has_global("legacy-alias-name"));
-        assert!(matches!(
-            vm.global_value("legacy-alias-name"),
-            Some(Value::Closure { .. })
-        ));
-    }
-
-    #[test]
-    fn compat_alias_beats_stale_flat_slot() {
-        let mut vm = module_test_vm();
-        // A legacy flat def exists (as it would mid-session before a
-        // conversion re-eval); the alias must still win.
-        vm.eval_str("(def stale-legacy () 1)").expect("legacy def");
-        let source = r#"
-(module test.aliasmod2)
-(def replacement () 2)
-(module-compat-alias stale-legacy replacement)
-"#;
-        vm.eval_module_source(temp_lisp_path("compat-stale"), source, 1)
-            .expect("module eval");
-        let result = vm.eval_str("(stale-legacy)").expect("aliased call");
-        assert_eq!(result, Some(Value::Number(2.0)));
-    }
-
     /// Globals: a caller compiled BEFORE the alias existed interned (and
     /// emitted an index for) the stale `eseq.vanilla/…` slot, which stays
     /// empty. The runtime late-binding heal now retries that slot through the
     /// compat alias on its first read, so a converted file retrofits its
     /// earlier-compiled callers (module-system spec §10). This is what
     /// retires the step-0 load-order gate for def-only conversions.
-    #[test]
-    fn late_binding_heals_earlier_compiled_caller_through_alias() {
-        let mut vm = module_test_vm();
-        // Caller compiled first, while `pending-name` is undefined: the
-        // reference interns as eseq.vanilla/pending-name.
-        vm.eval_str("(def caller () (pending-name))")
-            .expect("caller def");
-        vm.eval_module_source(
-            temp_lisp_path("compat-late"),
-            "(module test.latemod)\n(def home () 5)\n(module-compat-alias pending-name home)",
-            1,
-        )
-        .expect("module eval");
-        // By-name resolution (host reads, string handlers, fresh compiles)
-        // follows the alias …
-        assert_eq!(vm.eval_str("(pending-name)"), Ok(Some(Value::Number(5.0))));
-        // … and so does the already-compiled caller, via the heal.
-        assert_eq!(vm.eval_str("(caller)"), Ok(Some(Value::Number(5.0))));
-    }
-
     /// The same heal for a caller whose reference compiled to a *flat* slot
     /// (the name was already interned flat — a native-era reference or a
     /// host-interned name — so the compiler emitted `old-name`, not
     /// `eseq.vanilla/old-name`). Alias keys are flat, so the base-name lookup
     /// covers both spellings.
-    #[test]
-    fn late_binding_heals_a_stale_flat_slot_through_alias() {
-        let mut vm = module_test_vm();
-        // Intern `flat-pending` flat without ever giving it a value, then
-        // compile a caller against it: the reference emits the flat index.
-        vm.ensure_global("flat-pending");
-        vm.eval_str("(def flat-caller () (flat-pending))")
-            .expect("caller def");
-        vm.eval_module_source(
-            temp_lisp_path("compat-flat-late"),
-            "(module test.flatlate)\n(def home () 7)\n(module-compat-alias flat-pending home)",
-            1,
-        )
-        .expect("module eval");
-        assert_eq!(vm.eval_str("(flat-caller)"), Ok(Some(Value::Number(7.0))));
-    }
-
     /// Without an alias the heal falls back to its pre-existing behavior:
     /// the implicit-module and flat spellings only, so an unrelated empty
     /// slot still errors rather than silently binding to something.
@@ -6883,61 +6718,10 @@ counter
     /// pre-conversion pair keeps last-writer-wins among themselves and stops
     /// tracking the module's own value. Documented caveat, not a bug — the
     /// heal is a read-side rescue, not two-way aliasing.
-    #[test]
-    fn a_store_through_the_stale_slot_unlinks_the_heal() {
-        let mut vm = module_test_vm();
-        vm.eval_str("(def read-it () healed-var)")
-            .expect("reader def");
-        vm.eval_str("(def set-it (v) (set! healed-var v))")
-            .expect("setter def");
-        vm.eval_module_source(
-            temp_lisp_path("compat-store"),
-            "(module test.storemod)\n(def home 1)\n(module-compat-alias healed-var home)\n\
-             (def read-home () home)",
-            1,
-        )
-        .expect("module eval");
-        // First read heals to the module's cell …
-        assert_eq!(vm.eval_str("(read-it)"), Ok(Some(Value::Number(1.0))));
-        // … a store through the stale slot replaces it, unlinking the alias.
-        vm.eval_str("(set-it 2)").expect("stale store");
-        assert_eq!(vm.eval_str("(read-it)"), Ok(Some(Value::Number(2.0))));
-        assert_eq!(
-            vm.eval_str("(test.storemod/read-home)"),
-            Ok(Some(Value::Number(1.0))),
-            "the module's own value is unaffected by the stale-slot store"
-        );
-    }
-
     /// `defstate` is a second keyspace, so the alias has to be honoured by
     /// the state-binding ladders too — otherwise an unconverted
     /// `(set! old-name v)` resolves the global through the alias but misses
     /// the binding and stores over the NodeRef slot (IncorrectType).
-    #[test]
-    fn compat_alias_covers_the_defstate_keyspace() {
-        let mut vm = module_test_vm();
-        vm.eval_module_source(
-            temp_lisp_path("compat-state"),
-            "(module test.statealias)\n(defstate flag false)\n\
-             (module-compat-alias legacy-flag flag)\n(def read-flag () flag)",
-            1,
-        )
-        .expect("module eval");
-        // Unconverted caller writes through the old flat name …
-        vm.eval_str("(set! legacy-flag true)").expect("aliased set!");
-        assert_eq!(vm.eval_str("legacy-flag"), Ok(Some(Value::Bool(true))));
-        // … and the module's own bare reads see the same reactive source.
-        assert_eq!(
-            vm.eval_str("(test.statealias/read-flag)"),
-            Ok(Some(Value::Bool(true)))
-        );
-        // Runtime by-name path (host reads, string handlers) too.
-        assert_eq!(
-            vm.read_tracked_state_value("legacy-flag"),
-            Some(Value::Bool(true))
-        );
-    }
-
     /// Hazard (i) + (b) compounding, found converting `ui/browser.lisp`: a
     /// `defstate` that production Rust *writes* by bare spelling is pinned to
     /// `eseq.vanilla` with the §3 escape hatch and gets no compat alias, so its
@@ -6978,47 +6762,10 @@ counter
         );
     }
 
-    /// The macro table is a third flat keyspace (globals, `defstate` keys,
-    /// macros), so a converted module's renamed macros need the same alias
-    /// step or every unconverted caller's old flat spelling strands. This
-    /// is what blocked `ui/materials.lisp` in S3 batch 1.
-    #[test]
-    fn compat_alias_covers_the_macro_table() {
-        let mut vm = module_test_vm();
-        vm.eval_module_source(
-            temp_lisp_path("compat-macro"),
-            "(module test.macalias)\n(defmacro twice (x) `(+ ,x ,x))\n\
-             (module-compat-alias legacy-twice twice)",
-            1,
-        )
-        .expect("module eval");
-        // Unconverted caller compiled AFTER the module: the old flat macro
-        // name expands through the alias.
-        assert_eq!(vm.eval_str("(legacy-twice 5)"), Ok(Some(Value::Number(10.0))));
-    }
-
-    /// A stale flat macro left in the table from before a conversion (the
-    /// hot-reload case) must not shadow the alias — same ladder position as
-    /// `compat_alias_beats_stale_flat_slot` for globals.
-    #[test]
-    fn compat_alias_macro_beats_stale_flat_macro() {
-        let mut vm = module_test_vm();
-        vm.eval_str("(defmacro stale-mac (x) `(* ,x 100))")
-            .expect("legacy macro");
-        vm.eval_module_source(
-            temp_lisp_path("compat-macro-stale"),
-            "(module test.macalias2)\n(defmacro fresh (x) `(* ,x 2))\n\
-             (module-compat-alias stale-mac fresh)",
-            1,
-        )
-        .expect("module eval");
-        assert_eq!(vm.eval_str("(stale-mac 3)"), Ok(Some(Value::Number(6.0))));
-    }
-
     // ── import's compile-time half (spec §4, eseq-mods.12) ──────────────
     // A unit is compiled and executed in segments split at top-level
     // `(import …)` forms, so an import supplies COMPILE-time surface — the
-    // target's defstate keyspace, macros and aliases — to every form after
+    // target's defstate keyspace and macros — to every form after
     // it in the same unit, retiring §10 hazard (p).
 
     fn import_test_dir(tag: &str) -> std::path::PathBuf {
@@ -7195,7 +6942,7 @@ counter
             "(module ctfail-child)\n(def ctfail-x 11)",
         )
         .unwrap();
-        let source = "(import ctfail-child)\n(module-compat-alias broken)";
+        let source = "(import ctfail-child)\n(import)";
         let result = vm.eval_module_source(dir.join("root.lisp"), source, 1);
         assert!(result.is_err(), "the malformed form must fail the unit");
         assert_eq!(
@@ -7208,70 +6955,6 @@ counter
     /// Macro aliases inherit the global aliases' forward-only constraint:
     /// a caller compiled before the alias exists already expanded (or
     /// failed to expand) against the table it saw. Nothing retrofits it.
-    #[test]
-    fn compat_alias_macro_does_not_retrofit_an_earlier_compiled_caller() {
-        let mut vm = module_test_vm();
-        // Compiled while `pending-mac` is not a macro: it compiles as an
-        // ordinary call to an undefined global.
-        vm.eval_str("(def early-caller () (pending-mac 4))")
-            .expect("caller def");
-        vm.eval_module_source(
-            temp_lisp_path("compat-macro-late"),
-            "(module test.maclate)\n(defmacro home-mac (x) `(+ ,x 1))\n\
-             (module-compat-alias pending-mac home-mac)",
-            1,
-        )
-        .expect("module eval");
-        // A fresh compile expands through the alias …
-        assert_eq!(vm.eval_str("(pending-mac 4)"), Ok(Some(Value::Number(5.0))));
-        // … the earlier-compiled caller stays broken.
-        assert!(
-            vm.eval_str("(early-caller)").is_err(),
-            "pre-alias compiled macro call must not silently start working"
-        );
-    }
-
-    #[test]
-    fn compat_alias_requires_flat_old_and_qualified_target() {
-        let mut vm = module_test_vm();
-        let result = vm.eval_str("(module-compat-alias flat-old flat-new)");
-        assert!(matches!(result, Err(super::VMError::CompileError)));
-        assert!(
-            vm.take_source_load_errors()
-                .iter()
-                .any(|e| e.contains("must be qualified")),
-            "expected qualified-target error"
-        );
-    }
-
-    #[test]
-    fn compat_alias_survives_and_rolls_back_with_snapshots() {
-        let mut vm = module_test_vm();
-        vm.eval_module_source(
-            temp_lisp_path("compat-snap"),
-            "(module test.snapmod)\n(def kept () 1)\n(module-compat-alias kept-alias kept)",
-            1,
-        )
-        .expect("module eval");
-        let snapshot = vm.snapshot_state();
-        vm.eval_module_source(
-            temp_lisp_path("compat-snap2"),
-            "(module test.snapmod2)\n(def dropped () 2)\n(module-compat-alias dropped-alias dropped)",
-            2,
-        )
-        .expect("second module eval");
-        assert!(vm.compat_aliases.contains_key("dropped-alias"));
-        vm.restore_state(snapshot);
-        assert!(
-            vm.compat_aliases.contains_key("kept-alias"),
-            "pre-snapshot alias must survive restore"
-        );
-        assert!(
-            !vm.compat_aliases.contains_key("dropped-alias"),
-            "post-snapshot alias must roll back"
-        );
-    }
-
     #[test]
     fn module_widget_key_qualifies_stable_key_prop() {
         let mut vm = module_test_vm();

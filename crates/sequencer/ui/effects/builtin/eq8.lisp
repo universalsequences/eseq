@@ -3,36 +3,35 @@
 (module eseq.effects.builtin.eq8)
 
 (import eseq.effects.builtin.filter-core :refer
-  (builtin-fx-param
-   builtin-fx-filter-mini-number
-   builtin-fx-set-effect-option))
+  (eseq.effects.builtin.filter-core/builtin-fx-param
+   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number
+   eseq.effects.builtin.filter-core/builtin-fx-set-effect-option))
 (import eseq.effects.param-controls :refer
-  (fx-param-on-for?
-   fx-param-value-for
-   fx-set-effect-value
-   fx-toggle-effect-value
-   param-base-max-prop
-   param-base-min-prop
-   param-base-value-prop
-   param-control-key-mode
-   param-control-max
-   param-control-min
-   param-knob-mod-depth-prop
-   param-knob-mod-slot-prop
-   param-mod-wrapper
-   param-plock-active?
-   param-plock-color-b
-   param-plock-color-g
-   param-plock-color-r
-   param-plock-default
-   param-plock-text-color
-   param-selected-mod-slot-prop
-   param-set-control-value))
-(import eseq.effects.param-grid :refer (fx-param-grid))
+  (eseq.effects.param-controls/fx-param-on-for?
+   eseq.effects.param-controls/fx-param-value-for
+   eseq.effects.param-controls/fx-set-effect-value
+   eseq.effects.param-controls/fx-toggle-effect-value
+   eseq.effects.param-controls/param-base-max-prop
+   eseq.effects.param-controls/param-base-min-prop
+   eseq.effects.param-controls/param-base-value-prop
+   eseq.effects.param-controls/param-control-key-mode
+   eseq.effects.param-controls/param-control-max
+   eseq.effects.param-controls/param-control-min
+   eseq.effects.param-controls/param-knob-mod-depth-prop
+   eseq.effects.param-controls/param-knob-mod-slot-prop
+   eseq.effects.param-controls/param-mod-wrapper
+   eseq.effects.param-controls/param-plock-active?
+   eseq.effects.param-controls/param-plock-color-b
+   eseq.effects.param-controls/param-plock-color-g
+   eseq.effects.param-controls/param-plock-color-r
+   eseq.effects.param-controls/param-plock-default
+   eseq.effects.param-controls/param-plock-text-color
+   eseq.effects.param-controls/param-selected-mod-slot-prop
+   eseq.effects.param-controls/param-set-control-value))
+(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
 
 ;; Migration alias (module spec §10). `builtin-fx-eq8-source` is evaled by
 ;; name from src/ui/state_values/tests.rs (read-only, alias-covered).
-(module-compat-alias builtin-fx-eq8-source eq8-source)
 
 (defstate %selected-track -1)
 (defstate %selected-bus -1)
@@ -66,7 +65,7 @@
     (set! %selected-band band)))
 
 (def %param (params band suffix)
-  (builtin-fx-param params (str "b" (+ band 1) " " suffix)))
+  (eseq.effects.builtin.filter-core/builtin-fx-param params (str "b" (+ band 1) " " suffix)))
 
 (def %band-type (p)
   (if p
@@ -83,16 +82,16 @@
     (dict
       :id band
       :type (%band-type type-p)
-      :freq (fx-param-value-for fx freq-p)
-      :freq-min (param-control-min fx freq-p)
-      :freq-max (param-control-max fx freq-p)
-      :gain (fx-param-value-for fx gain-p)
-      :gain-min (param-control-min fx gain-p)
-      :gain-max (param-control-max fx gain-p)
-      :q (fx-param-value-for fx q-p)
-      :q-min (param-control-min fx q-p)
-      :q-max (param-control-max fx q-p)
-      :enabled (fx-param-on-for? fx enabled-p)
+      :freq (eseq.effects.param-controls/fx-param-value-for fx freq-p)
+      :freq-min (eseq.effects.param-controls/param-control-min fx freq-p)
+      :freq-max (eseq.effects.param-controls/param-control-max fx freq-p)
+      :gain (eseq.effects.param-controls/fx-param-value-for fx gain-p)
+      :gain-min (eseq.effects.param-controls/param-control-min fx gain-p)
+      :gain-max (eseq.effects.param-controls/param-control-max fx gain-p)
+      :q (eseq.effects.param-controls/fx-param-value-for fx q-p)
+      :q-min (eseq.effects.param-controls/param-control-min fx q-p)
+      :q-max (eseq.effects.param-controls/param-control-max fx q-p)
+      :enabled (eseq.effects.param-controls/fx-param-on-for? fx enabled-p)
       :selected (= selected-band band))))
 
 (def %bands (fx params)
@@ -111,9 +110,9 @@
         (gain-p (%param params band "gain"))
         (q-p (%param params band "q")))
     (do
-      (fx-set-effect-value fx freq-p freq)
-      (fx-set-effect-value fx gain-p gain)
-      (fx-set-effect-value fx q-p q))))
+      (eseq.effects.param-controls/fx-set-effect-value fx freq-p freq)
+      (eseq.effects.param-controls/fx-set-effect-value fx gain-p gain)
+      (eseq.effects.param-controls/fx-set-effect-value fx q-p q))))
 
 (def %handle-action (fx params event)
   (let ((type (get event :type))
@@ -123,7 +122,7 @@
       (if (= type :toggle-band)
         (do
           (%select-band fx band)
-          (fx-set-effect-value fx (%param params band "enabled")
+          (eseq.effects.param-controls/fx-set-effect-value fx (%param params band "enabled")
             (if (get event :enabled) 1 0)))
         (if (or (= type :change-band) (= type :commit-band))
           (do
@@ -150,36 +149,36 @@
         :width 2.35 :height 1.05 :padding 0 :font-size 8.0
         :background-color (if (get band-map :enabled) (rgba 0.92 0.35 0.12 1.0) :mixer-control-bg)
         :color (if (get band-map :enabled) :white :dim)
-        :plock-active (if (param-plock-active? fx enabled-p) 1 0)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
+        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx enabled-p) 1 0)
+        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
         :on-click |x y r| (do
           (%select-band fx band)
-          (fx-toggle-effect-value fx enabled-p))))))
+          (eseq.effects.param-controls/fx-toggle-effect-value fx enabled-p))))))
 
 (def %selected-knob (fx label-text p decimals)
-  (param-mod-wrapper fx p (str "eq8-param-" (get p :idx) "-mod-wrapper")
-    (subtree :key (str "eq8-param-" (get p :idx) (param-control-key-mode fx p))
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str "eq8-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "eq8-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
-        :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
-        :base-value (param-base-value-prop fx p)
-        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
-        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
-        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
-        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
-        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
-        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :value (eseq.effects.param-controls/fx-param-value-for fx p)
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
+        :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
+        :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 8.8 :label-font-size 8.6
-        :text-color (param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-default (param-plock-default fx p)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
+        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
         :width 4.45 :height 3.48 :knob-size 1.65
-        :on-change (lambda (v) (param-set-control-value fx p v))))))
+        :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def %selected-knobs (fx params)
   (let ((band (%selected-band-for fx)))
@@ -203,15 +202,15 @@
           (label (str "B" (+ band 1)) :font-size 9.5 :width 2.0 :color :dim :bg :transparent)
           (dropdown :value (get type-p :text-value)
             :options (get type-p :options)
-            :on-change (lambda (v) (builtin-fx-set-effect-option fx type-p v))
-            :plock-active (if (param-plock-active? fx type-p) 1 0)
-            :plock-color-r (param-plock-color-r)
-            :plock-color-g (param-plock-color-g)
-            :plock-color-b (param-plock-color-b)
+            :on-change (lambda (v) (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx type-p v))
+            :plock-active (if (eseq.effects.param-controls/param-plock-active? fx type-p) 1 0)
+            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
             :width 6.6 :height 1.05 :font-size 9.0)
-          (builtin-fx-filter-mini-number fx "freq" freq-p)
-          (builtin-fx-filter-mini-number fx "gain" gain-p)
-          (builtin-fx-filter-mini-number fx "q" q-p))))))
+          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "freq" freq-p)
+          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "gain" gain-p)
+          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "q" q-p))))))
 
 (def eq8-ui (fx)
   (let ((params (get fx :params)))
@@ -250,4 +249,4 @@
             (%band-button fx params 6)
             (%band-button fx params 7)))
         (%selected-controls fx params))
-      (fx-param-grid params fx))))
+      (eseq.effects.param-grid/fx-param-grid params fx))))

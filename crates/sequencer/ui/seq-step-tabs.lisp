@@ -31,32 +31,6 @@
 ;; Identity aliases — one per name with a caller outside this file (verified by
 ;; a whole-file sweep of crates/sequencer/ui, crates/sequencer/src and
 ;; crates/eseqlisp/src). Names with no external caller are `%`-private below.
-(module-compat-alias piano-roll-placement piano-roll-placement)
-(module-compat-alias seq-main-view seq-main-view)
-(module-compat-alias step-panel-buffer step-panel-buffer)
-(module-compat-alias remembered-step-panel-buffer remembered-step-panel-buffer)
-(module-compat-alias lower-panel-buffer lower-panel-buffer)
-(module-compat-alias seq-layout-mode seq-layout-mode)
-(module-compat-alias seq-patcher-buffer seq-patcher-buffer)
-(module-compat-alias seq-patcher-source-buffer seq-patcher-source-buffer)
-(module-compat-alias seq-registered-step-tabs seq-registered-step-tabs)
-(module-compat-alias lower-fx-layout-height lower-fx-layout-height)
-(module-compat-alias piano-roll-default-pane-height piano-roll-default-pane-height)
-(module-compat-alias seq-step-tab-buffer seq-step-tab-buffer)
-(module-compat-alias seq-step-tab-sequencer-name seq-step-tab-sequencer-name)
-(module-compat-alias seq-step-tab-source-path seq-step-tab-source-path)
-(module-compat-alias seq-step-tab-matches-buffer? seq-step-tab-matches-buffer?)
-(module-compat-alias seq-main-step-tabs seq-main-step-tabs)
-(module-compat-alias seq-main-step-tab-buffer? seq-main-step-tab-buffer?)
-(module-compat-alias seq-sanitized-step-buffer seq-sanitized-step-buffer)
-(module-compat-alias seq-arrangement-view? seq-arrangement-view?)
-(module-compat-alias seq-visible-main-panel-buffer seq-visible-main-panel-buffer)
-(module-compat-alias seq-main-step-tile-layout-spec seq-main-step-tile-layout-spec)
-(module-compat-alias seq-register-step-sequencer-tab seq-register-step-sequencer-tab)
-(module-compat-alias seq-register-script-step-sequencer-tab seq-register-script-step-sequencer-tab)
-(module-compat-alias seq-unregister-step-sequencer-tab seq-unregister-step-sequencer-tab)
-(module-compat-alias seq-clear-project-script-tabs seq-clear-project-script-tabs)
-(module-compat-alias seq-select-main-step-tab-by-index seq-select-main-step-tab-by-index)
 
 (defstate piano-roll-placement :bottom)
 (defstate seq-main-view :session)
@@ -99,7 +73,7 @@
         buffer
         :on-close
         (lambda (closed-buffer tab-index)
-          (seq-delete-script-sequencer-by-buffer closed-buffer)))
+          (eseq.seq-script-picker/seq-delete-script-sequencer-by-buffer closed-buffer)))
       (list (%seq-step-tab-label tab) buffer))))
 
 (def seq-main-step-tabs ()
@@ -198,7 +172,7 @@
           (set! remembered-step-panel-buffer buffer)
           (set! seq-main-view :session)
           (set-window-buffer buffer)
-          (seq-refresh-current-layout)
+          (eseq.seq-layout/refresh-current-layout)
           (%seq-refresh-step-tabs-if-present)
           true))
       false)))

@@ -30,14 +30,6 @@
 ;; picker by name. `choose-model` itself keeps its spelling — it is the M-x
 ;; command name — but still needs an alias, because bare `(choose-model)` from
 ;; an unconverted caller does not find `eseq.choose-model/choose-model`.
-(module-compat-alias choose-model choose-model)
-(module-compat-alias choose-model-open? open?)
-(module-compat-alias choose-model-open open)
-(module-compat-alias choose-model-close close)
-(module-compat-alias choose-model-select select)
-(module-compat-alias choose-model-current current)
-(module-compat-alias choose-model-current-label current-label)
-(module-compat-alias choose-model-panel panel)
 
 ;; Modal visibility is pure UI state, so it lives here rather than in Rust.
 (defstate open? false)

@@ -17,33 +17,6 @@
 ;; the track menu and param mode.  The rest are entry points src/ui/input.rs and
 ;; the Rust state_values / ui tests drive by name.  Deleted as each consumer
 ;; converts.
-(module-compat-alias seqv-collapse-all-tracks collapse-all-tracks)
-(module-compat-alias seqv-cursor-step track-cursor)
-(module-compat-alias seqv-current-number-picker-key current-number-picker-key)
-(module-compat-alias seqv-current-page track-current-page)
-(module-compat-alias seqv-current-param-mode current-param-mode)
-(module-compat-alias seqv-current-selected-step current-selected-step)
-(module-compat-alias seqv-current-step track-current-step)
-(module-compat-alias seqv-drop-new-track drop-new-track)
-(module-compat-alias seqv-drop-on-track drop-on-track)
-(module-compat-alias seqv-drop-sample-on-track drop-sample-on-track)
-(module-compat-alias seqv-expanded-track-ids expanded-track-ids)
-(module-compat-alias seqv-handle-key handle-key)
-(module-compat-alias seqv-open-piano-roll-for-track open-piano-roll-for-track)
-(module-compat-alias seqv-param-mode track-param-mode)
-(module-compat-alias seqv-param-mode-for-key param-mode-for-key)
-(module-compat-alias seqv-select-all-current-track-steps select-all-current-track-steps)
-(module-compat-alias seqv-select-process-lane-option select-process-lane-option)
-(module-compat-alias seqv-select-track-for-edit select-track-for-edit)
-(module-compat-alias seqv-set-cursor-step set-track-cursor)
-(module-compat-alias seqv-set-param-mode set-track-param-mode)
-(module-compat-alias seqv-set-track-expanded set-track-expanded)
-(module-compat-alias seqv-step-pointer-down grid-step-pointer-down)
-(module-compat-alias seqv-step-pointer-up grid-step-pointer-up)
-(module-compat-alias seqv-toggle-current-track-expanded toggle-current-track-expanded)
-(module-compat-alias seqv-track-header track-header)
-(module-compat-alias seqv-track-menu-click track-menu-click)
-(module-compat-alias seqv-track-selected-binding track-selected-binding)
 
 (import eseq.track-collapse)
 
@@ -94,7 +67,7 @@
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
 (def track-selected-binding (i)
-  (if (< selected-bus 0)
+  (if (< eseq.seq-core-state/selected-bus 0)
     (bind-seq (str "track-selected-" i))
     0))
 
@@ -137,10 +110,10 @@
 
 (def %set-row-timebase (track label)
   (let ((plock-selected
-      (and (< selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
+      (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
     (do
       (%activate-track-for-edit track)
-      (cool-off-follow)
+      (eseq.seq-core-state/cool-off-follow)
       (if plock-selected
         (seq-plock-timebase label)
         (seq-set-timebase label)))))
@@ -178,13 +151,13 @@
 ;; `cursor-step` is a mutable vanilla global; a module must read it through its
 ;; owner's accessor or the late-binding heal freezes the value (§10 hazard m).
 (def %global-cursor-step-for-track (track)
-  (%project-cursor-step track (cursor-step-value)))
+  (%project-cursor-step track (eseq.seq-core-state/cursor-step-value)))
 
 (def %sync-track-cursor-to-global (track)
   (if (and (>= track 0) (< track (len SEQ.track-ids)))
     (set-track-cursor
       (%track-id-at track)
-      (cursor-step-value))
+      (eseq.seq-core-state/cursor-step-value))
     nil))
 
 (def %sync-all-track-cursors-to-global ()
@@ -196,7 +169,7 @@
 ;; explicit gesture owned by show-fx-for-track (track-name double-click).
 (def select-track-for-edit (track)
   (do
-    (set! selected-bus -1)
+    (set! eseq.seq-core-state/selected-bus -1)
     (if (= SEQ.current-track track) nil (seq-clear-selection))
     (seq-set-track track)
     (%sync-track-cursor-to-global track)))
@@ -205,16 +178,16 @@
   (select-track-for-edit track))
 
 (def open-piano-roll-for-track (track)
-  (if (and (= lower-panel-buffer "*piano-roll*") (= SEQ.current-track track))
-    (seq-show-fx-lower-panel)
+  (if (and (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*") (= SEQ.current-track track))
+    (eseq.seq-panels/seq-show-fx-lower-panel)
     (do
       (%activate-track-for-edit track)
-      (seq-open-piano-roll-bottom-for-track track))))
+      (eseq.seq-panels/seq-open-piano-roll-bottom-for-track track))))
 
 (def %show-fx-for-track (track)
   (do
     (select-track-for-edit track)
-    (seq-show-fx-lower-panel)))
+    (eseq.seq-panels/seq-show-fx-lower-panel)))
 
 (def %track-expanded? (track-id)
   (reactive-get "SEQV" (%expanded-track-field track-id)))
@@ -305,16 +278,10 @@
     (set-track-cursor (%track-id-at track) step)
     nil))
 
-;; Stub-then-override, kept working across the conversion (module spec §10
-;; hazard i, applied to a lisp→lisp protocol).  ui/step-grid-interactions.lisp
-;; defines a nil `sequencer-cursor-step-changed` stub and calls it from
-;; `set-track-cursor-step`; this file's later def is what makes the cursor
-;; actually move.  A compat alias cannot rescue that caller: it compiled at
-;; main.lisp:46, before this file's aliases existed at :57, and the late-binding
-;; heal only repairs an *empty* slot — the stub already filled it.  So the flat
-;; name stays flat via the §3 cross-module def escape hatch and forwards into
-;; the module.  It gets no `module-compat-alias` for the same reason
-;; `eseq.vanilla` names never do.  This pair is the S4 `defhook` candidate.
+;; Stub-then-override protocol (module spec §10 hazard i). The flat name stays
+;; pinned through the §3 cross-module def escape hatch because
+;; ui/step-grid-interactions.lisp compiles and calls the stub before this file
+;; replaces it. This pair is the S4 `defhook` candidate.
 (def eseq.vanilla/sequencer-cursor-step-changed (track step)
   (eseq.sequencer/cursor-step-changed track step))
 
@@ -356,7 +323,7 @@
             (if (or (= key "s") (= key "S"))
               5
               (if (or (= key "x") (= key "X"))
-                (if (> (len SEQ.process-lanes) 0) seqv-process-lane-mode-offset -1)
+                (if (> (len SEQ.process-lanes) 0) eseq.seqv-track-params/seqv-process-lane-mode-offset -1)
                 -1))))))))
 
 (def %selected-drum-sound (track)
@@ -364,19 +331,19 @@
           (filter
             (lambda (sound)
               (> (reactive-value (%drum-slot-selected-binding sound)) 0.5))
-            (seqv-track-drum-sounds track))))
+            (eseq.seqv-track-params/seqv-track-drum-sounds track))))
     (if (> (len selected) 0) (nth selected 0) nil)))
 
 (def select-all-current-track-steps ()
   (let ((track SEQ.current-track))
     (do
-      (set! selected-bus -1)
-      (if (seqv-track-drum-rack? track)
+      (set! eseq.seq-core-state/selected-bus -1)
+      (if (eseq.seqv-track-params/seqv-track-drum-rack? track)
         (let ((sound (%selected-drum-sound track)))
           (if sound
             (seq-select-all-drum-rack-steps (get sound :transpose))
             nil))
-        (select-all-steps)))))
+        (eseq.step-grid-interactions/select-all-steps)))))
 
 (def collapse-all-tracks ()
   (do
@@ -388,7 +355,7 @@
 (def toggle-current-track-expanded ()
   (let ((track-id (%current-track-id)))
     (do
-      (set! selected-bus -1)
+      (set! eseq.seq-core-state/selected-bus -1)
       (set-track-expanded track-id (not (%track-expanded? track-id))))))
 
 (def handle-key (key text)
@@ -396,17 +363,17 @@
     (if (>= mode 0)
       (do (%select-current-param-mode mode) true)
       (if (= key "LEFT")
-        (do (cursor-left) true)
+        (do (eseq.step-grid-interactions/cursor-left) true)
         (if (= key "RIGHT")
-          (do (cursor-right) true)
+          (do (eseq.step-grid-interactions/cursor-right) true)
           (if (= key "C-a")
             (do (select-all-current-track-steps) true)
             (if (or (= key "C-h") (= key "C-H"))
               (do (collapse-all-tracks) true)
               (if (or (= key "BS") (= key "Delete"))
-                (do (delete-selected-steps) true)
+                (do (eseq.step-grid-interactions/delete-selected-steps) true)
                 (if (= key "RET")
-                  (do (cursor-toggle) true)
+                  (do (eseq.step-grid-interactions/cursor-toggle) true)
                   false)))))))))
 
 (def track-menu-click (track)
@@ -423,14 +390,14 @@
       (if path
         (do
           (%activate-track-for-edit track)
-          (sbrowser-drop-sample-on-track event))
+          (eseq.browser/drop-sample-on-track event))
         (status "Drop a sample file, not a folder")))))
 
 (def drop-on-track (event)
   (if (= (get event :drag-type) "sound")
-    (sbrowser-drop-sound-on-track event)
+    (eseq.browser/drop-sound-on-track event)
     (if (= (get event :drag-type) "instrument")
-      (sbrowser-drop-instrument-on-track event)
+      (eseq.browser/drop-instrument-on-track event)
       (drop-sample-on-track event))))
 
 (def drop-new-track (event)
@@ -470,7 +437,7 @@
           :light (vec3 0.0 -1.0 3.5) :shininess 82.0)
         :color
         (* (if (= active 1) 1.0 (+ 0.2 (smoothstep -0.4 0.1 d)))
-          (aqua-color
+          (eseq.materials/color
             (rgba
               (if (= active 1) 0.85 0.5)
               (if (= active 1) 0.05 0.5)
@@ -558,7 +525,7 @@
           :lighting (lighting :edge-min -0.30 :edge-max 0.45
             :light (vec3 0.0 -1.0 2.6) :shininess 64.0)
           :color
-            (aqua-color
+            (eseq.materials/color
               (rgba (+ (* track-r 0.38) 0.45) (+ (* track-g 0.38) 0.45) (+ (* track-b 0.38) 0.45) 1.0)
               (rgba 0.95 0.96 0.98 1.0)))))))
 
@@ -600,7 +567,7 @@
        :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
      :color
        (* (if (= active 1) 1.0 0.42)
-          (aqua-color
+          (eseq.materials/color
             (if (= active 1)
               (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 1.0)
               (rgba
@@ -683,7 +650,7 @@
             :color (* 0.7 (if (= duration 1)
                 (if (= muted 1)
                   (rgba 0 0 0 0)
-                  (aqua-color
+                  (eseq.materials/color
                     (mix border (rgba (* track-r 0.85) (* track-g 0.85) (* track-b 0.85) 0.5) (if (= selected 1) 0.8 0.6))
                     (if (= selected 1) border (rgba track-r track-g track-b 0.6))))
                 (rgba 0 0 0 0)))))
@@ -692,14 +659,14 @@
           (material
             :lighting (lighting :edge-min -0.12 :edge-max 0.9
               :light (vec3 -0.3 0.7 0.8) :shininess 92.0)
-            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (aqua-color border border)))
+            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1.2)) (eseq.materials/color border border)))
           )
         
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.15 :edge-max 1.0
               :light (vec3 0.3 -2.0 2.8) :shininess 92.0)
-            :color (* (if (= muted 1) 0.3 1) (aqua-color offcol offcol))))
+            :color (* (if (= muted 1) 0.3 1) (eseq.materials/color offcol offcol))))
         ;; p-lock indicator
         (sdf/fill
           (sdf/translate 0 0.82
@@ -735,8 +702,8 @@
               :light (vec3 0.1 -1.4 0.3) :shininess 32.0)
             :color (if (= active 1)
               (if (= muted 1)
-                (* 0.7 (aqua-color offcol border))
-                (aqua-color
+                (* 0.7 (eseq.materials/color offcol border))
+                (eseq.materials/color
                   (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
                   (rgba track-r track-g track-b 1.0)))
               (rgba 0 0 0 0))))))))
@@ -810,7 +777,7 @@
               :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
             :color
             (* (if (= active 1) 1 0.3)
-               (aqua-color
+               (eseq.materials/color
                  (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
                  (rgba track-r track-g track-b 1.0)))))))))
 
@@ -888,7 +855,7 @@
           :on-double-click (lambda (evt) (%show-fx-for-track i))
           (badge (%track-name-display name)
             :key (str "track-name-label-" i)
-            :icon (seq-track-type-icon i)
+            :icon (eseq.track-collapse/type-icon i)
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
             :background-color :transparent
@@ -964,10 +931,10 @@
   (if (%track-song-governed? track)
     nil
     (do
-      (set! selected-bus -1)
+      (set! eseq.seq-core-state/selected-bus -1)
       (seq-set-track track)
       (set! %drag-track track)
-      (step-select-drag-start step evt))))
+      (eseq.step-grid-interactions/step-select-drag-start step evt))))
 
 (def %grid-step-select-drag-over (track step evt)
   (if (%track-song-governed? track)
@@ -977,7 +944,7 @@
       (if (= %drag-track track)
         (do
           (seq-set-track track)
-          (step-select-drag-over-for-track track step evt))
+          (eseq.step-grid-interactions/step-select-drag-over-for-track track step evt))
         nil))))
 
 ;; Song-governed lanes are non-interactive (takes spec 10 UX): while the
@@ -989,24 +956,24 @@
     nil
     (let ((use-selection (= SEQ.current-track track)))
       (do
-        (set! selected-bus -1)
+        (set! eseq.seq-core-state/selected-bus -1)
         (seq-set-track track)
         (set! %drag-track track)
-        (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (%duration-edge? evt))
+        (if (and (seq-track-step-active? track step) (not (eseq.step-grid-interactions/selection-click? evt)) (%duration-edge? evt))
           (do
             (set! %duration-drag-source step)
-            (step-clear-drag-state)
-            (cool-off-follow)
-            (set-track-cursor-step step)
+            (eseq.step-grid-interactions/step-clear-drag-state)
+            (eseq.seq-core-state/cool-off-follow)
+            (eseq.step-grid-interactions/set-track-cursor-step step)
             (%set-duration-from-drag track step step))
-          (step-pointer-down-for-track track step evt use-selection))))))
+          (eseq.step-grid-interactions/step-pointer-down-for-track track step evt use-selection))))))
 
 (def %grid-step-double-click (track step evt)
   (if (%track-song-governed? track)
     nil
     (do
       (seq-set-track track)
-      (step-double-click-for-track track step evt))))
+      (eseq.step-grid-interactions/step-double-click-for-track track step evt))))
 
 (def grid-step-pointer-up (track step evt)
   (do
@@ -1015,7 +982,7 @@
           (not (%track-song-governed? track)))
       (do
         (seq-set-track track)
-        (step-pointer-up step evt))
+        (eseq.step-grid-interactions/step-pointer-up step evt))
       nil)
     (set! %drag-track nil)
     (set! %duration-drag-source nil)))
@@ -1038,7 +1005,7 @@
       (%set-drum-duration-from-drag
         track pad-note %duration-drag-source step)
       (if (and (= %drag-track track) (= %drum-drag-pad pad-note))
-        (drum-step-select-drag-over track pad-note step evt)
+        (eseq.step-grid-interactions/drum-step-select-drag-over track pad-note step evt)
         nil))))
 
 (def %grid-drum-step-pointer-down (track slot-idx pad-note step evt)
@@ -1046,20 +1013,20 @@
     nil
     (do
       (%select-drum-slot-index track slot-idx)
-      (set! selected-bus -1)
+      (set! eseq.seq-core-state/selected-bus -1)
       (seq-set-track track)
       (set! %drag-track track)
       (set! %drum-drag-pad pad-note)
       (if (and (seq-drum-lane-step-active? track pad-note step)
-            (not (selection-click? evt))
+            (not (eseq.step-grid-interactions/selection-click? evt))
             (%duration-edge? evt))
         (do
           (set! %duration-drag-source step)
-          (step-clear-drag-state)
-          (cool-off-follow)
-          (drum-step-set-cursor track pad-note step)
+          (eseq.step-grid-interactions/step-clear-drag-state)
+          (eseq.seq-core-state/cool-off-follow)
+          (eseq.step-grid-interactions/drum-step-set-cursor track pad-note step)
           (%set-drum-duration-from-drag track pad-note step step))
-        (drum-step-pointer-down track pad-note step evt)))))
+        (eseq.step-grid-interactions/drum-step-pointer-down track pad-note step evt)))))
 
 (def %grid-drum-step-pointer-up (track pad-note step evt)
   (do
@@ -1067,7 +1034,7 @@
           (= %drum-drag-pad pad-note)
           (= %duration-drag-source nil)
           (not (%track-song-governed? track)))
-      (drum-step-pointer-up track pad-note step evt)
+      (eseq.step-grid-interactions/drum-step-pointer-up track pad-note step evt)
       nil)
     (set! %drag-track nil)
     (set! %drum-drag-pad nil)
@@ -1079,7 +1046,7 @@
     (do
       (%select-drum-slot-index track slot-idx)
       (seq-set-track track)
-      (drum-step-double-click track pad-note step evt))))
+      (eseq.step-grid-interactions/drum-step-double-click track pad-note step evt))))
 
 ;; Single tight step button (no slider, no number).
 (def %track-step-value (lists track step fallback)
@@ -1176,8 +1143,8 @@
         (if visible
           (%grid-drum-step-double-click track slot-idx pad-note step evt)
           nil))
-      :active (if (and (= drum-step-cursor-track track)
-                    (= drum-step-cursor-pad pad-note))
+      :active (if (and (= eseq.step-grid-interactions/drum-step-cursor-track track)
+                    (= eseq.step-grid-interactions/drum-step-cursor-pad pad-note))
         (%cursor-highlight-binding track step)
         0)
       :selected (track-selected-binding track)
@@ -1245,10 +1212,10 @@
   (track-cursor track-id))
 
 (def %page-count (track)
-  (max 1 (floor (/ (+ (%track-num-steps track) (- page-size 1)) page-size))))
+  (max 1 (floor (/ (+ (%track-num-steps track) (- eseq.seq-core-state/page-size 1)) eseq.seq-core-state/page-size))))
 
 (def track-current-page (track track-id)
-  (min (floor (/ (track-current-step track track-id) page-size)) (- (%page-count track) 1)))
+  (min (floor (/ (track-current-step track track-id) eseq.seq-core-state/page-size)) (- (%page-count track) 1)))
 
 (def %playhead-page (track)
   (let ((page (reactive-get "SEQ" (str "track-playhead-page-" track))))
@@ -1262,7 +1229,7 @@
     (track-current-page track track-id)))
 
 (def %page-offset (track track-id)
-  (* (%visible-page track track-id) page-size))
+  (* (%visible-page track track-id) eseq.seq-core-state/page-size))
 
 (def %expanded-step-index (track track-id i)
   (+ (%page-offset track track-id) i))
@@ -1343,39 +1310,39 @@
 
 (def %expanded-sync-current-label (track track-id)
   (nth SEQ.sync-labels
-    (floor (+ 0.5 (seqv-param-value-at track 5 (track-current-step track track-id))))))
+    (floor (+ 0.5 (eseq.seqv-track-params/seqv-param-value-at track 5 (track-current-step track track-id))))))
 
 (def %set-expanded-cursor (track track-id step)
   (do
-    (set-track-cursor-step step)))
+    (eseq.step-grid-interactions/set-track-cursor-step step)))
 
 (def %expanded-step-click (track track-id step evt)
   (if (%expanded-step-visible? track track-id (- step (%page-offset track track-id)))
     (do
       (%activate-track-for-edit track)
-      (cool-off-follow)
+      (eseq.seq-core-state/cool-off-follow)
       (%set-expanded-cursor track track-id step)
-      (if (selection-click? evt)
-        (step-select-drag-start step evt)
+      (if (eseq.step-grid-interactions/selection-click? evt)
+        (eseq.step-grid-interactions/step-select-drag-start step evt)
         (seq-clear-selection)))
     nil))
 
 (def %expanded-step-drag (track track-id step evt)
   (do
-    (step-select-drag-over-for-track-no-cursor track step evt)))
+    (eseq.step-grid-interactions/step-select-drag-over-for-track-no-cursor track step evt)))
 
 (def %expanded-step-pointer-down (track track-id step evt)
   (let ((use-selection (= SEQ.current-track track)))
     (do
       (%activate-track-for-edit track)
       (%set-expanded-cursor track track-id step)
-      (step-pointer-down-for-track track step evt use-selection))))
+      (eseq.step-grid-interactions/step-pointer-down-for-track track step evt use-selection))))
 
 (def %expanded-step-pointer-up (track track-id step evt)
   (do
     (%activate-track-for-edit track)
     (%set-expanded-cursor track track-id step)
-    (step-pointer-up step evt)))
+    (eseq.step-grid-interactions/step-pointer-up step evt)))
 
 (def %expanded-slot-click (track track-id slot evt)
   (let ((step (%slot-step-index-value track-id slot)))
@@ -1404,7 +1371,7 @@
 (def %expanded-step-double-click (track track-id step evt)
   (do
     (%activate-track-for-edit track)
-    (step-double-click-for-track track step evt)))
+    (eseq.step-grid-interactions/step-double-click-for-track track step evt)))
 
 (def %expanded-slot-double-click (track track-id slot evt)
   (let ((step (%slot-step-index-value track-id slot)))
@@ -1421,73 +1388,73 @@
 (def %set-expanded-slot-sound (track track-id slot sound-index)
   (%set-expanded-slot-param
     track track-id slot 3
-    (seqv-drum-sound-transpose-at-index track sound-index)))
+    (eseq.seqv-track-params/seqv-drum-sound-transpose-at-index track sound-index)))
 
 (def %set-expanded-step-param (track track-id step mode slider-value)
   (do
     (%activate-track-for-edit track)
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (%set-expanded-cursor track track-id step)
-    (if (seqv-process-lane-mode? mode)
-      (seq-set-process-lane-from-step
+    (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+      (eseq.step-grid-interactions/seq-set-process-lane-from-step
         track
         mode
         step
-        (seqv-track-step-slider-param-value track mode slider-value))
-      (seq-set-step-param-from-step
+        (eseq.seqv-track-params/seqv-track-step-slider-param-value track mode slider-value))
+      (eseq.step-grid-interactions/seq-set-step-param-from-step
         step
-        (seqv-param-keyword mode)
-        (seqv-step-slider-param-value mode slider-value)))))
+        (eseq.seqv-track-params/seqv-param-keyword mode)
+        (eseq.seqv-track-params/seqv-step-slider-param-value mode slider-value)))))
 
 (def %set-expanded-current-param (track track-id mode value)
   (do
     (%activate-track-for-edit track)
-    (cool-off-follow)
-    (set-track-cursor-step (track-current-step track track-id))
-    (if (seqv-process-lane-mode? mode)
-      (seq-set-process-lane-from-step
+    (eseq.seq-core-state/cool-off-follow)
+    (eseq.step-grid-interactions/set-track-cursor-step (track-current-step track track-id))
+    (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+      (eseq.step-grid-interactions/seq-set-process-lane-from-step
         track
         mode
         (track-current-step track track-id)
-        (seqv-track-step-param-value track mode value))
-      (seq-set-step-param-from-step
+        (eseq.seqv-track-params/seqv-track-step-param-value track mode value))
+      (eseq.step-grid-interactions/seq-set-step-param-from-step
         (track-current-step track track-id)
-        (seqv-param-keyword mode)
-        (seqv-step-param-value mode value)))))
+        (eseq.seqv-track-params/seqv-param-keyword mode)
+        (eseq.seqv-track-params/seqv-step-param-value mode value)))))
 
 (def %set-expanded-current-sound (track track-id label)
   (%set-expanded-current-param
     track track-id 3
-    (seqv-drum-sound-transpose-for-label track label)))
+    (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label track label)))
 
 (def %set-expanded-timebase (track label)
   (let ((plock-selected
-      (and (< selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
+      (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track track) (seq-has-selection?))))
     (do
       (%activate-track-for-edit track)
-      (cool-off-follow)
+      (eseq.seq-core-state/cool-off-follow)
       (if plock-selected
         (seq-plock-timebase label)
         (seq-set-timebase label)))))
 
 (def %goto-page (track track-id page)
-  (let ((step (min (* page page-size) (- (max 1 (%track-num-steps track)) 1))))
+  (let ((step (min (* page eseq.seq-core-state/page-size) (- (max 1 (%track-num-steps track)) 1))))
     (do
       (%activate-track-for-edit track)
-      (cool-off-follow)
-      (set-track-cursor-step step))))
+      (eseq.seq-core-state/cool-off-follow)
+      (eseq.step-grid-interactions/set-track-cursor-step step))))
 
 (def %double-track-pattern (track track-id)
   (do
     (%activate-track-for-edit track)
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (seq-double-track-pattern)
     (%sync-all-track-cursors-to-global)))
 
 (def %halve-track-pattern (track track-id)
   (do
     (%activate-track-for-edit track)
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (seq-halve-track-pattern)
     (%sync-all-track-cursors-to-global)))
 
@@ -1501,24 +1468,24 @@
       s)))
 
 (def %param-header-name (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (%clip-label (seqv-track-param-name track mode) 28)
-    (if (seqv-drum-sound-mode? track mode) "Sound" (seqv-param-name mode))))
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+    (%clip-label (eseq.seqv-track-params/seqv-track-param-name track mode) 28)
+    (if (eseq.seqv-track-params/seqv-drum-sound-mode? track mode) "Sound" (eseq.seqv-track-params/seqv-param-name mode))))
 
 (def %param-header-width (mode)
-  (if (seqv-process-lane-mode? mode) 17.8 6.4))
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode) 17.8 6.4))
 
 (def %param-tab (track track-id mode tab-label)
   (box :width (%param-tab-width mode) :height 2
     :key (str "expanded-param-tab-" track-id "-" mode)
-    :bg (if (= (track-param-mode track-id) mode) (seqv-param-color mode) :dark-gray)
+    :bg (if (= (track-param-mode track-id) mode) (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
     :on-click |x y r| (do (%activate-track-for-edit track) (set-track-param-mode track-id mode))
     (label tab-label :font-size 12
       :color (if (= (track-param-mode track-id) mode) :primary :dim)
       :bg :transparent)))
 
 (def %process-lane-option-label (track lane-idx)
-  (let ((lane (nth (seqv-track-process-lanes track) lane-idx)))
+  (let ((lane (nth (eseq.seqv-track-params/seqv-track-process-lanes track) lane-idx)))
     (str (+ lane-idx 1) " " (get lane :short-label))))
 
 (def %process-lane-options (track)
@@ -1526,12 +1493,12 @@
     (list "none")
     (map
       (lambda (lane-idx) (%process-lane-option-label track lane-idx))
-      (range 0 (len (seqv-track-process-lanes track))))))
+      (range 0 (len (eseq.seqv-track-params/seqv-track-process-lanes track))))))
 
 (def %process-lane-selector-value (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (let ((lane-idx (seqv-process-lane-index mode)))
-      (if (and (>= lane-idx 0) (< lane-idx (len (seqv-track-process-lanes track))))
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+    (let ((lane-idx (eseq.seqv-track-params/seqv-process-lane-index mode)))
+      (if (and (>= lane-idx 0) (< lane-idx (len (eseq.seqv-track-params/seqv-track-process-lanes track))))
         (%process-lane-option-label track lane-idx)
         "none"))
     "none"))
@@ -1542,13 +1509,13 @@
     (reduce |acc lane-idx|
       (if (= label (%process-lane-option-label track lane-idx)) lane-idx acc)
       -1
-      (range 0 (len (seqv-track-process-lanes track))))))
+      (range 0 (len (eseq.seqv-track-params/seqv-track-process-lanes track))))))
 
 (def %selected-process-lane (track mode)
-  (if (seqv-process-lane-mode? mode)
-    (let ((lane-idx (seqv-process-lane-index mode)))
-      (if (and (>= lane-idx 0) (< lane-idx (len (seqv-track-process-lanes track))))
-        (nth (seqv-track-process-lanes track) lane-idx)
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+    (let ((lane-idx (eseq.seqv-track-params/seqv-process-lane-index mode)))
+      (if (and (>= lane-idx 0) (< lane-idx (len (eseq.seqv-track-params/seqv-track-process-lanes track))))
+        (nth (eseq.seqv-track-params/seqv-track-process-lanes track) lane-idx)
         nil))
     nil))
 
@@ -1557,8 +1524,8 @@
     (do
       (%activate-track-for-edit track)
       (if (>= lane-idx 0)
-        (set-track-param-mode track-id (+ seqv-process-lane-mode-offset lane-idx))
-        (if (seqv-process-lane-mode? (track-param-mode track-id))
+        (set-track-param-mode track-id (+ eseq.seqv-track-params/seqv-process-lane-mode-offset lane-idx))
+        (if (eseq.seqv-track-params/seqv-process-lane-mode? (track-param-mode track-id))
           (set-track-param-mode track-id 3)
           nil)))))
 
@@ -1584,12 +1551,12 @@
             :key (str "expanded-sync-label-" track-id)
             (label (%expanded-sync-current-label track track-id)
               :font-size 11 :color :white :bg :transparent))
-          (if (seqv-drum-sound-mode? track mode)
-            (if (> (seqv-drum-sound-count track) 0)
+          (if (eseq.seqv-track-params/seqv-drum-sound-mode? track mode)
+            (if (> (eseq.seqv-track-params/seqv-drum-sound-count track) 0)
               (dropdown :key (str "expanded-sound-picker-" track-id)
-                :value (seqv-drum-sound-label-for-transpose track
-                  (seqv-param-value-at track mode (track-current-step track track-id)))
-                :options (seqv-drum-sound-labels track)
+                :value (eseq.seqv-track-params/seqv-drum-sound-label-for-transpose track
+                  (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id)))
+                :options (eseq.seqv-track-params/seqv-drum-sound-labels track)
                 :on-change (lambda (label) (%set-expanded-current-sound track track-id label))
                 :width 13 :height 1.3 :font-size 9)
               (box :width 13 :height 1.3
@@ -1597,8 +1564,8 @@
                 (label "No drum pads" :font-size 9 :color :dim :bg :transparent)))
             (number-picker :key (str "expanded-param-number-picker-" track-id)
               :border-color :white
-              :value (seqv-param-value-at track mode (track-current-step track track-id))
-              :min (seqv-track-param-min track mode) :max (seqv-track-param-max track mode) :decimals (seqv-track-param-decimals track mode)
+              :value (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id))
+              :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode) :decimals (eseq.seqv-track-params/seqv-track-param-decimals track mode)
               :on-change (lambda (v) (%set-expanded-current-param track track-id mode v))
               :width 8 :height 1.3 :font-size 11)))
         (h-stack :gap 0.4 :align :center
@@ -1622,11 +1589,11 @@
             :key (str "expanded-pages-" track-id)
             (h-stack :gap 0.1 :align :center
               (each (range 0 (%page-count track)) |page|
-                (box :width page-button-width :height 1.1
+                (box :width eseq.step-grid-interactions/page-button-width :height 1.1
                   :key (str "expanded-page-" track-id "-" page)
                   :background "pattern-pill-bg"
                   :active (%page-active-binding track-id page)
-                  :style pattern-control-style
+                  :style eseq.transport/pattern-control-style
                   :on-click |x y r| (%goto-page track track-id page)
                   (v-stack :align :center
                     (label (fmt " {} " (+ page 1))
@@ -1638,8 +1605,8 @@
 
 (def %expanded-track-editor (track track-id)
   (let ((mode (track-param-mode track-id))
-        (sound-mode (seqv-drum-sound-mode? track (track-param-mode track-id)))
-        (sound-count (seqv-drum-sound-count track)))
+        (sound-mode (eseq.seqv-track-params/seqv-drum-sound-mode? track (track-param-mode track-id)))
+        (sound-count (eseq.seqv-track-params/seqv-drum-sound-count track)))
     (box :padding 0.25
       (box 
         :background-color (rgba 0.1 0.1 0.1 0.2) :corner-radius 8
@@ -1648,7 +1615,7 @@
             (box :width 1)
             (%param-tab track track-id 0 "vel")
             (%param-tab track track-id 1 "dur")
-            (%param-tab track track-id 3 (if (seqv-track-drum-rack? track) "sound" "tpose"))
+            (%param-tab track track-id 3 (if (eseq.seqv-track-params/seqv-track-drum-rack? track) "sound" "tpose"))
             (%param-tab track track-id 4 "pan")
             (%param-tab track track-id 5 "sync")
             (%param-tab track track-id 6 "delay")
@@ -1665,7 +1632,7 @@
             :col-width 4
             :row-height %expanded-step-row-height
             :align :stretch
-            (each (range 0 page-size) |i|
+            (each (range 0 eseq.seq-core-state/page-size) |i|
               (box :padding %expanded-step-column-padding
                 :key (str "expanded-step-column-" track-id "-" i)
                 :background "cursor-highlight"
@@ -1690,14 +1657,14 @@
                             :width 1
                             :min 0 :max (- sound-count 1)
                             :origin 0
-                            :value (seqv-drum-sound-index-for-transpose track
+                            :value (eseq.seqv-track-params/seqv-drum-sound-index-for-transpose track
                               (reactive-value (%slot-param-slider-binding track-id mode i)))
-                            :haptic-value (seqv-drum-sound-index-for-transpose track
+                            :haptic-value (eseq.seqv-track-params/seqv-drum-sound-index-for-transpose track
                               (reactive-value (%slot-param-haptic-binding track-id mode i)))
                             :haptic-min 0 :haptic-max (- sound-count 1)
                             :haptic-pivot-position 1 :haptic-pivot-value (- sound-count 1)
                             :haptic-exponent 1
-                            :items (seqv-drum-sound-short-labels track)
+                            :items (eseq.seqv-track-params/seqv-drum-sound-short-labels track)
                             :font-size 11
                             :color :white
                             :fill (%expanded-slider-fill track)
@@ -1715,15 +1682,15 @@
                         (vslider :height %expanded-step-slider-height
                           :key (str "expanded-step-slider-" track-id "-" i)
                           :width (if (= mode 5) 2 1)
-                          :min (seqv-track-param-slider-min track mode) :max (seqv-track-param-slider-max track mode)
-                          :origin (seqv-track-param-origin track mode)
+                          :min (eseq.seqv-track-params/seqv-track-param-slider-min track mode) :max (eseq.seqv-track-params/seqv-track-param-slider-max track mode)
+                          :origin (eseq.seqv-track-params/seqv-track-param-origin track mode)
                           :value (%slot-param-slider-binding track-id mode i)
                           :haptic-value (%slot-param-haptic-binding track-id mode i)
-                          :haptic-min (seqv-track-param-min track mode)
-                          :haptic-max (seqv-track-param-max track mode)
-                          :haptic-pivot-position (seqv-param-haptic-pivot-position mode)
-                          :haptic-pivot-value (seqv-track-param-haptic-pivot-value track mode)
-                          :haptic-exponent (seqv-param-haptic-exponent mode)
+                          :haptic-min (eseq.seqv-track-params/seqv-track-param-min track mode)
+                          :haptic-max (eseq.seqv-track-params/seqv-track-param-max track mode)
+                          :haptic-pivot-position (eseq.seqv-track-params/seqv-param-haptic-pivot-position mode)
+                          :haptic-pivot-value (eseq.seqv-track-params/seqv-track-param-haptic-pivot-value track mode)
+                          :haptic-exponent (eseq.seqv-track-params/seqv-param-haptic-exponent mode)
                           :items (if (= mode 5) SEQ.sync-labels '())
                           :font-size 11
                           :color :white
@@ -1898,7 +1865,7 @@
 (def %drum-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))
       (rows (max 1 (floor (/ (+ num-steps (- %row-width 1)) %row-width))))
-      (sounds (seqv-track-drum-sounds track-idx)))
+      (sounds (eseq.seqv-track-params/seqv-track-drum-sounds track-idx)))
     (box :padding 0.15
       (box :background-color :buffer-bg
         (v-stack :gap 0.5
@@ -1958,7 +1925,7 @@
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0
-    (each (seq-visible-track-indices) |i|
+    (each (eseq.track-collapse/visible-track-indices) |i|
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
         ;; :muted is a binding (not a value read) so mute/solo changes update
         ;; the row chrome without rerunning this subtree.
@@ -1975,9 +1942,9 @@
           :selected-border-color :mixer-strip-selected-border
           :muted-border-color :mixer-strip-border
           :drop-hover-border-color :mixer-strip-selected-border
-          :drop-types (if (seq-track-replaceable-instrument? i)
+          :drop-types (if (eseq.track-collapse/replaceable-instrument? i)
             (list "sample" "instrument" "sound")
-            (if (seq-track-sound-replaceable? i) (list "sample" "sound") (list "sample")))
+            (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample")))
           :drop-meta (dict :kind "track" :track i)
           :on-drop (lambda (event) (drop-on-track event))
           :padding 0.0145
@@ -1991,7 +1958,7 @@
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                 (%track-actions i))
               (%expanded-track-editor i (nth SEQ.track-ids i)))
-            (if (seqv-track-drum-rack? i)
+            (if (eseq.seqv-track-params/seqv-track-drum-rack? i)
               ;; Drum racks put the rack header on its own row so the slot
               ;; lanes get the full width for their per-slot gutters.
               (v-stack :width :fill :gap 0.2
@@ -2024,6 +1991,6 @@
         :bg :transparent))))
 
 
-(set-buffer-mode-for "*sequencer*" "seq-grid-mode")
+(set-buffer-mode-for "*sequencer*" "eseq.seq-grid-mode/seq-grid-mode")
 
-(cursor-step-changed SEQ.current-track (cursor-step-value))
+(cursor-step-changed SEQ.current-track (eseq.seq-core-state/cursor-step-value))

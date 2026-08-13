@@ -9,14 +9,6 @@
 ;; Bare callers: unconverted custom-ui-lego.lisp, generated
 ;; instruments/**/ui.lisp files (evaluated headerless), the ui_validate.rs
 ;; whitelist/stubs, and headerless evals in state_values/tests.rs.
-(module-compat-alias ui-param-knob ui-param-knob)
-(module-compat-alias ui-param-matrix ui-param-matrix)
-(module-compat-alias ui-param-knob-c ui-param-knob-c)
-(module-compat-alias base-note-c base-note-c)
-(module-compat-alias ui-panel-c ui-panel-c)
-(module-compat-alias ui-param-value ui-param-value)
-(module-compat-alias ui-param-bound-value ui-param-bound-value)
-(module-compat-alias ui-set-param ui-set-param)
 
 (def ui-param-knob (name title)
   (let ((p (rt/custom-ui-current-param name)))

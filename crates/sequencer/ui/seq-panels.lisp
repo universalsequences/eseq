@@ -62,61 +62,36 @@
 ;;   [module]   an already-converted module calls it bare and cannot import us
 ;;   [vanilla]  a headerless lisp caller (ui/capture-fixtures/*.lisp)
 ;;   [m-x]      user-facing command; the flat spelling is the documented one
-(module-compat-alias seq-hide-samples-sidebar seq-hide-samples-sidebar)            ; [module] seq-layout
-(module-compat-alias seq-hide-mixer-panel seq-hide-mixer-panel)                    ; [module] seq-layout
-(module-compat-alias seq-hide-fx-panel seq-hide-fx-panel)                          ; [module] seq-layout
-(module-compat-alias seq-hide-patch-macros-panel seq-hide-patch-macros-panel)      ; [module] seq-layout
 ;; (seq-toggle-patch-macros-panel needs no alias: its only external reach was
 ;; the C-x m `bind-key`, which qualifies against this module — see [key] above.)
-(module-compat-alias seq-toggle-samples-sidebar seq-toggle-samples-sidebar)        ; [module] transport.lisp
-(module-compat-alias seq-toggle-mixer-panel seq-toggle-mixer-panel)                ; [rust] input.rs, [module] transport.lisp
-(module-compat-alias seq-toggle-fx-panel seq-toggle-fx-panel)                      ; [module] transport.lisp
-(module-compat-alias seq-restore-instrument-patcher-layout seq-restore-instrument-patcher-layout) ; [rust] edit_sessions.rs
-(module-compat-alias seq-current-step-buffer seq-current-step-buffer)              ; [rust] input.rs, [module] seq-layout
-(module-compat-alias seq-close-piano-roll seq-close-piano-roll)                    ; [m-x]
-(module-compat-alias seq-open-piano-roll-bottom-for-track seq-open-piano-roll-bottom-for-track) ; [module] sequencer.lisp (UI root)
-(module-compat-alias seq-open-arrangement-piano-roll-bottom-for-track seq-open-arrangement-piano-roll-bottom-for-track) ; [module] arrangement.lisp, [vanilla] capture-fixtures
-(module-compat-alias seq-open-piano-roll-bottom seq-open-piano-roll-bottom)        ; [module] sequencer.lisp (UI root)
-(module-compat-alias seq-open-piano-roll-main seq-open-piano-roll-main)            ; [m-x]
-(module-compat-alias seq-open-piano-roll-preferred seq-open-piano-roll-preferred)  ; [m-x]
-(module-compat-alias seq-show-sequencer-main seq-show-sequencer-main)              ; [module] transport.lisp
-(module-compat-alias seq-open-arrangement seq-open-arrangement)                    ; [module] arrangement.lisp + transport.lisp, [vanilla] capture-fixtures
-(module-compat-alias seq-toggle-arrangement seq-toggle-arrangement)                ; [rust] input.rs, [key] Tab
-(module-compat-alias seq-toggle-current-track-expanded-main seq-toggle-current-track-expanded-main) ; [m-x]
-(module-compat-alias seq-toggle-piano-roll-main seq-toggle-piano-roll-main)        ; [m-x]
-(module-compat-alias seq-toggle-piano-roll-placement seq-toggle-piano-roll-placement) ; [rust] input.rs
-(module-compat-alias seq-toggle-fx-piano-roll seq-toggle-fx-piano-roll)            ; [m-x]
-(module-compat-alias seq-toggle-main-or-piano-roll seq-toggle-main-or-piano-roll)  ; [rust] input.rs, [key] BackTab
-(module-compat-alias seq-show-fx-lower-panel seq-show-fx-lower-panel)              ; [module] sequencer.lisp + effects/param-controls.lisp
-(module-compat-alias seq-toggle-current-track-mods-view seq-toggle-current-track-mods-view) ; [rust] input.rs
 
 (def seq-hide-samples-sidebar ()
-  (if samples-sidebar-visible
+  (if eseq.seq-core-state/samples-sidebar-visible
     (do
-      (set! samples-sidebar-visible false)
-      (seq-refresh-current-layout))
+      (set! eseq.seq-core-state/samples-sidebar-visible false)
+      (eseq.seq-layout/refresh-current-layout))
     nil))
 
 (def seq-hide-mixer-panel ()
-  (if mixer-panel-visible
+  (if eseq.seq-core-state/mixer-panel-visible
     (do
       (%sync-step-panel-buffer-from-current-window)
-      (set! mixer-panel-visible false)
-      (seq-refresh-current-layout))
+      (set! eseq.seq-core-state/mixer-panel-visible false)
+      (eseq.seq-layout/refresh-current-layout))
     nil))
 
 (def seq-hide-fx-panel ()
-  (if lower-panel-visible
+  (if eseq.seq-core-state/lower-panel-visible
     (do
-      (set! lower-panel-visible false)
-      (seq-refresh-current-layout))
+      (set! eseq.seq-core-state/lower-panel-visible false)
+      (eseq.seq-layout/refresh-current-layout))
     nil))
 
 (def seq-hide-patch-macros-panel ()
-  (if patch-macros-panel-visible
+  (if eseq.seq-core-state/patch-macros-panel-visible
     (do
-      (set! patch-macros-panel-visible false)
-      (seq-refresh-current-layout))
+      (set! eseq.seq-core-state/patch-macros-panel-visible false)
+      (eseq.seq-layout/refresh-current-layout))
     nil))
 
 ;; Bound to C-x m below: dragging the macro sidebar past the collapse threshold
@@ -124,75 +99,75 @@
 ;; only way back is M-x.
 (def seq-toggle-patch-macros-panel ()
   (do
-    (set! patch-macros-panel-visible (not patch-macros-panel-visible))
-    (seq-refresh-current-layout)))
+    (set! eseq.seq-core-state/patch-macros-panel-visible (not eseq.seq-core-state/patch-macros-panel-visible))
+    (eseq.seq-layout/refresh-current-layout)))
 
 (bind-key "C-x m" "seq-toggle-patch-macros-panel")
 
 (def seq-toggle-samples-sidebar ()
   (do
-    (set! samples-sidebar-visible (not samples-sidebar-visible))
-    (seq-refresh-current-layout)))
+    (set! eseq.seq-core-state/samples-sidebar-visible (not eseq.seq-core-state/samples-sidebar-visible))
+    (eseq.seq-layout/refresh-current-layout)))
 
 (def seq-toggle-mixer-panel ()
   (do
     (%sync-step-panel-buffer-from-current-window)
-    (set! mixer-panel-visible (not mixer-panel-visible))
-    (seq-refresh-current-layout)))
+    (set! eseq.seq-core-state/mixer-panel-visible (not eseq.seq-core-state/mixer-panel-visible))
+    (eseq.seq-layout/refresh-current-layout)))
 
 (def seq-toggle-fx-panel ()
   (do
-    (set! lower-panel-visible (not lower-panel-visible))
-    (seq-refresh-current-layout)))
+    (set! eseq.seq-core-state/lower-panel-visible (not eseq.seq-core-state/lower-panel-visible))
+    (eseq.seq-layout/refresh-current-layout)))
 
 (def seq-restore-instrument-patcher-layout ()
   (do
-    (set! step-panel-buffer remembered-step-panel-buffer)
-    (if (= lower-panel-buffer "*piano-roll*")
-      (seq-apply-piano-roll-layout)
-      (seq-apply-fx-layout))))
+    (set! eseq.seq-step-tabs/step-panel-buffer eseq.seq-step-tabs/remembered-step-panel-buffer)
+    (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+      (eseq.seq-layout/apply-piano-roll-layout)
+      (eseq.seq-layout/apply-fx-layout))))
 
 (def seq-current-step-buffer ()
-  (seq-sanitized-step-buffer
-    (if (= step-panel-buffer "*piano-roll*")
-      remembered-step-panel-buffer
-      step-panel-buffer)))
+  (eseq.seq-step-tabs/seq-sanitized-step-buffer
+    (if (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
+      eseq.seq-step-tabs/remembered-step-panel-buffer
+      eseq.seq-step-tabs/step-panel-buffer)))
 
 (def %sync-step-panel-buffer-from-current-window ()
   (let ((buffer (current-buffer-name)))
-    (if (seq-main-step-tab-buffer? buffer)
+    (if (eseq.seq-step-tabs/seq-main-step-tab-buffer? buffer)
       (do
-        (set! step-panel-buffer buffer)
-        (set! remembered-step-panel-buffer buffer))
+        (set! eseq.seq-step-tabs/step-panel-buffer buffer)
+        (set! eseq.seq-step-tabs/remembered-step-panel-buffer buffer))
       nil)))
 
 (def %piano-roll-open? ()
-  (or (= step-panel-buffer "*piano-roll*")
-    (= lower-panel-buffer "*piano-roll*")))
+  (or (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
+    (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")))
 
 (def seq-close-piano-roll ()
-  (if (= step-panel-buffer "*piano-roll*")
+  (if (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
     (do
-      (set! step-panel-buffer (seq-current-step-buffer))
-      (set-window-buffer step-panel-buffer)
-      (seq-apply-fx-layout))
+      (set! eseq.seq-step-tabs/step-panel-buffer (seq-current-step-buffer))
+      (set-window-buffer eseq.seq-step-tabs/step-panel-buffer)
+      (eseq.seq-layout/apply-fx-layout))
     (do
       (if (= (current-buffer-name) "*piano-roll*")
         (set-window-buffer "*fx*")
         (set-window-buffer-for "*piano-roll*" "*fx*"))
-      (seq-apply-fx-layout))))
+      (eseq.seq-layout/apply-fx-layout))))
 
 (def %open-piano-roll-bottom-for-track-core (track)
   (do
-    (set! lower-panel-visible true)
-    (if (= step-panel-buffer "*piano-roll*")
-      (set! step-panel-buffer (seq-current-step-buffer))
+    (set! eseq.seq-core-state/lower-panel-visible true)
+    (if (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
+      (set! eseq.seq-step-tabs/step-panel-buffer (seq-current-step-buffer))
       nil)
     (if (= (current-buffer-name) "*fx*")
       (set-window-buffer "*piano-roll*")
       (set-window-buffer-for "*fx*" "*piano-roll*"))
-    (piano-roll-request-fit-for-track track)
-    (seq-apply-piano-roll-layout)))
+    (eseq.piano-roll/piano-roll-request-fit-for-track track)
+    (eseq.seq-layout/apply-piano-roll-layout)))
 
 (def seq-open-piano-roll-bottom-for-track (track)
   (do
@@ -214,27 +189,27 @@
   (seq-open-piano-roll-bottom))
 
 (def %switch-main-view (view)
-  (let ((old-buffer (seq-visible-main-panel-buffer)))
+  (let ((old-buffer (eseq.seq-step-tabs/seq-visible-main-panel-buffer)))
     (do
-      (set! seq-main-view view)
-      (if (= seq-layout-mode :lower-panel)
+      (set! eseq.seq-step-tabs/seq-main-view view)
+      (if (= eseq.seq-step-tabs/seq-layout-mode :lower-panel)
         ;; Reapplying the layout when nothing changed clobbers incremental
         ;; relayout dirty tracking (e.g. expand/collapse row diffs), so only
         ;; refresh when the visible main panel actually switched buffers.
-        (if (not (= old-buffer (seq-visible-main-panel-buffer)))
+        (if (not (= old-buffer (eseq.seq-step-tabs/seq-visible-main-panel-buffer)))
           (do
-            (set-window-buffer-for old-buffer (seq-visible-main-panel-buffer))
-            (seq-refresh-current-layout))
+            (set-window-buffer-for old-buffer (eseq.seq-step-tabs/seq-visible-main-panel-buffer))
+            (eseq.seq-layout/refresh-current-layout))
           nil)
         ;; An explicit view switch leaves the instrument patcher workspace and
         ;; returns to the normal sequencer workspace.
-        (seq-apply-fx-layout)))))
+        (eseq.seq-layout/apply-fx-layout)))))
 
 (def seq-show-sequencer-main ()
   (do
     (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
-    (set! remembered-step-panel-buffer "*sequencer*")
-    (set! step-panel-buffer "*sequencer*")
+    (set! eseq.seq-step-tabs/remembered-step-panel-buffer "*sequencer*")
+    (set! eseq.seq-step-tabs/step-panel-buffer "*sequencer*")
     (%switch-main-view :session)))
 
 ;; Arrangement is an app view, not a sequencer tile tab. It owns a wider main
@@ -243,49 +218,49 @@
   (%switch-main-view :arrangement))
 
 (def seq-toggle-arrangement ()
-  (if (seq-arrangement-view?)
+  (if (eseq.seq-step-tabs/seq-arrangement-view?)
     (seq-show-sequencer-main)
     (seq-open-arrangement)))
 
 (def seq-toggle-current-track-expanded-main ()
   (do
     (seq-show-sequencer-main)
-    (seqv-toggle-current-track-expanded)))
+    (eseq.sequencer/toggle-current-track-expanded)))
 
 (def seq-toggle-piano-roll-main ()
   (seq-toggle-main-or-piano-roll))
 
 (def seq-toggle-piano-roll-placement ()
   (do
-    (set! piano-roll-placement :bottom)
-    (if (= step-panel-buffer "*piano-roll*")
+    (set! eseq.seq-step-tabs/piano-roll-placement :bottom)
+    (if (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
       (seq-open-piano-roll-bottom)
       nil)))
 
 (def seq-toggle-fx-piano-roll ()
   (do
-    (set! lower-panel-visible true)
+    (set! eseq.seq-core-state/lower-panel-visible true)
     (if (= (current-buffer-name) "*fx*")
     (do
       (set-window-buffer "*piano-roll*")
-      (set! lower-panel-buffer "*piano-roll*")
-      (piano-roll-request-fit)
-      (seq-apply-piano-roll-layout))
+      (set! eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+      (eseq.piano-roll/piano-roll-request-fit)
+      (eseq.seq-layout/apply-piano-roll-layout))
     (if (= (current-buffer-name) "*piano-roll*")
       (do
         (set-window-buffer "*fx*")
-        (set! lower-panel-buffer "*fx*")
-        (seq-apply-fx-layout))
-      (if (= lower-panel-buffer "*fx*")
+        (set! eseq.seq-step-tabs/lower-panel-buffer "*fx*")
+        (eseq.seq-layout/apply-fx-layout))
+      (if (= eseq.seq-step-tabs/lower-panel-buffer "*fx*")
         (do
           (set-window-buffer-for "*fx*" "*piano-roll*")
-          (set! lower-panel-buffer "*piano-roll*")
-          (piano-roll-request-fit)
-          (seq-apply-piano-roll-layout))
+          (set! eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+          (eseq.piano-roll/piano-roll-request-fit)
+          (eseq.seq-layout/apply-piano-roll-layout))
         (do
           (set-window-buffer-for "*piano-roll*" "*fx*")
-          (set! lower-panel-buffer "*fx*")
-          (seq-apply-fx-layout)))))))
+          (set! eseq.seq-step-tabs/lower-panel-buffer "*fx*")
+          (eseq.seq-layout/apply-fx-layout)))))))
 
 (def seq-toggle-main-or-piano-roll ()
   (if (or (= SEQ.editor-mode "new-instrument")
@@ -302,21 +277,21 @@
     ;; This is an explicit mode transition even when the FX buffer is already
     ;; visible; do not leave a stale arrangement-editor mode behind.
     (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
-    (if (or (not lower-panel-visible) (= lower-panel-buffer "*piano-roll*"))
+    (if (or (not eseq.seq-core-state/lower-panel-visible) (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*"))
       (do
-        (set! lower-panel-visible true)
-        (if (= lower-panel-buffer "*piano-roll*")
+        (set! eseq.seq-core-state/lower-panel-visible true)
+        (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
           (if (= (current-buffer-name) "*piano-roll*")
             (set-window-buffer "*fx*")
             (set-window-buffer-for "*piano-roll*" "*fx*"))
           nil)
-        (seq-apply-fx-layout))
+        (eseq.seq-layout/apply-fx-layout))
       nil)))
 
 (def seq-toggle-current-track-mods-view ()
   (do
-    (set! selected-bus -1)
-    (instrument-toggle-mods-view)
+    (set! eseq.seq-core-state/selected-bus -1)
+    (eseq.effects.effect-panels/instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
 (bind-key "Tab" "seq-toggle-arrangement")

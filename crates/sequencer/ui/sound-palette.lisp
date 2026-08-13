@@ -23,9 +23,6 @@
 ;; seq-panels.lisp — which is late-bound and resolves through this table at
 ;; dispatch — and the Rust state_values test that evals `(sound-palette-apply
 ;; …)`. `seq-toggle-sound-palette` is also the M-x-visible spelling.
-(module-compat-alias sound-palette-panel panel)
-(module-compat-alias seq-toggle-sound-palette toggle-open)
-(module-compat-alias sound-palette-apply apply-entry)
 
 (defstate renaming -1)
 (defstate rename-draft "")

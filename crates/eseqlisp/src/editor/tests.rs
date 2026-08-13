@@ -12954,50 +12954,7 @@ fn module_define_mode_qualifies_name_and_on_key_handler() {
     );
 }
 
-/// Hazard (d), flat → qualified: the moment a mode-defining file converts,
-/// its registry key qualifies, and every unconverted
-/// `(set-buffer-mode-for "*buf*" "the-mode")` caller has to reach it through
-/// the compat alias — otherwise the buffer silently loses its keymap.
-#[test]
-fn compat_alias_reaches_a_module_defined_mode_from_a_flat_caller() {
-    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-    editor.open_scratch_buffer("*grid*", "");
-    editor.open_scratch_buffer("*other*", "");
-    eval_module(
-        &mut editor,
-        "mode-alias",
-        r#"
-(module test.gridmode)
-(module-compat-alias grid-mode grid-mode)
-(def grid-key (k txt) (host-command "grid-key" k) true)
-(define-mode "grid-mode" :on-key "grid-key")
-"#,
-    );
-    assert!(
-        editor.mode_registry.contains_key("test.gridmode/grid-mode"),
-        "mode registered qualified, got {:?}",
-        editor.mode_registry.keys().collect::<Vec<_>>()
-    );
-    // Unconverted vanilla caller, bare flat mode name.
-    editor
-        .runtime_mut()
-        .eval_str(r#"(set-buffer-mode-for "*grid*" "grid-mode")"#)
-        .expect("flat set-buffer-mode-for");
-    editor.refresh_runtime_side_effects();
-    let buffer = editor
-        .buffers
-        .iter()
-        .find(|b| b.name == "*grid*")
-        .expect("*grid* buffer");
-    assert_eq!(
-        buffer.mode,
-        BufferMode::Named("test.gridmode/grid-mode".to_string()),
-        "flat caller must reach the module's mode through the compat alias"
-    );
-}
-
-/// The other direction (already present before the alias rung, pinned here
-/// so the new rung ordering cannot regress it): a declared module's mode
+/// A declared module's mode
 /// reference is qualified against the *caller*, and must still fall back to
 /// a vanilla mode the module never defined.
 #[test]
@@ -13109,10 +13066,9 @@ fn vanilla_bind_key_records_stay_flat() {
 }
 
 #[test]
-fn mx_command_defined_in_a_declared_module_opens_via_typed_bare_name() {
-    // Mirrors the S3 batch-1 choose-model conversion: an M-x command
-    // defined inside a declared module, reachable by its typed bare name
-    // through the candidate filter and through the compat alias.
+fn mx_command_defined_in_a_declared_module_requires_its_qualified_name() {
+    // M-x exposes a declared module's qualified command and does not retain
+    // migration-era flat vocabulary.
     let runtime = Runtime::with_init_source("");
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor
@@ -13121,7 +13077,6 @@ fn mx_command_defined_in_a_declared_module_opens_via_typed_bare_name() {
             std::env::temp_dir().join("mx-module-test.lisp"),
             r#"
 (module test.mxmod)
-(module-compat-alias mx-probe-command probe-command)
 (defstate probe-open? false)
 (def probe-command () (set! probe-open? true))
 "#,
@@ -13139,8 +13094,8 @@ fn mx_command_defined_in_a_declared_module_opens_via_typed_bare_name() {
     );
     let filtered = super::filter_candidates(&candidates, "mx-probe-command");
     assert!(
-        !filtered.is_empty(),
-        "typed old name should still match something (alias-era candidates: {:?})",
+        filtered.is_empty(),
+        "retired flat name must not remain an M-x candidate: {:?}",
         candidates
             .iter()
             .filter(|c| c.contains("probe"))
@@ -13155,7 +13110,7 @@ fn mx_command_defined_in_a_declared_module_opens_via_typed_bare_name() {
         "qualified M-x execution should run the command"
     );
 
-    // …and executing by the typed flat name resolves through the alias.
+    // Executing the retired flat spelling is a miss.
     editor
         .runtime_mut()
         .eval_str("(set! test.mxmod/probe-open? false)")
@@ -13163,8 +13118,8 @@ fn mx_command_defined_in_a_declared_module_opens_via_typed_bare_name() {
     editor.execute_mx_command("mx-probe-command");
     assert_eq!(
         editor.runtime_mut().eval_str("test.mxmod/probe-open?").unwrap(),
-        Some(Value::Bool(true)),
-        "aliased flat-name M-x execution should run the command"
+        Some(Value::Bool(false)),
+        "retired flat-name M-x execution must not run the command"
     );
 }
 
@@ -13316,7 +13271,7 @@ fn real_choose_model_dropdown_row_click_selects() {
         .runtime_mut()
         .eval_str(
             r#"
-            (effect-buffer "*panel*" (choose-model-panel))
+            (effect-buffer "*panel*" (eseq.choose-model/panel))
             (effect-buffer "*sequencer*"
               (button "underlay"
                 :width 60
@@ -13331,7 +13286,7 @@ fn real_choose_model_dropdown_row_click_selects() {
         .expect("mount panel");
     editor
         .runtime_mut()
-        .eval_str("(choose-model)")
+        .eval_str("(eseq.choose-model/choose-model)")
         .expect("open picker");
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(200, 60);
@@ -13374,7 +13329,7 @@ fn real_choose_model_dropdown_row_click_selects() {
         "row click should write through agent/set-patch-model"
     );
     assert_eq!(
-        editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+        editor.runtime_mut().eval_str("eseq.choose-model/open?").unwrap(),
         Some(Value::Bool(false)),
         "select should close the picker"
     );

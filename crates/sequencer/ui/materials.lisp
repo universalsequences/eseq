@@ -11,11 +11,6 @@
 ;; slider-material-demo.lisp) and the Rust test fixtures that define their
 ;; own flat `aqua-color`/`aqua-slider-material` never load this file, so
 ;; the alias cannot shadow them.
-(module-compat-alias aqua-color color)
-(module-compat-alias aqua-slider-material slider-material)
-(module-compat-alias aqua-slider-muted-material slider-muted-material)
-(module-compat-alias aqua-slider-track-material slider-track-material)
-(module-compat-alias aqua-slider-track-muted-material slider-track-muted-material)
 
 ;; NOTE: `:shader` and `:material` values are auto-quoted and expand at
 ;; shader-compile time in a throwaway implicit-module compiler, NOT in this
@@ -73,8 +68,8 @@
        :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
      :color
        (eseq.materials/color
-         (rgba (* metal-track-r 0.55) (* metal-track-g 0.55) (* metal-track-b 0.55) 1.0)
-         (rgba metal-track-r metal-track-g metal-track-b 1.0))))
+         (rgba (* eseq.step-grid/metal-track-r 0.55) (* eseq.step-grid/metal-track-g 0.55) (* eseq.step-grid/metal-track-b 0.55) 1.0)
+         (rgba eseq.step-grid/metal-track-r eseq.step-grid/metal-track-g eseq.step-grid/metal-track-b 1.0))))
 
 (defmacro slider-track-muted-material ()
   `(material
@@ -84,14 +79,14 @@
        (* 0.42
           (eseq.materials/color
             (rgba
-              (+ (* metal-track-r 0.36) 0.06)
-              (+ (* metal-track-g 0.36) 0.06)
-              (+ (* metal-track-b 0.36) 0.08)
+              (+ (* eseq.step-grid/metal-track-r 0.36) 0.06)
+              (+ (* eseq.step-grid/metal-track-g 0.36) 0.06)
+              (+ (* eseq.step-grid/metal-track-b 0.36) 0.08)
               0.85)
             (rgba
-              (+ (* metal-track-r 0.30) 0.04)
-              (+ (* metal-track-g 0.30) 0.04)
-              (+ (* metal-track-b 0.30) 0.08)
+              (+ (* eseq.step-grid/metal-track-r 0.30) 0.04)
+              (+ (* eseq.step-grid/metal-track-g 0.30) 0.04)
+              (+ (* eseq.step-grid/metal-track-b 0.30) 0.08)
               0.85)))))
 
      

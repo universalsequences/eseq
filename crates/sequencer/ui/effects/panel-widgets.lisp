@@ -9,11 +9,6 @@
 ;; (src/ui/state_values/tests.rs). The buffers.lisp flat edges
 ;; (fx-has-selected-bus?) retired with eseq.effects.buffers, which imports
 ;; this module.
-(module-compat-alias fx-select-effect select-effect)
-(module-compat-alias fx-select-midi-effect select-midi-effect)
-(module-compat-alias fx-select-bus-effect select-bus-effect)
-(module-compat-alias fx-select-rack-effect select-rack-effect)
-(module-compat-alias fx-delete-selected-effect delete-selected-effect)
 
 (def select-effect (slot)
   (do
@@ -40,9 +35,9 @@
             :effect-slot effect-slot))))
 
 (def has-selected-bus? ()
-  (and (>= selected-bus 0)
-       (< selected-bus (len SEQ.bus-names))
-       (< selected-bus (len SEQ.bus-effects))))
+  (and (>= eseq.seq-core-state/selected-bus 0)
+       (< eseq.seq-core-state/selected-bus (len SEQ.bus-names))
+       (< eseq.seq-core-state/selected-bus (len SEQ.bus-effects))))
 
 (def delete-selected-effect ()
   (if (pp/delete-selected)

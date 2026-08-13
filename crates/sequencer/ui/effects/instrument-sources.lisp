@@ -1,6 +1,6 @@
 ;; Instrument source tabs and source parameter grids.
 (module eseq.effects.instrument-sources)
-(import eseq.effects.state :refer (instrument-source-tab))
+(import eseq.effects.state :refer (eseq.effects.state/instrument-source-tab))
 (import eseq.effects.param-grid :as pg)
 
 ;; No compat aliases: neither def has a caller outside this file (lisp or
@@ -19,7 +19,7 @@
 (def %source-tabs (inst)
   (if (> (len (get inst :sources)) 0)
     (tabs :items (get inst :source-names)
-      :bind instrument-source-tab
+      :bind eseq.effects.state/instrument-source-tab
       :compact true
       :gap 0.75
       :tab-padding 0.5

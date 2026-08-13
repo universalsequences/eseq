@@ -10,11 +10,6 @@
 ;; the old flat spellings (src/ui/state_values/tests.rs). The buffers.lisp
 ;; flat edges (fx-track-parameters-panel, fx-delete-selected-plock-row)
 ;; retired with eseq.effects.buffers, which imports this module.
-(module-compat-alias fx-selected-plock-row selected-plock-row)
-(module-compat-alias fx-plock-row-selected? plock-row-selected?)
-(module-compat-alias fx-plock-chip-click plock-chip-click)
-(module-compat-alias fx-track-plocks-panel track-plocks-panel)
-(module-compat-alias fx-step-parameters-panel step-parameters-panel)
 
 (def %track-bus-send-field (bus)
   (str "tp-bus-" bus "-send"))
@@ -32,7 +27,7 @@
 
 (def %set-timebase (label)
   (do
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (if (seq-has-selection?)
       (seq-plock-timebase label)
       (seq-set-timebase label))))
@@ -59,23 +54,23 @@
         :noui true :font-size 9 :text-color :dim
         :on-change (lambda (v)
           (do
-            (cool-off-follow)
+            (eseq.seq-core-state/cool-off-follow)
             (host-command "set-track-bus-send"
               (dict :bus (get send :bus-idx) :amount v))))
         :width 4 :height 1))
     (box :width 8 :height 2
       (hslider :min 0 :max 1
         :value (bind-seq (%track-bus-send-field (get send :bus-idx)))
-        :material (aqua-slider-material)
+        :material (eseq.materials/slider-material)
         :on-change (lambda (v)
           (do
-            (cool-off-follow)
+            (eseq.seq-core-state/cool-off-follow)
             (host-command "set-track-bus-send"
               (dict :bus (get send :bus-idx) :amount v))))))))
 
 (def %plock-set-value (p v)
   (do
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (host-command "set-track-plock-entry"
       (dict :target (get p :target)
             :step-idx (get p :step-idx)
@@ -86,7 +81,7 @@
 
 (def %plock-set-option (p label)
   (do
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (host-command "set-track-plock-entry-option"
       (dict :target (get p :target)
             :step-idx (get p :step-idx)
@@ -145,12 +140,12 @@
 
 (def plock-chip-click (chip)
   (do
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (set! selected-plock-row -1)
     (if (seq-has-selection?)
       (host-command "stamp-plock-variant"
         (dict :label (get chip :label)
-              :step (current-step)))
+              :step (eseq.seq-core-state/current-step)))
       (host-command "preview-plock-variant"
         (dict :label (get chip :label))))))
 
@@ -304,46 +299,46 @@
           :font-size 9 :color :dim :bg :transparent)))))
 
 (def %step-param-value (mode)
-  (let ((values (seqv-current-param-values mode))
-        (step (current-step)))
+  (let ((values (eseq.seqv-track-params/seqv-current-param-values mode))
+        (step (eseq.seq-core-state/current-step)))
     (if (< step (len values))
       (nth values step)
       0)))
 
 (def %step-set-param (mode value)
   (do
-    (cool-off-follow)
+    (eseq.seq-core-state/cool-off-follow)
     (if (seq-has-selection?)
       (seq-set-step-param-plock
-        (seqv-param-keyword mode)
-        (seqv-step-param-value mode value))
+        (eseq.seqv-track-params/seqv-param-keyword mode)
+        (eseq.seqv-track-params/seqv-step-param-value mode value))
       (seq-set-step-param
-        (current-step)
-        (seqv-param-keyword mode)
-        (seqv-step-param-value mode value)))))
+        (eseq.seq-core-state/current-step)
+        (eseq.seqv-track-params/seqv-param-keyword mode)
+        (eseq.seqv-track-params/seqv-step-param-value mode value)))))
 
 (def %step-set-sound (label)
-  (%step-set-param 3 (seqv-drum-sound-transpose-for-label SEQ.current-track label)))
+  (%step-set-param 3 (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label SEQ.current-track label)))
 
 (def %step-param-min (mode)
   (if (= mode 3) -48
     (if (= mode 1) 0
-      (seqv-param-min mode))))
+      (eseq.seqv-track-params/seqv-param-min mode))))
 
 (def %step-param-max (mode)
   (if (= mode 3) 48
     (if (= mode 1) 128
-      (seqv-param-max mode))))
+      (eseq.seqv-track-params/seqv-param-max mode))))
 
 (def %step-param-picker (mode key width)
   (v-stack :align :center :gap 0.24
-    (label (seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
+    (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
     (number-picker
       :key (str "step-param-" key)
       :value (bind-seq (str "fx-step-value-" key))
       :min (%step-param-min mode)
       :max (%step-param-max mode)
-      :decimals (seqv-param-decimals mode)
+      :decimals (eseq.seqv-track-params/seqv-param-decimals mode)
       :noui true
       :font-size 10
       :text-color :white
@@ -354,11 +349,11 @@
 (def %step-sound-picker ()
   (v-stack :align :center :gap 0.24
     (label "Sound" :font-size 8 :color :dim :bg :transparent)
-    (if (> (seqv-drum-sound-count SEQ.current-track) 0)
+    (if (> (eseq.seqv-track-params/seqv-drum-sound-count SEQ.current-track) 0)
       (dropdown
         :key "step-param-sound"
-        :value (seqv-drum-sound-label-for-transpose SEQ.current-track (%step-param-value 3))
-        :options (seqv-drum-sound-labels SEQ.current-track)
+        :value (eseq.seqv-track-params/seqv-drum-sound-label-for-transpose SEQ.current-track (%step-param-value 3))
+        :options (eseq.seqv-track-params/seqv-drum-sound-labels SEQ.current-track)
         :on-change (lambda (label) (%step-set-sound label))
         :width 8.8 :height 1.15 :font-size 8.2)
       (box :key "step-param-sound-empty" :width 8.8 :height 1.15
@@ -370,17 +365,17 @@
 ;; ride along into every VM that loads the effects family.
 (def %step-track-badge ()
   (let ((track SEQ.current-track)
-        (muted (mixer-v2-muted? SEQ.current-track)))
+        (muted (eseq.mixer/muted? SEQ.current-track)))
     (box
       :key "step-track-badge"
       :width 3.65 :height 1.0
       :padding 0
       :background-color (rgba
-        (mixer-v2-track-color-r track muted)
-        (mixer-v2-track-color-g track muted)
-        (mixer-v2-track-color-b track muted)
+        (eseq.mixer/track-color-r track muted)
+        (eseq.mixer/track-color-g track muted)
+        (eseq.mixer/track-color-b track muted)
         1.0)
-      (label (mixer-v2-track-collapsed-label track)
+      (label (eseq.mixer/track-collapsed-label track)
         :width 3.65
         :font-size 9
         :h-align :center
@@ -406,7 +401,7 @@
               :suffix " selected" :decimals 0 :width 5.0
               :font-size 8 :color :dim :bg :transparent)))
         (h-stack :gap 0.55 :align :center
-          (if (seqv-track-drum-rack? SEQ.current-track)
+          (if (eseq.seqv-track-params/seqv-track-drum-rack? SEQ.current-track)
             (%step-sound-picker)
             (%step-param-picker 3 "transpose" 4.2))
           (%step-param-picker 0 "velocity" 4.2)
@@ -424,14 +419,14 @@
           (dropdown :key "track-accumulator-function"
             :value SEQ.tp-accumulator
             :options SEQ.accumulator-options
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
+            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accumulator v)))
             :width 7.0 :height 1.25 :font-size 9))
         (v-stack :align :center :gap 0.40
           (label "acc mode" :font-size 8 :color :dim :bg :transparent)
           (dropdown :key "track-accumulator-mode"
             :value SEQ.tp-accum-mode
             :options SEQ.accum-mode-options
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
+            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accum-mode v)))
             :width 6.0 :height 1.25 :font-size 9))
         (v-stack :align :center :gap 0.22
           (v-stack :gap 0.5 :align :center
@@ -439,7 +434,7 @@
             (number-picker :key "track-accumulator-limit"
               :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
               :noui false :font-size 8 :text-color :dim
-              :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accum-limit v)))
               :width 5.2 :height 1.15)))))))
 
 (def track-parameters-panel ()
@@ -454,7 +449,7 @@
             (label "steps" :font-size 8 :color :dim :bg :transparent)
             (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
               :noui false :font-size 8 :text-color :white
-              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :num-steps v)))
               :width 4.2 :height 1.15))
 
           (v-stack :align :center :gap 0.34
@@ -467,7 +462,7 @@
               ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
               ;; never the track-level param below — route there instead, or this control
               ;; silently edits a value playback ignores.
-              :on-click |x y r| (do (cool-off-follow)
+              :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow)
                 (if SEQ.tp-is-rack
                   (host-command "set-rack-slot-max-polyphony"
                     (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
@@ -478,7 +473,7 @@
             (label "voices" :font-size 8 :color :dim :bg :transparent)
             (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
               :noui false :font-size 8 :text-color :white
-              :on-change (lambda (v) (do (cool-off-follow)
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
                 (if SEQ.tp-is-rack
                   (host-command "set-rack-slot-max-polyphony"
                     (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
@@ -489,7 +484,7 @@
             (label "scale" :font-size 8 :color :dim :bg :transparent)
             (dropdown :value SEQ.tp-fts
               :options SEQ.fts-options
-              :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
               :width 7.0 :height 1.25 :font-size 9))
 
           ))
@@ -503,7 +498,7 @@
             (dropdown :value SEQ.tp-swing-resolution
               :key "track-swing-resolution"
               :options '("1/16" "1/8" "1/4" "1/2")
-              :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-swing-resolution v)))
               :plock-active (if (%track-param-plock-active? "swing-resolution") 1 0)
               :plock-color-r (pc/param-plock-color-r)
               :plock-color-g (pc/param-plock-color-g)
@@ -520,7 +515,7 @@
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
-                :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
+                :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
                 :width 5.2 :height 1.15))
             )
 
@@ -542,7 +537,7 @@
               :options SEQ.mute-group-options
               :on-change (lambda (v)
                 (do
-                  (cool-off-follow)
+                  (eseq.seq-core-state/cool-off-follow)
                   (seq-set-track-param :mute-group (%mute-group-value v))))
               :width 5.4 :height 1.25 :font-size 9))
           )))))

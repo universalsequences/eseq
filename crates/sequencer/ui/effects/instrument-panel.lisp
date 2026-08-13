@@ -21,19 +21,6 @@
 ;; (the rack-panel-toggle-*/rack-slot-*/rack-pad-*/drop entry points).
 ;; (The buffers.lisp aliases retired with eseq.effects.buffers, which now
 ;; imports this module.)
-(module-compat-alias rack-macro-arm rack-macro-arm)
-(module-compat-alias rack-panel-toggle-slot-list rack-panel-toggle-slot-list)
-(module-compat-alias rack-panel-toggle-selected-chain rack-panel-toggle-selected-chain)
-(module-compat-alias rack-panel-toggle-macros rack-panel-toggle-macros)
-(module-compat-alias rack-slot-select rack-slot-select)
-(module-compat-alias rack-slot-select-delete-target rack-slot-select-delete-target)
-(module-compat-alias rack-slot-set-gain rack-slot-set-gain)
-(module-compat-alias rack-slot-set-choke-group-label rack-slot-set-choke-group-label)
-(module-compat-alias rack-panel-drop-on-rack rack-panel-drop-on-rack)
-(module-compat-alias rack-selected-instrument-drop rack-selected-instrument-drop)
-(module-compat-alias rack-panel-drop-on-drum-pad rack-panel-drop-on-drum-pad)
-(module-compat-alias rack-pad-select rack-pad-select)
-(module-compat-alias rack-pad-bank-select rack-pad-bank-select)
 
 ;; `sbrowser-drop-sound-on-track` / `sbrowser-enter-preset-save` stay bare:
 ;; owned by eseq.browser (a UI-root module that must not be imported from
@@ -265,7 +252,7 @@
 
 (def %rack-panel-drop-on-container (event)
   (if (= (get event :drag-type) "sound")
-    (sbrowser-drop-sound-on-track event)
+    (eseq.browser/drop-sound-on-track event)
     (rack-panel-drop-on-rack event)))
 
 (def rack-selected-instrument-drop (event)
@@ -273,7 +260,7 @@
         (target (get event :target))
         (drag-type (get event :drag-type)))
     (if (= drag-type "sound")
-      (sbrowser-drop-sound-on-track event)
+      (eseq.browser/drop-sound-on-track event)
       (if (= drag-type "instrument")
         (let ((name (get payload :name)))
           (if name
@@ -704,7 +691,7 @@
               (v-stack
                 (box :width 1 :height 0.1)
                 (fx-mini-save-icon
-                  :on-click |x y r| (sbrowser-enter-preset-save)
+                  :on-click |x y r| (eseq.browser/enter-preset-save)
                   :active 0)))
             (box :width 0 :height 0))
           (box :width 0.5)))
@@ -781,7 +768,7 @@
                   (v-stack
                     (box :width 1 :height 0.1)
                     (fx-mini-save-icon
-                      :on-click |x y r| (sbrowser-enter-preset-save)
+                      :on-click |x y r| (eseq.browser/enter-preset-save)
                       :active 0))
                   )
                 (box :width 0.5)
@@ -806,7 +793,7 @@
           :drop-hover-border-color :mixer-strip-selected-border
           :on-drop (lambda (event)
             (if (= (get inst :rack-slot) nil)
-              (sbrowser-drop-sound-on-track event)
+              (eseq.browser/drop-sound-on-track event)
               (rack-selected-instrument-drop event)))
           :padding 0
           :height st/fx-fixed-panel-height

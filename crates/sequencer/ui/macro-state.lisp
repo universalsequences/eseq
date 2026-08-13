@@ -7,11 +7,6 @@
 ;; the table is deleted when the migration finishes. Aliases must be evaluated
 ;; before a caller *compiles*, which is why the FX manifest loads this file
 ;; first (ui/effects.lisp:6).
-(module-compat-alias macro-mapping-open mapping-open)
-(module-compat-alias macro-mapping-selected mapping-selected)
-(module-compat-alias rack-macro-mapping-selected rack-mapping-selected)
-(module-compat-alias macro-clear-mapping-arm clear-mapping-arm)
-(module-compat-alias rack-macro-clear-mapping-arm rack-clear-mapping-arm)
 
 (defstate mapping-open false)
 (defstate mapping-selected -1)

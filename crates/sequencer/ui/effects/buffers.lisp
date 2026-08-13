@@ -12,15 +12,12 @@
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
-(import eseq.effects.state :as st :refer (rack-panel-selected-chain-open))
+(import eseq.effects.state :as st :refer (eseq.effects.state/rack-panel-selected-chain-open))
 (import eseq.effects.track-panels :as tp)
 
 ;; Flat callers: step-buffer.lisp calls fx-empty-track-fallback and binds
 ;; "*step*" to seq-plock-panel-mode; state_values/tests.rs evals
 ;; (fx-delete-selected-plock-row-key) by name.
-(module-compat-alias fx-empty-track-fallback empty-track-fallback)
-(module-compat-alias fx-delete-selected-plock-row-key delete-selected-plock-row-key)
-(module-compat-alias seq-plock-panel-mode seq-plock-panel-mode)
 
 (defwidget black
   :width 2 :height 2
@@ -38,7 +35,7 @@
 
 (def %selected-bus-effects ()
   (if (pw/has-selected-bus?)
-    (nth SEQ.bus-effects selected-bus)
+    (nth SEQ.bus-effects eseq.seq-core-state/selected-bus)
     '()))
 
 (def %drop-placeholder-panel ()
@@ -53,7 +50,7 @@
        :drop-meta (dict :kind "fx-append"
                     :chain "append"
                     :track SEQ.current-track
-                    :bus (if (pw/has-selected-bus?) selected-bus -1)
+                    :bus (if (pw/has-selected-bus?) eseq.seq-core-state/selected-bus -1)
                     :slot -1)
        :drop-hover-border-color :mixer-strip-selected-border
        :drop-hover-background-color :mixer-control-bg
@@ -116,7 +113,7 @@
         (if (= (get inst :type) "rack")
           (h-stack :gap 0.2 :height st/fx-fixed-panel-height :align :stretch
             (ip/instrument-panel inst)
-            (if rack-panel-selected-chain-open
+            (if eseq.effects.state/rack-panel-selected-chain-open
               (h-stack :debug-name "rack-selected-chain-fx"
                 :gap 1 :height st/fx-fixed-panel-height :align :stretch
                 (ip/rack-selected-fx-panel inst)
@@ -176,7 +173,7 @@
       true)
     false))
 
-(define-mode "seq-plock-panel-mode" :read-only true)
-(mode-bind-key "seq-plock-panel-mode" "BS" "delete-selected-plock-row-key")
-(mode-bind-key "seq-plock-panel-mode" "Delete" "delete-selected-plock-row-key")
-(set-buffer-mode-for "*track*" "seq-plock-panel-mode")
+(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true)
+(mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "BS" "delete-selected-plock-row-key")
+(mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "Delete" "delete-selected-plock-row-key")
+(set-buffer-mode-for "*track*" "eseq.effects.buffers/seq-plock-panel-mode")

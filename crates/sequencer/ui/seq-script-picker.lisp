@@ -62,16 +62,6 @@
 ;; this file at main.lisp:17 instead of its declared slot at :42.  Per the
 ;; wave-7 identity-alias rule the alias serves both rungs: eseq.browser's bare
 ;; reference qualifies against itself, misses, and lands on the base-name alias.
-(module-compat-alias seq-register-script-source-tab seq-register-script-source-tab)
-(module-compat-alias seq-script-remember-source-buffer seq-script-remember-source-buffer)
-(module-compat-alias seq-script-default-dir seq-script-default-dir)
-(module-compat-alias seq-script-entry-visible? seq-script-entry-visible?)
-(module-compat-alias seq-script-scratch-entry seq-script-scratch-entry)
-(module-compat-alias seq-script-append-to-scratch seq-script-append-to-scratch)
-(module-compat-alias seq-script-load-file seq-script-load-file)
-(module-compat-alias seq-delete-script-sequencer seq-delete-script-sequencer)
-(module-compat-alias seq-delete-script-sequencer-by-buffer seq-delete-script-sequencer-by-buffer)
-(module-compat-alias seq-script-picker seq-script-picker)
 
 
 ;; ── Script picker ──────────────────────────────────────────────────────────
@@ -221,7 +211,7 @@
 ;; compile, wherever this file sits in the load order.
 (def seq-script-register-loaded-tab ()
   (if (not (= eseq.vanilla/script-buffer-name ""))
-    (seq-register-script-step-sequencer-tab
+    (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
       (if (= eseq.vanilla/script-tab-label "")
         eseq.vanilla/script-buffer-name
         eseq.vanilla/script-tab-label)
@@ -232,7 +222,7 @@
 
 (def seq-script-register-loaded-tab-from-path (path)
   (if (not (= eseq.vanilla/script-buffer-name ""))
-    (seq-register-script-step-sequencer-tab
+    (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
       (if (= eseq.vanilla/script-tab-label "")
         eseq.vanilla/script-buffer-name
         eseq.vanilla/script-tab-label)
@@ -254,27 +244,27 @@
     false))
 
 (def %tab-matches-sequencer? (tab name)
-  (= (seq-step-tab-sequencer-name tab) name))
+  (= (eseq.seq-step-tabs/seq-step-tab-sequencer-name tab) name))
 
 (def %tab-for-sequencer (name)
   (let ((hits (filter (lambda (tab) (%tab-matches-sequencer? tab name))
-                seq-registered-step-tabs)))
+                eseq.seq-step-tabs/seq-registered-step-tabs)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def seq-delete-step-sequencer-tab (buffer)
-  (seq-unregister-step-sequencer-tab buffer))
+  (eseq.seq-step-tabs/seq-unregister-step-sequencer-tab buffer))
 
 (def seq-delete-script-sequencer-by-buffer (buffer)
-  (let ((hits (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
-                seq-registered-step-tabs)))
+  (let ((hits (filter (lambda (tab) (eseq.seq-step-tabs/seq-step-tab-matches-buffer? tab buffer))
+                eseq.seq-step-tabs/seq-registered-step-tabs)))
     (if (> (len hits) 0)
       (let ((tab (nth hits 0))
-            (name (seq-step-tab-sequencer-name (nth hits 0)))
-            (path (seq-step-tab-source-path (nth hits 0))))
+            (name (eseq.seq-step-tabs/seq-step-tab-sequencer-name (nth hits 0)))
+            (path (eseq.seq-step-tabs/seq-step-tab-source-path (nth hits 0))))
         (do
           (if (not (= name "")) (seq-unpublish-sequencer name) false)
           (if (not (= path "")) (seq-script-remove-from-scratch path) false)
-          (seq-unregister-step-sequencer-tab buffer)
+          (eseq.seq-step-tabs/seq-unregister-step-sequencer-tab buffer)
           (status (fmt "Deleted sequencer tab {}" buffer))
           true))
       false)))
@@ -285,26 +275,26 @@
       (seq-unpublish-sequencer name)
       (if tab
         (do
-          (if (not (= (seq-step-tab-source-path tab) ""))
-            (seq-script-remove-from-scratch (seq-step-tab-source-path tab))
+          (if (not (= (eseq.seq-step-tabs/seq-step-tab-source-path tab) ""))
+            (seq-script-remove-from-scratch (eseq.seq-step-tabs/seq-step-tab-source-path tab))
             false)
-          (seq-unregister-step-sequencer-tab (seq-step-tab-buffer tab)))
+          (eseq.seq-step-tabs/seq-unregister-step-sequencer-tab (eseq.seq-step-tabs/seq-step-tab-buffer tab)))
         false)
       (status (fmt "Deleted sequencer {}" name))
       true)))
 
 (def seq-delete-script-sequencer-with-buffer (name buffer)
-  (let ((hits (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
-                seq-registered-step-tabs)))
+  (let ((hits (filter (lambda (tab) (eseq.seq-step-tabs/seq-step-tab-matches-buffer? tab buffer))
+                eseq.seq-step-tabs/seq-registered-step-tabs)))
     (do
       (seq-unpublish-sequencer name)
       (if (> (len hits) 0)
-        (let ((path (seq-step-tab-source-path (nth hits 0))))
+        (let ((path (eseq.seq-step-tabs/seq-step-tab-source-path (nth hits 0))))
           (if (not (= path ""))
             (seq-script-remove-from-scratch path)
             false))
         false)
-      (seq-unregister-step-sequencer-tab buffer)
+      (eseq.seq-step-tabs/seq-unregister-step-sequencer-tab buffer)
       (status (fmt "Deleted sequencer {}" name))
       true)))
 

@@ -11,20 +11,20 @@
 (module eseq.effects.builtin.multiband)
 
 (import eseq.effects.param-controls :refer
-  (fx-param-on-for?
-   fx-param-value
-   fx-set-effect-value
-   fx-toggle-effect-value
-   instrument-param-base-value
-   param-mod-wrapper
-   param-plock-active?
-   param-plock-color-b
-   param-plock-color-g
-   param-plock-color-r
-   param-plock-default
-   param-plock-text-color))
-(import eseq.effects.param-grid :refer (fx-param-grid))
-(import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
+  (eseq.effects.param-controls/fx-param-on-for?
+   eseq.effects.param-controls/fx-param-value
+   eseq.effects.param-controls/fx-set-effect-value
+   eseq.effects.param-controls/fx-toggle-effect-value
+   eseq.effects.param-controls/instrument-param-base-value
+   eseq.effects.param-controls/param-mod-wrapper
+   eseq.effects.param-controls/param-plock-active?
+   eseq.effects.param-controls/param-plock-color-b
+   eseq.effects.param-controls/param-plock-color-g
+   eseq.effects.param-controls/param-plock-color-r
+   eseq.effects.param-controls/param-plock-default
+   eseq.effects.param-controls/param-plock-text-color))
+(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
+(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
 
 (def %band-yellow () (rgba 0.93 0.85 0.36 1.0))
 (def %band-cyan   () (rgba 0.45 0.78 0.95 1.0))
@@ -44,7 +44,7 @@
 (def %band-row-h () 2.2)
 
 (def %param-wrapper (fx p control body)
-  (param-mod-wrapper fx p
+  (eseq.effects.param-controls/param-mod-wrapper fx p
     (str "ott-" control "-" (get fx :track-idx) "-" (get fx :rack-slot)
       "-" (get fx :slot-idx) "-" (get p :idx))
     body))
@@ -52,45 +52,45 @@
 (def %knob (fx label-text p)
   (%param-wrapper fx p "knob"
     (knob-number :label label-text
-    :value (fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals 2 :unit "dB"
     :font-size 9.0 :label-font-size 8.0
-    :text-color (param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-default (param-plock-default fx p)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
+    :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
+    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+    :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+    :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+    :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :width 5.6 :height (%band-row-h) :knob-size 1.5
       :track-color '(rgba 0.4, 0.4, 0.4, 1)
-      :on-change (lambda (v) (fx-set-effect-value fx p v)))))
+      :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v)))))
 
 (def %percent-knob (fx label-text p)
   (%param-wrapper fx p "percent-knob"
     (knob-number :label label-text
-    :value (fx-param-value p)
+    :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0 :unit "%"
     :font-size 9.0 :label-font-size 8.0
-    :text-color (param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-default (param-plock-default fx p)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
+    :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
+    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+    :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+    :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+    :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :width 5.6 :height (%band-row-h) :knob-size 1.5
       :track-color '(rgba 0.4, 0.4, 0.4, 1)
-      :on-change (lambda (v) (fx-set-effect-value fx p v)))))
+      :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v)))))
 
 (def %field (fx p decimals unit-text color width)
   (%param-wrapper fx p "field"
-    (number-picker :value (fx-param-value p)
+    (number-picker :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals :unit unit-text
     :noui true :font-size 9.0 :text-color color
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+    :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+    :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+      :on-change (lambda (v) (eseq.effects.param-controls/fx-set-effect-value fx p v))
       :width width :height 1.0)))
 
 ;; Threshold above ratio, in the band color, one per band row.
@@ -112,13 +112,13 @@
   (%param-wrapper fx p "toggle"
     (button label-text
     :width w :height 1.0 :padding 0 :font-size 8.0
-    :background-color (if (fx-param-on-for? fx p) (%button-on) :mixer-control-bg)
-    :color (if (fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-click |x y r| (fx-toggle-effect-value fx p))))
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (%button-on) :mixer-control-bg)
+    :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
+    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+    :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+      :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+      :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p))))
 
 ;; One Split Freq row: split button + crossover field (high/low bands) or a
 ;; plain label (mid), with the band activator and solo stacked beside it.
@@ -163,7 +163,7 @@
       (%toggle fx rms-p "RMS" 3.6))))
 
 (def %display-box (fx params)
-  (let ((p (lambda (name) (builtin-fx-param params name))))
+  (let ((p (lambda (name) (eseq.effects.builtin.filter-core/builtin-fx-param params name))))
     (let ((hb-thr (p "high below thr")) (hb-ratio (p "high below ratio"))
           (ha-thr (p "high above thr")) (ha-ratio (p "high above ratio"))
           (mb-thr (p "mid below thr"))  (mb-ratio (p "mid below ratio"))
@@ -188,17 +188,17 @@
             (multiband-meter
               :width 17.0 :height 7.0
               :source (%source fx)
-              :low-below-thr (instrument-param-base-value lb-thr)
-              :mid-below-thr (instrument-param-base-value mb-thr)
-              :high-below-thr (instrument-param-base-value hb-thr)
-              :low-above-thr (instrument-param-base-value la-thr)
-              :mid-above-thr (instrument-param-base-value ma-thr)
-              :high-above-thr (instrument-param-base-value ha-thr)
-              :low-on (instrument-param-base-value l-on)
-              :mid-on (instrument-param-base-value m-on)
-              :high-on (instrument-param-base-value h-on)
-              :low-split (instrument-param-base-value low-split)
-              :high-split (instrument-param-base-value high-split)))
+              :low-below-thr (eseq.effects.param-controls/instrument-param-base-value lb-thr)
+              :mid-below-thr (eseq.effects.param-controls/instrument-param-base-value mb-thr)
+              :high-below-thr (eseq.effects.param-controls/instrument-param-base-value hb-thr)
+              :low-above-thr (eseq.effects.param-controls/instrument-param-base-value la-thr)
+              :mid-above-thr (eseq.effects.param-controls/instrument-param-base-value ma-thr)
+              :high-above-thr (eseq.effects.param-controls/instrument-param-base-value ha-thr)
+              :low-on (eseq.effects.param-controls/instrument-param-base-value l-on)
+              :mid-on (eseq.effects.param-controls/instrument-param-base-value m-on)
+              :high-on (eseq.effects.param-controls/instrument-param-base-value h-on)
+              :low-split (eseq.effects.param-controls/instrument-param-base-value low-split)
+              :high-split (eseq.effects.param-controls/instrument-param-base-value high-split)))
           (v-stack :gap 0.18 :align :start
             (label "Above" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
             (%thr-ratio-cell fx ha-thr ha-ratio (%band-yellow))
@@ -230,7 +230,7 @@
 
 (def ott-ui (fx)
   (let ((params (get fx :params)))
-    (let ((p (lambda (name) (builtin-fx-param params name))))
+    (let ((p (lambda (name) (eseq.effects.builtin.filter-core/builtin-fx-param params name))))
       (let ((high-split (p "high split")) (low-split (p "low split"))
             (xh (p "xover high")) (xl (p "xover low"))
             (h-on (p "high on")) (h-solo (p "high solo"))
@@ -249,4 +249,4 @@
             (%display-box fx params)
             (%output-box fx h-out m-out l-out)
             (%global-box fx output time-p amount))
-          (fx-param-grid params fx))))))
+          (eseq.effects.param-grid/fx-param-grid params fx))))))

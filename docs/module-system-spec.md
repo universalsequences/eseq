@@ -2079,6 +2079,36 @@ stays as-is; real macro hygiene is out of scope for this spec.
     replacements. String and quoted-data diagnostics retain path, line,
     column, old spelling, and target, and remain untouched in both modes.
 
+  ### Compat-alias retirement (eseq-mods.10 end state)
+
+  The migration table and `(module-compat-alias …)` form no longer exist.
+  Pins made with explicit `eseq.vanilla/…` definitions remain a separate §3
+  escape hatch, and headerless-content fallbacks remain supported. The final
+  resolution ladders are:
+
+  - Compiler globals: lexical scope → declared current-module entry →
+    `:refer` target → current/implicit-module entry → flat entry → intern the
+    current-module spelling. Qualified core and `eseq.vanilla` reads may fall
+    back to their flat native/pinned entry.
+  - Runtime by-name globals: qualified exact → qualified core/vanilla flat
+    fallback; bare reactive namespace flat entry → `eseq.vanilla/<name>` →
+    flat entry.
+  - Late binding: an empty qualified slot may heal through its
+    `eseq.vanilla/<base>` spelling (for non-vanilla callers) and then the flat
+    base. An empty flat slot has no cross-module fallback.
+  - Macros: current module → `:refer` → flat. Qualified names are exact (with
+    the existing flat fallback for explicitly qualified legacy/core keys).
+  - `defstate`: exact/explicit-vanilla key → current module → `:refer` → miss;
+    runtime tracked-state lookup is exact/explicit-vanilla → executing module
+    → miss.
+  - Modes: exact → qualified-to-flat vanilla fallback → miss.
+  - Completion is derived from real global keys only. Qualified module names
+    remain visible; only `eseq.vanilla/` is displayed as bare.
+
+  The durable TSV, load-time detector, and explicit atomic migration command
+  from eseq-mods.13 remain independent safety infrastructure for external
+  content. They deliberately outlive the runtime compatibility mechanism.
+
 - **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
   `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
   add `~/.eseq.d/init.lisp` loaded last. `override` (§6.1) lands here — it

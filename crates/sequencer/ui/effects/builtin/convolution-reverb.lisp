@@ -4,7 +4,7 @@
 
 (module eseq.effects.builtin.convolution-reverb)
 
-(import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
+(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
 (import eseq.effects.builtin.dynamics :refer (percent-knob number-knob))
 
 (def %drop-ir (event)
@@ -21,8 +21,8 @@
 
 (def convolution-reverb-ui (fx)
   (let ((params (get fx :params)))
-    (let ((mix-p (builtin-fx-param params "mix"))
-          (gain-p (builtin-fx-param params "gain"))
+    (let ((mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
+          (gain-p (eseq.effects.builtin.filter-core/builtin-fx-param params "gain"))
           (ir-name (get fx :ir-name)))
       (v-stack :gap 0.4
         ;; Impulse-response slot: drop a sample here to swap the IR.

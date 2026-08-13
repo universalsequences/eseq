@@ -7,34 +7,34 @@
 (module eseq.effects.builtin.space-echo)
 
 (import eseq.effects.param-controls :refer
-  (fx-param-numeric-value
-   fx-param-on-for?
-   fx-param-value-for
-   fx-set-effect-value
-   fx-toggle-effect-value
-   param-base-max-prop
-   param-base-min-prop
-   param-base-value-prop
-   param-control-key-mode
-   param-control-max
-   param-control-min
-   param-knob-mod-depth-prop
-   param-knob-mod-slot-prop
-   param-mod-wrapper
-   param-plock-active?
-   param-plock-color-b
-   param-plock-color-g
-   param-plock-color-r
-   param-plock-default
-   param-plock-text-color
-   param-selected-mod-slot-prop
-   param-set-control-value))
-(import eseq.effects.param-grid :refer (fx-param-grid))
+  (eseq.effects.param-controls/fx-param-numeric-value
+   eseq.effects.param-controls/fx-param-on-for?
+   eseq.effects.param-controls/fx-param-value-for
+   eseq.effects.param-controls/fx-set-effect-value
+   eseq.effects.param-controls/fx-toggle-effect-value
+   eseq.effects.param-controls/param-base-max-prop
+   eseq.effects.param-controls/param-base-min-prop
+   eseq.effects.param-controls/param-base-value-prop
+   eseq.effects.param-controls/param-control-key-mode
+   eseq.effects.param-controls/param-control-max
+   eseq.effects.param-controls/param-control-min
+   eseq.effects.param-controls/param-knob-mod-depth-prop
+   eseq.effects.param-controls/param-knob-mod-slot-prop
+   eseq.effects.param-controls/param-mod-wrapper
+   eseq.effects.param-controls/param-plock-active?
+   eseq.effects.param-controls/param-plock-color-b
+   eseq.effects.param-controls/param-plock-color-g
+   eseq.effects.param-controls/param-plock-color-r
+   eseq.effects.param-controls/param-plock-default
+   eseq.effects.param-controls/param-plock-text-color
+   eseq.effects.param-controls/param-selected-mod-slot-prop
+   eseq.effects.param-controls/param-set-control-value))
+(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
 (import eseq.effects.builtin.filter-core :refer
-  (builtin-fx-param
-   builtin-fx-set-effect-option
-   builtin-fx-filter-mini-number
-   builtin-fx-filter-mini-percent))
+  (eseq.effects.builtin.filter-core/builtin-fx-param
+   eseq.effects.builtin.filter-core/builtin-fx-set-effect-option
+   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number
+   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent))
 
 (def %orange () (rgba 1.00 0.62 0.25 1.0))
 (def %green  () (rgba 0.36 0.80 0.50 1.0))
@@ -43,63 +43,63 @@
 ;; Mod-wrapped knob (same pattern as the Str8 Delay knobs, so intensity /
 ;; rate / volumes pick up modulation rings and plock handling).
 (def %knob (fx label-text p decimals)
-  (param-mod-wrapper fx p (str "space-echo-param-" (get p :idx) "-mod-wrapper")
-    (subtree :key (str "space-echo-param-" (get p :idx) (param-control-key-mode fx p))
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str "space-echo-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "space-echo-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
-        :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
-        :base-value (param-base-value-prop fx p)
-        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
-        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
-        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
-        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
-        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
-        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :value (eseq.effects.param-controls/fx-param-value-for fx p)
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
+        :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
+        :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-default (param-plock-default fx p)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
+        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
         :width 4.35 :height 2.45 :knob-size 1.85
-        :on-change (lambda (v) (param-set-control-value fx p v))))))
+        :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 (def %percent-knob (fx label-text p)
-  (param-mod-wrapper fx p (str "space-echo-param-" (get p :idx) "-mod-wrapper")
-    (subtree :key (str "space-echo-param-" (get p :idx) (param-control-key-mode fx p))
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str "space-echo-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "space-echo-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
-        :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
-        :base-value (param-base-value-prop fx p)
-        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
-        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
-        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
-        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
-        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
-        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :value (eseq.effects.param-controls/fx-param-value-for fx p)
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :value-scale 100 :decimals 0
+        :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
+        :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (param-plock-text-color fx p) :label-color :dim
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-default (param-plock-default fx p)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
+        :text-color (eseq.effects.param-controls/param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
         :width 4.35 :height 2.45 :knob-size 1.85
-        :on-change (lambda (v) (param-set-control-value fx p v))))))
+        :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 ;; ── Repeat rate (sync grid / free knob) ──
 
 (def %sync-button (fx p)
   (button "Sync"
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (fx-param-on-for? fx p) (%orange) :mixer-control-bg)
-    :color (if (fx-param-on-for? fx p) :black :dim)
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :on-click |x y r| (fx-toggle-effect-value fx p)))
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (%orange) :mixer-control-bg)
+    :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
+    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+    :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+    :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+    :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p)))
 
 (def %div-button (fx p label-text)
   (button label-text
@@ -107,11 +107,11 @@
     :background-color (if (= (get p :text-value) label-text) (%orange) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
     :border-color :transparent
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
+    :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+    :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+    :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+    :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+    :on-click |x y r| (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p label-text)))
 
 (def %div-grid (fx p)
   (v-stack :gap 0.11
@@ -141,10 +141,10 @@
       (label "REPEAT RATE" :font-size 8.0 :width 5.4 :color :dim :bg :transparent)
       (box :height 0.5)
       (%sync-button fx sync-p)
-      (if (fx-param-on-for? fx sync-p)
+      (if (eseq.effects.param-controls/fx-param-on-for? fx sync-p)
         (v-stack :gap 0.12 :align :center
           (%div-grid fx div-p)
-          (builtin-fx-filter-mini-percent fx "ofs" offset-p))
+          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "ofs" offset-p))
         (v-stack :gap 0.30 :align :center
           (box :height 0.8)
           (%percent-knob fx "rate" rate-p))))))
@@ -152,7 +152,7 @@
 ;; ── Mode selector ──
 
 (def %mode-button (fx p index short-label)
-  (let ((selected (= (round (fx-param-numeric-value p)) index))
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index))
       (reverb-mode (> index 5)))
     (button short-label
       :width 3.0 :height 1.30 :padding 0 :font-size 8.5
@@ -161,11 +161,11 @@
         :mixer-control-bg)
       :color (if selected :black :dim)
       :border-color :transparent
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-click |x y r| (fx-set-effect-value fx p index))))
+      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+      :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+      :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+      :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p index))))
 
 (def %mode-grid (fx p)
   (v-stack :gap 0.14
@@ -209,27 +209,27 @@
       (box :height 0.85)
       (label "TONE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (v-stack :gap 0.30 :align :baseline
-        (builtin-fx-filter-mini-number fx "bass" bass-p)
-        (builtin-fx-filter-mini-number fx "treb" treble-p)
+        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "bass" bass-p)
+        (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "treb" treble-p)
         (if width-p
-          (builtin-fx-filter-mini-percent fx "wide" width-p)
+          (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "wide" width-p)
           (box :height 0.1))))))
 
 ;; ── Tape + reverb section ──
 
 ;; Spring type selector (which physical tank the model is tuned to).
 (def %spring-button (fx p index short-label)
-  (let ((selected (= (round (fx-param-numeric-value p)) index)))
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index)))
     (button short-label
       :width 4.35 :height 0.92 :padding 0 :font-size 8.0
       :background-color (if selected (%green) :mixer-control-bg)
       :border-color :transparent
       :color (if selected :black :dim)
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-click |x y r| (fx-set-effect-value fx p index))))
+      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+      :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+      :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+      :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p index))))
 
 (def %spring-row (fx p)
   (v-stack
@@ -252,34 +252,34 @@
         (%spring-row fx spring-p)
         (box :height 0.1))
       (label "TAPE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
-      (builtin-fx-filter-mini-percent fx "w/f" wf-p)
-      (builtin-fx-filter-mini-percent fx "age" age-p)
-      (builtin-fx-filter-mini-number fx "drv" drive-p)
-      (builtin-fx-filter-mini-percent fx "dry" dry-p))))
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "w/f" wf-p)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "age" age-p)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "drv" drive-p)
+      (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "dry" dry-p))))
 
 (def panel-ui (fx)
   (let ((params (get fx :params)))
-    (let ((mode-p (builtin-fx-param params "mode"))
-          (rate-p (builtin-fx-param params "repeat rate"))
-          (sync-p (builtin-fx-param params "sync"))
-          (div-p (builtin-fx-param params "sync div"))
-          (offset-p (builtin-fx-param params "sync offset"))
-          (intensity-p (builtin-fx-param params "intensity"))
-          (bass-p (builtin-fx-param params "bass"))
-          (treble-p (builtin-fx-param params "treble"))
-          (echo-p (builtin-fx-param params "echo volume"))
-          (reverb-p (builtin-fx-param params "reverb volume"))
-          (tension-p (builtin-fx-param params "tension"))
-          (spring-p (builtin-fx-param params "spring type"))
-          (width-p (builtin-fx-param params "stereo width"))
-          (dry-p (builtin-fx-param params "dry"))
-          (drive-p (builtin-fx-param params "input drive"))
-          (wf-p (builtin-fx-param params "wow/flutter"))
-          (age-p (builtin-fx-param params "tape age")))
+    (let ((mode-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mode"))
+          (rate-p (eseq.effects.builtin.filter-core/builtin-fx-param params "repeat rate"))
+          (sync-p (eseq.effects.builtin.filter-core/builtin-fx-param params "sync"))
+          (div-p (eseq.effects.builtin.filter-core/builtin-fx-param params "sync div"))
+          (offset-p (eseq.effects.builtin.filter-core/builtin-fx-param params "sync offset"))
+          (intensity-p (eseq.effects.builtin.filter-core/builtin-fx-param params "intensity"))
+          (bass-p (eseq.effects.builtin.filter-core/builtin-fx-param params "bass"))
+          (treble-p (eseq.effects.builtin.filter-core/builtin-fx-param params "treble"))
+          (echo-p (eseq.effects.builtin.filter-core/builtin-fx-param params "echo volume"))
+          (reverb-p (eseq.effects.builtin.filter-core/builtin-fx-param params "reverb volume"))
+          (tension-p (eseq.effects.builtin.filter-core/builtin-fx-param params "tension"))
+          (spring-p (eseq.effects.builtin.filter-core/builtin-fx-param params "spring type"))
+          (width-p (eseq.effects.builtin.filter-core/builtin-fx-param params "stereo width"))
+          (dry-p (eseq.effects.builtin.filter-core/builtin-fx-param params "dry"))
+          (drive-p (eseq.effects.builtin.filter-core/builtin-fx-param params "input drive"))
+          (wf-p (eseq.effects.builtin.filter-core/builtin-fx-param params "wow/flutter"))
+          (age-p (eseq.effects.builtin.filter-core/builtin-fx-param params "tape age")))
       (if (and mode-p rate-p sync-p intensity-p echo-p reverb-p)
         (h-stack :gap 0.35 :align :start
           (%rate-box fx sync-p div-p offset-p rate-p)
           (%mode-box fx mode-p)
           (%echo-box fx intensity-p echo-p bass-p treble-p width-p)
           (%tape-box fx reverb-p tension-p spring-p wf-p age-p drive-p dry-p))
-        (fx-param-grid params fx)))))
+        (eseq.effects.param-grid/fx-param-grid params fx)))))

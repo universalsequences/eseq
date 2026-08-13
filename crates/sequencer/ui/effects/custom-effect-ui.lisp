@@ -18,10 +18,6 @@
 ;; The standalone Runtime::new() harnesses in state_values/tests.rs and
 ;; ui_validate.rs define their OWN stubs of these names and never load
 ;; this file — they need no alias (the mixer track-peak precedent).
-(module-compat-alias midi-fx-ui-param midi-fx-ui-param)
-(module-compat-alias midi-fx-ui-param-control midi-fx-ui-param-control)
-(module-compat-alias audio-fx-ui-param audio-fx-ui-param)
-(module-compat-alias audio-fx-ui-param-control audio-fx-ui-param-control)
 
 ;; The current-fx globals below are pinned to eseq.vanilla by their owner
 ;; (effects/state.lisp, spec §10 hazard i): src/ui/custom_ui.rs GENERATES

@@ -12,25 +12,6 @@
 ;; thirteen are `mixer-v2-*` entry points driven by name from Rust
 ;; state_values tests; `seq-ctrl-g` is the global C-g dispatcher that
 ;; src/ui/input.rs evals by name.  Deleted as each consumer converts.
-(module-compat-alias mixer-v2-muted? muted?)
-(module-compat-alias mixer-v2-track-color-r track-color-r)
-(module-compat-alias mixer-v2-track-color-g track-color-g)
-(module-compat-alias mixer-v2-track-color-b track-color-b)
-(module-compat-alias mixer-v2-track-collapsed-label track-collapsed-label)
-(module-compat-alias mixer-v2-select-track select-track)
-(module-compat-alias mixer-v2-select-track-delete-target select-track-delete-target)
-(module-compat-alias mixer-v2-drop-sample-on-track drop-sample-on-track)
-(module-compat-alias mixer-v2-drop-sample-new-track drop-sample-new-track)
-(module-compat-alias mixer-v2-drop-on-track drop-on-track)
-(module-compat-alias mixer-v2-drop-effect-on-bus drop-effect-on-bus)
-(module-compat-alias mixer-v2-drop-on-group-header drop-on-group-header)
-(module-compat-alias mixer-v2-launch-track-pattern launch-track-pattern)
-(module-compat-alias mixer-v2-track-pattern-cells track-pattern-cells)
-(module-compat-alias mixer-v2-select-prev-channel select-prev-channel)
-(module-compat-alias mixer-v2-select-next-channel select-next-channel)
-(module-compat-alias mixer-v2-delete-selected-track delete-selected-track)
-(module-compat-alias mixer-v2-handle-key handle-key)
-(module-compat-alias seq-ctrl-g seq-ctrl-g)
 
 (import eseq.track-collapse)
 
@@ -115,21 +96,21 @@
 
 (def select-track (i)
   (do
-    (set! selected-bus -1)
+    (set! eseq.seq-core-state/selected-bus -1)
     (%clear-delete-target)
     (seq-set-track i)
     (host-command "reveal-sequencer-track" (dict :track i))))
 
 (def select-track-delete-target (i)
   (do
-    (set! selected-bus -1)
+    (set! eseq.seq-core-state/selected-bus -1)
     (seq-set-track i)
     (host-command "reveal-sequencer-track" (dict :track i))
     (seq-set-delete-target :mixer-track (dict :track i))))
 
 (def %activate-track-control (i)
   (do
-    (set! selected-bus -1)
+    (set! eseq.seq-core-state/selected-bus -1)
     (%clear-delete-target)))
 
 ;; cmd/super/meta-click on a mixer strip toggles multi-select membership.
@@ -138,7 +119,7 @@
 
 (def %toggle-track-select (i)
   (do
-    (set! selected-bus -1)
+    (set! eseq.seq-core-state/selected-bus -1)
     (%clear-delete-target)
     (seq-toggle-track-selected i)
     (host-command "reveal-sequencer-track" (dict :track i))))
@@ -159,7 +140,7 @@
   (do
     (seq-clear-selection)
     (seq-clear-delete-target)
-    (set! selected-bus i)))
+    (set! eseq.seq-core-state/selected-bus i)))
 
 (def drop-sample-on-track (event)
   (let ((payload (get event :payload))
@@ -169,7 +150,7 @@
       (do
         (%clear-delete-target)
         (if path
-          (sbrowser-drop-sample-on-track event)
+          (eseq.browser/drop-sample-on-track event)
           (status "Drop a sample file, not a folder"))))))
 
 (def drop-sample-new-track (event)
@@ -231,9 +212,9 @@
 (def drop-on-track (event)
   (let ((drag-type (get event :drag-type)))
     (if (= drag-type "sound")
-      (sbrowser-drop-sound-on-track event)
+      (eseq.browser/drop-sound-on-track event)
       (if (= drag-type "instrument")
-        (sbrowser-drop-instrument-on-track event)
+        (eseq.browser/drop-instrument-on-track event)
         (if (= drag-type "sample")
           (drop-sample-on-track event)
           (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
@@ -241,9 +222,9 @@
             (status "Unsupported drop")))))))
 
 (def %track-drop-types (i)
-  (if (seq-track-replaceable-instrument? i)
+  (if (eseq.track-collapse/replaceable-instrument? i)
     (list "sample" "instrument" "sound" "audio-effect" "midi-effect")
-    (if (seq-track-sound-replaceable? i)
+    (if (eseq.track-collapse/sound-replaceable? i)
       (list "sample" "sound" "audio-effect" "midi-effect")
       (list "sample" "audio-effect" "midi-effect"))))
 
@@ -869,10 +850,10 @@
         1.0)
       :selected-background-color :fx-panel-header-selected-bg
       :on-click (lambda (event) (%track-label-click event i))
-      :on-double-click (lambda (event) (seqv-open-piano-roll-for-track i))
+      :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
       (badge (substring (nth SEQ.track-names i) 0 10)
         :key (str "track-label-content-" i)
-        :icon (seq-track-type-icon i)
+        :icon (eseq.track-collapse/type-icon i)
         :width 9.8
         :height 1.0
         :padding 0
@@ -930,10 +911,10 @@
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (%track-label-click event i))
-          :on-double-click (lambda (event) (seqv-open-piano-roll-for-track i))
+          :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
           (badge (track-collapsed-label i)
             :key (str "track-collapsed-label-content-" i)
-            :icon (seq-track-type-icon i)
+            :icon (eseq.track-collapse/type-icon i)
             :width 3.65
             :height 1.0
             :padding 0
@@ -975,8 +956,8 @@
   (+ SEQ.num-tracks (len SEQ.bus-names)))
 
 (def %current-channel-index ()
-  (if (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names)))
-    (+ SEQ.num-tracks (%bus-display-index selected-bus))
+  (if (and (>= eseq.seq-core-state/selected-bus 0) (< eseq.seq-core-state/selected-bus (len SEQ.bus-names)))
+    (+ SEQ.num-tracks (%bus-display-index eseq.seq-core-state/selected-bus))
     (let ((selected (filter
             (lambda (i) (> (reactive-value (bind-seq (str "track-selected-" i))) 0.5))
             (range 0 SEQ.num-tracks))))
@@ -988,13 +969,13 @@
   (let ((clamped (min (max idx 0) (- (max (%channel-count) 1) 1))))
     (if (< clamped SEQ.num-tracks)
       (do
-        (set! selected-bus -1)
+        (set! eseq.seq-core-state/selected-bus -1)
         (%clear-delete-target)
         (seq-set-track clamped))
       (do
         (%clear-delete-target)
         (seq-clear-selection)
-        (set! selected-bus (%display-bus-index (- clamped SEQ.num-tracks)))))))
+        (set! eseq.seq-core-state/selected-bus (%display-bus-index (- clamped SEQ.num-tracks)))))))
 
 (def select-prev-channel ()
   (do
@@ -1021,7 +1002,7 @@
           false)))))
 
 (def %bus-strip (i)
-  (let ((selected (= selected-bus i)))
+  (let ((selected (= eseq.seq-core-state/selected-bus i)))
     (box :key (str "bus-strip-" i)
       :width 10.3 :height 13.8
       :background-color (%strip-bg selected (nth SEQ.bus-mutes i))
@@ -1143,7 +1124,7 @@
 ;; True when this group's backing bus is the currently selected channel.
 (def %group-selected? (gidx)
   (let ((idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
-    (and (>= idx 0) (= selected-bus idx))))
+    (and (>= idx 0) (= eseq.seq-core-state/selected-bus idx))))
 
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
 ;; the container, over the container color.
@@ -1217,7 +1198,7 @@
     (%drop-new-track-into-group event gidx)))
 
 (def %group-member-strip (i)
-  (if (seq-track-collapsed? i)
+  (if (eseq.track-collapse/collapsed? i)
     (%track-collapsed-strip i)
     (%track-strip i)))
 
@@ -1259,7 +1240,7 @@
           (%group-container gidx)))
       (let ((i (get item :track)))
         (subtree :key (str "mixer-v2-track-" i)
-          (if (seq-track-collapsed? i)
+          (if (eseq.track-collapse/collapsed? i)
             (%track-collapsed-strip i)
             (%track-strip i)))))))
 
@@ -1316,7 +1297,7 @@
                 ;; Rack tracks: playback polyphony is per-slot
                 ;; (RackSlotSnapshot::max_polyphony), never the track-level
                 ;; param — route there or this silently edits a dead value.
-                :on-click |x y r| (do (cool-off-follow)
+                :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow)
                   (if SEQ.tp-is-rack
                     (host-command "set-rack-slot-max-polyphony"
                       (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
@@ -1327,7 +1308,7 @@
                 :noui false :font-size 8 :text-color :white
                 :background-color :mixer-strip-bg
                 :border-color :dim
-                :on-change (lambda (v) (do (cool-off-follow)
+                :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow)
                     (if SEQ.tp-is-rack
                       (host-command "set-rack-slot-max-polyphony"
                         (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
@@ -1375,7 +1356,7 @@
 (def seq-ctrl-g ()
   (if (>= (len SEQ.selected-tracks) 2)
     (%group-selected)
-    (agent-open-instrument)))
+    (eseq.agent/agent-open-instrument)))
 
 (define-mode "seq-mixer-mode" :read-only true :on-key "handle-key")
 (mode-bind-key "seq-mixer-mode" "LEFT" "select-prev-channel")
