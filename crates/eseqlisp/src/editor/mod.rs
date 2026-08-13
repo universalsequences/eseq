@@ -242,7 +242,7 @@ fn inspect_node_source_buffer_id(node: &crate::layout::LayoutNode) -> Option<Buf
     }
 }
 
-fn inspect_node_source_module_path(node: &crate::layout::LayoutNode) -> Option<PathBuf> {
+fn inspect_node_source_file_path(node: &crate::layout::LayoutNode) -> Option<PathBuf> {
     match node.props.get(crate::vm::SOURCE_MODULE_PATH_PROP) {
         Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
         _ => None,
@@ -5142,7 +5142,7 @@ impl Editor {
     }
 
     fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
-        let source = inspect_node_source_module_path(node)
+        let source = inspect_node_source_file_path(node)
             .map(|path| path.display().to_string())
             .or_else(|| {
                 inspect_node_source_buffer_id(node).and_then(|id| {
@@ -5173,18 +5173,18 @@ impl Editor {
         node: &crate::layout::LayoutNode,
     ) -> Result<bool, EditorError> {
         inspect_debug_log(format!(
-            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_module={:?} source_symbol={:?} source_span={:?} source_revision={:?}",
+            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_file={:?} source_symbol={:?} source_span={:?} source_revision={:?}",
             node.widget_type,
             node.stable_key,
             inspect_node_prop_string(node, "debug-name"),
             inspect_node_source_buffer_id(node),
-            inspect_node_source_module_path(node),
+            inspect_node_source_file_path(node),
             inspect_node_source_symbol(node),
             inspect_node_source_span(node),
             inspect_node_source_revision(node)
         ));
-        let source_module_path = inspect_node_source_module_path(node);
-        let source_buffer_id = if let Some(path) = source_module_path.clone() {
+        let source_file_path = inspect_node_source_file_path(node);
+        let source_buffer_id = if let Some(path) = source_file_path.clone() {
             inspect_debug_log(format!("opening source module path {}", path.display()));
             Some(self.upsert_inactive_file_buffer_with_mode(path, BufferMode::ESeqLisp)?)
         } else if let Some(id) = inspect_node_source_buffer_id(node) {
@@ -5205,7 +5205,7 @@ impl Editor {
         };
         let mut opened_stale_snapshot = false;
         if let (Some(path), Some(revision), Some(_span)) = (
-            source_module_path.as_deref(),
+            source_file_path.as_deref(),
             inspect_node_source_revision(node),
             inspect_node_source_span(node),
         ) {
@@ -5527,6 +5527,9 @@ impl Editor {
         if let Some(prefix) = self.pending_key.take() {
             let chord = format!("{} {}", key_str(prefix), key_str(key));
             if let Some(handler) = self.lisp_bindings.get(&chord).cloned() {
+                // Module-qualified handlers resolve against the binding
+                // module first, then fall back to the flat name (spec §5).
+                let handler = self.runtime.resolve_handler_name(&handler).to_string();
                 if self.builtins.values().any(|cmd| cmd == &handler) {
                     self.run_command(&handler);
                 } else {
@@ -5648,6 +5651,8 @@ impl Editor {
         let Some(handler) = self.lisp_bindings.get(key).cloned() else {
             return false;
         };
+        // Module-qualified handlers: binding module first, then flat.
+        let handler = self.runtime.resolve_handler_name(&handler).to_string();
         if self.builtins.values().any(|command| command == &handler) {
             self.run_command(&handler);
             true
@@ -6908,6 +6913,10 @@ impl Editor {
     }
 
     fn call_lisp_handler_with_args(&mut self, fn_name: &str, args: &[Value]) -> bool {
+        // Module-qualified handler names (bind-key / mode handlers stored
+        // from a declared module) fall back to the flat base name when the
+        // module never defined the handler (spec §5).
+        let fn_name = self.runtime.resolve_handler_name(fn_name);
         if fn_name == "eval-sexp" || fn_name == "eval-buffer-command" {
             self.eval_preview_handler(fn_name);
             return true;
@@ -6964,6 +6973,8 @@ impl Editor {
         let args = vec![Value::String(key_str(key)), text];
         self.sync_runtime_source_context();
         self.clear_minibuffer_message();
+        // Module-qualified on-key handlers: defining module first, then flat.
+        let handler = self.runtime.resolve_handler_name(&handler).to_string();
         let code = format!(
             "({} {} {})",
             handler,
@@ -7894,6 +7905,22 @@ impl Editor {
         }
     }
 
+    /// Resolve a mode reference by exact name, then by the flat base for a
+    /// module reference to a vanilla mode. There is deliberately no registry
+    /// scan by base name because two modules may define the same mode.
+    fn resolve_mode_name(&self, name: String) -> String {
+        if self.mode_registry.contains_key(&name) {
+            return name;
+        }
+        let base = crate::modules::split_qualified(&name)
+            .map(|(_, base)| base)
+            .unwrap_or(name.as_str());
+        if base != name.as_str() && self.mode_registry.contains_key(base) {
+            return base.to_string();
+        }
+        name
+    }
+
     pub fn refresh_runtime_side_effects(&mut self) {
         let scene_trace = std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1");
         let trace_started = std::time::Instant::now();
@@ -7925,6 +7952,7 @@ impl Editor {
 
         // Process mode keybindings
         for (mode_name, key, handler) in self.runtime.take_pending_mode_bindings() {
+            let mode_name = self.resolve_mode_name(mode_name);
             if let Some(mode) = self.mode_registry.get_mut(&mode_name) {
                 mode.keybindings.insert(key, handler);
             }
@@ -7989,6 +8017,7 @@ impl Editor {
 
         // Process set-buffer-mode (after buffer creation so it targets the new buffer)
         if let Some(mode_name) = self.runtime.take_pending_set_mode() {
+            let mode_name = self.resolve_mode_name(mode_name);
             let mode_def = self.mode_registry.get(&mode_name).cloned();
             let buffer = self.active_buffer_mut();
             buffer.mode = BufferMode::Named(mode_name.clone());
@@ -7998,6 +8027,7 @@ impl Editor {
             // Call on_enter hook
             if let Some(on_enter) = mode_def.as_ref().and_then(|m| m.on_enter.clone()) {
                 self.sync_runtime_source_context();
+                let on_enter = self.runtime.resolve_handler_name(&on_enter).to_string();
                 let code = format!("({on_enter})");
                 let _ = self.runtime.eval_str(&code);
                 if let Some(status) = self.runtime.take_status_message() {
@@ -8523,6 +8553,7 @@ impl Editor {
 
         // Process set-buffer-mode-for (after buffer creation so targets exist)
         for (buf_name, mode_name) in self.runtime.take_pending_set_mode_for() {
+            let mode_name = self.resolve_mode_name(mode_name);
             let mode_def = self.mode_registry.get(&mode_name).cloned();
             if let Some(buf) = self.buffers.iter_mut().find(|b| b.name == buf_name) {
                 buf.mode = BufferMode::Named(mode_name.clone());

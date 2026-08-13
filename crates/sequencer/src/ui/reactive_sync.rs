@@ -2366,7 +2366,7 @@ pub(super) fn apply_ui_invalidations(
 }
 
 pub(super) fn reset_sampler_waveform_view(editor: &mut Editor) {
-    if let Err(error) = editor.runtime_mut().eval_str("(sampler-reset-view)") {
+    if let Err(error) = editor.runtime_mut().eval_str("(eseq.effects.sampler-panel/sampler-reset-view)") {
         eprintln!("waveform: failed to reset sampler viewport: {error:?}");
     }
 }

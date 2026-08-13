@@ -1306,6 +1306,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
             kind.hash(hasher);
         }
         Value::NativeFunction(_) | Value::HostHandle { .. } => {}
+        Value::OverrideDispatcher(name) | Value::OverrideOriginal(name) => name.hash(hasher),
     }
 }
 

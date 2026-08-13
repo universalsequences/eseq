@@ -8,5 +8,5 @@
 
 (def capture-after-sync ()
   (do
-    (seqv-track-menu-click 0)
-    (seqv-set-param-mode (nth SEQ.track-ids 0) 3)))
+    (eseq.sequencer/track-menu-click 0)
+    (eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) 3)))

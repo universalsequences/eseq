@@ -1,6 +1,38 @@
 ;; Reusable project-macro controls for script-authored player surfaces.
 ;; This file intentionally mounts no buffer of its own. The UI manifest loads
 ;; ui/macro-state.lisp first.
+;;
+;; Converted to a module in S3b. Two policies shape this header:
+;;
+;; 1. This is a generated-vocabulary hub. Its names are the surface that
+;;    user-authored and script-generated lisp calls by FLAT spelling — the
+;;    317 lisp files under crates/sequencer outside ui/ (instruments, effects,
+;;    scripts, midi-fx, defmacros) are content and stay headerless forever.
+;;    So: no renames, no %-private names, and one *identity* compat alias per
+;;    def. An identity alias serves both rungs at once — a headerless caller
+;;    matches the flat key exactly, and a converted module's bare reference
+;;    qualifies against itself, misses, and lands on the same alias by base
+;;    name. Every name here is a function, so its slot is written once by its
+;;    own def and the late-binding heal can never unlink it (hazard m's escape
+;;    clause). Nothing here needs an eseq.vanilla pin.
+;;
+;; 2. NO `import` lines, deliberately (spec hazard n2). Two Rust harnesses in
+;;    src/ui/state_values/tests.rs read this whole file and eval it into a
+;;    bare runtime with no @/ source root; an import there would resolve to a
+;;    nonexistent cwd-relative path and push a load error into those VMs.
+;;    Cross-module names are therefore reached BARE through their owners'
+;;    compat aliases: macro-mapping-open / macro-mapping-selected /
+;;    rack-macro-mapping-selected / macro-clear-mapping-arm /
+;;    rack-macro-clear-mapping-arm all belong to eseq.macro-state, which
+;;    aliases each of those flat spellings. Same convention as
+;;    ui/effects/effect-panels.lisp.
+;;
+;; Extension hooks are addressed as data via `run-hook` (spec hazard e): a
+;; bare hook call inside a module would intern a dead qualified slot instead
+;; of reaching the flat hook keyspace.
+(module eseq.macros)
+
+;; Identity compat aliases — see note 1 above. Order matches the definitions.
 
 ;; Script keys are written in canonical lowercase. `str` preserves strings and
 ;; prefixes keywords with `:`, so normalize both accepted spellings for lookup.
@@ -39,20 +71,23 @@
 
 (def macro-mapping-active-for-key? (key)
   (let ((id (macro-id-for-key key)))
-    (and macro-mapping-open (>= id 0) (= macro-mapping-selected id))))
+    (and eseq.macro-state/mapping-open (>= id 0) (= eseq.macro-state/mapping-selected id))))
 
 (def macro-toggle-mapping-arm (key)
   (let ((id (macro-id-for-key key)))
     (if (< id 0)
       false
       (if (macro-mapping-active-for-key? key)
-        (macro-clear-mapping-arm)
+        (eseq.macro-state/clear-mapping-arm)
         (do
-          (macro-mapping-arm-enter-hook)
-          (macro-mapping-sidebar-open-hook)
-          (set! macro-mapping-open true)
-          (set! macro-mapping-selected id)
-          (macro-mapping-sidebar-refresh-hook)
+          ;; Hooks are a flat keyspace and do NOT auto-qualify: reach them as
+          ;; data, never as a bare call (spec hazard e).
+          (run-hook "macro-mapping-arm-enter-hook")
+          (run-hook "macro-mapping-sidebar-open-hook")
+          ;; eseq.macro-state defstates, bare through its compat aliases.
+          (set! eseq.macro-state/mapping-open true)
+          (set! eseq.macro-state/mapping-selected id)
+          (run-hook "macro-mapping-sidebar-refresh-hook")
           true)))))
 
 (def macro-set-mapping-display-range (macro mapping endpoint value)
@@ -80,12 +115,12 @@
 (def rack-macro-mapping-table-macro ()
   (let ((panel (nth SEQ.instrument-panel 0)))
     (if panel
-      (nth (filter |macro| (= (get macro :id) rack-macro-mapping-selected)
+      (nth (filter |macro| (= (get macro :id) eseq.macro-state/rack-mapping-selected)
         (get panel :macros)) 0)
       false)))
 
 (def active-macro-mapping-table-macros ()
-  (if (>= rack-macro-mapping-selected 0)
+  (if (>= eseq.macro-state/rack-mapping-selected 0)
     (let ((macro (rack-macro-mapping-table-macro)))
       (if macro (list macro) '()))
     SEQ.macros))
@@ -110,7 +145,7 @@
          :height 1.35 :padding 0.12
          :background-color (if (get mapping :suspended)
            (rgba 0.92 0.55 0.18 0.10)
-           (if (= (get macro :id) macro-mapping-selected)
+           (if (= (get macro :id) eseq.macro-state/mapping-selected)
              (rgba 0.18 0.85 0.42 0.10)
              :mixer-control-bg))
       (h-stack :gap 0.25 :align :baseline
@@ -198,7 +233,7 @@
 
 (def macro-mapping-table ()
   (let ((macros (active-macro-mapping-table-macros))
-        (rack-active (>= rack-macro-mapping-selected 0)))
+        (rack-active (>= eseq.macro-state/rack-mapping-selected 0)))
     (box :width :fill :height :fill :padding 0.65 :background-color :buffer-bg
       (v-stack :width :fill :gap 0.2
         (h-stack :width :fill :height 1.3 :align :center
@@ -207,7 +242,7 @@
           (button "done" :width 5.0 :height 1.05 :font-size 8.5
             :background-color (rgba 0.18 0.85 0.42 0.22) :color :foreground
             :on-click (lambda (event)
-              (if rack-active (rack-macro-clear-mapping-arm) (macro-clear-mapping-arm)))))
+              (if rack-active (eseq.macro-state/rack-clear-mapping-arm) (eseq.macro-state/clear-mapping-arm)))))
         (macro-mapping-editor-header)
         (if (= (macro-mapping-editor-row-count macros) 0)
           (macro-mapping-editor-empty "Click a green parameter to map it")

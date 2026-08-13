@@ -276,7 +276,7 @@ pub(crate) fn reactive_tick_and_render(
             if cleared_step_selection || cleared_piano_selection {
                 ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
             }
-            let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
+            let _ = editor.runtime_mut().eval_str("(set! eseq.seq-core-state/selected-bus -1)");
             reset_sampler_waveform_view(&mut editor);
             let param_sync_revision =
                 capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);

@@ -2,7 +2,12 @@
 ;; A drop target showing the current impulse-response name; dropping a sample
 ;; onto it swaps the IR (the cursor changes on hover, like other sample drops).
 
-(def convolution-reverb-drop-ir (event)
+(module eseq.effects.builtin.convolution-reverb)
+
+(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
+(import eseq.effects.builtin.dynamics :refer (percent-knob number-knob))
+
+(def %drop-ir (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((path (get payload :path))
@@ -14,10 +19,10 @@
           (dict :track track :slot slot :bus bus :path path))
         (status "Drop a sample file, not a folder")))))
 
-(def builtin-fx-convolution-reverb-ui (fx)
+(def convolution-reverb-ui (fx)
   (let ((params (get fx :params)))
-    (let ((mix-p (builtin-fx-param params "mix"))
-          (gain-p (builtin-fx-param params "gain"))
+    (let ((mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
+          (gain-p (eseq.effects.builtin.filter-core/builtin-fx-param params "gain"))
           (ir-name (get fx :ir-name)))
       (v-stack :gap 0.4
         ;; Impulse-response slot: drop a sample here to swap the IR.
@@ -29,7 +34,7 @@
                            :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
                            :slot (get fx :slot-idx))
           :drop-hover-border-color :blue
-          :on-drop (lambda (event) (convolution-reverb-drop-ir event))
+          :on-drop (lambda (event) (%drop-ir event))
           (v-stack :gap 0.15 :align :center
             (label "IMPULSE RESPONSE" :font-size 7.5 :color :dim :bg :transparent)
             (label (if ir-name ir-name "Drop a sample")
@@ -37,8 +42,8 @@
         ;; Wet mix + output gain.
         (h-stack :gap 0.6 :align :center
           (if mix-p
-            (builtin-fx-dynamics-percent-knob fx "mix" mix-p)
+            (percent-knob fx "mix" mix-p)
             (box :width 0 :height 0))
           (if gain-p
-            (builtin-fx-dynamics-number-knob fx "gain" gain-p 2)
+            (number-knob fx "gain" gain-p 2)
             (box :width 0 :height 0)))))))

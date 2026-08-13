@@ -7,13 +7,13 @@
 (def shd-cell-width 5.8)
 
 (def shd-param (name)
-  (midi-fx-ui-param midi-fx-ui-current-fx name))
+  (eseq.effects.custom-effect-ui/midi-fx-ui-param midi-fx-ui-current-fx name))
 
 (def shd-param-value (p)
-  (fx-param-value-for midi-fx-ui-current-fx p))
+  (eseq.effects.param-controls/fx-param-value-for midi-fx-ui-current-fx p))
 
 (def shd-set-param (p v)
-  (param-set-control-value midi-fx-ui-current-fx p v))
+  (eseq.effects.param-controls/param-set-control-value midi-fx-ui-current-fx p v))
 
 (def shd-param-live-value (p)
   (if (get p :value-field)
@@ -30,8 +30,8 @@
   (number-picker
     :key key
     :value (shd-param-value p)
-    :min (param-control-min midi-fx-ui-current-fx p)
-    :max (param-control-max midi-fx-ui-current-fx p)
+    :min (eseq.effects.param-controls/param-control-min midi-fx-ui-current-fx p)
+    :max (eseq.effects.param-controls/param-control-max midi-fx-ui-current-fx p)
     :step step
     :decimals decimals
     :width shd-cell-width
@@ -43,15 +43,15 @@
   (let ((p (shd-param "taps")))
     (subtree :key (str "custom-midi-fx-ui-" midi-fx-ui-current-name
                        "-slot-" (get midi-fx-ui-current-fx :slot-idx)
-                       "-taps-number" (param-control-key-mode midi-fx-ui-current-fx p))
+                       "-taps-number" (eseq.effects.param-controls/param-control-key-mode midi-fx-ui-current-fx p))
       (number-picker
         :key "shd-taps"
         :value (shd-param-value p)
-        :min (param-control-min midi-fx-ui-current-fx p)
-        :max (param-control-max midi-fx-ui-current-fx p)
-        :base-value (param-base-value-prop midi-fx-ui-current-fx p)
-        :base-min (param-base-min-prop midi-fx-ui-current-fx p)
-        :base-max (param-base-max-prop midi-fx-ui-current-fx p)
+        :min (eseq.effects.param-controls/param-control-min midi-fx-ui-current-fx p)
+        :max (eseq.effects.param-controls/param-control-max midi-fx-ui-current-fx p)
+        :base-value (eseq.effects.param-controls/param-base-value-prop midi-fx-ui-current-fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop midi-fx-ui-current-fx p)
+        :base-max (eseq.effects.param-controls/param-base-max-prop midi-fx-ui-current-fx p)
         :step 1
         :decimals 0
         :width 3.5

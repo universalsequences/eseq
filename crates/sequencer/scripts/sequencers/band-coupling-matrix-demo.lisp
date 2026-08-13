@@ -430,6 +430,6 @@
   (band-panel SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors
               SEQ.track-process-slots))
 
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
 
 (band-attach)

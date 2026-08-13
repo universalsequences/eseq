@@ -4,5 +4,5 @@
 
 (def capture-after-sync ()
   (do
-    (set! macro-mapping-open true)
-    (set! macro-mapping-selected 1)))
+    (set! eseq.macro-state/mapping-open true)
+    (set! eseq.macro-state/mapping-selected 1)))

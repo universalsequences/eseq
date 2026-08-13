@@ -113,7 +113,7 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                 }
                 if head == "param" {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
-                        return format!("(ui-param-control {})", lisp_string_literal(&name));
+                        return format!("(eseq.effects.custom-ui-runtime/ui-param-control {})", lisp_string_literal(&name));
                     }
                 }
                 if head == "params" {
@@ -124,7 +124,7 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                         }
                         if let Some(name) = custom_ui_param_name(item) {
                             controls
-                                .push(format!("(ui-param-control {})", lisp_string_literal(&name)));
+                                .push(format!("(eseq.effects.custom-ui-runtime/ui-param-control {})", lisp_string_literal(&name)));
                         }
                     }
                     return format!("(v-stack :gap 0.25 {})", controls.join(" "));
@@ -151,7 +151,7 @@ fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                 if head == "midi-fx-param" {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
                         return format!(
-                            "(midi-fx-ui-param-control {})",
+                            "(eseq.effects.custom-effect-ui/midi-fx-ui-param-control {})",
                             lisp_string_literal(&name)
                         );
                     }
@@ -164,7 +164,7 @@ fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                         }
                         if let Some(name) = custom_ui_param_name(item) {
                             controls.push(format!(
-                                "(midi-fx-ui-param-control {})",
+                                "(eseq.effects.custom-effect-ui/midi-fx-ui-param-control {})",
                                 lisp_string_literal(&name)
                             ));
                         }
@@ -193,7 +193,7 @@ fn transform_audio_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                 if matches!(head.as_str(), "effect-param" | "fx-param" | "param") {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
                         return format!(
-                            "(audio-fx-ui-param-control {})",
+                            "(eseq.effects.custom-effect-ui/audio-fx-ui-param-control {})",
                             lisp_string_literal(&name)
                         );
                     }
@@ -206,7 +206,7 @@ fn transform_audio_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                         }
                         if let Some(name) = custom_ui_param_name(item) {
                             controls.push(format!(
-                                "(audio-fx-ui-param-control {})",
+                                "(eseq.effects.custom-effect-ui/audio-fx-ui-param-control {})",
                                 lisp_string_literal(&name)
                             ));
                         }
@@ -317,6 +317,10 @@ fn instrument_ui_dispatch_aliases(
     aliases.into_iter().collect()
 }
 
+fn warn_custom_ui_source(path: &str, source: &str) {
+    eseqlisp::module_alias_migration::warn_on_old_module_aliases(Path::new(path), source);
+}
+
 pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     overlay: Option<(String, String, String)>,
 ) -> String {
@@ -381,6 +385,7 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     }
 
     for (instrument_name, ui_path, src) in ui_sources {
+        warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -422,7 +427,7 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             functions.push_str(&format!("\n{helper}\n"));
         }
         functions.push_str(&format!(
-            "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) (set! custom-ui-current-kind \"instrument\") (set! custom-ui-selected-section (custom-ui-selected-section-for-current-scope)) {body}))\n",
+            "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) (set! custom-ui-current-kind \"instrument\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
             lisp_string_literal(normalized_instrument_name)
         ));
         let aliases = instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts);
@@ -539,6 +544,7 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
     let mut functions = String::new();
     let mut dispatch = "false".to_string();
     for (fx_name, ui_path, src) in ui_sources {
+        warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -639,6 +645,7 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
     let mut functions = String::new();
     let mut dispatch = "false".to_string();
     for (fx_name, ui_path, src) in ui_sources {
+        warn_custom_ui_source(&ui_path, &src);
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -679,7 +686,7 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
             functions.push_str(&format!("\n{helper}\n"));
         }
         functions.push_str(&format!(
-            "\n(def {fn_name} (fx) (do (set! audio-fx-ui-current-fx fx) (set! audio-fx-ui-current-name {}) (set! custom-ui-current-kind \"audio-fx\") (set! custom-ui-selected-section (custom-ui-selected-section-for-current-scope)) {body}))\n",
+            "\n(def {fn_name} (fx) (do (set! audio-fx-ui-current-fx fx) (set! audio-fx-ui-current-name {}) (set! custom-ui-current-kind \"audio-fx\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
             lisp_string_literal(&fx_name)
         ));
         dispatch = format!(
@@ -749,7 +756,8 @@ fn reload_custom_ui_source(editor: &mut Editor, path: &str, source: &str, label:
 mod tests {
     use super::{
         build_custom_audio_fx_ui_source_with_overlay,
-        build_custom_instrument_ui_source_with_overlay, instrument_ui_dispatch_aliases,
+        build_custom_instrument_ui_source_with_overlay, build_custom_midi_fx_ui_source_with_overlay,
+        instrument_ui_dispatch_aliases,
         reload_custom_ui_source, GENERATED_INSTRUMENT_UI_PATH,
     };
     use eseqlisp::vm::Value;
@@ -771,17 +779,55 @@ mod tests {
     }
 
     #[test]
+    fn authored_custom_ui_bypasses_run_module_alias_preflight() {
+        let cases = [
+            (
+                "instrument",
+                "instruments/external/ui.lisp",
+                "(def helper () (eseq.seq-layout/apply-fx-layout))\n(defsynth-ui (label \"ok\"))",
+            ),
+            (
+                "midi-fx",
+                "midi-fx/external/ui.lisp",
+                "(def helper () (eseq.seq-layout/apply-fx-layout))\n(def-midi-fx-ui (label \"ok\"))",
+            ),
+            (
+                "audio-fx",
+                "effects/external/ui.lisp",
+                "(def helper () (eseq.seq-layout/apply-fx-layout))\n(defeffect-ui (label \"ok\"))",
+            ),
+        ];
+        build_custom_instrument_ui_source_with_overlay(Some((
+            "external/".to_string(), cases[0].1.to_string(), cases[0].2.to_string(),
+        )));
+        build_custom_midi_fx_ui_source_with_overlay(Some((
+            "external".to_string(), cases[1].1.to_string(), cases[1].2.to_string(),
+        )));
+        build_custom_audio_fx_ui_source_with_overlay(Some((
+            "external".to_string(), cases[2].1.to_string(), cases[2].2.to_string(),
+        )));
+        for (kind, path, source) in cases {
+            assert!(
+                eseqlisp::module_alias_migration::warn_on_old_module_aliases(
+                    std::path::Path::new(path), source,
+                ).is_none(),
+                "{kind} authored source was not preflighted before transformation",
+            );
+        }
+    }
+
+    #[test]
     fn instrument_ui_injection_namespaces_local_helpers() {
         let source = build_custom_instrument_ui_source_with_overlay(Some((
             "agent-draft-1/".to_string(),
             "instruments/agent-draft-1/ui.lisp".to_string(),
             r#"
             (def tune-block ()
-              (ui-control-block-small-s "TUNE" (ui-accent-blue) 0
-                (ui-lego-num-s 0 "op1_ratio" "r1" 4.1 2 false (ui-accent-cyan))))
+              (eseq.effects.custom-ui-lego/ui-control-block-small-s "TUNE" (eseq.effects.custom-ui-lego/ui-accent-blue) 0
+                (eseq.effects.custom-ui-lego/ui-lego-num-s 0 "op1_ratio" "r1" 4.1 2 false (eseq.effects.custom-ui-lego/ui-accent-cyan))))
 
             (defsynth-ui
-              (ui-lego-column-full
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
                 (tune-block)))
             "#
             .to_string(),
@@ -808,9 +854,9 @@ mod tests {
             "instruments/emulations/minimoog-lad2/ui.lisp".to_string(),
             r#"
             (defsynth-ui
-              (ui-lego-column-full
-                (ui-control-block-small-s "OSC" (ui-accent-blue) 0
-                  (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-blue) 2))))
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-small-s "OSC" (eseq.effects.custom-ui-lego/ui-accent-blue) 0
+                  (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2))))
             "#
             .to_string(),
         )));
@@ -857,9 +903,9 @@ mod tests {
             "effects/agent-effect-draft-1/ui.lisp".to_string(),
             r#"
             (defeffect-ui
-              (ui-lego-column-full
-                (ui-control-block-small-s "MIX" (ui-accent-blue) 0
-                  (ui-lego-knob-s 0 "mix" "mix" 4.8 (ui-accent-blue) 2))))
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-small-s "MIX" (eseq.effects.custom-ui-lego/ui-accent-blue) 0
+                  (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "mix" "mix" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2))))
             "#
             .to_string(),
         )));

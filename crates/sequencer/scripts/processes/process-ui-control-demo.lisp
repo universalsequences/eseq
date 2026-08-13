@@ -250,6 +250,6 @@
 (effect-buffer "*process-ui*"
   (process-ui-panel SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors))
 
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
 
 (ps)

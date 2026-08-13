@@ -9,7 +9,7 @@
 
     (h-stack :gap 1.2
       (digitone-section "GLOBAL"
-        (base-note))
+        (eseq.effects.custom-ui-runtime/base-note))
       (digitone-section "AMP"
         (params amp_attack amp_decay amp_sustain amp_release))
       (digitone-section "MIX"

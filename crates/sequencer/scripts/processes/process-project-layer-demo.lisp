@@ -26,7 +26,7 @@
 ;; pattern-owned lane edits across re-evals (whole-layer replace with
 ;; reconciliation, same rules as track chains).
 
-(seq-register-script-source-tab "Project Process Layer")
+(eseq.seq-script-picker/seq-register-script-source-tab "Project Process Layer")
 
 (def-process project-prob-mask
   :doc "Roll against a per-step probability lane; veto the trig on failure."

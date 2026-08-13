@@ -427,6 +427,60 @@ fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
 }
 
 #[test]
+fn hot_reload_reevaluates_imported_children_from_the_owner_root() {
+    // Module spec §4/§11 q4. Editing a child re-evaluates its *owner root*
+    // (`reload_paths_transactional` → `owner_root_for`), and after
+    // eseq-mods.9 the root reaches its children through `import`, not
+    // `load`. Import is load-once, so without a per-reload reset the root
+    // re-eval would skip every child and the edit would silently not land —
+    // the whole ui/ tree would stop hot-reloading.
+    let dir = hot_reload_temp_dir("eseqlisp-hot-import-child");
+    let root = dir.join("root.lisp");
+    let child = dir.join("hot-import-child.lisp");
+    std::fs::write(
+        &root,
+        r#"(import hot-import-child)
+(effect-buffer "*hot-import*" (label (hot-import-child/child-label)))"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &child,
+        "(module hot-import-child)\n(def child-label () \"before\")",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new();
+    let source = std::fs::read_to_string(&root).unwrap();
+    let report = runtime.eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(
+        report.success,
+        "initial root eval failed: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        runtime.eval_str("(hot-import-child/child-label)"),
+        Ok(Some(Value::String("before".to_string())))
+    );
+
+    std::fs::write(
+        &child,
+        "(module hot-import-child)\n(def child-label () \"after\")",
+    )
+    .unwrap();
+    let report = runtime.reload_paths_transactional(vec![child.clone()], Vec::new());
+    assert!(
+        report.success,
+        "child reload failed: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        runtime.eval_str("(hot-import-child/child-label)"),
+        Ok(Some(Value::String("after".to_string()))),
+        "re-evaluating the root must re-import the edited child, not skip it"
+    );
+}
+
+#[test]
 fn hot_reload_active_named_buffer_syncs_active_tile_layout_cache() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-active-layout-sync");
     let root = dir.join("root.lisp");
@@ -12791,3 +12845,531 @@ fn save_prompt_keys_outrank_an_open_modal() {
         "with the prompt gone, Esc closes the modal"
     );
 }
+
+// ── Module-system slice 3: late-bound handler module capture (spec §5) ──
+
+fn eval_module(editor: &mut Editor, tag: &str, source: &str) {
+    let path = temp_file_path(&format!("module-{tag}.lisp"));
+    editor
+        .runtime_mut()
+        .eval_source_at_path(path, source)
+        .expect("module eval");
+    editor.refresh_runtime_side_effects();
+}
+
+#[test]
+fn module_bind_key_captures_module_and_dispatches_local_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "x");
+    eval_module(
+        &mut editor,
+        "bindkey-local",
+        r#"
+(module test.keys)
+(def my-handler () (host-command "module-handler-ran" true))
+(bind-key "C-y" "my-handler")
+"#,
+    );
+    // The stored binding record carries the module (qualified handler).
+    assert_eq!(
+        editor.runtime.lisp_bindings().get("C-y").map(String::as_str),
+        Some("test.keys/my-handler"),
+        "bind-key from a declared module must store the module-qualified handler"
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "module-handler-ran")),
+        "module-local handler should dispatch, got {commands:?}"
+    );
+}
+
+#[test]
+fn module_bind_key_falls_back_to_flat_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "x");
+    editor
+        .runtime_mut()
+        .eval_str(r#"(def shared-handler () (host-command "shared-ran" true))"#)
+        .expect("vanilla handler");
+    eval_module(
+        &mut editor,
+        "bindkey-fallback",
+        r#"
+(module test.keys2)
+(bind-key "C-u" "shared-handler")
+"#,
+    );
+    assert_eq!(
+        editor.runtime.lisp_bindings().get("C-u").map(String::as_str),
+        Some("test.keys2/shared-handler")
+    );
+    // test.keys2 never defined shared-handler: dispatch resolves the
+    // stored module first, then falls back to the flat name (spec §5).
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "shared-ran")),
+        "flat-handler fallback should dispatch, got {commands:?}"
+    );
+}
+
+#[test]
+fn module_define_mode_qualifies_name_and_on_key_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*modetest*", "");
+    eval_module(
+        &mut editor,
+        "define-mode",
+        r#"
+(module test.modes)
+(def my-on-key (k txt) (host-command "mode-key" k) true)
+(define-mode "special" :read-only true :on-key "my-on-key")
+(set-buffer-mode "special")
+"#,
+    );
+    // Registry key and buffer mode are the module-qualified name; the flat
+    // set-buffer-mode reference from inside the module resolved to it.
+    assert!(
+        editor.mode_registry.contains_key("test.modes/special"),
+        "define-mode in a declared module must register qualified, got {:?}",
+        editor.mode_registry.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        editor.active_buffer().mode,
+        BufferMode::Named("test.modes/special".to_string())
+    );
+    // The on-key handler captured its module and dispatches.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "mode-key")),
+        "module on-key handler should dispatch, got {commands:?}"
+    );
+}
+
+/// A declared module's mode
+/// reference is qualified against the *caller*, and must still fall back to
+/// a vanilla mode the module never defined.
+#[test]
+fn module_mode_reference_falls_back_to_a_vanilla_mode() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*plain*", "");
+    editor
+        .runtime_mut()
+        .eval_str(r#"(define-mode "plain-mode" :read-only true)"#)
+        .expect("vanilla mode");
+    editor.refresh_runtime_side_effects();
+    eval_module(
+        &mut editor,
+        "mode-fallback",
+        r#"
+(module test.modeconsumer)
+(set-buffer-mode-for "*plain*" "plain-mode")
+"#,
+    );
+    let buffer = editor
+        .buffers
+        .iter()
+        .find(|b| b.name == "*plain*")
+        .expect("*plain* buffer");
+    assert_eq!(
+        buffer.mode,
+        BufferMode::Named("plain-mode".to_string()),
+        "module caller must still reach a vanilla mode by its flat name"
+    );
+    assert!(buffer.read_only, "the vanilla mode's read-only must apply");
+}
+
+/// Hazard (d), second thread: `mode_bind_key` qualifies its *handler* string
+/// unconditionally, and `ui/seq-grid-mode.lisp` binds seven handlers defined
+/// outside itself. End-to-end proof that the dispatch-side ladder
+/// (`Runtime::resolve_handler_name`) covers it.
+#[test]
+fn module_mode_binding_dispatches_a_vanilla_handler() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*bound*", "");
+    editor
+        .runtime_mut()
+        .eval_str(r#"(def cursor-left () (host-command "cursor-left-ran" true))"#)
+        .expect("vanilla handler");
+    editor.refresh_runtime_side_effects();
+    eval_module(
+        &mut editor,
+        "mode-bind-foreign",
+        r#"
+(module test.boundmode)
+(define-mode "bound-mode")
+(mode-bind-key "bound-mode" "C-b" "cursor-left")
+(set-buffer-mode-for "*bound*" "bound-mode")
+"#,
+    );
+    // The binding is stored under the caller's module, which never defined
+    // the handler.
+    assert_eq!(
+        editor
+            .mode_registry
+            .get("test.boundmode/bound-mode")
+            .and_then(|m| m.keybindings.get("C-b"))
+            .map(String::as_str),
+        Some("test.boundmode/cursor-left"),
+        "mode-bind-key qualifies the handler against the caller's module"
+    );
+    // *bound* is the active buffer (last scratch opened), so the mode keymap
+    // is the one consulted on key input.
+    assert_eq!(
+        editor.active_buffer().mode,
+        BufferMode::Named("test.boundmode/bound-mode".to_string())
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "cursor-left-ran")),
+        "qualified→flat handler fallback should dispatch, got {commands:?}"
+    );
+}
+
+#[test]
+fn vanilla_bind_key_records_stay_flat() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "x");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(def flat-handler () (host-command "flat-ran" true))
+(bind-key "C-j" "flat-handler")
+"#,
+        )
+        .expect("vanilla bind");
+    editor.refresh_runtime_side_effects();
+    assert_eq!(
+        editor.runtime.lisp_bindings().get("C-j").map(String::as_str),
+        Some("flat-handler"),
+        "headerless bind-key must keep today's flat handler string"
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    let commands = editor.drain_host_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, HostCommand::Custom { name, .. } if name == "flat-ran"))
+    );
+}
+
+#[test]
+fn mx_command_defined_in_a_declared_module_requires_its_qualified_name() {
+    // M-x exposes a declared module's qualified command and does not retain
+    // migration-era flat vocabulary.
+    let runtime = Runtime::with_init_source("");
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_source_at_path(
+            std::env::temp_dir().join("mx-module-test.lisp"),
+            r#"
+(module test.mxmod)
+(defstate probe-open? false)
+(def probe-command () (set! probe-open? true))
+"#,
+        )
+        .expect("module eval");
+
+    // The candidate list carries the qualified name and the typed bare
+    // name substring-matches it.
+    let candidates = editor.collect_mx_candidates();
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c == "test.mxmod/probe-command"),
+        "qualified command should be an M-x candidate"
+    );
+    let filtered = super::filter_candidates(&candidates, "mx-probe-command");
+    assert!(
+        filtered.is_empty(),
+        "retired flat name must not remain an M-x candidate: {:?}",
+        candidates
+            .iter()
+            .filter(|c| c.contains("probe"))
+            .collect::<Vec<_>>()
+    );
+
+    // Executing by the qualified candidate works…
+    editor.execute_mx_command("test.mxmod/probe-command");
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.mxmod/probe-open?").unwrap(),
+        Some(Value::Bool(true)),
+        "qualified M-x execution should run the command"
+    );
+
+    // Executing the retired flat spelling is a miss.
+    editor
+        .runtime_mut()
+        .eval_str("(set! test.mxmod/probe-open? false)")
+        .unwrap();
+    editor.execute_mx_command("mx-probe-command");
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.mxmod/probe-open?").unwrap(),
+        Some(Value::Bool(false)),
+        "retired flat-name M-x execution must not run the command"
+    );
+}
+
+/// The S3 batch-1 choose-model shape end-to-end: a modal + dropdown declared
+/// inside a module, the row click dispatching an on-change that calls a
+/// module-local fn writing module defstates. Covers the full pointer
+/// pipeline (overlay hit-test → Custom event → closure) with qualified
+/// widget keys and state bindings.
+#[cfg(target_os = "macos")]
+#[test]
+fn module_dropdown_row_click_applies_selection_and_closes_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_source_at_path(
+            std::env::temp_dir().join("module-picker-test.lisp"),
+            r#"
+(module test.picker)
+(defstate picker-open? true)
+(defstate picked "plate")
+(def choose (v)
+  (do
+    (set! picked v)
+    (set! picker-open? false)))
+(def panel ()
+  (modal :is-open picker-open?
+         :on-close (lambda () (set! picker-open? false))
+    (v-stack
+      (dropdown
+        :key "dropdown"
+        :width 12
+        :height 1.4
+        :options '("plate" "hall" "quad")
+        :value picked
+        :on-change (lambda (v) (choose v))))))
+"#,
+        )
+        .expect("module picker source");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*panel*" (test.picker/panel))
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 18
+                :on-click (lambda (event) true)))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*panel*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#,
+        )
+        .expect("mount panel");
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    open_dropdown_inside_modal(&mut editor);
+
+    // Click the "hall" row (index 1) inside the open menu overlay.
+    // Mirrors dropdown.rs MENU_PADDING_V=0.3 / MENU_ROW_HEIGHT=1.4.
+    let menu = crate::widget_render::get_overlay_rect().expect("open dropdown menu rect");
+    let row = menu.row + 0.3 + 1.4 * 1.0 + 0.7;
+    let col = menu.col + menu.width * 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col.floor() as u16,
+            row.floor() as u16,
+        ),
+        col,
+        row,
+        0,
+    );
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.picker/picked").unwrap(),
+        Some(Value::String("hall".to_string())),
+        "row click should dispatch on-change through the module fn"
+    );
+    assert_eq!(
+        editor
+            .runtime_mut()
+            .eval_str("test.picker/picker-open?")
+            .unwrap(),
+        Some(Value::Bool(false)),
+        "the module fn should close the modal"
+    );
+}
+
+/// Load the REAL ui/choose-model.lisp (agent natives stubbed) and click a
+/// dropdown row — reproduces the in-app ArityMismatch report if present.
+#[cfg(target_os = "macos")]
+#[test]
+fn real_choose_model_dropdown_row_click_selects() {
+    let _overlay_guard = OverlayClearGuard;
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .register_native("agent/models", |_args, _ctx| {
+            Ok(Value::List(vec![
+                Rc::new(RefCell::new(Value::String("gpt-5.5".into()))),
+                Rc::new(RefCell::new(Value::String("claude-fable-5".into()))),
+            ]))
+        });
+    let picked = Rc::new(RefCell::new(String::new()));
+    let picked_for_native = picked.clone();
+    editor
+        .runtime_mut()
+        .register_native("agent/patch-model", move |_args, _ctx| {
+            Ok(Value::String(picked_for_native.borrow().clone()))
+        });
+    let picked_for_set = picked.clone();
+    editor
+        .runtime_mut()
+        .register_native("agent/set-patch-model", move |args, _ctx| {
+            if let Some(Value::String(v)) = args.first() {
+                *picked_for_set.borrow_mut() = v.clone();
+            }
+            Ok(Value::Nil)
+        });
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sequencer/ui/choose-model.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real choose-model.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real choose-model.lisp");
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*panel*" (eseq.choose-model/panel))
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 18
+                :on-click (lambda (event) true)))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*panel*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#,
+        )
+        .expect("mount panel");
+    editor
+        .runtime_mut()
+        .eval_str("(eseq.choose-model/choose-model)")
+        .expect("open picker");
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(200, 60);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 200, 60);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 200, 60);
+
+    open_dropdown_inside_modal(&mut editor);
+
+    // Click the "claude-fable-5" row: options = Default (auto), gpt-5.5,
+    // claude-fable-5 → index 2. MENU_PADDING_V=0.3, MENU_ROW_HEIGHT=1.4.
+    let menu = crate::widget_render::get_overlay_rect().expect("open dropdown menu rect");
+    let row = menu.row + 0.3 + 1.4 * 2.0 + 0.7;
+    let col = menu.col + menu.width * 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col.floor() as u16,
+            row.floor() as u16,
+        ),
+        col,
+        row,
+        0,
+    );
+    editor.refresh_runtime_side_effects();
+    assert_eq!(
+        picked.borrow().as_str(),
+        "claude-fable-5",
+        "row click should write through agent/set-patch-model"
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("eseq.choose-model/open?").unwrap(),
+        Some(Value::Bool(false)),
+        "select should close the picker"
+    );
+}
+
+
+/// Differential probe: identical to module_dropdown_row_click test but the
+/// module fn is named `select` (a builtin widget name).
+#[cfg(target_os = "macos")]
+#[test]
+fn module_fn_named_select_compiles_with_correct_arity() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_source_at_path(
+            std::env::temp_dir().join("module-select-arity-test.lisp"),
+            r#"
+(module test.selarity)
+(defstate picked "plate")
+(def select (v) (set! picked v))
+(def handler-holder ()
+  (lambda (v) (select v)))
+"#,
+        )
+        .expect("module source");
+    let cb = editor
+        .runtime_mut()
+        .eval_str("(test.selarity/handler-holder)")
+        .expect("build handler")
+        .expect("closure value");
+    let one = editor
+        .runtime
+        .invoke(cb.clone(), vec![Value::String("hall".into())]);
+    eprintln!("[probe-arity] invoke 1 arg => {one:?}");
+    assert!(one.is_ok(), "lambda calling module fn named select must take 1 arg: {one:?}");
+    assert_eq!(
+        editor.runtime_mut().eval_str("test.selarity/picked").unwrap(),
+        Some(Value::String("hall".to_string()))
+    );
+}
+
+

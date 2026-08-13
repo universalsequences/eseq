@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "smoothstep",
+  "params": [
+    "edge0",
+    "edge1",
+    "x"
+  ],
+  "outputs": [
+    "out"
+  ]
+}

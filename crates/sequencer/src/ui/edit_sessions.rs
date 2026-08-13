@@ -814,11 +814,11 @@ pub(super) fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -
     let buffer_name = escape_lisp_string(buffer_name);
     let path = escape_lisp_string(&path.to_string_lossy());
     format!(
-        // The `M-x choose-model` picker is mounted in the patcher's own
+        // The `M-x eseq.choose-model/choose-model` picker is mounted in the patcher's own
         // buffer rather than a sibling tile: a modal only receives pointer
         // input through the *active* tile's layout, and the patch editor's
         // canvas is the active tile. Closed, it has zero layout footprint.
-        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (choose-model-panel)\n    (patcher\n      :intent :instrument\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (choose-model-current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (choose-model-open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (patcher\n      :intent :instrument\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
     )
 }
 
@@ -836,7 +836,7 @@ pub(super) fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> St
     format!(
         // Mounted alongside the patcher for the same reason as the
         // instrument variant above.
-        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (choose-model-panel)\n    (patcher\n      :intent :effect\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (choose-model-current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (choose-model-open)\n          (host-command \"preview-effect-patch\" event))))))\n"
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (patcher\n      :intent :effect\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-effect-patch\" event))))))\n"
     )
 }
 
@@ -845,7 +845,7 @@ pub(super) const NEW_EFFECT_DRAFT_NAME: &str = "new-effect-draft/";
 pub(super) const NEW_SCRIPT_TAB_LABEL: &str = "New Script";
 pub(super) const NEW_SCRIPT_TEMPLATE: &str = r#"; ESeqLisp script
 ; Source-only scripts can still appear as sequencer tabs.
-(seq-register-script-source-tab "Untitled Script")
+(eseq.seq-script-picker/seq-register-script-source-tab "Untitled Script")
 
 "#;
 
@@ -928,7 +928,7 @@ pub(super) fn instrument_run_mode_from_label(label: &str) -> Option<CustomInstru
 
 pub(super) fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {
     let buffer_name = escape_lisp_string(buffer_name);
-    format!("(seq-apply-instrument-patcher-layout \"{buffer_name}\")")
+    format!("(eseq.seq-layout/apply-instrument-patcher-layout \"{buffer_name}\")")
 }
 
 pub(super) fn show_instrument_patcher_source_layout_source(
@@ -938,12 +938,12 @@ pub(super) fn show_instrument_patcher_source_layout_source(
     let patcher_buffer_name = escape_lisp_string(patcher_buffer_name);
     let source_buffer_name = escape_lisp_string(source_buffer_name);
     format!(
-        "(seq-apply-instrument-patcher-source-layout \"{patcher_buffer_name}\" \"{source_buffer_name}\")"
+        "(eseq.seq-layout/apply-instrument-patcher-source-layout \"{patcher_buffer_name}\" \"{source_buffer_name}\")"
     )
 }
 
 pub(super) fn restore_instrument_patcher_layout_source() -> &'static str {
-    "(seq-restore-instrument-patcher-layout)"
+    "(eseq.seq-panels/seq-restore-instrument-patcher-layout)"
 }
 
 pub(super) fn reset_instrument_patcher_state(path: &Path) {
@@ -1074,7 +1074,7 @@ pub(super) fn register_script_source_tab(
     let buffer = escape_lisp_string(&buffer_name);
     let source_path = escape_lisp_string(source_path_for_project);
     let form = format!(
-        "(seq-register-script-step-sequencer-tab \"{label}\" \"{buffer}\" \"\" \"{source_path}\")"
+        "(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab \"{label}\" \"{buffer}\" \"\" \"{source_path}\")"
     );
     editor
         .runtime_mut()
@@ -1088,7 +1088,7 @@ pub(super) fn preserve_sample_browser_context_for_loaded_sample(editor: &mut Edi
     let path = escape_lisp_string(path);
     if let Err(error) = editor
         .runtime_mut()
-        .eval_str(&format!("(set! sbrowser-auditioned-sample \"{path}\")"))
+        .eval_str(&format!("(set! eseq.browser/sbrowser-auditioned-sample \"{path}\")"))
     {
         eprintln!("sample browser: failed to mark browser-initiated sample load: {error:?}");
     }
@@ -1097,7 +1097,7 @@ pub(super) fn preserve_sample_browser_context_for_loaded_sample(editor: &mut Edi
 pub(super) fn refresh_sample_browser_buffer(editor: &mut Editor) -> Result<(), String> {
     editor
         .runtime_mut()
-        .eval_str("(sbrowser-refresh-buffer)")
+        .eval_str("(eseq.browser/refresh-buffer)")
         .map_err(|error| format!("{error:?}"))?;
     editor.refresh_runtime_side_effects();
     editor.refresh_visible_layouts_for_buffer_named("*samples*");

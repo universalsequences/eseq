@@ -10,11 +10,11 @@
       :instrument-group-bg)))
 (def oberheim_sem-cell-width 4.0)
 (def oberheim_sem-param-cell-step-section-width (name title decimals step section width)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (eseq.effects.custom-ui-runtime/inst-param synth-ui-current-inst name)))
     (if p
       (subtree :key (str "oberheim_sem-cell-" name)
         (knob-number :label title
-          :value (fx-param-value p)
+          :value (eseq.effects.param-controls/fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
@@ -23,18 +23,18 @@
           :on-change (lambda (v)
             (do
               (oberheim_sem-select section)
-              (fx-set-instrument-value p v)))))
+              (eseq.effects.param-controls/fx-set-instrument-value p v)))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 (def oberheim_sem-param-cell-step-section (name title decimals step section)
   (oberheim_sem-param-cell-step-section-width name title decimals step section oberheim_sem-cell-width))
 (def oberheim_sem-param-cell-section (name title decimals section)
   (oberheim_sem-param-cell-step-section name title decimals 0 section))
 (def oberheim_sem-base-note-cell (section)
-  (let ((p (inst-base-note-param synth-ui-current-inst)))
+  (let ((p (eseq.effects.custom-ui-runtime/inst-base-note-param synth-ui-current-inst)))
     (if p
       (subtree :key (str "oberheim_sem-base-note-cell")
         (knob-number :label "note"
-          :value (fx-param-value p)
+          :value (eseq.effects.param-controls/fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
@@ -43,16 +43,16 @@
           :on-change (lambda (v)
             (do
               (oberheim_sem-select section)
-              (fx-set-instrument-value p v)))))
+              (eseq.effects.param-controls/fx-set-instrument-value p v)))))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 (def oberheim_sem-param-number-section (name title decimals unit section)
   (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
+    (let ((p (eseq.effects.custom-ui-runtime/inst-param synth-ui-current-inst name)))
       (if p
         (subtree :key (str "oberheim_sem-adsr-number-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
+            (number-picker :value (eseq.effects.param-controls/fx-param-value p)
               :min (get p :min) :max (get p :max) :decimals decimals
               :unit unit
               :noui true :font-size 10.5
@@ -62,7 +62,7 @@
               :on-change (lambda (v)
                 (do
                   (oberheim_sem-select section)
-                  (fx-set-instrument-value p v))))))
+                  (eseq.effects.param-controls/fx-set-instrument-value p v))))))
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
     (box :width 5.2 :height 1.75
       (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
@@ -73,13 +73,13 @@
           :width 5.0 :height 0.95)))))
 (def oberheim_sem-param-value (name fallback)
   (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-param-value p) fallback))
+    (let ((p (eseq.effects.custom-ui-runtime/inst-param synth-ui-current-inst name)))
+      (if p (eseq.effects.param-controls/fx-param-value p) fallback))
     fallback))
 (def oberheim_sem-set-param (name value)
   (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-set-instrument-value p value) false))
+    (let ((p (eseq.effects.custom-ui-runtime/inst-param synth-ui-current-inst name)))
+      (if p (eseq.effects.param-controls/fx-set-instrument-value p value) false))
     false))
 (def oberheim_sem-adsr-view (attack decay sustain release section)
   (adsr-editor

@@ -391,4 +391,4 @@
             :value (g16-viz-matrix viz :dampening-matrix (g16-zero-matrix)))))))))
 
 (effect-buffer "*16x16*" (g16-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

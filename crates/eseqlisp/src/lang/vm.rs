@@ -1,6 +1,6 @@
-use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
+use crate::compiler::{Chunk, Compiler, CompilerError, MacroDef, OpCode};
 use crate::host::BufferId;
-use crate::hot_reload::{ModuleStackEntry, SourceManager, extract_defined_symbols_from_source};
+use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
 use crate::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -43,6 +43,26 @@ pub enum VMError {
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideKind {
+    Replace,
+    Around,
+}
+
+#[derive(Clone)]
+pub struct OverrideEntry {
+    pub overriding_module: String,
+    pub kind: OverrideKind,
+    pub callback: Value,
+    pub quarantined: bool,
+}
+
+#[derive(Clone)]
+pub struct OverrideSet {
+    pub entries: Vec<OverrideEntry>,
+    dispatcher: Rc<RefCell<Value>>,
+}
 pub type InlineWidgetMetadataResolver = Rc<dyn Fn(&str, &str) -> Option<InlineWidgetMetadata>>;
 pub type NodeId = u32;
 
@@ -158,6 +178,11 @@ pub enum Value {
         slot: Arc<AtomicU64>,
     },
     NativeFunction(NativeFn),
+    /// Internal callables used by the §6.1 override layer. Dispatchers are
+    /// returned by global reads; originals bypass that layer and resolve the
+    /// current factory cell at call time.
+    OverrideDispatcher(String),
+    OverrideOriginal(String),
     HostHandle {
         kind: String,
         id: u64,
@@ -185,7 +210,7 @@ pub enum ReactiveNode {
         chunk_idx: usize,
         callable: Option<Value>,
         source_buffer_id: Option<BufferId>,
-        source_module: Option<std::path::PathBuf>,
+        source_file: Option<std::path::PathBuf>,
         source_revision: Option<u64>,
         target: EffectTarget,
         subtree_root_id: Option<u64>,
@@ -213,7 +238,7 @@ pub struct EvalProfile {
 #[derive(Clone)]
 pub struct PendingWidgetTree {
     pub source_buffer_id: Option<BufferId>,
-    pub source_module: Option<std::path::PathBuf>,
+    pub source_file: Option<std::path::PathBuf>,
     pub target: EffectTarget,
     pub tree: Value,
     pub reactive_dependencies: Vec<ReactiveFieldKey>,
@@ -224,7 +249,7 @@ pub enum PendingUiUpdate {
     FullTree(PendingWidgetTree),
     ReplaceSubtree {
         source_buffer_id: Option<BufferId>,
-        source_module: Option<std::path::PathBuf>,
+        source_file: Option<std::path::PathBuf>,
         target: EffectTarget,
         subtree_root_id: u64,
         tree: Value,
@@ -242,10 +267,10 @@ impl PendingUiUpdate {
         }
     }
 
-    pub fn source_module(&self) -> Option<&std::path::Path> {
+    pub fn source_file(&self) -> Option<&std::path::Path> {
         match self {
-            PendingUiUpdate::FullTree(pending) => pending.source_module.as_deref(),
-            PendingUiUpdate::ReplaceSubtree { source_module, .. } => source_module.as_deref(),
+            PendingUiUpdate::FullTree(pending) => pending.source_file.as_deref(),
+            PendingUiUpdate::ReplaceSubtree { source_file, .. } => source_file.as_deref(),
         }
     }
 
@@ -625,6 +650,8 @@ pub fn format_lisp_value(value: &Value) -> String {
             ..
         } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
+        Value::OverrideDispatcher(name) => format!("<override:{name}>"),
+        Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
     }
 }
@@ -674,6 +701,8 @@ pub fn format_lisp_source(value: &Value) -> String {
             ..
         } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
+        Value::OverrideDispatcher(name) => format!("<override:{name}>"),
+        Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
     }
 }
@@ -838,6 +867,8 @@ impl PartialEq for Value {
             (Self::Closure(a, _), Self::Closure(b, _)) => a == b,
             (Self::Function(a), Self::Function(b)) => a == b,
             (Self::NodeRef(a), Self::NodeRef(b)) => a == b,
+            (Self::OverrideDispatcher(a), Self::OverrideDispatcher(b)) => a == b,
+            (Self::OverrideOriginal(a), Self::OverrideOriginal(b)) => a == b,
             (
                 Self::ReactiveRef {
                     namespace: a_ns,
@@ -899,6 +930,8 @@ impl Clone for Value {
                 slot: slot.clone(),
             },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+            Self::OverrideDispatcher(name) => Self::OverrideDispatcher(name.clone()),
+            Self::OverrideOriginal(name) => Self::OverrideOriginal(name.clone()),
             Self::HostHandle { kind, id, callable } => Self::HostHandle {
                 kind: kind.clone(),
                 id: *id,
@@ -954,6 +987,36 @@ fn is_source_prop_keyword(expr: &Expr) -> bool {
                 || key == SOURCE_END_BYTE_PROP
                 || key == SOURCE_REVISION_PROP
     )
+}
+
+fn is_module_declaration(expr: &Expr) -> bool {
+    if let ExprKind::List(items) = &expr.kind
+        && let Some(head) = items.first()
+        && let ExprKind::Symbol(name) = &head.kind
+    {
+        return name == "module";
+    }
+    false
+}
+
+/// Top-level `(def NAME …)` forms whose NAME collides with a widget
+/// constructor name — inside a declared module these defs shadow the
+/// builtin for bare calls in the same unit.
+fn collect_shadowing_def_names(
+    expr: &Expr,
+    local_defwidgets: &HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    if let ExprKind::List(items) = &expr.kind
+        && items.len() >= 2
+        && let Some(head) = items.first()
+        && let ExprKind::Symbol(def) = &head.kind
+        && def == "def"
+        && let ExprKind::Symbol(name) = &items[1].kind
+        && is_widget_constructor_name(name, local_defwidgets)
+    {
+        out.insert(name.clone());
+    }
 }
 
 fn is_widget_constructor_name(name: &str, local_defwidgets: &HashSet<String>) -> bool {
@@ -1044,19 +1107,21 @@ fn convert_source_data_expr(
     expr: &Expr,
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
-    convert_source_expr(expr, source_revision, local_defwidgets, macro_names, false)
+    convert_source_expr(expr, source_revision, local_defwidgets, shadowed_widget_names, macro_names, false)
 }
 
 fn convert_let_bindings(
     expr: &Expr,
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
     let ExprKind::List(bindings) = &expr.kind else {
-        return convert_source_data_expr(expr, source_revision, local_defwidgets, macro_names);
+        return convert_source_data_expr(expr, source_revision, local_defwidgets, shadowed_widget_names, macro_names);
     };
     Expression::List(
         bindings
@@ -1067,6 +1132,7 @@ fn convert_let_bindings(
                         binding,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     );
                 };
@@ -1079,6 +1145,7 @@ fn convert_let_bindings(
                                 part,
                                 source_revision,
                                 local_defwidgets,
+                                shadowed_widget_names,
                                 macro_names,
                                 idx > 0,
                             )
@@ -1094,6 +1161,7 @@ fn convert_list_with_code_from_idx(
     items: &[Expr],
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
     code_start_idx: usize,
 ) -> Expression {
@@ -1106,6 +1174,7 @@ fn convert_list_with_code_from_idx(
                     item,
                     source_revision,
                     local_defwidgets,
+                    shadowed_widget_names,
                     macro_names,
                     idx >= code_start_idx,
                 )
@@ -1118,6 +1187,7 @@ fn convert_defwidget_list(
     items: &[Expr],
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
     let mut converted = Vec::with_capacity(items.len());
@@ -1128,6 +1198,7 @@ fn convert_defwidget_list(
             item,
             source_revision,
             local_defwidgets,
+            shadowed_widget_names,
             macro_names,
             idx > 1,
         ));
@@ -1139,6 +1210,7 @@ fn convert_defwidget_list(
                 next,
                 source_revision,
                 local_defwidgets,
+                shadowed_widget_names,
                 macro_names,
             ));
             idx += 2;
@@ -1153,6 +1225,7 @@ fn convert_match_list(
     items: &[Expr],
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
 ) -> Expression {
     Expression::List(
@@ -1165,6 +1238,7 @@ fn convert_match_list(
                     item,
                     source_revision,
                     local_defwidgets,
+                    shadowed_widget_names,
                     macro_names,
                     is_code,
                 )
@@ -1177,6 +1251,7 @@ fn convert_source_expr(
     expr: &Expr,
     source_revision: u64,
     local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
     macro_names: &HashSet<String>,
     annotate_widgets: bool,
 ) -> Expression {
@@ -1194,6 +1269,7 @@ fn convert_source_expr(
             inner,
             source_revision,
             local_defwidgets,
+            shadowed_widget_names,
             macro_names,
             annotate_widgets,
         ))),
@@ -1209,6 +1285,7 @@ fn convert_source_expr(
                                 item,
                                 source_revision,
                                 local_defwidgets,
+                                shadowed_widget_names,
                                 macro_names,
                             )
                         })
@@ -1221,12 +1298,14 @@ fn convert_source_expr(
                         &items[0],
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     ));
                     converted.push(convert_let_bindings(
                         &items[1],
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     ));
                     converted.extend(items[2..].iter().map(|item| {
@@ -1234,6 +1313,7 @@ fn convert_source_expr(
                             item,
                             source_revision,
                             local_defwidgets,
+                            shadowed_widget_names,
                             macro_names,
                             true,
                         )
@@ -1245,6 +1325,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                         2,
                     );
@@ -1262,6 +1343,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                         body_start_idx,
                     );
@@ -1275,6 +1357,7 @@ fn convert_source_expr(
                                     item,
                                     source_revision,
                                     local_defwidgets,
+                                    shadowed_widget_names,
                                     macro_names,
                                 )
                             })
@@ -1286,6 +1369,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     );
                 }
@@ -1294,6 +1378,7 @@ fn convert_source_expr(
                         items,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                     );
                 }
@@ -1303,7 +1388,10 @@ fn convert_source_expr(
                 annotate_widgets && head_name.is_some_and(|name| macro_names.contains(name));
             let should_annotate = annotate_widgets
                 && !is_macro_call
-                && head_name.is_some_and(|name| is_widget_constructor_name(name, local_defwidgets));
+                && head_name.is_some_and(|name| {
+                    is_widget_constructor_name(name, local_defwidgets)
+                        && !shadowed_widget_names.contains(name)
+                });
             let mut idx = 0;
             while idx < items.len() {
                 let item = &items[idx];
@@ -1315,6 +1403,7 @@ fn convert_source_expr(
                     item,
                     source_revision,
                     local_defwidgets,
+                    shadowed_widget_names,
                     macro_names,
                     annotate_widgets,
                 );
@@ -1351,6 +1440,7 @@ fn convert_source_expr(
                         next,
                         source_revision,
                         local_defwidgets,
+                        shadowed_widget_names,
                         macro_names,
                         false,
                     ));
@@ -1400,23 +1490,105 @@ fn convert_source_expr(
     }
 }
 
+/// The unit-wide name collections the source→Expression conversion needs:
+/// defwidget/defmacro names defined anywhere in the unit and the module
+/// defs that shadow builtin widget constructors. Computed once over the
+/// FULL top-level form list so that splitting a unit into import-bounded
+/// segments (see `eval_str`) cannot hide a later definition from an
+/// earlier segment's conversion.
+struct UnitConversionContext {
+    local_defwidgets: HashSet<String>,
+    unit_macro_names: HashSet<String>,
+    shadowed_widget_names: HashSet<String>,
+}
+
+fn unit_conversion_context(exprs: &[Expr]) -> UnitConversionContext {
+    let mut local_defwidgets = HashSet::new();
+    let mut unit_macro_names = HashSet::new();
+    for expr in exprs {
+        collect_defwidget_names(expr, &mut local_defwidgets);
+        collect_defmacro_names(expr, &mut unit_macro_names);
+    }
+    // Inside a declared module, the module's own top-level defs shadow
+    // builtin widget-constructor names (spec §3: current module wins), so
+    // calls to them are ordinary calls and must not get `__source-*`
+    // widget-provenance props appended — a module fn has fixed arity and
+    // the injected keyword args made the call an ArityMismatch (found via
+    // eseq.choose-model's `select` in S3 batch 1).
+    let mut shadowed_widget_names = HashSet::new();
+    if exprs.iter().any(is_module_declaration) {
+        for expr in exprs {
+            collect_shadowing_def_names(expr, &local_defwidgets, &mut shadowed_widget_names);
+        }
+    }
+    UnitConversionContext {
+        local_defwidgets,
+        unit_macro_names,
+        shadowed_widget_names,
+    }
+}
+
+fn convert_segment_exprs_with_origins(
+    context: &UnitConversionContext,
+    exprs: &[Expr],
+    source_revision: u64,
+    existing_macros: &HashSet<String>,
+) -> Vec<Expression> {
+    let mut macro_names = existing_macros.clone();
+    macro_names.extend(context.unit_macro_names.iter().cloned());
+    exprs
+        .iter()
+        .map(|expr| {
+            convert_source_expr(
+                expr,
+                source_revision,
+                &context.local_defwidgets,
+                &context.shadowed_widget_names,
+                &macro_names,
+                true,
+            )
+        })
+        .collect()
+}
+
 fn convert_source_exprs_with_origins(
     exprs: &[Expr],
     source_revision: u64,
     existing_macros: &HashSet<String>,
 ) -> Vec<Expression> {
-    let mut local_defwidgets = HashSet::new();
-    let mut macro_names = existing_macros.clone();
-    for expr in exprs {
-        collect_defwidget_names(expr, &mut local_defwidgets);
-        collect_defmacro_names(expr, &mut macro_names);
+    let context = unit_conversion_context(exprs);
+    convert_segment_exprs_with_origins(&context, exprs, source_revision, existing_macros)
+}
+
+/// True for a literal top-level `(import …)` form — the only shape whose
+/// compile-time half (spec §4) splits a unit into segments. Quoted or
+/// nested occurrences stay runtime-only.
+fn is_top_level_import(expr: &Expr) -> bool {
+    let ExprKind::List(items) = &expr.kind else {
+        return false;
+    };
+    matches!(items.first().map(|item| &item.kind),
+             Some(ExprKind::Symbol(name)) if name == "import")
+}
+
+/// Split a unit's top-level forms at import boundaries: every segment ends
+/// with an import form (except possibly the last). Compiling and executing
+/// segment-by-segment makes each import's target evaluated before any
+/// later form COMPILES, so the next segment's compiler is re-seeded with
+/// the target's defstate keyspace, macros and compat aliases.
+fn split_at_top_level_imports(exprs: &[Expr]) -> Vec<&[Expr]> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (idx, expr) in exprs.iter().enumerate() {
+        if is_top_level_import(expr) {
+            segments.push(&exprs[start..=idx]);
+            start = idx + 1;
+        }
     }
-    exprs
-        .iter()
-        .map(|expr| {
-            convert_source_expr(expr, source_revision, &local_defwidgets, &macro_names, true)
-        })
-        .collect()
+    if start < exprs.len() || segments.is_empty() {
+        segments.push(&exprs[start..]);
+    }
+    segments
 }
 
 fn source_origin_number_arg(value: &Value) -> Option<usize> {
@@ -1544,6 +1716,8 @@ impl Value {
                 slot: slot.clone(),
             },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+            Self::OverrideDispatcher(name) => Self::OverrideDispatcher(name.clone()),
+            Self::OverrideOriginal(name) => Self::OverrideOriginal(name.clone()),
             Self::HostHandle { kind, id, callable } => Self::HostHandle {
                 kind: kind.clone(),
                 id: *id,
@@ -1710,7 +1884,7 @@ fn annotate_explicit_subtree_root(
 fn annotate_widget_tree_stable_ids(
     value: &Value,
     source_buffer_id: Option<BufferId>,
-    source_module: Option<&std::path::Path>,
+    source_file: Option<&std::path::Path>,
     target: &EffectTarget,
     parent_stable_id: Option<u64>,
     path: &mut Vec<usize>,
@@ -1749,7 +1923,7 @@ fn annotate_widget_tree_stable_ids(
                             let annotated_child = annotate_widget_tree_stable_ids(
                                 &child.borrow(),
                                 source_buffer_id,
-                                source_module,
+                                source_file,
                                 target,
                                 Some(stable_id),
                                 path,
@@ -1780,13 +1954,13 @@ fn annotate_widget_tree_stable_ids(
             Rc::new(RefCell::new(Value::Number(source_buffer_id as f64))),
         );
     }
-    if let Some(source_module) = source_module
+    if let Some(source_file) = source_file
         && !annotated.contains_key(SOURCE_MODULE_PATH_PROP)
     {
         annotated.insert(
             SOURCE_MODULE_PATH_PROP.to_string(),
             Rc::new(RefCell::new(Value::String(
-                source_module.display().to_string(),
+                source_file.display().to_string(),
             ))),
         );
     }
@@ -1856,6 +2030,24 @@ pub struct VM {
     /// listeners. Re-adding with an existing key replaces that entry in place,
     /// so re-evaluating a module never duplicates its listeners.
     pub extension_hooks: HashMap<String, Vec<(String, Value)>>,
+    /// Qualified factory symbol → advice registrations. Entries are keyed by
+    /// overriding module within each set; the most recently evaluated module
+    /// is active. Factory global cells remain untouched underneath.
+    pub overrides: HashMap<String, OverrideSet>,
+    /// Modules declared via `(module NAME)` → the file that declared them
+    /// (None for include_str!-style sources with no path). `import`
+    /// consults this for load-once semantics (spec §4).
+    pub declared_modules: HashMap<String, Option<std::path::PathBuf>>,
+    /// Module name → the import pass that last evaluated it (spec §4, §11
+    /// q4). `import` is load-once *per pass*, not forever: hot reload
+    /// re-evaluates a changed file's owner root, and since the root reaches
+    /// its children through `import`, a permanent ledger would make that
+    /// re-eval skip every child and silently drop the edit. Bumping the
+    /// epoch (`begin_import_pass`) is what re-arms them.
+    pub imported_at_epoch: HashMap<String, u64>,
+    /// Current import pass. Starts at 1 so entries from a plain
+    /// `eval_module_source` (no transaction) still dedupe within that pass.
+    pub import_pass_epoch: u64,
 }
 
 pub struct VmStateSnapshot {
@@ -1890,6 +2082,10 @@ pub struct VmStateSnapshot {
     source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
+    overrides: HashMap<String, OverrideSet>,
+    declared_modules: HashMap<String, Option<std::path::PathBuf>>,
+    imported_at_epoch: HashMap<String, u64>,
+    import_pass_epoch: u64,
 }
 
 fn clone_globals_for_snapshot(
@@ -2319,6 +2515,81 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Nil
     });
 
+    // Module system (spec §2/§4). (module NAME) compiles to a
+    // __module-declare call so the runtime knows the module is loaded and
+    // which file declared it; (import NAME …) compiles to __import-module,
+    // which resolves the name to a file and evaluates it exactly once.
+    vm.register_native_with_vm("__module-declare", |args, vm| {
+        let Some(Value::String(name)) = args.first() else {
+            log_native_misuse("__module-declare", "expects a module name string");
+            return Value::Nil;
+        };
+        let path = vm.current_source_file();
+        vm.declared_modules.insert(name.clone(), path);
+        // A module evaluated by `load` counts as satisfied for this pass too,
+        // so a later `import` of it does not double-evaluate (ui/effects.lisp
+        // still `load`s files that effects/* modules import).
+        let epoch = vm.import_pass_epoch;
+        vm.imported_at_epoch.insert(name.clone(), epoch);
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("__import-module", |args, vm| {
+        let Some(Value::String(name)) = args.first() else {
+            log_native_misuse("__import-module", "expects a module name string");
+            return Value::Nil;
+        };
+        if crate::modules::CORE_NAMESPACES.contains(&name.as_str())
+            || name == crate::modules::IMPLICIT_MODULE
+        {
+            return Value::Nil; // built in, never a file
+        }
+        // Load-once *per import pass* (see `imported_at_epoch`). Recorded
+        // before the eval so an import cycle terminates on the second visit
+        // rather than recursing.
+        let epoch = vm.import_pass_epoch;
+        if vm.imported_at_epoch.get(name) == Some(&epoch) {
+            return Value::Nil;
+        }
+        vm.imported_at_epoch.insert(name.clone(), epoch);
+        let mut errors = Vec::new();
+        for candidate in crate::modules::module_file_candidates(name) {
+            match vm.source_manager.load_source(&candidate) {
+                Ok(loaded) => {
+                    let path_display = loaded.path.display().to_string();
+                    return match vm.eval_module_source(
+                        loaded.path,
+                        &loaded.text,
+                        loaded.revision,
+                    ) {
+                        Ok(_) => {
+                            if !vm.declared_modules.contains_key(name) {
+                                vm.source_load_errors.push(format!(
+                                    "import {name}: {path_display} did not declare \
+                                     (module {name})"
+                                ));
+                            }
+                            Value::Nil
+                        }
+                        Err(e) => {
+                            let message =
+                                format!("import {name}: {path_display}: eval error: {e:?}");
+                            vm.source_load_errors.push(message.clone());
+                            Value::String(message)
+                        }
+                    };
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        let message = format!(
+            "import {name}: no module file found ({})",
+            errors.join("; ")
+        );
+        vm.source_load_errors.push(message.clone());
+        Value::String(message)
+    });
+
     // Emacs-style extension hooks. (defhook "name") declares a hook and
     // defines a global function of that name that runs its listeners, so call
     // sites invoke hooks like ordinary functions. (add-hook name key fn)
@@ -2378,6 +2649,58 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         };
         run_extension_hook(vm, &name, args)
+    });
+
+    // `override` itself is compiler syntax so its symbol target is not read as
+    // a value. These private natives receive the canonical target and closure.
+    vm.register_native_with_vm("__register-override", |args, vm| {
+        let (Some(Value::String(name)), Some(Value::String(kind)), Some(callback)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            log_native_misuse(
+                "__register-override",
+                "expects target string, kind string, and callback",
+            );
+            return Value::Nil;
+        };
+        let kind = match kind.as_str() {
+            "replace" => OverrideKind::Replace,
+            "around" => OverrideKind::Around,
+            _ => {
+                log_native_misuse("__register-override", "unknown override kind");
+                return Value::Nil;
+            }
+        };
+        let overriding_module = vm.current_module_name().to_string();
+        let set = vm
+            .overrides
+            .entry(name.clone())
+            .or_insert_with(|| OverrideSet {
+                entries: Vec::new(),
+                dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(name.clone()))),
+            });
+        // Re-evaluation replaces this module's registration and makes it the
+        // active (most recently evaluated) layer rather than stacking copies.
+        set.entries
+            .retain(|entry| entry.overriding_module != overriding_module);
+        set.entries.push(OverrideEntry {
+            overriding_module,
+            kind,
+            callback: callback.clone(),
+            quarantined: false,
+        });
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("__remove-override", |args, vm| {
+        let Some(Value::String(name)) = args.first() else {
+            log_native_misuse("__remove-override", "expects a target string");
+            return Value::Nil;
+        };
+        // The public contract is an immediate return to factory behavior, not
+        // exposure of an older hidden advice layer.
+        vm.overrides.remove(name);
+        Value::Nil
     });
 
     vm.register_native("zip", |args| {
@@ -3274,6 +3597,10 @@ impl VM {
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
+            overrides: HashMap::new(),
+            declared_modules: HashMap::new(),
+            imported_at_epoch: HashMap::new(),
+            import_pass_epoch: 1,
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
         };
@@ -3291,8 +3618,43 @@ impl VM {
         name: &str,
         f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static,
     ) {
-        let idx = self.ensure_global(name);
-        self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
+        // Natives registered at startup (empty table) intern flat; natives
+        // registered mid-run by name (defhook, defwidget) must land in the
+        // qualified slot if the compiler already interned one for that name
+        // — same resolve-existing rule as `set_global_value`.
+        let idx = match self.resolve_global_read_index(name) {
+            Some(idx) => idx,
+            None => self.ensure_global(name),
+        };
+        if idx >= self.globals.len() {
+            self.globals.resize(idx + 1, None);
+        }
+        let native = Value::NativeFunction(Rc::new(f));
+        // Re-registration mutates the existing cell in place instead of
+        // replacing the slot Option: a converted module's healed alias slot
+        // (spec §10 stage 3) shares the cell, and replacing the Option would
+        // strand it on the old native forever (hazard (m) for natives —
+        // test harnesses re-register stubs like `seq-has-selection?` after
+        // module slots have healed). Transactionally safe: snapshots
+        // deep-clone every cell, so restore rebuilds slots wholesale.
+        match &self.globals[idx] {
+            Some(cell) => *cell.borrow_mut() = native,
+            None => self.globals[idx] = Some(Rc::new(RefCell::new(native))),
+        }
+    }
+
+    /// Register a native under a namespace (spec §3 "Core namespaces"):
+    /// `register_native_in_namespace("sdf", "layer", …)` interns
+    /// `sdf/layer`. Blessed namespaces (`sdf`, `eseq.core`) need no import
+    /// at the call site.
+    pub fn register_native_in_namespace(
+        &mut self,
+        namespace: &str,
+        name: &str,
+        f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static,
+    ) {
+        let qualified = crate::modules::qualify(namespace, name);
+        self.register_native_with_vm(&qualified, f);
     }
 
     pub fn add_global_store_hook(&mut self, hook: GlobalStoreHook) {
@@ -3319,14 +3681,83 @@ impl VM {
             .and_then(|chunk| chunk.source_symbol.clone())
     }
 
-    pub fn current_source_module(&self) -> Option<std::path::PathBuf> {
+    /// The module of the currently executing chunk (spec §5): registration
+    /// natives (widget constructors, `bind-key`, `define-mode`, …) call
+    /// this to learn the module current at their call site. Outside a
+    /// declared module this is the implicit `eseq.vanilla`.
+    pub fn current_module_name(&self) -> &str {
         self.chunks
             .get(self.current_chunk)
-            .and_then(|chunk| chunk.source_module.clone())
-            .or_else(|| self.source_manager.current_module())
+            .and_then(|chunk| chunk.source_module.as_deref())
+            .unwrap_or(crate::modules::IMPLICIT_MODULE)
+    }
+
+    /// Registry auto-qualification for widget `:key` strings (spec §5):
+    /// inside a declared module the stable key is prefixed with the module
+    /// BEFORE it feeds any identity hash — `:key (str "cell-glyph-" i)`
+    /// in `eseq.mixer` becomes `"eseq.mixer/cell-glyph-3"` — by writing
+    /// the qualified form into `__stable-key` (the raw `:key` prop stays
+    /// as authored). Every downstream identity reader (stable widget
+    /// hashing here, layout's FNV `stable_key_to_widget_id`) prefers
+    /// `__stable-key`. Vanilla chunks change nothing, which keeps
+    /// serialized layout/p-lock identity stable until a file converts.
+    pub fn qualify_widget_stable_key(&self, widget: &mut Value) {
+        let module = self.current_module_name();
+        if module == crate::modules::IMPLICIT_MODULE {
+            return;
+        }
+        let module = module.to_string();
+        let Value::Map(map) = widget else {
+            return;
+        };
+        if map.contains_key(STABLE_KEY_PROP) {
+            return;
+        }
+        let Some(key) = stable_key_value(map) else {
+            return;
+        };
+        if crate::modules::is_qualified(&key) {
+            return;
+        }
+        map.insert(
+            STABLE_KEY_PROP.to_string(),
+            Rc::new(RefCell::new(Value::String(crate::modules::qualify(
+                &module, &key,
+            )))),
+        );
+    }
+
+    pub fn current_source_file(&self) -> Option<std::path::PathBuf> {
+        self.chunks
+            .get(self.current_chunk)
+            .and_then(|chunk| chunk.source_file.clone())
+            .or_else(|| self.source_manager.current_source_file())
+    }
+
+    /// Names that may head a macro call in source about to be compiled.
+    /// The source-annotation pass uses this to keep widget-provenance props
+    /// off macro calls.
+    fn macro_call_names(&self) -> HashSet<String> {
+        self.macros.keys().cloned().collect()
     }
 
     /// Compile and run `code` in this VM's existing context (globals persist).
+    ///
+    /// The unit is split at top-level `(import …)` forms (spec §4: import's
+    /// compile-time half): each segment is compiled and EXECUTED before the
+    /// next segment is compiled, so an import's target is evaluated —
+    /// through the ordinary `__import-module` runtime ledger — before any
+    /// later form in this unit compiles, and the next segment's compiler is
+    /// re-seeded from the VM with the target's defstate keyspace, macros
+    /// and compat aliases. A unit with no top-level imports is exactly one
+    /// segment, i.e. the historical whole-unit compile.
+    ///
+    /// Failure semantics: a compile error in segment N surfaces after
+    /// segments 1..N-1 already executed. Inside the transactional eval
+    /// entry points the surrounding snapshot rolls everything back; on a
+    /// bare `eval_str` the earlier segments' effects persist, matching the
+    /// existing precedent that load-once side effects persist across a
+    /// failed load.
     pub fn eval_str(&mut self, code: &str) -> Result<Option<Value>, VMError> {
         let tokens = Parser::new(code.to_string())
             .parse_spanned()
@@ -3338,64 +3769,86 @@ impl VM {
             .source_manager
             .current_revision()
             .unwrap_or_else(|| crate::hot_reload::hash_source(code));
-        let existing_macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
-        let exprs = convert_source_exprs_with_origins(
-            &spanned_exprs,
-            source_revision,
-            &existing_macro_names,
-        );
-        self.register_static_inline_widgets(&spanned_exprs, source_revision);
+        let conversion_context = unit_conversion_context(&spanned_exprs);
+        let segments = split_at_top_level_imports(&spanned_exprs);
+        let mut module_context = None;
+        let mut last_value = None;
+        for segment in segments {
+            let existing_macro_names = self.macro_call_names();
+            let exprs = convert_segment_exprs_with_origins(
+                &conversion_context,
+                segment,
+                source_revision,
+                &existing_macro_names,
+            );
+            self.register_static_inline_widgets(segment, source_revision);
 
-        let entry_idx = self.chunks.len();
-        let names_len = self.global_names.len();
-        // Move the program into the compiler instead of cloning it: this path
-        // runs on every shortcut eval, and cloning (then dropping) thousands
-        // of chunks made every keyboard action pay ~10 ms. The compiler only
-        // appends chunks and global names, so an error restores the moved
-        // state exactly by truncating to the pre-eval lengths.
-        let existing = std::mem::take(&mut self.chunks);
-        let names = std::mem::take(&mut self.global_names);
-        let reactive_namespaces = self.reactive_namespaces.clone();
-        let derived_bindings = self.derived_bindings.clone();
-        let state_bindings = self.state_bindings.clone();
-        let next_node_id = self.dag.next_id;
+            let entry_idx = self.chunks.len();
+            let names_len = self.global_names.len();
+            // Move the program into the compiler instead of cloning it: this
+            // path runs on every shortcut eval, and cloning (then dropping)
+            // thousands of chunks made every keyboard action pay ~10 ms. The
+            // compiler only appends chunks and global names, so an error
+            // restores the moved state exactly by truncating to the
+            // pre-segment lengths.
+            let existing = std::mem::take(&mut self.chunks);
+            let names = std::mem::take(&mut self.global_names);
+            let reactive_namespaces = self.reactive_namespaces.clone();
+            let derived_bindings = self.derived_bindings.clone();
+            let state_bindings = self.state_bindings.clone();
+            let next_node_id = self.dag.next_id;
 
-        let macros = self.macros.clone();
-        let source_module = self.source_manager.current_module();
-        let mut compiler = Compiler::new_repl(
-            exprs,
-            existing,
-            names,
-            reactive_namespaces,
-            derived_bindings,
-            state_bindings,
-            next_node_id,
-            macros,
-            source_module,
-        );
-        match compiler.compile() {
-            Ok(chunks) => {
-                self.chunks = chunks;
-                self.global_names = compiler.take_global_names();
-                self.derived_bindings = compiler.take_derived_bindings();
-                self.state_bindings = compiler.take_state_bindings();
-                self.dag.next_id = compiler.next_node_id();
-                // The compiler's macro table started from this VM's, so
-                // taking it wholesale keeps every existing macro and merges
-                // any new definitions.
-                self.macros = compiler.take_macros();
-                self.execute_from(entry_idx)
+            let macros = self.macros.clone();
+            let source_file = self.source_manager.current_source_file();
+            let mut compiler = Compiler::new_repl(
+                exprs,
+                existing,
+                names,
+                reactive_namespaces,
+                derived_bindings,
+                state_bindings,
+                next_node_id,
+                macros,
+                source_file,
+            );
+            // Continuation segments belong to the same unit: the module
+            // declaration and any :as/:refer bindings compiled in earlier
+            // segments carry forward.
+            if let Some(context) = module_context.take() {
+                compiler.set_module_context(context);
             }
-            Err(_) => {
-                let mut chunks = compiler.take_chunks();
-                chunks.truncate(entry_idx);
-                self.chunks = chunks;
-                let mut names = compiler.take_global_names();
-                names.truncate(names_len);
-                self.global_names = names;
-                Err(VMError::CompileError)
+            match compiler.compile() {
+                Ok(chunks) => {
+                    self.chunks = chunks;
+                    self.global_names = compiler.take_global_names();
+                    self.derived_bindings = compiler.take_derived_bindings();
+                    self.state_bindings = compiler.take_state_bindings();
+                    self.dag.next_id = compiler.next_node_id();
+                    // The compiler's macro table started from this VM's, so
+                    // taking it wholesale keeps every existing macro and
+                    // merges any new definitions.
+                    self.macros = compiler.take_macros();
+                    for warning in compiler.take_warnings() {
+                        self.source_manager.push_diagnostic(warning);
+                    }
+                    module_context = Some(compiler.take_module_context());
+                    last_value = self.execute_from(entry_idx)?;
+                }
+                Err(error) => {
+                    if let CompilerError::Message(message) = &error {
+                        self.source_load_errors.push(message.clone());
+                    }
+                    let mut chunks = compiler.take_chunks();
+                    chunks.truncate(entry_idx);
+                    self.chunks = chunks;
+                    let mut names = compiler.take_global_names();
+                    names.truncate(names_len);
+                    self.global_names = names;
+                    return Err(VMError::CompileError);
+                }
             }
         }
+        Ok(last_value)
     }
 
     pub fn eval_module_source(
@@ -3404,17 +3857,35 @@ impl VM {
         source: &str,
         revision: u64,
     ) -> Result<Option<Value>, VMError> {
-        let defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
+        // Path-associated source from load/import, editor evaluation, scripts,
+        // captures, and hot reload converges here. Virtual generated modules
+        // have no backing file and are scanned at their authored-file seams.
+        if path.is_file() && self.source_manager.should_scan_module_aliases(&path) {
+            crate::module_alias_migration::warn_on_old_module_aliases(&path, source);
+        }
+        let mut defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
             self.source_load_errors
                 .push(format!("{}: {error}", path.display()));
             VMError::ParseError
         })?;
+        // Textual extraction yields bare names, but the compiler interns
+        // most defs qualified (`eseq.vanilla/name`) and effect reads record
+        // interned names. Track both forms so hot-reload invalidation
+        // matches regardless of which slot a def resolved to (a def
+        // shadowing a flat native stays flat). Superset only means
+        // conservative over-invalidation.
+        let qualified: Vec<String> = defined_symbols
+            .iter()
+            .filter(|name| !crate::modules::is_qualified(name))
+            .map(|name| crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name))
+            .collect();
+        defined_symbols.extend(qualified);
         self.clear_effects_for_module(&path);
         self.source_manager
             .remember_evaluated_source(path.clone(), revision, source);
-        self.source_manager.enter_module(path.clone(), revision);
+        self.source_manager.enter_file(path.clone(), revision);
         let result = self.eval_str(source);
-        self.source_manager.leave_module();
+        self.source_manager.leave_file();
         if result.is_ok() {
             self.source_manager.record_module_success(
                 path,
@@ -3484,6 +3955,34 @@ impl VM {
                     )
                 })
                 .collect(),
+            overrides: self
+                .overrides
+                .iter()
+                .map(|(name, set)| {
+                    let entries = set
+                        .entries
+                        .iter()
+                        .map(|entry| OverrideEntry {
+                            overriding_module: entry.overriding_module.clone(),
+                            kind: entry.kind,
+                            callback: clone_value_for_snapshot(&entry.callback),
+                            quarantined: entry.quarantined,
+                        })
+                        .collect();
+                    (
+                        name.clone(),
+                        OverrideSet {
+                            entries,
+                            dispatcher: Rc::new(RefCell::new(Value::OverrideDispatcher(
+                                name.clone(),
+                            ))),
+                        },
+                    )
+                })
+                .collect(),
+            declared_modules: self.declared_modules.clone(),
+            imported_at_epoch: self.imported_at_epoch.clone(),
+            import_pass_epoch: self.import_pass_epoch,
         }
     }
 
@@ -3519,6 +4018,10 @@ impl VM {
         self.source_load_errors = snapshot.source_load_errors;
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
+        self.overrides = snapshot.overrides;
+        self.declared_modules = snapshot.declared_modules;
+        self.imported_at_epoch = snapshot.imported_at_epoch;
+        self.import_pass_epoch = snapshot.import_pass_epoch;
     }
 
     pub fn take_pending_reactive_sets(&mut self) -> Vec<(String, String, Value)> {
@@ -3546,7 +4049,7 @@ impl VM {
             .source_manager
             .current_revision()
             .unwrap_or_else(|| crate::hot_reload::hash_source(code));
-        let existing_macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let existing_macro_names = self.macro_call_names();
         let exprs = convert_source_exprs_with_origins(
             &spanned_exprs,
             source_revision,
@@ -3567,7 +4070,7 @@ impl VM {
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
-        let source_module = self.source_manager.current_module();
+        let source_file = self.source_manager.current_source_file();
         let compile_started = std::time::Instant::now();
         let mut compiler = Compiler::new_repl(
             exprs,
@@ -3578,7 +4081,7 @@ impl VM {
             state_bindings,
             next_node_id,
             macros,
-            source_module,
+            source_file,
         );
         match compiler.compile() {
             Ok(chunks) => {
@@ -3588,8 +4091,14 @@ impl VM {
                 self.state_bindings = compiler.take_state_bindings();
                 self.dag.next_id = compiler.next_node_id();
                 self.macros = compiler.take_macros();
+                for warning in compiler.take_warnings() {
+                    self.source_manager.push_diagnostic(warning);
+                }
             }
-            Err(_) => {
+            Err(error) => {
+                if let CompilerError::Message(message) = &error {
+                    self.source_load_errors.push(message.clone());
+                }
                 let mut chunks = compiler.take_chunks();
                 chunks.truncate(entry_idx);
                 self.chunks = chunks;
@@ -3617,12 +4126,213 @@ impl VM {
         idx
     }
 
+    /// Runtime by-name resolution ladder (module-system spec §3, slice 0),
+    /// mirroring `Compiler::resolve_global_name`: a qualified name resolves
+    /// as-is; a bare name prefers the current module's qualified entry
+    /// (`eseq.vanilla/name`) and falls back to the flat entry (natives,
+    /// host-registered globals). Keep the two in sync.
+    fn resolve_global_read_index(&self, name: &str) -> Option<usize> {
+        if crate::modules::is_qualified(name) {
+            let exact = self.global_names.iter().position(|n| n == name);
+            if exact.is_some() {
+                return exact;
+            }
+            // Core namespaces resolve bare or qualified without import
+            // (spec §3): `eseq.core/label` falls back to the flat native.
+            if let Some((ns, base)) = crate::modules::split_qualified(name) {
+                if crate::modules::CORE_NAMESPACES.contains(&ns)
+                    || ns == crate::modules::IMPLICIT_MODULE
+                {
+                    return self.global_names.iter().position(|n| n == base);
+                }
+            }
+            return None;
+        }
+        // Reactive namespaces (SEQ, THEME, …) are a flat keyspace: runtime
+        // field access looks the namespace map up by its flat name, so
+        // by-name writes must never divert into a qualified slot. Mirrors
+        // the compiler ladder's reactive_namespaces exemption.
+        if self.reactive_namespaces.contains(name) {
+            return self.global_names.iter().position(|n| n == name);
+        }
+        let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
+        self.global_names
+            .iter()
+            .position(|n| *n == qualified)
+            .or_else(|| self.global_names.iter().position(|n| n == name))
+    }
+
     pub fn has_global(&self, name: &str) -> bool {
-        self.global_names.iter().any(|n| n == name)
+        self.resolve_global_read_index(name).is_some()
+    }
+
+    /// Effective cell for a cached global index. The empty-registry branch is
+    /// deliberately first: global reads are ubiquitous, while overrides are
+    /// optional user configuration. Only the non-empty case hashes names.
+    fn override_dispatcher_for_index(&self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        if self.overrides.is_empty() {
+            return None;
+        }
+        let name = self.global_names.get(idx)?;
+        let set = self.overrides.get(name).or_else(|| {
+            (!crate::modules::is_qualified(name)).then(|| {
+                std::iter::once(crate::modules::IMPLICIT_MODULE)
+                    .chain(crate::modules::CORE_NAMESPACES.iter().copied())
+                    .find_map(|namespace| {
+                        self.overrides
+                            .get(&crate::modules::qualify(namespace, name))
+                    })
+            })?
+        })?;
+        if set.entries.last().is_some_and(|entry| !entry.quarantined) {
+            Some(set.dispatcher.clone())
+        } else {
+            None
+        }
+    }
+
+    fn raw_global_cell(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        self.globals
+            .get(idx)
+            .and_then(|slot| slot.clone())
+            .or_else(|| self.late_bind_empty_global(idx))
+    }
+
+    fn global_read_cell(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        self.override_dispatcher_for_index(idx)
+            .or_else(|| self.raw_global_cell(idx))
+    }
+
+    fn invoke_raw_global(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, VMError> {
+        let idx = self
+            .resolve_global_read_index(name)
+            .ok_or_else(|| VMError::UnknownVariable(name.to_string()))?;
+        let callable = self
+            .raw_global_cell(idx)
+            .ok_or_else(|| VMError::UnknownVariable(name.to_string()))?
+            .borrow()
+            .clone();
+        self.invoke(callable, args)
+    }
+
+    fn dispatch_override(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, VMError> {
+        let Some(active) = self
+            .overrides
+            .get(name)
+            .and_then(|set| set.entries.last())
+            .cloned()
+        else {
+            return self.invoke_raw_global(name, args);
+        };
+        if active.quarantined {
+            return self.invoke_raw_global(name, args);
+        }
+
+        let mut override_args = args.clone();
+        if active.kind == OverrideKind::Around {
+            override_args.insert(0, Value::OverrideOriginal(name.to_string()));
+        }
+        match self.invoke(active.callback, override_args) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if let Some(entry) = self
+                    .overrides
+                    .get_mut(name)
+                    .and_then(|set| {
+                        set.entries.iter_mut().rev().find(|entry| {
+                            entry.overriding_module == active.overriding_module
+                        })
+                    })
+                {
+                    entry.quarantined = true;
+                }
+                let detail = self.last_reactive_error_detail.as_deref().unwrap_or("-");
+                let message = format!(
+                    "override {name} from {} failed ({error:?}, detail={detail}); \
+                     quarantined and using factory definition",
+                    active.overriding_module
+                );
+                self.source_load_errors.push(message.clone());
+                if debug_lisp_callback_errors_enabled() {
+                    eprintln!("[lisp-error][override] {message}");
+                }
+                self.invoke_raw_global(name, args)
+            }
+        }
+    }
+
+    /// Late-binding heal for a compile-time forward reference (module-system
+    /// spec §3, migration pragmatics): a slot interned before its symbol
+    /// existed anywhere stays empty if the definition later landed in a
+    /// DIFFERENT slot — a declared module's bare forward reference to a
+    /// vanilla symbol defined in a later-loaded file, a flat native
+    /// registered after a reference compiled.
+    ///
+    /// For a qualified stale slot, try the implicit-module spelling and then
+    /// the flat base name. A flat empty slot has no fallback.
+    ///
+    /// The healed slot is *aliased* to the found cell, so a later StoreGlobal
+    /// to this index replaces the slot `Option` and unlinks the alias —
+    /// write-then-read keeps last-writer-wins.
+    fn late_bind_empty_global(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
+        let name = self.global_names.get(idx)?.clone();
+        let split = crate::modules::split_qualified(&name);
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some((ns, base)) = split {
+            if ns != crate::modules::IMPLICIT_MODULE {
+                candidates.push(crate::modules::qualify(crate::modules::IMPLICIT_MODULE, base));
+            }
+            candidates.push(base.to_string());
+        }
+        for candidate in candidates {
+            if let Some(candidate_idx) = self.global_names.iter().position(|n| *n == candidate)
+                && candidate_idx != idx
+                && let Some(Some(cell)) = self.globals.get(candidate_idx).cloned()
+            {
+                if idx >= self.globals.len() {
+                    self.globals.resize(idx + 1, None);
+                }
+                self.globals[idx] = Some(cell.clone());
+                return Some(cell);
+            }
+        }
+        None
+    }
+
+    /// A reactive namespace registered after code already compiled a bare
+    /// reference to its name (interned `eseq.vanilla/NAME` while the
+    /// namespace was unknown) leaves that qualified slot stale. Point it at
+    /// the flat slot's cell so early-compiled references see the live map.
+    pub fn alias_stale_qualified_slot(&mut self, name: &str) {
+        let qualified = crate::modules::qualify(crate::modules::IMPLICIT_MODULE, name);
+        let Some(qualified_idx) = self.global_names.iter().position(|n| *n == qualified) else {
+            return;
+        };
+        let Some(flat_idx) = self.global_names.iter().position(|n| n == name) else {
+            return;
+        };
+        if let Some(Some(cell)) = self.globals.get(flat_idx).cloned() {
+            if qualified_idx < self.globals.len() {
+                self.globals[qualified_idx] = Some(cell);
+            }
+        }
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
-        let idx = self.ensure_global(name);
+        // Write into the slot a lisp reference would resolve to; only
+        // create a new (flat, host-owned) slot when neither form exists.
+        let idx = match self.resolve_global_read_index(name) {
+            Some(idx) => idx,
+            None => self.ensure_global(name),
+        };
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, None);
         }
@@ -3634,15 +4344,43 @@ impl VM {
     }
 
     pub fn global_value(&self, name: &str) -> Option<Value> {
-        let idx = self.global_names.iter().position(|global| global == name)?;
-        self.globals
-            .get(idx)
-            .and_then(|value| value.as_ref())
+        let idx = self.resolve_global_read_index(name)?;
+        self.override_dispatcher_for_index(idx)
+            .or_else(|| self.globals.get(idx).and_then(|value| value.clone()))
             .map(|value| value.borrow().clone())
     }
 
+    /// Runtime state-binding lookup: exact key first (flat, or an already
+    /// qualified name), then the executing chunk's module key (spec §5 —
+    /// a declared module's `defstate` interns qualified, but its own code
+    /// and defwidget shader uniforms read it by bare name).
+    fn state_binding_node(&self, name: &str) -> Option<NodeId> {
+        if let Some(node_id) = self.state_bindings.get(name) {
+            return Some(*node_id);
+        }
+        // `eseq.vanilla/x` registers flat (Compiler::qualify_registration_name),
+        // so the §3 escape-hatch spelling of a pinned `defstate` reduces to the
+        // flat key here too — mirrors `Compiler::state_binding_for`.
+        let stripped = crate::modules::strip_implicit(name);
+        if stripped != name
+            && let Some(node_id) = self.state_bindings.get(stripped)
+        {
+            return Some(*node_id);
+        }
+        let module = self.current_module_name();
+        if module != crate::modules::IMPLICIT_MODULE
+            && !crate::modules::is_qualified(name)
+            && let Some(node_id) = self
+                .state_bindings
+                .get(&crate::modules::qualify(module, name))
+        {
+            return Some(*node_id);
+        }
+        None
+    }
+
     pub fn read_tracked_state_value(&mut self, name: &str) -> Option<Value> {
-        let node_id = self.state_bindings.get(name).copied()?;
+        let node_id = self.state_binding_node(name)?;
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
             self.dag.add_edge(node_id, ctx_id);
         }
@@ -3694,9 +4432,9 @@ impl VM {
             .iter()
             .filter_map(|(id, node)| match node {
                 ReactiveNode::Effect {
-                    source_module: Some(source_module),
+                    source_file: Some(source_file),
                     ..
-                } if source_module == module => Some(*id),
+                } if source_file == module => Some(*id),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -3714,9 +4452,9 @@ impl VM {
                 matches!(
                     node,
                     ReactiveNode::Effect {
-                        source_module: Some(source_module),
+                        source_file: Some(source_file),
                         ..
-                    } if source_module == module
+                    } if source_file == module
                 )
             })
             .count()
@@ -3729,14 +4467,14 @@ impl VM {
         target: EffectTarget,
     ) {
         let source_buffer_id = self.current_effect_source_buffer_id;
-        let source_module = self.source_manager.current_module();
+        let source_file = self.source_manager.current_source_file();
         let source_revision = self.source_manager.current_revision();
         match self.dag.nodes.get_mut(&node_id) {
             Some(ReactiveNode::Effect {
                 chunk_idx: current_chunk_idx,
                 callable,
                 source_buffer_id: current_source_buffer_id,
-                source_module: current_source_module,
+                source_file: current_source_file,
                 source_revision: current_source_revision,
                 target: current_target,
                 subtree_root_id: None,
@@ -3748,7 +4486,7 @@ impl VM {
                 *current_chunk_idx = chunk_idx;
                 *callable = None;
                 *current_source_buffer_id = source_buffer_id;
-                *current_source_module = source_module;
+                *current_source_file = source_file;
                 *current_source_revision = source_revision;
                 *current_target = target;
                 *parent_subtree_root_id = None;
@@ -3763,7 +4501,7 @@ impl VM {
                     chunk_idx,
                     callable: None,
                     source_buffer_id,
-                    source_module,
+                    source_file,
                     source_revision,
                     target,
                     subtree_root_id: None,
@@ -3779,7 +4517,7 @@ impl VM {
                     chunk_idx,
                     callable: None,
                     source_buffer_id,
-                    source_module,
+                    source_file,
                     source_revision,
                     target,
                     subtree_root_id: None,
@@ -3849,6 +4587,14 @@ impl VM {
 
     pub fn inline_widget_registration_enabled(&self) -> bool {
         self.current_effect_source_buffer_id.is_some()
+    }
+
+    /// Start a new import pass (spec §4, §11 q4). Every transactional eval
+    /// or hot reload calls this so `import` re-evaluates the modules it
+    /// reaches: without it, re-running the owner root would skip every
+    /// imported child and the edit would never land.
+    pub fn begin_import_pass(&mut self) {
+        self.import_pass_epoch = self.import_pass_epoch.wrapping_add(1);
     }
 
     pub fn begin_inline_widget_capture(&mut self) {
@@ -4060,7 +4806,7 @@ impl VM {
             chunk_idx,
             callable: Some(callable.clone()),
             source_buffer_id: self.current_effect_source_buffer_id,
-            source_module: self.source_manager.current_module(),
+            source_file: self.source_manager.current_source_file(),
             source_revision: self.source_manager.current_revision(),
             target: self.current_effect_target.clone(),
             subtree_root_id: Some(root_id),
@@ -4227,6 +4973,8 @@ impl VM {
                 }
                 Ok(Some(result))
             }
+            Value::OverrideDispatcher(name) => self.dispatch_override(&name, args),
+            Value::OverrideOriginal(name) => self.invoke_raw_global(&name, args),
             Value::HostHandle { callable, .. } => {
                 let result = callable(args, self);
                 if self.execution_depth == 0 && !self.processing_reactive {
@@ -4521,9 +5269,16 @@ impl VM {
     }
 
     fn mark_owner_path_dirty(&mut self, owner_path: &str) {
-        let parts = owner_path.splitn(2, '.').collect::<Vec<_>>();
+        // Module-qualified names (`test.mod/panel`) are state keys, never
+        // reactive namespace.field paths — the first `/` wins over `.`
+        // (mirrors compile_set_statement).
+        let parts = if crate::modules::is_qualified(owner_path) {
+            vec![owner_path]
+        } else {
+            owner_path.splitn(2, '.').collect::<Vec<_>>()
+        };
         if parts.len() == 1 {
-            if let Some(node_id) = self.state_bindings.get(parts[0]).copied() {
+            if let Some(node_id) = self.state_binding_node(parts[0]) {
                 let current = self
                     .dag
                     .nodes
@@ -4588,26 +5343,26 @@ impl VM {
                     progressed = true;
                     let previous_owner = (
                         self.current_effect_source_buffer_id,
-                        self.source_manager.module_stack_snapshot(),
+                        self.source_manager.source_stack_snapshot(),
                         self.current_effect_target.clone(),
                     );
                     if let Some((
                         source_buffer_id,
-                        source_module,
+                        source_file,
                         source_revision,
                         target,
                         subtree_root_id,
                     )) = self.dag.nodes.get(&node_id).and_then(|node| match node {
                         ReactiveNode::Effect {
                             source_buffer_id,
-                            source_module,
+                            source_file,
                             source_revision,
                             target,
                             subtree_root_id,
                             ..
                         } => Some((
                             *source_buffer_id,
-                            source_module.clone(),
+                            source_file.clone(),
                             *source_revision,
                             target.clone(),
                             *subtree_root_id,
@@ -4615,14 +5370,14 @@ impl VM {
                         _ => None,
                     }) {
                         self.current_effect_source_buffer_id = source_buffer_id;
-                        let source_module_stack = match (source_module.clone(), source_revision) {
+                        let source_file_stack = match (source_file.clone(), source_revision) {
                             (Some(path), Some(revision)) => {
-                                vec![ModuleStackEntry { path, revision }]
+                                vec![SourceStackEntry { path, revision }]
                             }
                             _ => Vec::new(),
                         };
                         self.source_manager
-                            .restore_module_stack(source_module_stack);
+                            .restore_source_stack(source_file_stack);
                         self.current_effect_target = target;
                         if let Some(root_id) = subtree_root_id {
                             let Some(owner) = self.registered_subtree_owner(root_id) else {
@@ -4652,7 +5407,7 @@ impl VM {
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
                                 self.current_effect_source_buffer_id,
-                                source_module.as_deref(),
+                                source_file.as_deref(),
                                 &self.current_effect_target,
                                 None,
                                 &mut path,
@@ -4681,7 +5436,7 @@ impl VM {
                             self.pending_widget_trees
                                 .push(PendingUiUpdate::ReplaceSubtree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_module: source_module.clone(),
+                                    source_file: source_file.clone(),
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id: root_id,
                                     tree: annotated_tree,
@@ -4703,7 +5458,7 @@ impl VM {
                             self.current_subtree_capture_stack = previous_subtree_capture_stack;
                             self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                             self.current_effect_source_buffer_id = previous_owner.0;
-                            self.source_manager.restore_module_stack(previous_owner.1);
+                            self.source_manager.restore_source_stack(previous_owner.1);
                             self.current_effect_target = previous_owner.2;
                             continue;
                         }
@@ -4785,7 +5540,7 @@ impl VM {
                     self.current_subtree_capture_stack = previous_subtree_capture_stack;
                     self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                     self.current_effect_source_buffer_id = previous_owner.0;
-                    self.source_manager.restore_module_stack(previous_owner.1);
+                    self.source_manager.restore_source_stack(previous_owner.1);
                     self.current_effect_target = previous_owner.2;
                 }
 
@@ -4849,10 +5604,12 @@ impl VM {
     }
 
     fn unknown_global(&self, idx: usize) -> VMError {
+        // Report the bare name: the implicit-module prefix is an interning
+        // detail users never typed (module-system spec slice 0).
         let name = self
             .global_names
             .get(idx)
-            .cloned()
+            .map(|name| crate::modules::strip_implicit(name).to_string())
             .unwrap_or_else(|| format!("<global:{idx}>"));
         VMError::UnknownVariable(name)
     }
@@ -5052,8 +5809,14 @@ impl VM {
                                 stack.push(Rc::new(RefCell::new(Value::Bool(result))));
                             }
                             (right, left) => {
-                                self.last_reactive_error_detail =
-                                    Some(format!("{op:?} left={left:?} right={right:?}"));
+                                let chunk_sym = frames
+                                    .last()
+                                    .and_then(|f| self.chunks.get(f.chunk_idx))
+                                    .and_then(|c| c.source_symbol.clone())
+                                    .unwrap_or_default();
+                                self.last_reactive_error_detail = Some(format!(
+                                    "{op:?} left={left:?} right={right:?} in={chunk_sym}"
+                                ));
                                 return Err(VMError::IncorrectType);
                             }
                         }
@@ -5179,9 +5942,14 @@ impl VM {
                         if let (Some(name), Some(value)) =
                             (self.global_names.get(idx), stored.as_ref())
                         {
+                            // Hooks see the bare name: consumers (process/
+                            // channel naming) treat it as a user-visible
+                            // identifier. Revisit when registries qualify
+                            // per-module (spec §5, slice 3).
                             let value = value.borrow().clone();
+                            let hook_name = crate::modules::strip_implicit(name);
                             for hook in &self.global_store_hooks {
-                                hook(name, &value);
+                                hook(hook_name, &value);
                             }
                         }
                         frame.pc += 1;
@@ -5189,7 +5957,7 @@ impl VM {
                 }
                 OpCode::LoadGlobal(idx) => {
                     if let Some(frame) = frames.last_mut() {
-                        if let Some(Some(val)) = self.globals.get(idx).cloned() {
+                        if let Some(val) = self.global_read_cell(idx) {
                             if let Some(name) = self.global_names.get(idx).cloned() {
                                 self.record_symbol_read(&name);
                             }
@@ -5594,6 +6362,24 @@ impl VM {
                                 stack.push(Rc::new(RefCell::new(result)));
                                 frames.last_mut().unwrap().pc += 1;
                             }
+                            Value::OverrideDispatcher(name) | Value::OverrideOriginal(name) => {
+                                let name = name.clone();
+                                let is_dispatcher = matches!(&*borrowed, Value::OverrideDispatcher(_));
+                                drop(borrowed);
+                                let mut args: Vec<Value> = (0..arity)
+                                    .filter_map(|_| stack.pop())
+                                    .map(|v| v.borrow().clone())
+                                    .collect();
+                                args.reverse();
+                                let result = if is_dispatcher {
+                                    self.dispatch_override(&name, args)?
+                                } else {
+                                    self.invoke_raw_global(&name, args)?
+                                }
+                                .unwrap_or(Value::Nil);
+                                stack.push(Rc::new(RefCell::new(result)));
+                                frames.last_mut().unwrap().pc += 1;
+                            }
                             Value::HostHandle { callable, .. } => {
                                 let f = callable.clone();
                                 drop(borrowed);
@@ -5665,7 +6451,7 @@ impl VM {
                         let annotated_tree = annotate_widget_tree_stable_ids(
                             &tree.borrow(),
                             self.current_effect_source_buffer_id,
-                            self.source_manager.current_module().as_deref(),
+                            self.source_manager.current_source_file().as_deref(),
                             &self.current_effect_target,
                             None,
                             &mut path,
@@ -5683,7 +6469,7 @@ impl VM {
                             self.pending_widget_trees
                                 .push(PendingUiUpdate::ReplaceSubtree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_module: self.source_manager.current_module(),
+                                    source_file: self.source_manager.current_source_file(),
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id,
                                     tree: annotated_tree,
@@ -5693,7 +6479,7 @@ impl VM {
                             self.pending_widget_trees.push(PendingUiUpdate::FullTree(
                                 PendingWidgetTree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
-                                    source_module: self.source_manager.current_module(),
+                                    source_file: self.source_manager.current_source_file(),
                                     target: self.current_effect_target.clone(),
                                     tree: annotated_tree,
                                     reactive_dependencies: Vec::new(),
@@ -5739,8 +6525,8 @@ mod tests {
     use super::{
         EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
         ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
-        SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
-        debug_assert_cell_not_frozen, freeze_widget_tree,
+        SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
+        Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
 
     fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
@@ -5796,6 +6582,967 @@ mod tests {
 "#;
         vm.eval_module_source(path, source, 1).expect("module eval");
         assert_eq!(*calls.borrow(), vec![7.0, 9.0]);
+    }
+
+    fn module_test_vm() -> VM {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm
+    }
+
+    fn temp_lisp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "eseqlisp-modules-{tag}-{}.lisp",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn override_survives_owner_reload_and_removal_restores_reloaded_factory() {
+        let mut vm = module_test_vm();
+        let owner = temp_lisp_path("override-owner");
+        let user = temp_lisp_path("override-user");
+        vm.eval_module_source(
+            owner.clone(),
+            "(module test.factory)\n(def value () 10)\n(def call-value () (value))",
+            1,
+        )
+        .expect("owner v1");
+        // `call-value` cached value's global slot before the advice existed.
+        vm.eval_module_source(
+            user.clone(),
+            "(module test.user)\n(override test.factory/value (lambda () 99))",
+            1,
+        )
+        .expect("register override");
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("overridden call"),
+            Some(Value::Number(99.0))
+        );
+
+        vm.eval_module_source(
+            owner,
+            "(module test.factory)\n(def value () 20)\n(def call-value () (value))",
+            2,
+        )
+        .expect("owner v2");
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("override after reload"),
+            Some(Value::Number(99.0))
+        );
+        vm.eval_module_source(
+            user,
+            "(module test.user)\n(override test.factory/value (lambda () 98))",
+            2,
+        )
+        .expect("reload override owner");
+        assert_eq!(
+            vm.overrides["test.factory/value"].entries.len(),
+            1,
+            "re-evaluation must replace the overriding module's entry"
+        );
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("reloaded override"),
+            Some(Value::Number(98.0))
+        );
+        vm.eval_str("(remove-override test.factory/value)")
+            .expect("remove override");
+        assert_eq!(
+            vm.eval_str("(test.factory/call-value)").expect("restored factory"),
+            Some(Value::Number(20.0))
+        );
+    }
+
+    #[test]
+    fn around_override_late_binds_original_across_owner_reload() {
+        let mut vm = module_test_vm();
+        let owner = temp_lisp_path("around-owner");
+        vm.eval_module_source(
+            owner.clone(),
+            "(module test.around-factory)\n(def value (x) (+ x 1))",
+            1,
+        )
+        .expect("owner v1");
+        vm.eval_module_source(
+            temp_lisp_path("around-user"),
+            "(module test.around-user)\n\
+             (override test.around-factory/value :around (original x) (+ (original x) 100))",
+            1,
+        )
+        .expect("around override");
+        assert_eq!(
+            vm.eval_str("(test.around-factory/value 2)").expect("v1 around"),
+            Some(Value::Number(103.0))
+        );
+        vm.eval_module_source(
+            owner,
+            "(module test.around-factory)\n(def value (x) (+ x 10))",
+            2,
+        )
+        .expect("owner v2");
+        assert_eq!(
+            vm.eval_str("(test.around-factory/value 2)").expect("v2 around"),
+            Some(Value::Number(112.0))
+        );
+    }
+
+    #[test]
+    fn failing_override_is_quarantined_once_and_falls_through_to_factory() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("failing-override-owner"),
+            "(module test.safe-factory)\n(def value () 7)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("failing-override-user"),
+            "(module test.safe-user)\n\
+             (override test.safe-factory/value () (missing-override-helper))",
+            1,
+        )
+        .expect("override registration");
+        for _ in 0..2 {
+            assert_eq!(
+                vm.eval_str("(test.safe-factory/value)").expect("contained call"),
+                Some(Value::Number(7.0))
+            );
+        }
+        let failures = vm
+            .take_source_load_errors()
+            .into_iter()
+            .filter(|error| error.contains("override test.safe-factory/value"))
+            .count();
+        assert_eq!(failures, 1, "a quarantined override must warn only once");
+    }
+
+    #[test]
+    fn private_override_warns_but_works() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("private-override-owner"),
+            "(module test.private-factory)\n(def %value () 1)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("private-override-user"),
+            "(module test.private-user)\n\
+             (override test.private-factory/%value () 2)",
+            1,
+        )
+        .expect("private override");
+        assert_eq!(
+            vm.eval_str("(test.private-factory/%value)").expect("call"),
+            Some(Value::Number(2.0))
+        );
+        assert!(
+            vm.source_manager
+                .diagnostics()
+                .iter()
+                .any(|warning| warning.contains("overriding test.private-factory/%value")),
+            "expected private-override warning"
+        );
+    }
+
+    #[test]
+    fn override_registry_is_snapshot_aware() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("snapshot-override-owner"),
+            "(module test.snapshot-factory)\n(def value () 3)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("snapshot-override-user"),
+            "(module test.snapshot-user)\n\
+             (override test.snapshot-factory/value () 4)",
+            1,
+        )
+        .expect("override");
+        let snapshot = vm.snapshot_state();
+        vm.eval_str("(remove-override test.snapshot-factory/value)")
+            .expect("remove");
+        assert_eq!(
+            vm.eval_str("(test.snapshot-factory/value)").expect("factory"),
+            Some(Value::Number(3.0))
+        );
+        vm.restore_state(snapshot);
+        assert_eq!(
+            vm.eval_str("(test.snapshot-factory/value)").expect("restored override"),
+            Some(Value::Number(4.0))
+        );
+    }
+
+    #[test]
+    #[ignore = "override global-read microbenchmark; run explicitly in release mode"]
+    fn override_empty_registry_global_read_cost() {
+        let mut vm = module_test_vm();
+        vm.set_global_value("benchmark-global", Value::Number(1.0));
+        let idx = vm
+            .resolve_global_read_index("benchmark-global")
+            .expect("benchmark slot");
+        let iterations = 10_000_000_u32;
+        let mut raw_samples = Vec::new();
+        let mut effective_samples = Vec::new();
+        for trial in 0..8 {
+            let measure_raw = |vm: &mut VM| {
+                let started = std::time::Instant::now();
+                for _ in 0..iterations {
+                    std::hint::black_box(vm.raw_global_cell(idx).expect("raw cell"));
+                }
+                started.elapsed()
+            };
+            let measure_effective = |vm: &mut VM| {
+                let started = std::time::Instant::now();
+                for _ in 0..iterations {
+                    std::hint::black_box(vm.global_read_cell(idx).expect("effective cell"));
+                }
+                started.elapsed()
+            };
+            let (raw, effective) = if trial % 2 == 0 {
+                (measure_raw(&mut vm), measure_effective(&mut vm))
+            } else {
+                let effective = measure_effective(&mut vm);
+                (measure_raw(&mut vm), effective)
+            };
+            if trial >= 2 {
+                raw_samples.push(raw.as_nanos() as f64 / f64::from(iterations));
+                effective_samples.push(effective.as_nanos() as f64 / f64::from(iterations));
+            }
+        }
+        raw_samples.sort_by(f64::total_cmp);
+        effective_samples.sort_by(f64::total_cmp);
+        let raw = raw_samples[raw_samples.len() / 2];
+        let effective = effective_samples[effective_samples.len() / 2];
+        eprintln!(
+            "empty override registry: raw={raw:.3}ns effective={effective:.3}ns \
+             delta={:.3}ns ({:.2}%)",
+            effective - raw,
+            (effective / raw - 1.0) * 100.0
+        );
+    }
+
+    #[test]
+    fn module_form_switches_interning_namespace() {
+        let mut vm = module_test_vm();
+        let path = temp_lisp_path("switch");
+        let source = r#"
+(module test.mod)
+(def foo () 42)
+(foo)
+"#;
+        let result = vm.eval_module_source(path, source, 1).expect("module eval");
+        assert_eq!(result, Some(Value::Number(42.0)));
+        assert!(
+            vm.global_names().iter().any(|n| n == "test.mod/foo"),
+            "def inside (module test.mod) should intern qualified"
+        );
+        assert!(vm.declared_modules.contains_key("test.mod"));
+        // A later headerless unit reaches it only qualified.
+        let qualified = vm.eval_str("(test.mod/foo)").expect("qualified call");
+        assert_eq!(qualified, Some(Value::Number(42.0)));
+    }
+
+    #[test]
+    fn module_form_resets_per_compile_unit() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(temp_lisp_path("reset-a"), "(module test.reset)\n(def a () 1)", 1)
+            .expect("module eval");
+        // Headerless unit: defs go back to the implicit module.
+        vm.eval_str("(def b () 2)").expect("headerless eval");
+        assert!(vm.global_names().iter().any(|n| n == "test.reset/a"));
+        assert!(vm.global_names().iter().any(|n| n == "eseq.vanilla/b"));
+    }
+
+    #[test]
+    fn duplicate_module_form_is_a_compile_error() {
+        let mut vm = module_test_vm();
+        let result =
+            vm.eval_str("(module test.dup)\n(module test.other)\n(def x () 1)");
+        assert!(matches!(result, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|e| e.contains("duplicate (module")),
+            "expected duplicate-module error message"
+        );
+    }
+
+    #[test]
+    fn import_registers_alias_and_loads_once() {
+        let mut vm = module_test_vm();
+        let helper_path = temp_lisp_path("alias-helper");
+        std::fs::write(
+            &helper_path,
+            "(module test.alias-helper)\n(def helper-val () 5)\n(def %secret () 6)",
+        )
+        .expect("write helper");
+        let main_path = helper_path.with_file_name(format!(
+            "eseqlisp-modules-alias-main-{}.lisp",
+            std::process::id()
+        ));
+        let source = format!(
+            "(import {} :as th)\n(th/helper-val)",
+            "test.alias-helper"
+        );
+        // Candidate resolution is relative to the importing file, so give
+        // the helper the name the module convention expects.
+        let conventional = helper_path.with_file_name("test.alias-helper.lisp");
+        std::fs::rename(&helper_path, &conventional).expect("rename helper");
+        let result = vm
+            .eval_module_source(main_path.clone(), &source, 1)
+            .expect("import eval");
+        assert_eq!(result, Some(Value::Number(5.0)));
+        assert!(vm.declared_modules.contains_key("test.alias-helper"));
+        // Load-once: importing again evaluates nothing new (same result).
+        let again = vm
+            .eval_module_source(main_path, &source, 2)
+            .expect("second import eval");
+        assert_eq!(again, Some(Value::Number(5.0)));
+        let _ = std::fs::remove_file(conventional);
+    }
+
+    #[test]
+    fn native_reregistration_reaches_a_healed_module_slot() {
+        // A converted module's bare call to a flat native interns a
+        // qualified slot that the late-binding heal aliases to the native's
+        // cell on first read. Re-registering the native (test stubs do this
+        // mid-run) must write through that shared cell, not replace the
+        // slot Option — otherwise the module keeps calling the old native
+        // forever (hazard (m) for natives).
+        let mut vm = module_test_vm();
+        vm.register_native("probe-native", |_args| Value::Number(1.0));
+        vm.eval_module_source(
+            temp_lisp_path("native-rereg"),
+            "(module test.native-rereg)\n(def call-probe () (probe-native))",
+            1,
+        )
+        .expect("module eval");
+        let first = vm
+            .eval_str("(test.native-rereg/call-probe)")
+            .expect("first call heals the module slot");
+        assert_eq!(first, Some(Value::Number(1.0)));
+        vm.register_native("probe-native", |_args| Value::Number(2.0));
+        let second = vm
+            .eval_str("(test.native-rereg/call-probe)")
+            .expect("second call after re-registration");
+        assert_eq!(second, Some(Value::Number(2.0)));
+    }
+
+    #[test]
+    fn import_resolves_nested_eseq_module_under_the_ui_root() {
+        // Production layout (spec §7): the source-manager cwd is
+        // crates/sequencer, and the vanilla distro lives in its ui/
+        // subdirectory, so `eseq.effects.state` must resolve as
+        // `@/ui/effects/state.lisp`. Pinned here against a synthetic root
+        // because in the app the manifest usually pre-loads every module
+        // and import's load branch never fires.
+        let mut vm = module_test_vm();
+        let root = std::env::temp_dir().join(format!(
+            "eseqlisp-modules-ui-root-{}",
+            std::process::id()
+        ));
+        let effects_dir = root.join("ui/effects");
+        std::fs::create_dir_all(&effects_dir).expect("create ui/effects");
+        std::fs::write(
+            effects_dir.join("import-probe.lisp"),
+            "(module eseq.effects.import-probe)\n(def probe-val () 17)",
+        )
+        .expect("write probe module");
+        vm.source_manager.set_cwd(root.clone());
+        let main_path = root.join("ui/consumer.lisp");
+        let source =
+            "(import eseq.effects.import-probe :as probe)\n(probe/probe-val)";
+        let result = vm
+            .eval_module_source(main_path, source, 1)
+            .expect("import eval");
+        assert_eq!(result, Some(Value::Number(17.0)));
+        assert!(vm.declared_modules.contains_key("eseq.effects.import-probe"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_refer_binds_bare_symbols() {
+        let mut vm = module_test_vm();
+        let helper = std::env::temp_dir().join(format!(
+            "test.refer-helper-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(&helper, format!("(module test.refer-helper-{})\n(def refer-val () 11)", std::process::id()))
+            .expect("write helper");
+        let main_path = helper.with_file_name(format!(
+            "eseqlisp-modules-refer-main-{}.lisp",
+            std::process::id()
+        ));
+        let source = format!(
+            "(import test.refer-helper-{} :refer (refer-val))\n(refer-val)",
+            std::process::id()
+        );
+        let result = vm
+            .eval_module_source(main_path, &source, 1)
+            .expect("refer eval");
+        assert_eq!(result, Some(Value::Number(11.0)));
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn unknown_alias_is_a_compile_error() {
+        let mut vm = module_test_vm();
+        let result = vm.eval_str("(zz9/nothing 1)");
+        assert!(matches!(result, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|e| e.contains("unknown alias or namespace 'zz9'")),
+            "expected unknown-alias error message"
+        );
+    }
+
+    #[test]
+    fn private_reference_from_outside_warns_but_resolves() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("privacy"),
+            "(module test.privacy)\n(def %secret () 6)",
+            1,
+        )
+        .expect("module eval");
+        let result = vm.eval_str("(test.privacy/%secret)").expect("private call");
+        assert_eq!(result, Some(Value::Number(6.0)));
+        let diagnostics = vm.source_manager.diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("%secret") && d.contains("internal")),
+            "expected %-privacy warning, got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn macros_defined_in_module_are_namespace_aware() {
+        let mut vm = module_test_vm();
+        let result = vm
+            .eval_module_source(
+                temp_lisp_path("macros"),
+                "(module test.mac)\n(defmacro twice (x) `(+ ,x ,x))\n(twice 3)",
+                1,
+            )
+            .expect("module eval");
+        // Bare lookup inside the defining module.
+        assert_eq!(result, Some(Value::Number(6.0)));
+        // Qualified lookup from a headerless unit.
+        let qualified = vm.eval_str("(test.mac/twice 4)").expect("qualified macro");
+        assert_eq!(qualified, Some(Value::Number(8.0)));
+        assert!(vm.macros.contains_key("test.mac/twice"));
+    }
+
+    #[test]
+    fn namespaced_natives_resolve_qualified_without_import() {
+        let mut vm = module_test_vm();
+        vm.register_native_in_namespace("sdf", "answer", |_args, _vm| Value::Number(41.0));
+        let result = vm.eval_str("(sdf/answer)").expect("namespaced native");
+        assert_eq!(result, Some(Value::Number(41.0)));
+        // Blessed core namespace falls back to flat natives when qualified.
+        vm.register_native("flat-answer", |_args| Value::Number(40.0));
+        let core = vm
+            .eval_str("(eseq.core/flat-answer)")
+            .expect("core-qualified native");
+        assert_eq!(core, Some(Value::Number(40.0)));
+    }
+
+    #[test]
+    fn module_defstate_interns_qualified_and_reads_bare() {
+        let mut vm = module_test_vm();
+        let source = r#"
+(module test.statemod)
+(defstate counter 1)
+(def bump () (set! counter (+ counter 1)))
+(bump)
+counter
+"#;
+        let result = vm
+            .eval_module_source(temp_lisp_path("state-qual"), source, 1)
+            .expect("module eval");
+        assert_eq!(result, Some(Value::Number(2.0)));
+        assert!(
+            vm.state_bindings.contains_key("test.statemod/counter"),
+            "declared-module defstate should key state_bindings qualified, got {:?}",
+            vm.state_bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !vm.state_bindings.contains_key("counter"),
+            "no flat key should be created for a declared-module defstate"
+        );
+        // A later unit reaches the state through its qualified name.
+        let qualified = vm
+            .eval_str("test.statemod/counter")
+            .expect("qualified state read");
+        assert_eq!(qualified, Some(Value::Number(2.0)));
+    }
+
+    #[test]
+    fn vanilla_defstate_stays_flat_keyed() {
+        let mut vm = module_test_vm();
+        vm.eval_str("(defstate plain-state 7)").expect("defstate");
+        assert!(
+            vm.state_bindings.contains_key("plain-state"),
+            "headerless defstate must keep today's flat key"
+        );
+        assert!(
+            !vm.state_bindings.keys().any(|k| k.contains('/')),
+            "no qualified state keys for vanilla code, got {:?}",
+            vm.state_bindings.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vm.eval_str("plain-state").expect("state read"),
+            Some(Value::Number(7.0))
+        );
+    }
+
+    #[test]
+    fn module_def_colliding_with_flat_native_does_not_clobber_it() {
+        let mut vm = module_test_vm();
+        vm.register_native("collide-native", |_args| Value::Number(7.0));
+        let source = r#"
+(module test.defsite)
+(def collide-native (v) (+ v 1))
+(collide-native 1)
+"#;
+        // The module's def interns test.defsite/collide-native; its own
+        // bare call resolves to the module entry (declared-module rung).
+        let result = vm
+            .eval_module_source(temp_lisp_path("def-site-collision"), source, 1)
+            .expect("module eval");
+        assert_eq!(result, Some(Value::Number(2.0)));
+        // The flat native survives untouched for everyone else.
+        let flat = vm.eval_str("(collide-native 1)").expect("flat call");
+        assert_eq!(flat, Some(Value::Number(7.0)));
+        assert!(matches!(
+            vm.global_value("test.defsite/collide-native"),
+            Some(Value::Closure { .. })
+        ));
+    }
+
+    #[test]
+    fn module_forward_reference_to_later_vanilla_def_late_binds() {
+        let mut vm = module_test_vm();
+        let module_source = r#"
+(module test.fwdref)
+(def call-later () (defined-later 2))
+"#;
+        vm.eval_module_source(temp_lisp_path("fwd-ref-module"), module_source, 1)
+            .expect("module eval");
+        // The vanilla definition lands AFTER the module compiled its bare
+        // forward reference (which interned test.fwdref/defined-later).
+        vm.eval_str("(def defined-later (v) (* v 10))")
+            .expect("vanilla def");
+        // First read of the empty qualified slot heals to the vanilla cell.
+        let result = vm.eval_str("(test.fwdref/call-later)").expect("healed call");
+        assert_eq!(result, Some(Value::Number(20.0)));
+    }
+
+    /// Globals: a caller compiled BEFORE the alias existed interned (and
+    /// emitted an index for) the stale `eseq.vanilla/…` slot, which stays
+    /// empty. The runtime late-binding heal now retries that slot through the
+    /// compat alias on its first read, so a converted file retrofits its
+    /// earlier-compiled callers (module-system spec §10). This is what
+    /// retires the step-0 load-order gate for def-only conversions.
+    /// The same heal for a caller whose reference compiled to a *flat* slot
+    /// (the name was already interned flat — a native-era reference or a
+    /// host-interned name — so the compiler emitted `old-name`, not
+    /// `eseq.vanilla/old-name`). Alias keys are flat, so the base-name lookup
+    /// covers both spellings.
+    /// Without an alias the heal falls back to its pre-existing behavior:
+    /// the implicit-module and flat spellings only, so an unrelated empty
+    /// slot still errors rather than silently binding to something.
+    #[test]
+    fn late_binding_without_an_alias_keeps_the_old_behavior() {
+        let mut vm = module_test_vm();
+        vm.eval_str("(def orphan-caller () (never-defined))")
+            .expect("caller def");
+        vm.eval_module_source(
+            temp_lisp_path("compat-none"),
+            "(module test.noalias)\n(def home () 9)",
+            1,
+        )
+        .expect("module eval");
+        assert!(
+            vm.eval_str("(orphan-caller)").is_err(),
+            "an unaliased empty slot must stay unresolved"
+        );
+    }
+
+    /// A write emitted against the *stale* slot (a setter compiled before the
+    /// conversion, same index as the reader) replaces that slot's `Option`
+    /// rather than mutating the shared cell, so it unlinks the heal: the
+    /// pre-conversion pair keeps last-writer-wins among themselves and stops
+    /// tracking the module's own value. Documented caveat, not a bug — the
+    /// heal is a read-side rescue, not two-way aliasing.
+    /// `defstate` is a second keyspace, so the alias has to be honoured by
+    /// the state-binding ladders too — otherwise an unconverted
+    /// `(set! old-name v)` resolves the global through the alias but misses
+    /// the binding and stores over the NodeRef slot (IncorrectType).
+    /// Hazard (i) + (b) compounding, found converting `ui/browser.lisp`: a
+    /// `defstate` that production Rust *writes* by bare spelling is pinned to
+    /// `eseq.vanilla` with the §3 escape hatch and gets no compat alias, so its
+    /// `state_bindings` key must stay **flat** — vanilla's registry keyspace is
+    /// the flat keyspace under slice 0, and neither state-binding ladder has an
+    /// implicit-module rung. Both the module's own bare reference and an
+    /// unconverted flat writer have to land on the one node.
+    #[test]
+    fn a_vanilla_pinned_defstate_registers_flat() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("compat-pin"),
+            "(module test.pinned)\n(defstate eseq.vanilla/host-tab \"samples\")\n\
+             (def read-tab () eseq.vanilla/host-tab)\n(def bare-read () host-tab)",
+            1,
+        )
+        .expect("module eval");
+        // An unconverted (headerless) writer, i.e. what Rust emits.
+        vm.eval_str("(set! host-tab \"instruments\")")
+            .expect("flat set!");
+        assert_eq!(
+            vm.eval_str("host-tab"),
+            Ok(Some(Value::String("instruments".to_string())))
+        );
+        // The module sees it through both the qualified and the bare spelling.
+        assert_eq!(
+            vm.eval_str("(test.pinned/read-tab)"),
+            Ok(Some(Value::String("instruments".to_string())))
+        );
+        assert_eq!(
+            vm.eval_str("(test.pinned/bare-read)"),
+            Ok(Some(Value::String("instruments".to_string())))
+        );
+        // And the runtime by-name path (host state reads) resolves the flat key.
+        assert_eq!(
+            vm.read_tracked_state_value("host-tab"),
+            Some(Value::String("instruments".to_string()))
+        );
+    }
+
+    // ── import's compile-time half (spec §4, eseq-mods.12) ──────────────
+    // A unit is compiled and executed in segments split at top-level
+    // `(import …)` forms, so an import supplies COMPILE-time surface — the
+    // target's defstate keyspace and macros — to every form after
+    // it in the same unit, retiring §10 hazard (p).
+
+    fn import_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "eseqlisp-ct-import-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The (p) reproducer shape, inverted: a `set!`/read of another
+    /// module's `defstate` in the SAME unit as the import must compile as
+    /// a state write/read, not a raw global store next to the binding.
+    #[test]
+    fn import_supplies_defstate_keyspace_to_the_rest_of_the_unit() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("defstate");
+        std::fs::write(
+            dir.join("ctimp-child.lisp"),
+            "(module ctimp-child)\n(defstate ctimp-counter 1)",
+        )
+        .unwrap();
+        let source = "(import ctimp-child)\n\
+                      (set! ctimp-child/ctimp-counter 5)\n\
+                      (def ctimp-read () ctimp-child/ctimp-counter)";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        assert_eq!(vm.eval_str("(ctimp-read)"), Ok(Some(Value::Number(5.0))));
+        assert_eq!(
+            vm.read_tracked_state_value("ctimp-child/ctimp-counter"),
+            Some(Value::Number(5.0)),
+            "the unit's set! must land on the state binding, not a flat global"
+        );
+        vm.eval_str("(set! ctimp-child/ctimp-counter 9)")
+            .expect("later set!");
+        assert_eq!(
+            vm.eval_str("(ctimp-read)"),
+            Ok(Some(Value::Number(9.0))),
+            "the unit's reader must read through the state binding"
+        );
+    }
+
+    /// Macros are the second compile-time keyspace hazard (p) names: a
+    /// macro call after the import in the same unit must expand.
+    #[test]
+    fn import_supplies_macros_to_the_rest_of_the_unit() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("macros");
+        std::fs::write(
+            dir.join("ctmac-child.lisp"),
+            "(module ctmac-child)\n(defmacro ctmac-double (x) `(+ ,x ,x))",
+        )
+        .unwrap();
+        let source = "(import ctmac-child)\n(def ctmac-val (ctmac-child/ctmac-double 4))";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        assert_eq!(vm.eval_str("ctmac-val"), Ok(Some(Value::Number(8.0))));
+    }
+
+    /// `:as` bindings and the `(module …)` declaration are compiler-local;
+    /// both must survive the segment split introduced by a later import
+    /// (`Compiler::take_module_context` threading).
+    #[test]
+    fn module_context_survives_later_import_segments() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("context");
+        std::fs::write(
+            dir.join("ctas-child.lisp"),
+            "(module ctas-child)\n(def ctas-fn () 7)",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ctas-other.lisp"),
+            "(module ctas-other)\n(def ctas-other-fn () 1)",
+        )
+        .unwrap();
+        let source = "(module ctas-root)\n\
+                      (import ctas-child :as cc)\n\
+                      (import ctas-other)\n\
+                      (def ctas-val (cc/ctas-fn))\n\
+                      (def ctas-own () 42)";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        // The alias bound before the second import still resolves after it …
+        assert_eq!(
+            vm.eval_str("ctas-root/ctas-val"),
+            Ok(Some(Value::Number(7.0)))
+        );
+        // … and bare defs after the imports still intern under the module
+        // declared in the first segment.
+        assert_eq!(
+            vm.eval_str("(ctas-root/ctas-own)"),
+            Ok(Some(Value::Number(42.0)))
+        );
+    }
+
+    /// The compile-time eval consults the same per-pass ledger as the
+    /// runtime half: a second import in the unit (or a later REPL
+    /// `eval_str` in the same pass) is a re-seed, not a re-eval; a new
+    /// import pass re-arms it (the hot-reload contract).
+    #[test]
+    fn import_compile_time_eval_is_load_once_per_pass() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("once");
+        vm.eval_str("(defstate ctonce-count 0)").expect("counter");
+        std::fs::write(
+            dir.join("ctonce-child.lisp"),
+            "(module ctonce-child)\n(set! ctonce-count (+ ctonce-count 1))",
+        )
+        .unwrap();
+        let source = "(import ctonce-child)\n(import ctonce-child)";
+        vm.eval_module_source(dir.join("root.lisp"), source, 1)
+            .expect("root eval");
+        assert_eq!(
+            vm.read_tracked_state_value("ctonce-count"),
+            Some(Value::Number(1.0)),
+            "two imports in one unit must evaluate the target once"
+        );
+        // REPL import later in the same pass: still satisfied.
+        vm.eval_str("(import ctonce-child)").expect("repl import");
+        assert_eq!(
+            vm.read_tracked_state_value("ctonce-count"),
+            Some(Value::Number(1.0))
+        );
+        // A new pass re-arms load-once: re-evaluating the owner root (the
+        // hot-reload shape) re-imports the child.
+        vm.begin_import_pass();
+        vm.eval_module_source(dir.join("root.lisp"), source, 2)
+            .expect("new-pass root eval");
+        assert_eq!(
+            vm.read_tracked_state_value("ctonce-count"),
+            Some(Value::Number(2.0))
+        );
+    }
+
+    /// A imports B while A is mid-compile and B imports A back. The
+    /// per-pass ledger records A when its `(module …)` form executes —
+    /// segment 1, before the import runs — so B's back-import is a no-op
+    /// and the split terminates exactly like the runtime path does.
+    #[test]
+    fn import_cycle_terminates_at_compile_time() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("cycle");
+        std::fs::write(
+            dir.join("cyc-a.lisp"),
+            "(module cyc-a)\n(import cyc-b)\n(def cyc-a-val 1)",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("cyc-b.lisp"),
+            "(module cyc-b)\n(import cyc-a)\n(def cyc-b-val 2)",
+        )
+        .unwrap();
+        let source = std::fs::read_to_string(dir.join("cyc-a.lisp")).unwrap();
+        vm.eval_module_source(dir.join("cyc-a.lisp"), &source, 1)
+            .expect("cycle eval");
+        assert_eq!(vm.eval_str("cyc-a/cyc-a-val"), Ok(Some(Value::Number(1.0))));
+        assert_eq!(vm.eval_str("cyc-b/cyc-b-val"), Ok(Some(Value::Number(2.0))));
+    }
+
+    /// Failure mid-unit on the bare (non-transactional) path: a compile
+    /// error after an import keeps the already-evaluated target, matching
+    /// the load-once precedent that side effects persist across a failed
+    /// load. The transactional entry points roll the whole pass back via
+    /// their snapshot instead.
+    #[test]
+    fn compile_error_after_an_import_keeps_the_imported_module() {
+        let mut vm = module_test_vm();
+        let dir = import_test_dir("fail");
+        std::fs::write(
+            dir.join("ctfail-child.lisp"),
+            "(module ctfail-child)\n(def ctfail-x 11)",
+        )
+        .unwrap();
+        let source = "(import ctfail-child)\n(import)";
+        let result = vm.eval_module_source(dir.join("root.lisp"), source, 1);
+        assert!(result.is_err(), "the malformed form must fail the unit");
+        assert_eq!(
+            vm.eval_str("ctfail-child/ctfail-x"),
+            Ok(Some(Value::Number(11.0))),
+            "the import evaluated before the failing segment compiled"
+        );
+    }
+
+    /// Macro aliases inherit the global aliases' forward-only constraint:
+    /// a caller compiled before the alias exists already expanded (or
+    /// failed to expand) against the table it saw. Nothing retrofits it.
+    #[test]
+    fn module_widget_key_qualifies_stable_key_prop() {
+        let mut vm = module_test_vm();
+        crate::widgets::register_widget_natives(&mut vm);
+        let source = r#"
+(module test.widgetmod)
+(def make-panel () (v-stack :key "panel"))
+"#;
+        vm.eval_module_source(temp_lisp_path("widget-key"), source, 1)
+            .expect("module eval");
+        // Constructed from the declared module's chunk (even when called
+        // from a headerless unit): the identity key is module-prefixed.
+        let widget = vm
+            .eval_str("(test.widgetmod/make-panel)")
+            .expect("widget call")
+            .expect("widget value");
+        let Value::Map(map) = &widget else {
+            panic!("expected widget map, got {widget:?}");
+        };
+        assert_eq!(
+            map.get(STABLE_KEY_PROP).map(|v| v.borrow().clone()),
+            Some(Value::String("test.widgetmod/panel".to_string())),
+            "declared-module widget :key should qualify into __stable-key"
+        );
+        // The authored :key prop is untouched.
+        assert_eq!(
+            map.get("key").map(|v| v.borrow().clone()),
+            Some(Value::String("panel".to_string()))
+        );
+        // Vanilla construction stays exactly as today: no __stable-key.
+        let vanilla = vm
+            .eval_str(r#"(v-stack :key "panel")"#)
+            .expect("vanilla widget")
+            .expect("widget value");
+        let Value::Map(map) = &vanilla else {
+            panic!("expected widget map");
+        };
+        assert!(
+            !map.contains_key(STABLE_KEY_PROP),
+            "vanilla widget keys must not gain __stable-key at construction"
+        );
+    }
+
+    #[test]
+    fn namespaced_keywords_are_legal_keyword_syntax() {
+        // Spec §5: `:eseq.mixer/mode` is one keyword with the first-slash
+        // split — extension data in serialized projects can use it so two
+        // extensions stashing `:mode` never collide. (The `::mode`
+        // current-module sugar is deferred until extensions write
+        // serialized data.)
+        let mut vm = module_test_vm();
+        let result = vm.eval_str(":eseq.mixer/mode").expect("keyword eval");
+        assert_eq!(
+            result,
+            Some(Value::Keyword("eseq.mixer/mode".to_string()))
+        );
+        let stored = vm
+            .eval_str(r#"(get (dict :eseq.mixer/mode 5) :eseq.mixer/mode)"#)
+            .expect("dict roundtrip");
+        assert_eq!(stored, Some(Value::Number(5.0)));
+    }
+
+    #[test]
+    fn module_def_process_name_qualifies_and_constructor_resolves() {
+        let mut vm = module_test_vm();
+        let captured = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        // Stub of the sequencer's def-process native: record the class
+        // name and register the constructor under it (the real one does
+        // the same via register_process_constructor_native).
+        vm.register_native_with_vm("def-process", move |args, vm| {
+            let Some(Value::Symbol(name)) = args.first() else {
+                panic!("def-process expects a symbol, got {:?}", args.first());
+            };
+            sink.borrow_mut().push(name.clone());
+            vm.register_native_with_vm(name, |_args, _vm| Value::Number(7.0));
+            Value::String(name.clone())
+        });
+        let source = r#"
+(module test.procmod)
+(def-process my-proc)
+(my-proc)
+"#;
+        let result = vm
+            .eval_module_source(temp_lisp_path("def-process"), source, 1)
+            .expect("module eval");
+        // The bare constructor call inside the module resolves to the
+        // qualified registration.
+        assert_eq!(result, Some(Value::Number(7.0)));
+        vm.eval_str("(def-process plain-proc)").expect("vanilla def");
+        assert_eq!(
+            *captured.borrow(),
+            vec!["test.procmod/my-proc".to_string(), "plain-proc".to_string()],
+            "declared-module class names qualify; vanilla stays flat"
+        );
+    }
+
+    #[test]
+    fn chunk_module_provenance_reaches_natives() {
+        let mut vm = module_test_vm();
+        let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        vm.register_native_with_vm("capture-module", move |_args, vm| {
+            sink.borrow_mut().push(vm.current_module_name().to_string());
+            Value::Nil
+        });
+        let source = r#"
+(module test.chunkmod)
+(capture-module)
+(def late-capture () (capture-module))
+"#;
+        vm.eval_module_source(temp_lisp_path("chunk-module"), source, 1)
+            .expect("module eval");
+        // Late-bound: calling the module's function from a headerless unit
+        // still reports the defining module (chunk provenance, not caller).
+        vm.eval_str("(test.chunkmod/late-capture)")
+            .expect("late call");
+        vm.eval_str("(capture-module)").expect("vanilla call");
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "test.chunkmod".to_string(),
+                "test.chunkmod".to_string(),
+                "eseq.vanilla".to_string()
+            ]
+        );
     }
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
@@ -6415,7 +8162,7 @@ mod tests {
             chunk_idx: 0,
             callable: None,
             source_buffer_id: None,
-            source_module: None,
+            source_file: None,
             source_revision: None,
             target: EffectTarget::BufferId(None),
             subtree_root_id: None,
@@ -6466,7 +8213,7 @@ mod tests {
             chunk_idx: 0,
             callable: None,
             source_buffer_id: None,
-            source_module: None,
+            source_file: None,
             source_revision: None,
             target: EffectTarget::BufferId(None),
             subtree_root_id: None,

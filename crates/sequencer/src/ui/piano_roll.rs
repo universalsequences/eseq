@@ -790,7 +790,7 @@ fn apply_pending_piano_roll_fit(rt: &mut Runtime) {
     ) {
         return;
     }
-    let Some(callback) = rt.global_value("piano-roll-apply-pending-fit") else {
+    let Some(callback) = rt.global_value("eseq.piano-roll/piano-roll-apply-pending-fit") else {
         return;
     };
     if let Err(error) = rt.invoke(callback, vec![]) {

@@ -27,7 +27,7 @@
 ;; Re-evaluation reconciles the named process instances, so lane edits remain
 ;; pattern-owned and the whole project layer is replaced atomically.
 
-(seq-register-script-source-tab "Project Performance Lanes")
+(eseq.seq-script-picker/seq-register-script-source-tab "Project Performance Lanes")
 
 (def-process project-ratchets
   :doc "Add a lane-controlled subdivided ratchet burst to every project track."

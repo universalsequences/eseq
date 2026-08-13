@@ -274,4 +274,4 @@
                   (graph-edge m8-name :from r :to c :weight v))))))))))
 
 (effect-buffer "*markov-8x8*" (m8-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

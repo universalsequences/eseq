@@ -10,7 +10,12 @@ pub struct Chunk {
     pub symbols: Vec<String>,
     pub upvalues: Vec<String>,
     pub source_symbol: Option<String>,
-    pub source_module: Option<PathBuf>,
+    pub source_file: Option<PathBuf>,
+    /// The module the chunk's code was compiled under (spec §5): `None`
+    /// for the implicit `eseq.vanilla`. Lets runtime registration forms
+    /// (widget `:key`, `bind-key`, `define-mode`, …) know the module
+    /// current at the executing call site.
+    pub source_module: Option<String>,
 }
 
 #[derive(Debug)]
@@ -29,6 +34,9 @@ struct Scope {
 pub enum CompilerError {
     UnknownOperator,
     InvalidArg,
+    /// A resolution error with a human-readable message (unknown import
+    /// alias/namespace, malformed `module`/`import` forms).
+    Message(String),
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +104,17 @@ pub struct MacroDef {
     pub body: Expression,
 }
 
+/// Compiler-local module state carried across the segment compilers of one
+/// compile unit (see `Compiler::take_module_context`).
+#[derive(Debug, Clone)]
+pub struct ModuleCompileContext {
+    current_module: String,
+    module_declared: bool,
+    import_aliases: HashMap<String, String>,
+    refers: HashMap<String, String>,
+    known_namespaces: HashSet<String>,
+}
+
 pub struct Compiler {
     expressions: Vec<Expression>,
     chunks: Vec<Chunk>,
@@ -107,7 +126,28 @@ pub struct Compiler {
     state_bindings: HashMap<String, u32>,
     next_node_id: u32,
     next_temp_id: u32,
-    source_module: Option<PathBuf>,
+    source_file: Option<PathBuf>,
+    /// The module bare global names qualify under: the implicit
+    /// `eseq.vanilla` until a `(module …)` header switches it (spec §2).
+    current_module: String,
+    /// Whether this compile unit has seen a `(module …)` form (one per
+    /// file, spec §2 decision 1).
+    module_declared: bool,
+    /// `(import NAME :as ALIAS)` bindings, per compile unit (spec §2
+    /// decision 2): alias → full module name.
+    import_aliases: HashMap<String, String>,
+    /// `(import NAME :refer (sym …))` bindings: bare symbol → qualified
+    /// name it resolves to (spec §3 resolution order).
+    refers: HashMap<String, String>,
+    /// Namespaces made known by qualified `def` targets in this unit (the
+    /// §3 escape hatch may define into a module before it exists).
+    known_namespaces: std::collections::HashSet<String>,
+    /// Non-fatal compile diagnostics (`%`-privacy references, escape-hatch
+    /// defs). Drained by the VM into the diagnostics channel.
+    warnings: Vec<String>,
+    /// Fatal resolution errors (unknown alias/namespace, malformed module
+    /// forms) recorded mid-compile and reported when `compile` finishes.
+    errors: Vec<String>,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -241,7 +281,14 @@ impl Compiler {
             state_bindings: HashMap::new(),
             next_node_id: 0,
             next_temp_id: 0,
-            source_module: None,
+            source_file: None,
+            current_module: super::modules::IMPLICIT_MODULE.to_string(),
+            module_declared: false,
+            import_aliases: HashMap::new(),
+            refers: HashMap::new(),
+            known_namespaces: std::collections::HashSet::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
             macros: HashMap::new(),
         }
     }
@@ -257,7 +304,7 @@ impl Compiler {
         state_bindings: HashMap<String, u32>,
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
-        source_module: Option<PathBuf>,
+        source_file: Option<PathBuf>,
     ) -> Self {
         Compiler {
             expressions,
@@ -270,9 +317,48 @@ impl Compiler {
             state_bindings,
             next_node_id,
             next_temp_id: 0,
-            source_module,
+            source_file,
+            current_module: super::modules::IMPLICIT_MODULE.to_string(),
+            module_declared: false,
+            import_aliases: HashMap::new(),
+            refers: HashMap::new(),
+            known_namespaces: std::collections::HashSet::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
             macros,
         }
+    }
+
+    /// The compiler-local module state a compile unit accumulates as its
+    /// top-level forms are walked: the `(module …)` declaration, `:as` /
+    /// `:refer` bindings and the namespaces made known so far. When the VM
+    /// splits a unit at top-level `import` boundaries (spec §4: import's
+    /// compile-time half) each continuation segment gets a fresh compiler
+    /// re-seeded from the VM, and this context is what threads the unit's
+    /// module identity across those segment compilers.
+    pub fn take_module_context(&mut self) -> ModuleCompileContext {
+        ModuleCompileContext {
+            current_module: std::mem::replace(
+                &mut self.current_module,
+                super::modules::IMPLICIT_MODULE.to_string(),
+            ),
+            module_declared: self.module_declared,
+            import_aliases: std::mem::take(&mut self.import_aliases),
+            refers: std::mem::take(&mut self.refers),
+            known_namespaces: std::mem::take(&mut self.known_namespaces),
+        }
+    }
+
+    pub fn set_module_context(&mut self, context: ModuleCompileContext) {
+        self.current_module = context.current_module;
+        self.module_declared = context.module_declared;
+        self.import_aliases = context.import_aliases;
+        self.refers = context.refers;
+        self.known_namespaces = context.known_namespaces;
+    }
+
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     pub fn macros(&self) -> &HashMap<String, MacroDef> {
@@ -285,6 +371,32 @@ impl Compiler {
         symbol
     }
 
+    /// Namespace-aware macro lookup (spec §3): qualified names rewrite
+    /// through import aliases then hit the table exactly (with a flat
+    /// fallback for legacy hand-rolled keys); bare names prefer the
+    /// current module, then `:refer`s, then the flat table.
+    pub fn lookup_macro(&self, name: &str) -> Option<&MacroDef> {
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .map(String::as_str)
+                .unwrap_or(ns);
+            return self
+                .macros
+                .get(&super::modules::qualify(full_ns, base))
+                .or_else(|| self.macros.get(name));
+        }
+        self.macros
+            .get(&super::modules::qualify(&self.current_module, name))
+            .or_else(|| {
+                self.refers
+                    .get(name)
+                    .and_then(|qualified| self.macros.get(qualified))
+            })
+            .or_else(|| self.macros.get(name))
+    }
+
     pub fn expand_macros(&self, expr: &Expression, depth: usize) -> Expression {
         if depth > 100 {
             return expr.clone();
@@ -292,7 +404,7 @@ impl Compiler {
         match expr {
             Expression::List(items) if !items.is_empty() => {
                 if let Expression::Symbol(name) = &items[0] {
-                    if let Some(mac) = self.macros.get(name) {
+                    if let Some(mac) = self.lookup_macro(name) {
                         if items.len() - 1 == mac.params.len() {
                             // Build parameter bindings: expand macro args first
                             let mut bindings = HashMap::new();
@@ -577,7 +689,8 @@ impl Compiler {
             symbols: vec![],
             upvalues: vec![],
             source_symbol: None,
-            source_module: self.source_module.clone(),
+            source_file: self.source_file.clone(),
+            source_module: None,
         });
 
         if is_effect {
@@ -609,7 +722,7 @@ impl Compiler {
         let chunk_idx = self.compile_reactive_chunk(node_id, body, false)?;
         self.derived_bindings.insert(name.to_string(), node_id);
         self.emit(OpCode::InitDerived(node_id, chunk_idx));
-        self.emit_symbol_store(name);
+        self.emit_symbol_store_for_definition(name);
         self.emit(OpCode::PushNil);
         Ok(())
     }
@@ -619,15 +732,20 @@ impl Compiler {
         name: &str,
         initial: &Expression,
     ) -> Result<(), CompilerError> {
+        // Registry auto-qualification (spec §5): a defstate inside a
+        // declared module keys `state_bindings` qualified
+        // (`eseq.mixer/panel-visible`); vanilla files keep flat keys so
+        // serialized identity does not shift.
+        let key = self.qualify_registration_name(name);
         let node_id = self
             .state_bindings
-            .get(name)
+            .get(&key)
             .copied()
             .unwrap_or_else(|| self.alloc_node_id());
-        self.state_bindings.insert(name.to_string(), node_id);
+        self.state_bindings.insert(key, node_id);
         self.compile_expression(initial)?;
         self.emit(OpCode::InitState(node_id));
-        let global_idx = self.use_global(name);
+        let global_idx = self.use_global_for_definition(name);
         self.emit(OpCode::StoreGlobal(global_idx));
         self.emit(OpCode::PushNil);
         Ok(())
@@ -640,7 +758,11 @@ impl Compiler {
     ) -> Result<(), CompilerError> {
         match target {
             Expression::Symbol(name) => {
-                let parts = name.splitn(2, '.').collect::<Vec<_>>();
+                let parts = if super::modules::is_qualified(name) {
+                    vec![name.as_str()]
+                } else {
+                    name.splitn(2, '.').collect::<Vec<_>>()
+                };
                 if parts.len() == 2 && self.reactive_namespaces.contains(parts[0]) {
                     self.compile_expression(value)?;
                     if parts[1].contains('.') {
@@ -1122,15 +1244,203 @@ impl Compiler {
     }
 
     fn use_global(&mut self, name: &str) -> usize {
-        if let Some(index) = self.global_symbols.iter().position(|r| *r == name) {
+        let resolved = self.resolve_global_name(name);
+        if let Some(index) = self.global_symbols.iter().position(|r| *r == resolved) {
             return index;
         }
         let idx = self.global_symbols.len();
-        self.global_symbols.push(name.to_string());
+        self.global_symbols.push(resolved);
         idx
     }
 
-    pub fn new_chunk(&mut self, chunk: Chunk) -> (usize, usize) {
+    /// Resolution ladder for global names (module-system spec §3).
+    /// Qualified `X/name`: `X` resolves as an import alias first, then as a
+    /// namespace (current module, blessed core, implicit, or one with
+    /// existing definitions); unknown alias/namespace is a compile error.
+    /// Bare names: current module → `:refer`red symbols → flat entry (Rust
+    /// natives and host-registered globals stay unqualified) → intern new
+    /// names under the current module. Mirrored at runtime by
+    /// `VM::resolve_global_read_index` — keep the two in sync.
+    fn resolve_global_name(&mut self, name: &str) -> String {
+        if self.reactive_namespaces.contains(name) {
+            return name.to_string();
+        }
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .cloned()
+                .unwrap_or_else(|| ns.to_string());
+            if super::modules::is_private_name(base) && full_ns != self.current_module {
+                self.warn_once(format!(
+                    "warning: {full_ns}/{base} is internal to {full_ns} (%-private, spec §2); \
+                     referencing it from {} may break on update",
+                    self.current_module
+                ));
+            }
+            if !self.namespace_is_known(&full_ns) {
+                if full_ns.contains('.') {
+                    // Dotted = full module name: the §3 escape hatch may
+                    // define into or reference a module before it loads, so
+                    // this warns instead of erroring and the namespace
+                    // becomes known for the rest of the unit.
+                    self.warn_once(format!(
+                        "warning: namespace '{full_ns}' in '{name}' has no import and no \
+                         definitions yet (cross-module escape hatch, or a load-order gap)"
+                    ));
+                    self.known_namespaces.insert(full_ns.clone());
+                } else {
+                    // Undotted = alias-shaped: a typo'd or missing import.
+                    self.errors.push(format!(
+                        "unknown alias or namespace '{ns}' in reference '{name}' \
+                         (no import in scope and no module of that name)"
+                    ));
+                }
+            }
+            let resolved = super::modules::qualify(&full_ns, base);
+            // Core namespaces resolve without import, and their natives
+            // may still be registered flat: `eseq.core/label` (or an
+            // explicit `eseq.vanilla/x`) falls back to the flat entry when
+            // no qualified one exists (mirrors VM::resolve_global_read_index).
+            if (super::modules::CORE_NAMESPACES.contains(&full_ns.as_str())
+                || full_ns == super::modules::IMPLICIT_MODULE)
+                && !self.global_symbols.iter().any(|s| *s == resolved)
+                && self.global_symbols.iter().any(|s| s == base)
+            {
+                return base.to_string();
+            }
+            return resolved;
+        }
+        let qualified = super::modules::qualify(&self.current_module, name);
+        // A declared module's own entry wins over everything but lexical
+        // scope (spec §3); the implicit eseq.vanilla entry is checked
+        // AFTER compat aliases below, because a converted symbol's stale
+        // vanilla slot (left interned from before the conversion) is
+        // exactly what an alias exists to supersede.
+        if self.declared_module().is_some() && self.global_symbols.iter().any(|s| *s == qualified)
+        {
+            return qualified;
+        }
+        if let Some(target) = self.refers.get(name) {
+            return target.clone();
+        }
+        if self.global_symbols.iter().any(|s| *s == qualified) {
+            return qualified;
+        }
+        if self.global_symbols.iter().any(|s| *s == name) {
+            return name.to_string();
+        }
+        qualified
+    }
+
+    /// A namespace is known if it is the current module, the implicit
+    /// module, a blessed core namespace, an imported module, one a
+    /// qualified `def` in this unit targets, or one with existing
+    /// definitions in the global or macro tables (covers hand-rolled
+    /// legacy names and modules loaded earlier).
+    fn namespace_is_known(&self, ns: &str) -> bool {
+        if ns == self.current_module
+            || ns == super::modules::IMPLICIT_MODULE
+            || super::modules::CORE_NAMESPACES.contains(&ns)
+            || self.known_namespaces.contains(ns)
+            || self.import_aliases.values().any(|full| full == ns)
+        {
+            return true;
+        }
+        let prefix_len = ns.len();
+        let has_prefix = |key: &str| {
+            key.len() > prefix_len + 1
+                && key.as_bytes()[prefix_len] == b'/'
+                && key.starts_with(ns)
+        };
+        self.global_symbols.iter().any(|s| has_prefix(s))
+            || self.macros.keys().any(|k| has_prefix(k))
+    }
+
+    /// The declared (non-implicit) module of this compile unit, if any.
+    fn declared_module(&self) -> Option<String> {
+        (self.current_module != super::modules::IMPLICIT_MODULE)
+            .then(|| self.current_module.clone())
+    }
+
+    /// Registry auto-qualification (spec §5): registration-form names
+    /// (`defstate`, `def-process`, …) prefix the current module unless
+    /// already qualified. Headerless (eseq.vanilla) files keep flat keys —
+    /// that is what keeps serialized identity stable until a file converts.
+    ///
+    /// An explicit `eseq.vanilla/name` registration (the §3 cross-module def
+    /// escape hatch, used by hazard (i) to pin a `defstate` that Rust writes
+    /// by bare spelling) registers under the **flat** key: vanilla's registry
+    /// keyspace *is* the flat keyspace under slice 0, and neither
+    /// `Compiler::state_binding_for` nor `VM::state_binding_node` has an
+    /// implicit-module rung. Without this strip a pinned `(defstate
+    /// eseq.vanilla/sbrowser-tab …)` would key `state_bindings` as
+    /// `eseq.vanilla/sbrowser-tab` while every flat reader and writer looks up
+    /// `sbrowser-tab`, so the binding would be invisible and `(set! …)` would
+    /// StoreGlobal over the slot holding the NodeRef.
+    fn qualify_registration_name(&self, name: &str) -> String {
+        if super::modules::is_qualified(name) {
+            return super::modules::strip_implicit(name).to_string();
+        }
+        if self.declared_module().is_none() {
+            return name.to_string();
+        }
+        super::modules::qualify(&self.current_module, name)
+    }
+
+    /// State-binding lookup mirroring the §3 resolution ladder over the
+    /// (possibly qualified) `state_bindings` keyspace: exact key →
+    /// current-module key → `:refer` target.
+    fn state_binding_for(&self, name: &str) -> Option<u32> {
+        if let Some(id) = self.state_bindings.get(name) {
+            return Some(*id);
+        }
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .map(String::as_str)
+                .unwrap_or(ns);
+            // `eseq.vanilla/x` registers flat (see `qualify_registration_name`),
+            // so the explicit escape-hatch spelling has to reduce to the flat
+            // key or a pinned `defstate` read qualified would compile to
+            // LoadGlobal and hand back the raw NodeRef.
+            if full_ns == super::modules::IMPLICIT_MODULE {
+                return self.state_bindings.get(base).copied();
+            }
+            return self
+                .state_bindings
+                .get(&super::modules::qualify(full_ns, base))
+                .copied();
+        }
+        if self.declared_module().is_some()
+            && let Some(id) = self
+                .state_bindings
+                .get(&super::modules::qualify(&self.current_module, name))
+        {
+            return Some(*id);
+        }
+        if let Some(id) = self
+            .refers
+            .get(name)
+            .and_then(|qualified| self.state_bindings.get(qualified))
+        {
+            return Some(*id);
+        }
+        None
+    }
+
+    fn warn_once(&mut self, message: String) {
+        if !self.warnings.contains(&message) {
+            self.warnings.push(message);
+        }
+    }
+
+    pub fn new_chunk(&mut self, mut chunk: Chunk) -> (usize, usize) {
+        // Stamp every chunk with the module current at its creation
+        // (None = implicit eseq.vanilla). The entry chunk of a unit whose
+        // (module …) form appears mid-file is re-stamped by that form.
+        chunk.source_module = self.declared_module();
         let symbols = chunk.symbols.clone();
         let prev_chunk_idx = self.current_chunk;
         let new_chunk_idx = self.chunks.len();
@@ -1152,24 +1462,74 @@ impl Compiler {
 
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(_) if self.state_bindings.contains_key(name) => {
-                self.emit(OpCode::LoadState(self.state_bindings[name]))
-            }
+            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
+                Some(node_id) => self.emit(OpCode::LoadState(node_id)),
+                None => self.emit(OpCode::LoadGlobal(idx)),
+            },
             SymbolResolution::Local(idx) => self.emit(OpCode::LoadLocal(idx)),
-            SymbolResolution::Global(idx) => self.emit(OpCode::LoadGlobal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::LoadUpvalue(idx)),
         }
     }
 
     fn emit_symbol_store(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(_) if self.state_bindings.contains_key(name) => {
-                self.emit(OpCode::StoreState(self.state_bindings[name]))
-            }
+            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
+                Some(node_id) => self.emit(OpCode::StoreState(node_id)),
+                None => self.emit(OpCode::StoreGlobal(idx)),
+            },
             SymbolResolution::Local(idx) => self.emit(OpCode::StoreLocal(idx)),
-            SymbolResolution::Global(idx) => self.emit(OpCode::StoreGlobal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::StoreUpvalue(idx)),
         }
+    }
+
+    /// Definition sites (`def`, defstate, derived defs) in a DECLARED
+    /// module always intern under that module: the reference ladder's
+    /// flat-entry fallback exists so vanilla defs keep today's
+    /// shadow-natives-in-place semantics, but inside a module it would
+    /// silently define into (and clobber) a same-named flat native — the
+    /// `select` builtin-widget collision found in S3 batch 1. Shadowing a
+    /// flat/core name from a module warns (spec §3) and creates the
+    /// module's own entry instead.
+    fn emit_symbol_store_for_definition(&mut self, name: &str) {
+        if self.declared_module().is_some()
+            && !super::modules::is_qualified(name)
+            && !self.reactive_namespaces.contains(name)
+        {
+            let idx = self.use_global_for_definition(name);
+            match self.state_binding_for(name) {
+                Some(node_id) => self.emit(OpCode::StoreState(node_id)),
+                None => self.emit(OpCode::StoreGlobal(idx)),
+            }
+            return;
+        }
+        self.emit_symbol_store(name);
+    }
+
+    /// Index for a definition-site global: in a declared module, always the
+    /// module-qualified entry (see `emit_symbol_store_for_definition`);
+    /// otherwise the ordinary reference ladder.
+    fn use_global_for_definition(&mut self, name: &str) -> usize {
+        if self.declared_module().is_none()
+            || super::modules::is_qualified(name)
+            || self.reactive_namespaces.contains(name)
+        {
+            return self.use_global(name);
+        }
+        if self.global_symbols.iter().any(|s| s == name) {
+            let module = self.current_module.clone();
+            self.warn_once(format!(
+                "warning: (def {name} …) in {module} does not replace the \
+                 existing flat/core `{name}`; it defines {module}/{name} \
+                 (use an explicit qualified def to overwrite the flat entry)"
+            ));
+        }
+        let qualified = super::modules::qualify(&self.current_module, name);
+        if let Some(index) = self.global_symbols.iter().position(|r| *r == qualified) {
+            return index;
+        }
+        let idx = self.global_symbols.len();
+        self.global_symbols.push(qualified);
+        idx
     }
 
     pub fn compile_function(
@@ -1214,7 +1574,8 @@ impl Compiler {
             symbols,
             upvalues: vec![],
             source_symbol: name.clone(),
-            source_module: self.source_module.clone(),
+            source_file: self.source_file.clone(),
+            source_module: None,
         });
         self.compile_expression(&wrapped_body)?;
 
@@ -1235,7 +1596,7 @@ impl Compiler {
         }
         self.emit(OpCode::MakeClosure(new_chunk_idx, scope.upvalues.len()));
         if let Some(name) = name {
-            self.emit_symbol_store(&name);
+            self.emit_symbol_store_for_definition(&name);
             self.emit(OpCode::PushNil);
         }
 
@@ -1359,7 +1720,7 @@ impl Compiler {
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         // Macro expansion: if the head is a macro name, expand and compile the result
         if let Some(Expression::Symbol(name)) = list.first() {
-            if let Some(mac) = self.macros.get(name) {
+            if let Some(mac) = self.lookup_macro(name) {
                 if list.len() - 1 != mac.params.len() {
                     return Err(CompilerError::InvalidArg);
                 }
@@ -1481,6 +1842,234 @@ impl Compiler {
         }
 
         if let Some(Expression::Symbol(s)) = list.first() {
+            // (module NAME) — top-level declaration (spec §2 decision 1):
+            // everything after it in this compile unit belongs to NAME.
+            if s == "module" {
+                if self.scopes.len() > 1 {
+                    self.errors
+                        .push("(module …) must appear at top level".to_string());
+                } else if let (Some(Expression::Symbol(name)), 2) = (list.get(1), list.len()) {
+                    if !super::modules::is_valid_module_name(name) {
+                        self.errors.push(format!(
+                            "invalid module name '{name}' (dotted segments, no '/')"
+                        ));
+                    } else if self.module_declared {
+                        self.errors.push(format!(
+                            "duplicate (module {name}) — one module form per file"
+                        ));
+                    } else {
+                        self.module_declared = true;
+                        self.current_module = name.clone();
+                        // The unit's entry chunk was created before this
+                        // form was seen; everything after it in the file
+                        // belongs to the module, so re-stamp it (top-level
+                        // registration calls run in the entry chunk).
+                        let entry_idx = self.current_chunk;
+                        if let Some(chunk) = self.chunks.get_mut(entry_idx) {
+                            chunk.source_module = Some(name.clone());
+                        }
+                        // Register the declaration at runtime so `import`
+                        // can treat the module as loaded (load-once).
+                        let declare = Expression::List(vec![
+                            Expression::Symbol("__module-declare".to_string()),
+                            Expression::String(name.clone()),
+                        ]);
+                        return self.compile_expression(&declare);
+                    }
+                } else {
+                    self.errors
+                        .push("(module …) expects exactly one symbol name".to_string());
+                }
+                self.emit(OpCode::PushNil);
+                return Ok(());
+            }
+            // (import NAME :as ALIAS) / (import NAME :refer (sym …)) —
+            // load-once + alias/refer registration (spec §2 decision 2, §4).
+            if s == "import" {
+                if self.scopes.len() > 1 {
+                    self.errors
+                        .push("(import …) must appear at top level, not inside a function".to_string());
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let Some(Expression::Symbol(module_name)) = list.get(1) else {
+                    self.errors
+                        .push("(import …) expects a module name symbol".to_string());
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                if !super::modules::is_valid_module_name(module_name) {
+                    self.errors
+                        .push(format!("invalid module name '{module_name}' in import"));
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let mut i = 2;
+                while i < list.len() {
+                    match (&list[i], list.get(i + 1)) {
+                        (Expression::Keyword(k), Some(Expression::Symbol(alias)))
+                            if k == "as" =>
+                        {
+                            self.import_aliases
+                                .insert(alias.clone(), module_name.clone());
+                            i += 2;
+                        }
+                        (Expression::Keyword(k), Some(Expression::List(syms)))
+                            if k == "refer" =>
+                        {
+                            for sym in syms {
+                                let Expression::Symbol(sym) = sym else {
+                                    self.errors.push(format!(
+                                        "import {module_name}: :refer expects symbols"
+                                    ));
+                                    continue;
+                                };
+                                self.refers.insert(
+                                    sym.clone(),
+                                    super::modules::qualify(module_name, sym),
+                                );
+                            }
+                            i += 2;
+                        }
+                        _ => {
+                            self.errors.push(format!(
+                                "import {module_name}: expected :as ALIAS or :refer (sym …)"
+                            ));
+                            break;
+                        }
+                    }
+                }
+                self.known_namespaces.insert(module_name.clone());
+                // Runtime half: resolve the name to a file and evaluate it
+                // if and only if it has not been evaluated (spec §4).
+                let load = Expression::List(vec![
+                    Expression::Symbol("__import-module".to_string()),
+                    Expression::String(module_name.clone()),
+                ]);
+                return self.compile_expression(&load);
+            }
+            // Advice-style user overrides (spec §6.1). The target is syntax,
+            // not a value lookup: compile it to a canonical qualified string
+            // plus a callback. Supported spellings are:
+            //   (override module/name (lambda (args...) ...))
+            //   (override module/name (args...) body...)
+            //   (override module/name :around (original args...) body...)
+            if s == "override" {
+                let Some(Expression::Symbol(target)) = list.get(1) else {
+                    self.errors.push(
+                        "(override …) expects a qualified symbol target".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                let Some((namespace, base)) = super::modules::split_qualified(target) else {
+                    self.errors.push(format!(
+                        "override target '{target}' must be module-qualified"
+                    ));
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                let namespace = self
+                    .import_aliases
+                    .get(namespace)
+                    .cloned()
+                    .unwrap_or_else(|| namespace.to_string());
+                let target = super::modules::qualify(&namespace, base);
+                if super::modules::is_private_name(base) {
+                    self.warn_once(format!(
+                        "warning: overriding {target}, which is %-private to {namespace}; \
+                         this override may break on update"
+                    ));
+                }
+
+                let (kind, callback) = match list.get(2) {
+                    Some(Expression::Keyword(kind)) if kind == "around" => {
+                        let Some(Expression::List(args)) = list.get(3) else {
+                            self.errors.push(
+                                "(override … :around …) expects (original args...) and a body"
+                                    .to_string(),
+                            );
+                            self.emit(OpCode::PushNil);
+                            return Ok(());
+                        };
+                        if args.is_empty() || list.len() < 5 {
+                            self.errors.push(
+                                "(override … :around …) requires original and a body".to_string(),
+                            );
+                            self.emit(OpCode::PushNil);
+                            return Ok(());
+                        }
+                        let mut lambda = vec![
+                            Expression::Symbol("lambda".to_string()),
+                            Expression::List(args.clone()),
+                        ];
+                        lambda.extend_from_slice(&list[4..]);
+                        ("around", Expression::List(lambda))
+                    }
+                    Some(Expression::List(items))
+                        if matches!(items.first(), Some(Expression::Symbol(head)) if head == "lambda")
+                            && list.len() == 3 =>
+                    {
+                        ("replace", list[2].clone())
+                    }
+                    Some(Expression::List(args)) if list.len() >= 4 => {
+                        let mut lambda = vec![
+                            Expression::Symbol("lambda".to_string()),
+                            Expression::List(args.clone()),
+                        ];
+                        lambda.extend_from_slice(&list[3..]);
+                        ("replace", Expression::List(lambda))
+                    }
+                    Some(callback) if list.len() == 3 => ("replace", callback.clone()),
+                    _ => {
+                        self.errors.push(
+                            "(override …) expects a callback or argument list and body".to_string(),
+                        );
+                        self.emit(OpCode::PushNil);
+                        return Ok(());
+                    }
+                };
+                let register = Expression::List(vec![
+                    Expression::Symbol("__register-override".to_string()),
+                    Expression::String(target),
+                    Expression::String(kind.to_string()),
+                    callback,
+                ]);
+                return self.compile_expression(&register);
+            }
+            if s == "remove-override" {
+                let Some(Expression::Symbol(target)) = list.get(1) else {
+                    self.errors.push(
+                        "(remove-override …) expects a qualified symbol target".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                if list.len() != 2 {
+                    self.errors.push(
+                        "(remove-override …) expects exactly one target".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let Some((namespace, base)) = super::modules::split_qualified(target) else {
+                    self.errors.push(format!(
+                        "remove-override target '{target}' must be module-qualified"
+                    ));
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                };
+                let namespace = self
+                    .import_aliases
+                    .get(namespace)
+                    .map(String::as_str)
+                    .unwrap_or(namespace);
+                let remove = Expression::List(vec![
+                    Expression::Symbol("__remove-override".to_string()),
+                    Expression::String(super::modules::qualify(namespace, base)),
+                ]);
+                return self.compile_expression(&remove);
+            }
             if s == "defmacro" && list.len() == 4 {
                 let Expression::Symbol(name) = &list[1] else {
                     return Err(CompilerError::InvalidArg);
@@ -1495,8 +2084,19 @@ impl Compiler {
                         _ => Err(CompilerError::InvalidArg),
                     })
                     .collect::<Result<_, _>>()?;
+                // Inside a declared module, bare macro names intern
+                // qualified (`sdf/circle`); headerless (eseq.vanilla)
+                // files keep flat keys until slice 3 so the patcher's
+                // textual defmacro machinery is untouched.
+                let key = if !super::modules::is_qualified(name)
+                    && self.current_module != super::modules::IMPLICIT_MODULE
+                {
+                    super::modules::qualify(&self.current_module, name)
+                } else {
+                    name.clone()
+                };
                 self.macros.insert(
-                    name.clone(),
+                    key,
                     MacroDef {
                         params,
                         body: list[3].clone(),
@@ -1643,7 +2243,19 @@ impl Compiler {
                         Expression::Symbol(_)
                             if (is_def_process || is_def_accumulator || is_defchan) && i == 0 =>
                         {
-                            let idx = self.use_string_constant(c);
+                            // Registry auto-qualification (spec §5):
+                            // def-process/def-accumulator class names inside
+                            // a declared module qualify, so the registry
+                            // entry and the constructor native land under
+                            // the module's name. defchan channel names stay
+                            // flat for now (channels are a separate,
+                            // handle-first keyspace).
+                            let name = if is_def_process || is_def_accumulator {
+                                self.qualify_registration_name(c)
+                            } else {
+                                c.clone()
+                            };
+                            let idx = self.use_string_constant(&name);
                             self.emit(OpCode::PushSymbol(idx));
                         }
                         _ => {
@@ -1722,7 +2334,7 @@ impl Compiler {
                 Expression::Symbol(s) if s == ">=" => self.emit(OpCode::Gte),
                 Expression::Symbol(s) if s == "def" => {
                     if let Some(Expression::Symbol(s)) = list.get(1) {
-                        self.emit_symbol_store(s);
+                        self.emit_symbol_store_for_definition(s);
                         self.emit(OpCode::PushNil);
                     }
                 }
@@ -1759,8 +2371,14 @@ impl Compiler {
                 }
                 // Dot syntax: person.age  →  load person, GetField("age")
                 // person.address.city  →  load person, GetField("address"), GetField("city")
+                // Module-qualified symbols (`test.mod/foo`) are exempt: the
+                // `/` split wins and dots before it are module segments.
                 let parts: Vec<&str> = s.splitn(2, '.').collect();
-                if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                if parts.len() == 2
+                    && !super::modules::is_qualified(s)
+                    && !parts[0].is_empty()
+                    && !parts[1].is_empty()
+                {
                     let fields = parts[1].split('.').collect::<Vec<_>>();
                     if self.reactive_namespaces.contains(parts[0]) {
                         let ns_idx = self.use_string_constant(parts[0]);
@@ -1815,6 +2433,11 @@ impl Compiler {
     }
 
     pub fn compile(&mut self) -> Result<Vec<Chunk>, CompilerError> {
+        // A continuation segment (module context injected before compile,
+        // see `set_module_context`) already belongs to its unit's module;
+        // stamp the entry chunk the way the `(module …)` form re-stamps it
+        // in the segment that actually contains the declaration.
+        let entry_module = self.declared_module();
         _ = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -1822,11 +2445,15 @@ impl Compiler {
             symbols: vec![],
             upvalues: vec![],
             source_symbol: None,
-            source_module: self.source_module.clone(),
+            source_file: self.source_file.clone(),
+            source_module: entry_module,
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
             self.compile_expression(expression)?;
+        }
+        if !self.errors.is_empty() {
+            return Err(CompilerError::Message(self.errors.join("; ")));
         }
         Ok(std::mem::take(&mut self.chunks))
     }

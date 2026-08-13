@@ -7,6 +7,6 @@
     :rack-slot-audio-fx ("OTT")))
 
 (def capture-after-sync ()
-  (set! rack-panel-slot-list-open false)
-  (set! rack-panel-selected-chain-open false)
-  (set! rack-panel-macros-open true))
+  (set! eseq.effects.state/rack-panel-slot-list-open false)
+  (set! eseq.effects.state/rack-panel-selected-chain-open false)
+  (set! eseq.effects.state/rack-panel-macros-open true))

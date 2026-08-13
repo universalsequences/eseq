@@ -175,10 +175,16 @@ pub(in crate::lisp_host) fn midi_fx_source_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+pub(in crate::lisp_host) fn read_midi_fx_lisp(path: &Path) -> io::Result<String> {
+    let source = std::fs::read_to_string(path)?;
+    eseqlisp::module_alias_migration::warn_on_old_module_aliases(path, &source);
+    Ok(source)
+}
+
 pub(in crate::lisp_host) fn load_midi_fx_source(name: &str) -> io::Result<String> {
     let path = midi_fx_source_path(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MIDI FX source not found"))?;
-    std::fs::read_to_string(path)
+    read_midi_fx_lisp(&path)
 }
 
 pub fn load_midi_fx_library_source() -> String {
@@ -196,7 +202,7 @@ pub fn load_midi_fx_library_source() -> String {
                 let dsp = path.join("dsp.lisp");
                 if dsp.exists() {
                     if let (Ok(rel), Ok(src)) =
-                        (path.strip_prefix(root), std::fs::read_to_string(&dsp))
+                        (path.strip_prefix(root), read_midi_fx_lisp(&dsp))
                     {
                         out.push((rel.to_string_lossy().replace('\\', "/"), src));
                     }

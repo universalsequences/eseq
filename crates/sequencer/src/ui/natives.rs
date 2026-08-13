@@ -2748,7 +2748,7 @@ pub(crate) fn init_runtime(
                     "record-armed",
                     build_record_armed_value(&record_armed.lock().unwrap()),
                 ),
-                ("playhead-page", Value::Number(0.0)),
+                ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-instrument-name", Value::String(String::new())),
                 (

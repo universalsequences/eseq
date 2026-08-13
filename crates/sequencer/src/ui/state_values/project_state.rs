@@ -121,7 +121,7 @@ pub(super) fn project_scratch_source_path() -> PathBuf {
 pub(crate) fn clear_project_script_tabs(editor: &mut Editor) -> Result<(), String> {
     editor
         .runtime_mut()
-        .eval_str("(seq-clear-project-script-tabs)")
+        .eval_str("(eseq.seq-step-tabs/seq-clear-project-script-tabs)")
         .map_err(|error| format!("Failed to clear project script tabs: {error:?}"))?;
     editor.refresh_runtime_side_effects();
     Ok(())

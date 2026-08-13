@@ -729,4 +729,4 @@
           )))))
 
 (effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors SEQ.track-active-notes))
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

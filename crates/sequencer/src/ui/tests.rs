@@ -1453,7 +1453,7 @@
 
         assert_eq!(
             source,
-            "(seq-apply-instrument-patcher-layout \"*instrument-patcher:digitone*\")"
+            "(eseq.seq-layout/apply-instrument-patcher-layout \"*instrument-patcher:digitone*\")"
         );
     }
 
@@ -1466,7 +1466,7 @@
 
         assert_eq!(
             source,
-            "(seq-apply-instrument-patcher-source-layout \"*instrument-patcher:digitone*\" \"*patcher-emitted:instruments/digitone/dsp.lisp*\")"
+            "(eseq.seq-layout/apply-instrument-patcher-source-layout \"*instrument-patcher:digitone*\" \"*patcher-emitted:instruments/digitone/dsp.lisp*\")"
         );
     }
 
@@ -1486,7 +1486,7 @@
     fn instrument_patcher_layout_restore_uses_remembered_step_panel() {
         let source = restore_instrument_patcher_layout_source();
 
-        assert_eq!(source, "(seq-restore-instrument-patcher-layout)");
+        assert_eq!(source, "(eseq.seq-panels/seq-restore-instrument-patcher-layout)");
     }
 
     #[test]
@@ -1524,7 +1524,7 @@
                 (def synth-ui-current-name "")
                 (def custom-ui-current-kind "instrument")
                 (def custom-ui-selected-section 0)
-                (def custom-ui-selected-section-for-current-scope () 0)
+                (def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () 0)
                 (def agent-instrument-stub-bg ()
                     (box :width 70 :height 8.2
                       (label "stub" :font-size 10 :color :gray :bg :transparent)))"#,
@@ -1538,7 +1538,7 @@
                 r#"(custom-instrument-synth-ui
                      (dict :name "agent-draft-1/"
                            :synth (list (dict :name "base_note"
-                                              :control "base-note"
+                                              :control "eseq.effects.custom-ui-runtime/base-note"
                                               :value 0
                                               :min -48
                                               :max 48))))"#,
@@ -1965,9 +1965,9 @@
         editor.switch_active_tile(mixer_tile_id);
         let mixer_layout = editor.widget_layout().expect("mixer active layout");
         let target_track = 1usize;
-        let target_badge = find_layout_node_by_stable_key(
+        let target_badge = find_layout_node_by_stable_key_suffix(
             &mixer_layout,
-            &format!("mixer-v2-track-label-{target_track}"),
+            &format!("/track-label-{target_track}"),
         )
         .expect("target mixer track badge");
         let click_col = target_badge.rect.col + target_badge.rect.width * 0.5;
@@ -2013,7 +2013,7 @@
         editor.reset_widget_scroll_for_buffer_named("*fx*");
         editor
             .runtime_mut()
-            .eval_str("(set! selected-bus -1)")
+            .eval_str("(set! eseq.seq-core-state/selected-bus -1)")
             .expect("clear selected bus");
         reset_sampler_waveform_view(&mut editor);
         let pre_sync = phase.elapsed();
@@ -2206,7 +2206,7 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: Cmd+A select-all and Escape unselect-all under the real production multi-pane layout (seq-apply-fx-layout), with retained Metal updates for every visible tile"]
+    #[ignore = "release-mode perf probe: Cmd+A select-all and Escape unselect-all under the real production multi-pane layout (eseq.seq-layout/apply-fx-layout), with retained Metal updates for every visible tile"]
     fn project_92_full_layout_step_interactions_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-full-layout-step-interactions-probe".to_string())
@@ -2351,7 +2351,7 @@
         ///
         /// Both gestures are the real ones — a mouse Down on a
         /// `transport-scene-pill-*` (-> `switch-pattern`) and on a
-        /// `mixer-v2-track-pattern-cell-*` (-> `set-scene-cell`, the live
+        /// `eseq.mixer/track-pattern-cell-*` (-> `set-scene-cell`, the live
         /// clip-launch path; `launch-track-pattern` is dead) — and both host
         /// commands run through the REAL `dispatch_custom_host_command`
         /// seam. The visible update replays the reactive tick INCLUDING its
@@ -2828,9 +2828,9 @@
             let step_clipboard = Arc::new(Mutex::new(None));
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
-                let cell = find_layout_node_by_stable_key(
+                let cell = find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                    &format!("/step-cell-{TRACK}-{step}"),
                 )
                 .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
                 (
@@ -3144,7 +3144,7 @@
                 assert!(state.pattern.patterns[TRACK].is_active(33));
                 editor
                     .runtime_mut()
-                    .eval_str("(seqv-step-pointer-up 0 33 (dict :sx -1))")
+                    .eval_str("(eseq.sequencer/grid-step-pointer-up 0 33 (dict :sx -1))")
                     .expect("finish pianohold toggle drag");
                 state.pattern.patterns[TRACK].set_step_active(32, false);
                 state.pattern.patterns[TRACK].set_step_active(33, false);
@@ -3966,9 +3966,9 @@
 
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
-                let cell = find_layout_node_by_stable_key(
+                let cell = find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                    &format!("/step-cell-{TRACK}-{step}"),
                 )
                 .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
                 (
@@ -5324,9 +5324,9 @@
             {
                 let (col, row, width, height) = {
                     let layout = editor.widget_layout().expect("sequencer layout");
-                    let cell = find_layout_node_by_stable_key(
+                    let cell = find_layout_node_by_stable_key_suffix(
                         &layout,
-                        &format!("seqv-step-cell-{TRACK}-{CURSOR_STEP}"),
+                        &format!("/step-cell-{TRACK}-{CURSOR_STEP}"),
                     )
                     .unwrap_or_else(|| panic!("visible sequencer step cell {CURSOR_STEP}"));
                     (
@@ -5389,7 +5389,7 @@
             ];
 
             for (label, param) in scenarios {
-                let picker_key = format!("fx-step-param-{label}");
+                let picker_key = format!("/step-param-{label}");
                 // Park the edited param mid-range first (fixture setup, not a
                 // measured edit): the picker maps drag distance onto
                 // [value..max] / [min..value], so a value already sitting at a
@@ -5432,7 +5432,7 @@
                         .widget_layout
                         .as_ref()
                         .expect("step tile layout");
-                    let node = find_layout_node_by_stable_key(layout, &picker_key)
+                    let node = find_layout_node_by_stable_key_suffix(layout, &picker_key)
                         .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
                         .unwrap_or_else(|| {
                             panic!(
@@ -5734,7 +5734,7 @@
         // Scene launch + track-clip launch at large-project clip scale.
         //
         // Clip launch is the real gesture: a mouse Down on a mixer
-        // `mixer-v2-track-pattern-cell-*` (its on-click fires on Down),
+        // `eseq.mixer/track-pattern-cell-*` (its on-click fires on Down),
         // which lowers to `set-scene-cell` — the live clip-launch path.
         // Scene launch is a mouse Down on a `transport-scene-pill-*`,
         // which lowers to `switch-pattern`. Both commands run through the
@@ -6640,10 +6640,10 @@
                 let mut targets = Vec::new();
                 for cell in &cells {
                     let key = format!(
-                        "mixer-v2-track-pattern-cell-{TRACK}-{}",
+                        "/track-pattern-cell-{TRACK}-{}",
                         cell.pattern_id.0
                     );
-                    let Some(node) = find_layout_node_by_stable_key(layout, &key) else {
+                    let Some(node) = find_layout_node_by_stable_key_suffix(layout, &key) else {
                         continue;
                     };
                     let center_col =
@@ -6841,9 +6841,11 @@
                         .widget_layout
                         .as_ref()
                         .expect("transport tile layout");
-                    let node = find_layout_node_by_stable_key(
+                    // ui/transport.lisp is `eseq.transport`, so the pill's
+                    // `:key` renders qualified (`eseq.transport/…`).
+                    let node = find_layout_node_by_stable_key_suffix(
                         layout,
-                        &format!("transport-scene-pill-{scene}"),
+                        &format!("/transport-scene-pill-{scene}"),
                     )
                     .unwrap_or_else(|| panic!("visible transport scene pill {scene}"));
                     let center_col =
@@ -7173,9 +7175,9 @@
                 let layout = editor.widget_layout().expect("sequencer layout");
                 for step in [0, 8, 15, 16, 31, 32, 47, 48, 63] {
                     assert!(
-                        find_layout_node_by_stable_key(
+                        find_layout_node_by_stable_key_suffix(
                             &layout,
-                            &format!("seqv-step-cell-{TRACK}-{step}"),
+                            &format!("/step-cell-{TRACK}-{step}"),
                         )
                         .is_some(),
                         "step cell {step} must be present in the sequencer tile layout at {vp_cols}x{vp_rows}",
@@ -7748,9 +7750,9 @@
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
-                let cell = find_layout_node_by_stable_key(
+                let cell = find_layout_node_by_stable_key_suffix(
                     &layout,
-                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                    &format!("/step-cell-{TRACK}-{step}"),
                 )
                 .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
                 (
@@ -8026,7 +8028,7 @@
                 });
                 finish_visible_update(&mut editor, &mut app);
                 assert_eq!(
-                    editor.runtime_mut().eval_str("(step-selected? 8)").unwrap(),
+                    editor.runtime_mut().eval_str("(eseq.step-grid-interactions/step-selected? 8)").unwrap(),
                     Some(Value::Bool(true)),
                     "move fixture must expose step 8 as selected to the gesture Lisp",
                 );
@@ -8051,7 +8053,7 @@
                 // precondition and is intentionally outside the sample.
                 editor
                     .runtime_mut()
-                    .eval_str("(seqv-step-pointer-down 0 8 (dict :sx -1))")
+                    .eval_str("(eseq.sequencer/grid-step-pointer-down 0 8 (dict :sx -1))")
                     .expect("arm selected-step move gesture");
                 assert_eq!(
                     editor.runtime_mut().eval_str("step-move-last").unwrap(),
@@ -8090,7 +8092,7 @@
                 }
                 editor
                     .runtime_mut()
-                    .eval_str("(seqv-step-pointer-up 0 9 (dict :sx -1))")
+                    .eval_str("(eseq.sequencer/grid-step-pointer-up 0 9 (dict :sx -1))")
                     .expect("finish benchmark selected-step drag");
 
                 selected_steps.lock().unwrap().clear();
@@ -8141,7 +8143,7 @@
                 }
                 editor
                     .runtime_mut()
-                    .eval_str("(seqv-step-pointer-up 0 33 (dict :sx -1))")
+                    .eval_str("(eseq.sequencer/grid-step-pointer-up 0 33 (dict :sx -1))")
                     .expect("finish benchmark toggle drag");
 
                 // delete-16: sixteen active steps selected, then the real
@@ -8336,7 +8338,7 @@
             editor.set_active_buffer(fx_buffer_id);
             editor
                 .runtime_mut()
-                .eval_str("(if (not rack-panel-macros-open) (rack-panel-toggle-macros) false)")
+                .eval_str("(if (not eseq.effects.state/rack-panel-macros-open) (eseq.effects.instrument-panel/rack-panel-toggle-macros) false)")
                 .expect("open rack macro bank");
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(180, 70);
@@ -8978,7 +8980,7 @@
 
                 assert!(
                     editor.focus_widget_by_stable_key(
-                        "fx-step-param-velocity",
+                        "eseq.effects.track-panels/step-param-velocity",
                         Some("number-picker")
                     ),
                     "the Escape benchmark must reproduce a focused *step* number picker"
@@ -9691,14 +9693,14 @@
         ));
         editor.refresh_runtime_side_effects();
         assert_eq!(
-            eval(&mut editor, "(seq-arrangement-view?)"),
+            eval(&mut editor, "(eseq.seq-step-tabs/seq-arrangement-view?)"),
             Some(Value::Bool(true)),
             "Tab must toggle into the arrangement view"
         );
         // Pin the shared time axis so gesture geometry is deterministic.
         eval(
             &mut editor,
-            "(do (set! arrangement-view-duration 64) (set-arrangement-view-start 0 64))",
+            "(do (set! eseq.arrangement/view-duration 64) (eseq.arrangement/set-view-start 0 64))",
         );
         editor.refresh_runtime_side_effects();
         editor.update_tile_rects(VIEW_W as u16, VIEW_H as u16);
@@ -9879,13 +9881,13 @@
         'outer: for track in 0..track_count {
             let clip_count = read_num(
                 &mut editor,
-                &format!("(len (arrangement-track-clips {track}))"),
+                &format!("(len (eseq.arrangement/track-clips {track}))"),
             ) as usize;
             for index in 0..clip_count {
                 let clip = |editor: &mut Editor, key: &str| {
                     eval(
                         editor,
-                        &format!("(get (nth (arrangement-track-clips {track}) {index}) :{key})"),
+                        &format!("(get (nth (eseq.arrangement/track-clips {track}) {index}) :{key})"),
                     )
                 };
                 let Some(Value::Number(start)) = clip(&mut editor, "start-beat") else {
@@ -9904,7 +9906,7 @@
                     read_num(
                         &mut editor,
                         &format!(
-                            "(get (nth (arrangement-track-clips {track}) {}) :start-beat)",
+                            "(get (nth (eseq.arrangement/track-clips {track}) {}) :start-beat)",
                             index + 1
                         ),
                     )
@@ -9926,23 +9928,23 @@
         );
         let clip_count = read_num(
             &mut editor,
-            &format!("(len (arrangement-track-clips {fixture_track}))"),
+            &format!("(len (eseq.arrangement/track-clips {fixture_track}))"),
         ) as usize;
         // Center the shared time axis on the fixture clip so its geometry is
         // on screen (the qualifying clip is usually late in the song).
         let view_start = ((clip_start + clip_end - VIEW_DURATION) * 0.5).max(0.0).floor();
         eval(
             &mut editor,
-            &format!("(set-arrangement-view-start {view_start} 64)"),
+            &format!("(eseq.arrangement/set-view-start {view_start} 64)"),
         );
         // The setter clamps against the scroll extent; use what it kept.
-        let view_start = read_num(&mut editor, "arrangement-view-start");
+        let view_start = read_num(&mut editor, "eseq.arrangement/view-start");
         editor.refresh_runtime_side_effects();
         let _ = editor.widget_layout();
         let lane_rect = |editor: &mut Editor| -> (f32, f32, f32, f32) {
             let layout = editor.widget_layout().expect("arrangement layout");
-            let key = format!("arrangement-track-lane-{fixture_track}");
-            let container = find_layout_node_by_stable_key(&layout, &key)
+            let key = format!("/track-lane-{fixture_track}");
+            let container = find_layout_node_by_stable_key_suffix(&layout, &key)
                 .expect("fixture track lane container");
             let lane = find_layout_node_by_widget_type(container, "timeline")
                 .expect("track 0 timeline instance");
@@ -9997,7 +9999,7 @@
             assert_eq!(
                 read_num(
                     &mut editor,
-                    &format!("(get (nth (arrangement-track-clips {fixture_track}) {clip_index}) :end-beat)"),
+                    &format!("(get (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}) :end-beat)"),
                 ),
                 shrunk_end,
                 "clip-resize commit must republish the shrunk clip"
@@ -10027,7 +10029,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             let elapsed = duration_ms(started.elapsed());
             assert_eq!(
-                read_num(&mut editor, &format!("(len (arrangement-lane-selection {fixture_track}))")),
+                read_num(&mut editor, &format!("(len (eseq.arrangement/lane-selection {fixture_track}))")),
                 1.0,
                 "clicking the clip title bar must select the clip"
             );
@@ -10037,7 +10039,7 @@
             // Deselect outside the sample.
             eval(
                 &mut editor,
-                &format!("(arrangement-track-action {fixture_track} (dict :type :clear-selection :time 0))"),
+                &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
@@ -10059,7 +10061,7 @@
                 "the resize tick must repaint retained runs in the same frame                  (ghost channels must dirty the lane widget)"
             );
             assert_eq!(
-                eval(&mut editor, "(arrangement-track-drag-kind)"),
+                eval(&mut editor, "(eseq.arrangement/track-drag-kind)"),
                 Some(Value::Keyword("track-resize".to_string())),
                 "the live resize tick must be previewing through the drag state"
             );
@@ -10067,7 +10069,7 @@
                 read_num(
                     &mut editor,
                     &format!(
-                        "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" {fixture_track}))"
+                        "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" {fixture_track}))"
                     ),
                 ) >= 2.0,
                 "the resize tick must publish the lane ghost channel"
@@ -10076,7 +10078,7 @@
                 read_num(
                     &mut editor,
                     &format!(
-                        "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" {fixture_track}))"
+                        "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" {fixture_track}))"
                     ),
                 ) < clip_end,
                 "the resize ghost must shorten the drawn clip"
@@ -10093,13 +10095,13 @@
             send_mouse(&mut editor, MouseEventKind::Up(MouseButton::Left), edge_col, row);
             apply_pending_song_commands(&mut editor, &mut app);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
-            assert_eq!(eval(&mut editor, "arrangement-track-drag"), Some(Value::Nil));
+            assert_eq!(eval(&mut editor, "eseq.arrangement/track-drag"), Some(Value::Nil));
             // Whatever the release committed, restore the fixture geometry.
             apply_clip_resize(&mut app, clip_end);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             eval(
                 &mut editor,
-                &format!("(arrangement-track-action {fixture_track} (dict :type :clear-selection :time 0))"),
+                &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
@@ -10117,7 +10119,7 @@
             let elapsed = duration_ms(started.elapsed());
             assert!(
                 matches!(
-                    eval(&mut editor, "(arrangement-track-drag-kind)"),
+                    eval(&mut editor, "(eseq.arrangement/track-drag-kind)"),
                     Some(Value::Keyword(ref kind)) if kind == "track-move" || kind == "region-move"
                 ),
                 "the live move tick must be previewing through the drag state"
@@ -10132,7 +10134,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             if read_num(
                 &mut editor,
-                &format!("(get (nth (arrangement-track-clips {fixture_track}) {clip_index}) :start-beat)"),
+                &format!("(get (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}) :start-beat)"),
             ) != clip_start
             {
                 let restore_payload = Value::Map(
@@ -10150,7 +10152,7 @@
             }
             eval(
                 &mut editor,
-                &format!("(arrangement-track-action {fixture_track} (dict :type :clear-selection :time 0))"),
+                &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
@@ -10167,7 +10169,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             let elapsed = duration_ms(started.elapsed());
             assert!(
-                eval(&mut editor, "arrangement-region-ghost") != Some(Value::Nil),
+                eval(&mut editor, "eseq.arrangement/region-ghost") != Some(Value::Nil),
                 "the live marquee tick must be previewing the region ghost"
             );
             if iteration >= WARMUPS {
@@ -10179,7 +10181,7 @@
             app.clear_song_region();
             eval(
                 &mut editor,
-                &format!("(arrangement-track-action {fixture_track} (dict :type :clear-selection :time 0))"),
+                &format!("(eseq.arrangement/track-action {fixture_track} (dict :type :clear-selection :time 0))"),
             );
             apply_pending_song_commands(&mut editor, &mut app);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
@@ -10202,7 +10204,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             let elapsed = duration_ms(started.elapsed());
             assert!(
-                read_num(&mut editor, "arrangement-view-start") != view_start,
+                read_num(&mut editor, "eseq.arrangement/view-start") != view_start,
                 "the pan tick must move the shared time axis"
             );
             if iteration >= WARMUPS {
@@ -10211,7 +10213,7 @@
             // Return the axis outside the sample.
             eval(
                 &mut editor,
-                &format!("(set-arrangement-view-start {view_start} 64)"),
+                &format!("(eseq.arrangement/set-view-start {view_start} 64)"),
             );
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
         }

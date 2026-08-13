@@ -358,8 +358,8 @@ impl ScratchControlRuntime {
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
         runtime.register_native_with_docs(
-            "seq-register-script-source-tab",
-            "(seq-register-script-source-tab label)",
+            "eseq.seq-script-picker/seq-register-script-source-tab",
+            "(eseq.seq-script-picker/seq-register-script-source-tab label)",
             "No-op outside the Metal Seq UI; lets source-tab scripts load in scratch/scheduler runtimes.",
             |_args, _ctx| Ok(EValue::Nil),
         );

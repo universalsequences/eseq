@@ -32,7 +32,7 @@
 ;; Re-evaluating this buffer is idempotent: it replaces track 0's process chain
 ;; for the current pattern.
 
-(seq-register-script-source-tab "Phase 3A Ports")
+(eseq.seq-script-picker/seq-register-script-source-tab "Phase 3A Ports")
 
 (def-process phase3a-port-writer
   :doc "Phase 3A named process port target demo"

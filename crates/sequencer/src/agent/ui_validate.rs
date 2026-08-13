@@ -56,7 +56,7 @@ fn validate_ui_source(
 
     if referenced_params.iter().any(|name| name.trim().is_empty()) {
         return Err(
-            "ui.lisp references an empty parameter name (`\"\"`). Do not pass blank placeholder params to UI helpers. If the instrument has only one envelope, use `(ui-lego-adsr-s section \"AMP ENV\" \"amp_attack\" \"amp_decay\" \"amp_sustain\" \"amp_release\")` instead of `ui-adsr-switch`. Use `ui-adsr-switch` only when both ADSR slots reference real DSP params."
+            "ui.lisp references an empty parameter name (`\"\"`). Do not pass blank placeholder params to UI helpers. If the instrument has only one envelope, use `(eseq.effects.custom-ui-lego/ui-lego-adsr-s section \"AMP ENV\" \"amp_attack\" \"amp_decay\" \"amp_sustain\" \"amp_release\")` instead of `eseq.effects.custom-ui-lego/ui-adsr-switch`. Use `eseq.effects.custom-ui-lego/ui-adsr-switch` only when both ADSR slots reference real DSP params."
                 .to_string(),
         );
     }
@@ -115,91 +115,91 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def audio-fx-ui-current-name "validation")
             (def custom-ui-current-kind "instrument")
             (def custom-ui-selected-section 0)
-            (def ui-section (title body) body)
-            (def ui-panel (title section body) body)
-            (def ui-panel-c (title section body) body)
-            (def ui-rack (mode left-panels adsr-form right-panels) (h-stack left-panels adsr-form right-panels))
-            (def ui-param-control (name) (label name :font-size 10 :color :gray :bg :transparent))
-            (def ui-param-knob (name title) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-param-knob-c (name title) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr-c (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-detail-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr-compact-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
-            (def ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
-            (def base-note () (label "base" :font-size 10 :color :gray :bg :transparent))
-            (def base-note-c () (label "base" :font-size 10 :color :gray :bg :transparent))
-            (def ui-accent-blue () :blue)
-            (def ui-accent-cyan () :cyan)
-            (def ui-accent-orange () :orange)
-            (def ui-accent-green () :green)
-            (def ui-accent-violet () :magenta)
-            (def ui-lego-gap () 0.25)
-            (def ui-lego-small-h () 1.95)
-            (def ui-lego-medium-h () 4.08)
-            (def ui-lego-dense-h () 3.08)
-            (def ui-lego-full-h () 8.48)
-            (def ui-lego-col-w () 24.0)
-            (def ui-lego-strip-w () 7.2)
-            (def ui-control-block-small (title accent body) body)
-            (def ui-control-block-medium (title accent body) body)
-            (def ui-control-block-full (title accent body) body)
-            (def ui-control-block-small-s (title accent section body) body)
-            (def ui-control-block-medium-s (title accent section body) body)
-            (def ui-control-block-small-wide-s (title accent section body) body)
-            (def ui-control-block-medium-wide-s (title accent section body) body)
-            (def ui-control-block-dense-s (title accent section body) body)
-            (def ui-control-panel-dense-s (section body) body)
-            (def ui-control-panel-small-s (section body) body)
-            (def ui-control-panel-medium-s (section body) body)
-            (def ui-control-block-full-s (title accent section body) body)
-            (def ui-readout-block-small (title accent body) body)
-            (def ui-readout-block-small-s (title accent section body) body)
-            (def ui-readout-block-small-wide-s (title accent section body) body)
-            (def ui-readout-block-dense-s (title accent section body) body)
-            (def ui-readout-panel-small-s (section body) body)
-            (def ui-readout-panel-dense-s (section body) body)
-            (def ui-readout-panel-medium-s (section body) body)
-            (def ui-readout-block-medium (title accent body) body)
-            (def ui-readout-block-full (title accent body) body)
-            (def ui-lego-column (a b c) (v-stack a b c))
-            (def ui-lego-column-2 (a b) (v-stack a b))
-            (def ui-lego-column-full (a) (v-stack a))
-            (def ui-lego-column-wide (a b c) (v-stack a b c))
-            (def ui-lego-column-wide-2 (a b) (v-stack a b))
-            (def ui-lego-column-wide-full (a) (v-stack a))
-            (def ui-lego-strip-s (title accent section body) body)
-            (def ui-lego-strip-half-s (title accent section body) body)
-            (def ui-lego-strip-panel-s (section body) body)
-            (def ui-lego-badge (title width accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-badge-s (section title width accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-micro-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-micro-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-micro-base-note-s (section width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
-            (def ui-lego-text-row-3 (a b c) (h-stack a b c))
-            (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
-            (def inst-param (inst name) (dict :name name :value 0 :min 0 :max 1))
+            (def eseq.effects.custom-ui-sections/ui-section (title body) body)
+            (def eseq.effects.custom-ui-sections/ui-panel (title section body) body)
+            (def eseq.effects.custom-ui-controls/ui-panel-c (title section body) body)
+            (def eseq.effects.custom-ui-lego/ui-rack (mode left-panels adsr-form right-panels) (h-stack left-panels adsr-form right-panels))
+            (def eseq.effects.custom-ui-runtime/ui-param-control (name) (label name :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-controls/ui-param-knob (name title) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-controls/ui-param-knob-c (name title) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr-c (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-detail-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr-compact-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-runtime/base-note () (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-controls/base-note-c () (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-accent-blue () :blue)
+            (def eseq.effects.custom-ui-lego/ui-accent-cyan () :cyan)
+            (def eseq.effects.custom-ui-lego/ui-accent-orange () :orange)
+            (def eseq.effects.custom-ui-lego/ui-accent-green () :green)
+            (def eseq.effects.custom-ui-lego/ui-accent-violet () :magenta)
+            (def eseq.effects.custom-ui-lego/ui-lego-gap () 0.25)
+            (def eseq.effects.custom-ui-lego/ui-lego-small-h () 1.95)
+            (def eseq.effects.custom-ui-lego/ui-lego-medium-h () 4.08)
+            (def eseq.effects.custom-ui-lego/ui-lego-dense-h () 3.08)
+            (def eseq.effects.custom-ui-lego/ui-lego-full-h () 8.48)
+            (def eseq.effects.custom-ui-lego/ui-lego-col-w () 24.0)
+            (def eseq.effects.custom-ui-lego/ui-lego-strip-w () 7.2)
+            (def eseq.effects.custom-ui-lego/ui-control-block-small (title accent body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-medium (title accent body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-full (title accent body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-small-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-medium-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-small-wide-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-medium-wide-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-dense-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-panel-dense-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-panel-small-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-panel-medium-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-control-block-full-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-block-small (title accent body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-block-small-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-block-small-wide-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-block-dense-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-panel-small-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-panel-dense-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-panel-medium-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-block-medium (title accent body) body)
+            (def eseq.effects.custom-ui-lego/ui-readout-block-full (title accent body) body)
+            (def eseq.effects.custom-ui-lego/ui-lego-column (a b c) (v-stack a b c))
+            (def eseq.effects.custom-ui-lego/ui-lego-column-2 (a b) (v-stack a b))
+            (def eseq.effects.custom-ui-lego/ui-lego-column-full (a) (v-stack a))
+            (def eseq.effects.custom-ui-lego/ui-lego-column-wide (a b c) (v-stack a b c))
+            (def eseq.effects.custom-ui-lego/ui-lego-column-wide-2 (a b) (v-stack a b))
+            (def eseq.effects.custom-ui-lego/ui-lego-column-wide-full (a) (v-stack a))
+            (def eseq.effects.custom-ui-lego/ui-lego-strip-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-lego-strip-half-s (title accent section body) body)
+            (def eseq.effects.custom-ui-lego/ui-lego-strip-panel-s (section body) body)
+            (def eseq.effects.custom-ui-lego/ui-lego-badge (title width accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-badge-s (section title width accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-micro-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-micro-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (section width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def eseq.effects.custom-ui-lego/ui-lego-text-row-3 (a b c) (h-stack a b c))
+            (def eseq.effects.custom-ui-lego/ui-lego-text-row-4 (a b c d) (h-stack a b c d))
+            (def eseq.effects.custom-ui-runtime/inst-param (inst name) (dict :name name :value 0 :min 0 :max 1))
             (def effect-param (fx name) (dict :name name :value 0 :min 0 :max 1))
-            (def inst-base-note-param (inst) (dict :name "base_note" :value 0 :min -48 :max 48))
-            (def custom-ui-current-scope () (dict :kind custom-ui-current-kind :name synth-ui-current-name :inst synth-ui-current-inst))
-            (def custom-ui-select-section-in-scope (scope section) section)
-            (def custom-ui-set-param-in-scope (scope p value) value)
-            (def custom-ui-set-param-by-name-in-scope (scope name value) value)
-            (def audio-fx-ui-param (fx name) '())
-            (def param-set-option (fx p value) value)
+            (def eseq.effects.custom-ui-runtime/inst-base-note-param (inst) (dict :name "base_note" :value 0 :min -48 :max 48))
+            (def eseq.effects.custom-ui-runtime/custom-ui-current-scope () (dict :kind custom-ui-current-kind :name synth-ui-current-name :inst synth-ui-current-inst))
+            (def eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope (scope section) section)
+            (def eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope (scope p value) value)
+            (def eseq.effects.custom-ui-runtime/custom-ui-set-param-by-name-in-scope (scope name value) value)
+            (def eseq.effects.custom-effect-ui/audio-fx-ui-param (fx name) '())
+            (def eseq.effects.param-controls/param-set-option (fx p value) value)
             (def string-starts-with? (s prefix) false)
             "#,
         )
@@ -220,7 +220,7 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
     if let Expression::Symbol(symbol) = expr {
         if symbol.starts_with('@') {
             return Err(format!(
-                "ui.lisp uses invalid UI attribute `{symbol}`. Custom UI uses keyword attributes like `:width`/`:gap`, and helper arguments are positional. For accents, pass `(ui-accent-blue)`, `(ui-accent-cyan)`, `(ui-accent-orange)`, `(ui-accent-green)`, or `(ui-accent-violet)` as the positional accent argument; do not write `{symbol}`."
+                "ui.lisp uses invalid UI attribute `{symbol}`. Custom UI uses keyword attributes like `:width`/`:gap`, and helper arguments are positional. For accents, pass `(eseq.effects.custom-ui-lego/ui-accent-blue)`, `(eseq.effects.custom-ui-lego/ui-accent-cyan)`, `(eseq.effects.custom-ui-lego/ui-accent-orange)`, `(eseq.effects.custom-ui-lego/ui-accent-green)`, or `(eseq.effects.custom-ui-lego/ui-accent-violet)` as the positional accent argument; do not write `{symbol}`."
             ));
         }
         return Ok(());
@@ -228,10 +228,11 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
     let Expression::List(items) = expr else {
         return Ok(());
     };
-    let head = match items.first() {
+    let qualified_head = match items.first() {
         Some(Expression::Symbol(head)) => head.as_str(),
         _ => "",
     };
+    let head = qualified_head.rsplit('/').next().unwrap_or(qualified_head);
     validate_known_ui_helper_arity(head, items.len().saturating_sub(1))?;
 
     if head == "scroll" {
@@ -250,7 +251,7 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
             | "ui-readout-block-param"
     ) {
         return Err(format!(
-            "ui.lisp uses invented UI helper `{head}`. Use the concrete lego helpers instead: `(ui-control-block-medium-s \"TITLE\" (ui-accent-blue) section body)`, `(ui-readout-block-small-s \"TITLE\" (ui-accent-orange) section body)`, and controls like `(ui-lego-knob-s section \"param_name\" \"label\" 4.8 (ui-accent-cyan) decimals)`."
+            "ui.lisp uses invented UI helper `{head}`. Use the concrete lego helpers instead: `(eseq.effects.custom-ui-lego/ui-control-block-medium-s \"TITLE\" (eseq.effects.custom-ui-lego/ui-accent-blue) section body)`, `(eseq.effects.custom-ui-lego/ui-readout-block-small-s \"TITLE\" (eseq.effects.custom-ui-lego/ui-accent-orange) section body)`, and controls like `(eseq.effects.custom-ui-lego/ui-lego-knob-s section \"param_name\" \"label\" 4.8 (eseq.effects.custom-ui-lego/ui-accent-cyan) decimals)`."
         ));
     }
     if matches!(
@@ -462,7 +463,8 @@ fn collect_ui_validation_refs(
         return;
     };
 
-    match head.as_str() {
+    let head = head.rsplit('/').next().unwrap_or(head);
+    match head {
         symbol if symbol == root.symbol() => *root_count += 1,
         "param" | "ui-param-control" | "ui-param-knob" | "ui-param-knob-c" | "ui-lego-knob"
         | "ui-lego-num" | "ui-lego-option" | "ui-lego-row" => {
@@ -620,12 +622,12 @@ mod tests {
             r#"
             (defsynth-ui
               (h-stack :width :fill :gap 0.35 :align :stretch
-                (ui-lego-column-full
-                  (ui-control-block-medium-s "FILT" (ui-accent-green) 1
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (eseq.effects.custom-ui-lego/ui-control-block-medium-s "FILT" (eseq.effects.custom-ui-lego/ui-accent-green) 1
                     (h-stack :gap 0.32 :align :start
-                      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0))))
-                (ui-lego-column-full
-                  (ui-lego-adsr-s 0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"))))
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 1 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 0))))
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (eseq.effects.custom-ui-lego/ui-lego-adsr-s 0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"))))
             "#,
             &manifest,
         )
@@ -638,10 +640,10 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-lego-column-full
-                (ui-control-block-medium-s "OUT" (ui-accent-orange) 0
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "OUT" (eseq.effects.custom-ui-lego/ui-accent-orange) 0
                   (h-stack
-                    (ui-lego-knob-s 0 "gaim" "gain" 4.8 (ui-accent-orange) 2)))))
+                    (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "gaim" "gain" 4.8 (eseq.effects.custom-ui-lego/ui-accent-orange) 2)))))
             "#,
             &manifest,
         )
@@ -657,9 +659,9 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-lego-column-full
-                (box :width (ui-lego-col-w) :height (ui-lego-full-h)
-                  (ui-adsr-switch
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (box :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :height (eseq.effects.custom-ui-lego/ui-lego-full-h)
+                  (eseq.effects.custom-ui-lego/ui-adsr-switch
                     0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
                     0 " " "" "" "" ""))))
             "#,
@@ -670,7 +672,7 @@ mod tests {
         assert!(err.contains("empty parameter name"));
         assert!(err.contains("ui-lego-adsr-s"));
         assert!(err
-            .contains("Use `ui-adsr-switch` only when both ADSR slots reference real DSP params"));
+            .contains("Use `eseq.effects.custom-ui-lego/ui-adsr-switch` only when both ADSR slots reference real DSP params"));
     }
 
     #[test]
@@ -679,10 +681,10 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-lego-column-full
-                (ui-control-block-medium-s "OUT" (ui-accent-magenta) 0
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "OUT" (ui-accent-magenta) 0
                   (h-stack
-                    (ui-lego-knob-s 0 "gain" "gain" 4.8 (ui-accent-magenta) 2)))))
+                    (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "gain" "gain" 4.8 (ui-accent-magenta) 2)))))
             "#,
             &manifest,
         )
@@ -713,8 +715,8 @@ mod tests {
         let nested_err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-control-block-medium-s "AMP" (ui-accent-orange) 0
-                (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
+              (eseq.effects.custom-ui-lego/ui-control-block-medium-s "AMP" (eseq.effects.custom-ui-lego/ui-accent-orange) 0
+                (eseq.effects.custom-ui-lego/ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
             "#,
             &manifest,
         )
@@ -726,9 +728,9 @@ mod tests {
     fn rejects_legacy_ui_helpers() {
         let manifest = manifest_with_params(&["cutoff"]);
         for helper_source in [
-            r#"(defsynth-ui (ui-panel "FILT" 0 (h-stack)))"#,
-            r#"(defsynth-ui (ui-param-knob "cutoff" "cut"))"#,
-            r#"(defsynth-ui (base-note))"#,
+            r#"(defsynth-ui (eseq.effects.custom-ui-sections/ui-panel "FILT" 0 (h-stack)))"#,
+            r#"(defsynth-ui (eseq.effects.custom-ui-controls/ui-param-knob "cutoff" "cut"))"#,
+            r#"(defsynth-ui (eseq.effects.custom-ui-runtime/base-note))"#,
         ] {
             let err = validate_instrument_ui_source(helper_source, &manifest).unwrap_err();
             assert!(err.contains("legacy UI helper"), "{err}");
@@ -752,18 +754,18 @@ mod tests {
         validate_instrument_ui_source(
             r#"
             (def envelope-column ()
-              (ui-lego-column-full
-                (box :width (ui-lego-col-w) :height (ui-lego-full-h)
-                  (ui-adsr-switch
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (box :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :height (eseq.effects.custom-ui-lego/ui-lego-full-h)
+                  (eseq.effects.custom-ui-lego/ui-adsr-switch
                     0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
                     1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))))
 
             (defsynth-ui
               (h-stack :width :fill :gap 0.35 :align :stretch
-                (ui-lego-column-full
-                  (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (eseq.effects.custom-ui-lego/ui-control-block-medium-s "FILTER" (eseq.effects.custom-ui-lego/ui-accent-green) 1
                     (h-stack :gap 0.32 :align :start
-                      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0))))
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 1 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 0))))
                 (envelope-column)))
             "#,
             &manifest,
@@ -791,9 +793,9 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-lego-column-full
-                (box :width (ui-lego-col-w) :height (ui-lego-full-h)
-                  (ui-adsr-switch
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (box :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :height (eseq.effects.custom-ui-lego/ui-lego-full-h)
+                  (eseq.effects.custom-ui-lego/ui-adsr-switch
                     0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
                     1 "FM ENV" "index_attack" "index_decay" "index_sustain" "index_release"
                     2 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))))
@@ -815,11 +817,11 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-lego-column
-                (ui-control-block-medium-s "OUT" (ui-accent-orange) 0
-                  (ui-lego-knob-s 0 "gain" "gain" 4.8 (ui-accent-orange) 2))
-                (ui-readout-block-small-s "DRIVE" (ui-accent-cyan) 0
-                  (ui-lego-num-s 0 "drive" "drive" 4.2 2 false (ui-accent-cyan)))))
+              (eseq.effects.custom-ui-lego/ui-lego-column
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "OUT" (eseq.effects.custom-ui-lego/ui-accent-orange) 0
+                  (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "gain" "gain" 4.8 (eseq.effects.custom-ui-lego/ui-accent-orange) 2))
+                (eseq.effects.custom-ui-lego/ui-readout-block-small-s "DRIVE" (eseq.effects.custom-ui-lego/ui-accent-cyan) 0
+                  (eseq.effects.custom-ui-lego/ui-lego-num-s 0 "drive" "drive" 4.2 2 false (eseq.effects.custom-ui-lego/ui-accent-cyan)))))
             "#,
             &manifest,
         )
@@ -843,9 +845,9 @@ mod tests {
               (if (= label "ladder") 1 0))
 
             (def filter-model-dropdown (section)
-              (let ((p (inst-param synth-ui-current-inst "filter_model")))
+              (let ((p (eseq.effects.custom-ui-runtime/inst-param synth-ui-current-inst "filter_model")))
                 (if p
-                  (let ((scope (custom-ui-current-scope)))
+                  (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
                     (subtree :key (str "filter-model-dropdown-" synth-ui-current-name)
                       (v-stack :width 5.0 :height 1.12 :gap 0.08 :align :start
                         (label "model" :font-size 8.2 :width 5.0 :color :dim :bg :transparent)
@@ -854,18 +856,18 @@ mod tests {
                           :width 5.6 :height 0.78 :font-size 8.0
                           :on-change (lambda (v)
                             (do
-                              (custom-ui-select-section-in-scope scope section)
-                              (custom-ui-set-param-in-scope scope p (filter-model-value v))))))))
+                              (eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope scope section)
+                              (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p (filter-model-value v))))))))
                   (label "missing: filter_model" :font-size 9 :color :red :bg :transparent))))
 
             (defsynth-ui
               (h-stack :width :fill :gap 0.35 :align :stretch
-                (ui-lego-column-full
-                  (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (eseq.effects.custom-ui-lego/ui-control-block-medium-s "FILTER" (eseq.effects.custom-ui-lego/ui-accent-green) 1
                     (h-stack :gap 0.32 :align :start
                       (filter-model-dropdown 1)
-                      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0)
-                      (ui-lego-knob-s 1 "resonance" "res" 4.8 (ui-accent-green) 2))))))
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 1 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 0)
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 1 "resonance" "res" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 2))))))
             "#,
             &manifest,
         )
@@ -879,17 +881,17 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (def filter-model-dropdown ()
-              (let ((p (inst-param synth-ui-current-inst "filter_modle")))
+              (let ((p (eseq.effects.custom-ui-runtime/inst-param synth-ui-current-inst "filter_modle")))
                 (if p
                   (dropdown :value "svf" :options '("svf" "ladder"))
                   (label "missing" :font-size 9 :color :red :bg :transparent))))
 
             (defsynth-ui
-              (ui-lego-column-full
-                (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "FILTER" (eseq.effects.custom-ui-lego/ui-accent-green) 1
                   (h-stack
                     (filter-model-dropdown)
-                    (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0)))))
+                    (eseq.effects.custom-ui-lego/ui-lego-knob-s 1 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 0)))))
             "#,
             &manifest,
         )
@@ -907,12 +909,12 @@ mod tests {
             r#"
             (defsynth-ui
               (h-stack :width :fill :gap 0.35 :align :stretch
-                (ui-lego-column-full
-                  (ui-control-block-medium-s "OSC" (ui-accent-cyan) 0
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (eseq.effects.custom-ui-lego/ui-control-block-medium-s "OSC" (eseq.effects.custom-ui-lego/ui-accent-cyan) 0
                     (h-stack :gap 0.32 :align :start
-                      (ui-lego-option-s 0 "osc1_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (ui-accent-cyan))
-                      (ui-lego-option-s 0 "osc2_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (ui-accent-violet))
-                      (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-green) 0))))))
+                      (eseq.effects.custom-ui-lego/ui-lego-option-s 0 "osc1_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (eseq.effects.custom-ui-lego/ui-accent-cyan))
+                      (eseq.effects.custom-ui-lego/ui-lego-option-s 0 "osc2_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (eseq.effects.custom-ui-lego/ui-accent-violet))
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "cutoff" "cut" 4.8 (eseq.effects.custom-ui-lego/ui-accent-green) 0))))))
             "#,
             &manifest,
         )
@@ -941,37 +943,37 @@ mod tests {
         validate_instrument_ui_source(
             r#"
             (def osc-block ()
-              (ui-control-panel-dense-s 0
+              (eseq.effects.custom-ui-lego/ui-control-panel-dense-s 0
                 (v-stack :width :fill :gap 0.12 :align :start
                   (h-stack :gap 0.18 :align :start
-                    (ui-lego-badge-s 0 "OSC1" 3.6 (ui-accent-cyan))
-                    (ui-lego-micro-option-s 0 "osc1_wave" "wave" 4.4 '("saw" "pulse") (ui-accent-cyan))
-                    (ui-lego-micro-num-s 0 "osc1_level" "lvl" 3.4 2 false (ui-accent-cyan)))
+                    (eseq.effects.custom-ui-lego/ui-lego-badge-s 0 "OSC1" 3.6 (eseq.effects.custom-ui-lego/ui-accent-cyan))
+                    (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc1_wave" "wave" 4.4 '("saw" "pulse") (eseq.effects.custom-ui-lego/ui-accent-cyan))
+                    (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc1_level" "lvl" 3.4 2 false (eseq.effects.custom-ui-lego/ui-accent-cyan)))
                   (h-stack :gap 0.18 :align :start
-                    (ui-lego-badge-s 0 "OSC2" 3.6 (ui-accent-blue))
-                    (ui-lego-micro-option-s 0 "osc2_wave" "wave" 4.4 '("saw" "pulse") (ui-accent-blue))
-                    (ui-lego-micro-num-s 0 "osc2_level" "lvl" 3.4 2 false (ui-accent-blue))))))
+                    (eseq.effects.custom-ui-lego/ui-lego-badge-s 0 "OSC2" 3.6 (eseq.effects.custom-ui-lego/ui-accent-blue))
+                    (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 0 "osc2_wave" "wave" 4.4 '("saw" "pulse") (eseq.effects.custom-ui-lego/ui-accent-blue))
+                    (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 0 "osc2_level" "lvl" 3.4 2 false (eseq.effects.custom-ui-lego/ui-accent-blue))))))
 
             (def detail-block ()
-              (ui-detail-adsr-switch-s
+              (eseq.effects.custom-ui-lego/ui-detail-adsr-switch-s
                 0 "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
                 1 "FILTER" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))
 
             (def lfo-strip ()
-              (ui-lego-strip-panel-s 2
+              (eseq.effects.custom-ui-lego/ui-lego-strip-panel-s 2
                 (v-stack :width :fill :align :center
-                  (ui-lego-badge-s 2 "LFO1" 5.8 (ui-accent-blue))
-                  (ui-lego-micro-option-s 2 "lfo1_wave" "wave" 5.8 '("sine" "saw") (ui-accent-blue))
-                  (ui-lego-micro-num-s 2 "lfo1_rate" "rate" 5.8 2 "Hz" (ui-accent-blue))
-                  (ui-lego-micro-base-note-s 2 5.8 (ui-accent-orange)))))
+                  (eseq.effects.custom-ui-lego/ui-lego-badge-s 2 "LFO1" 5.8 (eseq.effects.custom-ui-lego/ui-accent-blue))
+                  (eseq.effects.custom-ui-lego/ui-lego-micro-option-s 2 "lfo1_wave" "wave" 5.8 '("sine" "saw") (eseq.effects.custom-ui-lego/ui-accent-blue))
+                  (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 2 "lfo1_rate" "rate" 5.8 2 "Hz" (eseq.effects.custom-ui-lego/ui-accent-blue))
+                  (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s 2 5.8 (eseq.effects.custom-ui-lego/ui-accent-orange)))))
 
             (defsynth-ui
               (h-stack :width :fill :gap 0.35 :align :stretch
-                (ui-lego-column-full (osc-block))
-                (ui-lego-column-full
-                  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap)
-                    (ui-control-panel-small-s 0 (h-stack))
-                    (ui-readout-panel-medium-s 0 (detail-block))))
+                (eseq.effects.custom-ui-lego/ui-lego-column-full (osc-block))
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (v-stack :width (eseq.effects.custom-ui-lego/ui-lego-col-w) :gap (eseq.effects.custom-ui-lego/ui-lego-gap)
+                    (eseq.effects.custom-ui-lego/ui-control-panel-small-s 0 (h-stack))
+                    (eseq.effects.custom-ui-lego/ui-readout-panel-medium-s 0 (detail-block))))
                 (lfo-strip)))
             "#,
             &manifest,
@@ -986,9 +988,9 @@ mod tests {
         let err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-lego-column-full
-                (ui-control-block-medium-s "OSC" (ui-accent-cyan) 0
-                  (ui-lego-option-s 0 "osc1_wvae" "wave" 5.2 '("saw" "pulse") (ui-accent-cyan)))))
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "OSC" (eseq.effects.custom-ui-lego/ui-accent-cyan) 0
+                  (eseq.effects.custom-ui-lego/ui-lego-option-s 0 "osc1_wvae" "wave" 5.2 '("saw" "pulse") (eseq.effects.custom-ui-lego/ui-accent-cyan)))))
             "#,
             &manifest,
         )
@@ -1005,12 +1007,12 @@ mod tests {
             r#"
             (defeffect-ui
               (h-stack :width :fill :gap 0.35 :align :stretch
-                (ui-lego-column-full
-                  (ui-control-block-medium-s "MOTION" (ui-accent-blue) 0
+                (eseq.effects.custom-ui-lego/ui-lego-column-full
+                  (eseq.effects.custom-ui-lego/ui-control-block-medium-s "MOTION" (eseq.effects.custom-ui-lego/ui-accent-blue) 0
                     (h-stack :gap 0.32 :align :start
-                      (ui-lego-knob-s 0 "rate" "rate" 4.8 (ui-accent-blue) 2)
-                      (ui-lego-knob-s 0 "depth" "depth" 4.8 (ui-accent-cyan) 2)
-                      (ui-lego-knob-s 0 "mix" "mix" 4.8 (ui-accent-orange) 2))))))
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "rate" "rate" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2)
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "depth" "depth" 4.8 (eseq.effects.custom-ui-lego/ui-accent-cyan) 2)
+                      (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "mix" "mix" 4.8 (eseq.effects.custom-ui-lego/ui-accent-orange) 2))))))
             "#,
             &manifest,
         )
@@ -1021,7 +1023,7 @@ mod tests {
     fn rejects_defsynth_ui_for_effects() {
         let manifest = manifest_with_params(&["mix"]);
         let err = validate_effect_ui_source(
-            r#"(defsynth-ui (ui-lego-knob "mix" "mix" 4.8 (ui-accent-blue) 2))"#,
+            r#"(defsynth-ui (eseq.effects.custom-ui-lego/ui-lego-knob "mix" "mix" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2))"#,
             &manifest,
         )
         .unwrap_err();
@@ -1034,9 +1036,9 @@ mod tests {
         let err = validate_effect_ui_source(
             r#"
             (defeffect-ui
-              (ui-lego-column-full
-                (ui-control-block-medium-s "OUT" (ui-accent-orange) 0
-                  (ui-lego-knob-s 0 "mx" "mix" 4.8 (ui-accent-orange) 2))))
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "OUT" (eseq.effects.custom-ui-lego/ui-accent-orange) 0
+                  (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "mx" "mix" 4.8 (eseq.effects.custom-ui-lego/ui-accent-orange) 2))))
             "#,
             &manifest,
         )
@@ -1052,10 +1054,10 @@ mod tests {
             r#"
             (defeffect-ui
               (ui-control-block
-                (ui-control-block-header "Curve" "shape" @accent (ui-accent-violet))
+                (ui-control-block-header "Curve" "shape" @accent (eseq.effects.custom-ui-lego/ui-accent-violet))
                 (ui-control-block-grid
-                  (ui-control-block-param curve "Curve" (ui-lego-knob-s))
-                  (ui-control-block-param drive "Drive" (ui-lego-knob-s)))))
+                  (ui-control-block-param curve "Curve" (eseq.effects.custom-ui-lego/ui-lego-knob-s))
+                  (ui-control-block-param drive "Drive" (eseq.effects.custom-ui-lego/ui-lego-knob-s)))))
             "#,
             &manifest,
         )
@@ -1072,9 +1074,9 @@ mod tests {
         let err = validate_effect_ui_source(
             r#"
             (defeffect-ui
-              (ui-lego-column-full
-                (ui-control-block-medium-s "MIX" @accent 0
-                  (ui-lego-knob-s 0 "mix" "mix" 4.8 (ui-accent-blue) 2))))
+              (eseq.effects.custom-ui-lego/ui-lego-column-full
+                (eseq.effects.custom-ui-lego/ui-control-block-medium-s "MIX" @accent 0
+                  (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "mix" "mix" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2))))
             "#,
             &manifest,
         )

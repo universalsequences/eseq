@@ -14,7 +14,7 @@
 
 (def capture-after-sync ()
   (do
-    (seq-open-arrangement)
-    (set! arrangement-view-start 0)
-    (set! arrangement-view-duration 512)
-    (set-arrangement-cursor 128 0)))
+    (eseq.seq-panels/seq-open-arrangement)
+    (set! eseq.arrangement/view-start 0)
+    (set! eseq.arrangement/view-duration 512)
+    (eseq.arrangement/set-cursor 128 0)))

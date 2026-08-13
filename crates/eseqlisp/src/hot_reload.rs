@@ -30,7 +30,7 @@ pub struct LoadedSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleStackEntry {
+pub struct SourceStackEntry {
     pub path: PathBuf,
     pub revision: u64,
 }
@@ -198,6 +198,7 @@ pub struct SourceManager {
     changed_symbols: HashSet<String>,
     diagnostics: Vec<String>,
     evaluated_sources: HashMap<(PathBuf, u64), String>,
+    module_alias_scan_exclusions: Vec<PathBuf>,
 }
 
 impl Default for SourceManager {
@@ -218,7 +219,32 @@ impl SourceManager {
             changed_symbols: HashSet::new(),
             diagnostics: Vec::new(),
             evaluated_sources: HashMap::new(),
+            module_alias_scan_exclusions: Vec::new(),
         }
+    }
+
+    /// Override the `@/`-prefix root (defaults to the process cwd at
+    /// construction). Tests use this to pin module→file resolution against
+    /// a synthetic layout without touching the process-wide cwd.
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = cwd;
+    }
+
+    /// Excludes a known factory-content root from legacy-alias preflight.
+    /// Authored roots must not be registered here: future user roots should
+    /// inherit detection automatically through normal path evaluation.
+    pub fn exclude_module_alias_scan_root(&mut self, root: PathBuf) {
+        let root = self.canonicalize_path(&root);
+        if !self.module_alias_scan_exclusions.contains(&root) {
+            self.module_alias_scan_exclusions.push(root);
+        }
+    }
+
+    pub fn should_scan_module_aliases(&self, path: &Path) -> bool {
+        !self
+            .module_alias_scan_exclusions
+            .iter()
+            .any(|root| path.starts_with(root))
     }
 
     pub fn set_overlays(&mut self, overlays: Vec<SourceOverlay>) {
@@ -319,18 +345,18 @@ impl SourceManager {
         })
     }
 
-    pub fn enter_module(&mut self, path: PathBuf, revision: u64) {
+    pub fn enter_file(&mut self, path: PathBuf, revision: u64) {
         self.pending_children.entry(path.clone()).or_default();
         self.load_stack.push(path);
         self.revision_stack.push(revision);
     }
 
-    pub fn leave_module(&mut self) {
+    pub fn leave_file(&mut self) {
         let _ = self.load_stack.pop();
         let _ = self.revision_stack.pop();
     }
 
-    pub fn current_module(&self) -> Option<PathBuf> {
+    pub fn current_source_file(&self) -> Option<PathBuf> {
         self.load_stack.last().cloned()
     }
 
@@ -338,16 +364,16 @@ impl SourceManager {
         self.revision_stack.last().copied()
     }
 
-    pub fn module_stack_snapshot(&self) -> Vec<ModuleStackEntry> {
+    pub fn source_stack_snapshot(&self) -> Vec<SourceStackEntry> {
         self.load_stack
             .iter()
             .cloned()
             .zip(self.revision_stack.iter().copied())
-            .map(|(path, revision)| ModuleStackEntry { path, revision })
+            .map(|(path, revision)| SourceStackEntry { path, revision })
             .collect()
     }
 
-    pub fn restore_module_stack(&mut self, stack: Vec<ModuleStackEntry>) {
+    pub fn restore_source_stack(&mut self, stack: Vec<SourceStackEntry>) {
         self.load_stack = stack.iter().map(|entry| entry.path.clone()).collect();
         self.revision_stack = stack.iter().map(|entry| entry.revision).collect();
     }
@@ -390,7 +416,7 @@ impl SourceManager {
     }
 
     pub fn record_render_root(&mut self, node_id: u32) {
-        if let Some(module) = self.current_module() {
+        if let Some(module) = self.current_source_file() {
             self.module_graph.record_render_root(&module, node_id);
         }
     }
@@ -472,6 +498,14 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
         [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defmacro" => {
             out.insert(name.clone());
         }
+        [Expression::Symbol(form), Expression::Symbol(name), ..]
+            if form == "override" || form == "remove-override" =>
+        {
+            // Overrides change the effective value of the factory symbol even
+            // though they deliberately do not mutate its global cell. Mark it
+            // changed so transactional init/hot reload rerenders dependents.
+            out.insert(name.clone());
+        }
         [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defwidget" => {
             out.insert(name.clone());
         }
@@ -503,11 +537,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn override_targets_are_effective_defined_symbols_for_hot_reload() {
+        let symbols = extract_defined_symbols_from_source(
+            "(override eseq.factory/view :around (original) (original))\n\
+             (remove-override eseq.factory/other)",
+        )
+        .expect("extract symbols");
+        assert!(symbols.contains("eseq.factory/view"));
+        assert!(symbols.contains("eseq.factory/other"));
+    }
+
+    #[test]
     fn explicit_cwd_relative_load_ignores_the_active_module_directory() {
         let cwd = std::env::temp_dir().join("eseqlisp-source-root");
         let mut manager = SourceManager::new();
         manager.cwd = cwd.clone();
-        manager.enter_module(cwd.join("ui/main.lisp"), 1);
+        manager.enter_file(cwd.join("ui/main.lisp"), 1);
 
         assert_eq!(
             manager.resolve_load_path("@/ui/themes.lisp"),

@@ -36,7 +36,7 @@
 ;; Re-evaluating this buffer is idempotent: it replaces track 0's process chain
 ;; for the current pattern.
 
-(seq-register-script-source-tab "Phase 3B Mappable Targets")
+(eseq.seq-script-picker/seq-register-script-source-tab "Phase 3B Mappable Targets")
 
 (def-process phase3b-mappable-writer
   :doc "Phase 3B mappable target UI demo"

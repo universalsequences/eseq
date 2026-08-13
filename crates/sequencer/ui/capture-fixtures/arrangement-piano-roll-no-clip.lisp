@@ -6,4 +6,4 @@
   (track :sampler :name "Empty arrangement track"))
 
 (def capture-after-sync ()
-  (seq-open-arrangement-piano-roll-bottom-for-track 0))
+  (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track 0))

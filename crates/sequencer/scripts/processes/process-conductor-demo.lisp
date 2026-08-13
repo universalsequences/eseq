@@ -13,7 +13,7 @@
 ;; values, emits through the normal target-track MIDI-FX path, and also
 ;; suggests the resulting harmony field for any decentralized followers.
 
-(seq-register-script-source-tab "Conductor Demo")
+(eseq.seq-script-picker/seq-register-script-source-tab "Conductor Demo")
 
 (def-process call-response-conductor
   :doc "Observe two sparse melodies and publish their shared harmony suggestion."

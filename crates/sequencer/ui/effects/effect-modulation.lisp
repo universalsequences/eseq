@@ -1,28 +1,38 @@
 ;; Audio effect modulation source selection and editor controls.
-(def effect-set-selected-mod-slot (slot)
-  (set! effect-selected-mod-slot slot))
+(module eseq.effects.effect-modulation)
 
-(def effect-mod-selector-row (fx modulator)
+(import eseq.effects.state :as st :refer (eseq.effects.state/effect-selected-mod-slot))
+(import eseq.effects.param-controls :as pc)
+(import eseq.effects.param-grid :as pg)
+(import eseq.effects.instrument-modulation :as im)
+(import eseq.effects.panel-frame :as pf)
+(import eseq.effects.custom-ui-lego :as lego)
+
+
+(def %set-selected-mod-slot (slot)
+  (set! eseq.effects.state/effect-selected-mod-slot slot))
+
+(def %mod-selector-row (fx modulator)
   (let ((slot (get modulator :slot))
         (label-text (if (get modulator :name) (get modulator :name) (get modulator :label)))
         (source-p (get modulator :source-param)))
-    (subtree :key (str "effect-mod-selector-" (fx-effect-chain-kind fx) "-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" slot)
+    (subtree :key (str "effect-mod-selector-" (pf/fx-effect-chain-kind fx) "-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" slot)
       (h-stack :gap 0.18 :align :center
         (button label-text
           :width 3.9 :height 1.1
           :padding 0
           :font-size 9
-          :background-color (if (= effect-selected-mod-slot slot)
+          :background-color (if (= eseq.effects.state/effect-selected-mod-slot slot)
             (rgba 0.95 0.48 0.18 0.82)
             :instrument-control-bg)
-          :color (if (= effect-selected-mod-slot slot) :white :dim)
-          :on-click (lambda (info) (effect-set-selected-mod-slot slot)))
+          :color (if (= eseq.effects.state/effect-selected-mod-slot slot) :white :dim)
+          :on-click (lambda (info) (%set-selected-mod-slot slot)))
         (dropdown :value (if source-p (get source-p :text-value) "off")
           :options (if source-p (get source-p :options) '())
-          :on-change (lambda (v) (if source-p (param-set-option fx source-p v) false))
+          :on-change (lambda (v) (if source-p (pc/param-set-option fx source-p v) false))
           :width 4.8 :height 1.1 :font-size 8.5)))))
 
-(def effect-mod-selector (fx)
+(def %mod-selector (fx)
   (box :debug-name "effect-mod-selector"
        :width 9.4
        :height :fill
@@ -31,117 +41,117 @@
       (label "mods" :font-size 9 :color :dim :bg :transparent)
       (v-stack :gap 0.18 :align :start
         (each (get fx :sources) |modulator mi|
-          (effect-mod-selector-row fx modulator))))))
+          (%mod-selector-row fx modulator))))))
 
-(def effect-selected-mod-source-section (fx)
-  (nth (filter |section| (= (get section :slot) effect-selected-mod-slot)
+(def %selected-mod-source-section (fx)
+  (nth (filter |section| (= (get section :slot) eseq.effects.state/effect-selected-mod-slot)
          (get fx :sources))
        0))
 
-(def effect-source-param (section name)
+(def %source-param (section name)
   (nth (filter |p| (= (get p :name) name) (get section :params)) 0))
 
-(def effect-source-param-value (fx p fallback)
-  (if p (fx-param-value-for fx p) fallback))
+(def %source-param-value (fx p fallback)
+  (if p (pc/fx-param-value-for fx p) fallback))
 
-(def effect-source-set-param-value (fx p v)
-  (if p (param-set-control-value fx p v) false))
+(def %source-set-param-value (fx p v)
+  (if p (pc/param-set-control-value fx p v) false))
 
-(def effect-source-button (fx p title width)
-  (let ((active (> (reactive-value (effect-source-param-value fx p 0)) 0.5)))
+(def %source-button (fx p title width)
+  (let ((active (> (reactive-value (%source-param-value fx p 0)) 0.5)))
     (v-stack :width width :height 1.72 :gap 0.10 :align :start
       (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
       (button (if active "ON" "OFF")
         :width width :height 0.88 :padding 0 :font-size 9
-        :background-color (if active (ui-accent-orange) :mixer-control-bg)
+        :background-color (if active (lego/ui-accent-orange) :mixer-control-bg)
         :color (if active :black :dim)
         :on-click |x y r|
-          (effect-source-set-param-value fx p (if active 0 1))))))
+          (%source-set-param-value fx p (if active 0 1))))))
 
-(def effect-source-dropdown (fx p title width)
+(def %source-dropdown (fx p title width)
   (v-stack :width width :height 1.72 :gap 0.10 :align :start
     (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
     (dropdown :value (if p (get p :text-value) "")
       :options (if p (get p :options) '())
-      :on-change (lambda (v) (if p (param-set-option fx p v) false))
+      :on-change (lambda (v) (if p (pc/param-set-option fx p v) false))
       :width width :height 0.88 :font-size 8.5)))
 
-(def effect-source-number (fx p title decimals unit width)
+(def %source-number (fx p title decimals unit width)
   (v-stack :width width :height 1.72 :gap 0.10 :align :start
     (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
-    (number-picker :value (effect-source-param-value fx p 0)
-      :min (if p (param-control-min fx p) 0)
-      :max (if p (param-control-max fx p) 0)
+    (number-picker :value (%source-param-value fx p 0)
+      :min (if p (pc/param-control-min fx p) 0)
+      :max (if p (pc/param-control-max fx p) 0)
       :decimals decimals
       :unit unit
       :noui true :font-size 9.3
       :text-color :dim :edit-color :yellow
       :text-align :left
       :width width :height 0.82
-      :on-change (lambda (v) (effect-source-set-param-value fx p v)))))
+      :on-change (lambda (v) (%source-set-param-value fx p v)))))
 
-(def effect-source-compact-knob (fx p title decimals)
+(def %source-compact-knob (fx p title decimals)
   (box :debug-name (str "effect-source-compact-knob-" title)
        :width 4.4 :height 2.25 :padding 0
     (knob-number :label title
-      :value (effect-source-param-value fx p 0)
-      :min (if p (param-control-min fx p) 0)
-      :max (if p (param-control-max fx p) 0)
+      :value (%source-param-value fx p 0)
+      :min (if p (pc/param-control-min fx p) 0)
+      :max (if p (pc/param-control-max fx p) 0)
       :decimals decimals
       :font-size 9.4 :label-font-size 8.2
       :text-color :dim :label-color :dim
       :width 4.4 :height 2.05
-      :on-change (lambda (v) (effect-source-set-param-value fx p v)))))
+      :on-change (lambda (v) (%source-set-param-value fx p v)))))
 
-(def effect-lfo-source-editor (fx section)
-  (let ((rate (effect-source-param section "rate"))
-        (sync (effect-source-param section "sync"))
-        (division (effect-source-param section "division"))
-        (shape (effect-source-param section "shape"))
-        (pulse-width (effect-source-param section "pulse width"))
-        (retrigger (effect-source-param section "retrigger")))
-    (ui-readout-panel-medium-s 0
+(def %lfo-source-editor (fx section)
+  (let ((rate (%source-param section "rate"))
+        (sync (%source-param section "sync"))
+        (division (%source-param section "division"))
+        (shape (%source-param section "shape"))
+        (pulse-width (%source-param section "pulse width"))
+        (retrigger (%source-param section "retrigger")))
+    (lego/ui-readout-panel-medium-s 0
       (h-stack :debug-name "effect-lfo-source-editor"
                :width :fill :height :fill :gap 0.38 :align :start
         (v-stack :width 13.8 :height :fill :gap 0.12 :align :start
           (h-stack :gap 0.25 :align :start
-            (effect-source-number fx rate "rate" 2 false 6.4)
-            (effect-source-button fx sync "sync" 5.0))
+            (%source-number fx rate "rate" 2 false 6.4)
+            (%source-button fx sync "sync" 5.0))
           (h-stack :gap 0.25 :align :start
-            (effect-source-dropdown fx division "division" 6.4)
-            (effect-source-dropdown fx shape "shape" 5.0)))
+            (%source-dropdown fx division "division" 6.4)
+            (%source-dropdown fx shape "shape" 5.0)))
         (v-stack :width 5.0 :height :fill :gap 0.18 :align :center
-          (effect-source-compact-knob fx pulse-width "pw" 2)
+          (%source-compact-knob fx pulse-width "pw" 2)
           (box :debug-name "effect-lfo-retrigger-button"
                :width 4.4 :height 1.55 :padding 0
-            (effect-source-button fx retrigger "retrig" 4.4)))))))
+            (%source-button fx retrigger "retrig" 4.4)))))))
 
-(def effect-selected-mod-source-editor (fx)
+(def %selected-mod-source-editor (fx)
   (box :debug-name "effect-selected-mod-source-editor"
        :width 25.5
        :height :fill
        :padding 0.35
-    (let ((section (effect-selected-mod-source-section fx)))
+    (let ((section (%selected-mod-source-section fx)))
       (if section
-        (let ((source-type (instrument-source-type section)))
+        (let ((source-type (im/source-type section)))
           (v-stack :width :fill :height :fill :gap 0.3 :align :start
             (label (get section :name) :font-size 9 :color :dim :bg :transparent)
             (if (= source-type "lfo")
-              (effect-lfo-source-editor fx section)
+              (%lfo-source-editor fx section)
               (if (or (= source-type "rand") (= source-type "drift"))
-                (fx-param-grid (get section :params) fx)
+                (pg/fx-param-grid (get section :params) fx)
                 (box :width :fill :height 6 :h-align :center :v-align :center
                   (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))
         (box :width :fill :height :fill :h-align :center :v-align :center
           (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))
 
-(def effect-mod-control-panel (fx)
+(def mod-control-panel (fx)
   (box :debug-name "effect-mod-control-panel"
        :width 36.4
-       :height fx-panel-body-content-height
+       :height st/fx-panel-body-content-height
        :background-color :black
        :corner-radius 10
        :padding 0.25
     (h-stack :height :fill :gap 0.25 :align :stretch
-      (effect-mod-selector fx)
-      (effect-selected-mod-source-editor fx))))
+      (%mod-selector fx)
+      (%selected-mod-source-editor fx))))

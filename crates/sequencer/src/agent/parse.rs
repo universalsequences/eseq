@@ -73,12 +73,12 @@ mod tests {
 
     #[test]
     fn extracts_required_instrument_artifacts() {
-        let text = "ok\n```dgenlisp\n(out x 1)\n```\n```eseqlisp\n(defsynth-ui (ui-param-control \"gain\"))\n```";
+        let text = "ok\n```dgenlisp\n(out x 1)\n```\n```eseqlisp\n(defsynth-ui (eseq.effects.custom-ui-runtime/ui-param-control \"gain\"))\n```";
         let artifacts = instrument_artifacts(text).unwrap();
         assert_eq!(artifacts.dsp_source, "(out x 1)");
         assert_eq!(
             artifacts.ui_source,
-            "(defsynth-ui (ui-param-control \"gain\"))"
+            "(defsynth-ui (eseq.effects.custom-ui-runtime/ui-param-control \"gain\"))"
         );
     }
 

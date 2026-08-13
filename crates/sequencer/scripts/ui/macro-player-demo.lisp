@@ -10,9 +10,9 @@
 ;; Re-loading the script is safe: stable keys reuse the same project macros and
 ;; preserve their values, mappings, ranges, and names.
 
-(macro-ensure :delay-push "Delay Push")
-(macro-ensure :space "Space")
-(macro-ensure :texture "Texture")
+(eseq.macros/macro-ensure :delay-push "Delay Push")
+(eseq.macros/macro-ensure :space "Space")
+(eseq.macros/macro-ensure :texture "Texture")
 
 (def macro-player-control (key)
   (box
@@ -21,10 +21,10 @@
     :border-color :mixer-strip-border
     :corner-radius 14
     (v-stack :gap 0.65 :align :center
-      (macro-knob :macro key)
+      (eseq.macros/macro-knob :macro key)
       (h-stack :gap 0.4 :align :center
-        (macro-momentary :macro key)
-        (macro-map-button :macro key)))))
+        (eseq.macros/macro-momentary :macro key)
+        (eseq.macros/macro-map-button :macro key)))))
 
 (def macro-player-surface ()
   (box
@@ -41,7 +41,7 @@
         (macro-player-control :delay-push)
         (macro-player-control :space)
         (macro-player-control :texture))
-      (macro-mapping-editor :macro :delay-push))))
+      (eseq.macros/macro-mapping-editor :macro :delay-push))))
 
 (effect-buffer "*macro-player*" (macro-player-surface))
-(seq-register-script-step-sequencer-tab "Player" "*macro-player*" "" "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab "Player" "*macro-player*" "" "")

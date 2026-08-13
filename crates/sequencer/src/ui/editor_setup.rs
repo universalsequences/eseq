@@ -8,7 +8,7 @@ use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
 const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
-const STARTUP_GRID_LAYOUT_EXPR: &str = "(seq-apply-fx-layout)";
+const STARTUP_GRID_LAYOUT_EXPR: &str = "(eseq.seq-layout/apply-fx-layout)";
 
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
@@ -30,12 +30,26 @@ pub(crate) fn create_editor(
     runtime: Runtime,
     app: &app::App,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
-    let (init_src, init_path) = read_eseqlisp_init_source();
+    create_editor_with_user_init_path(runtime, app, sequencer::paths::user_init_path())
+}
+
+pub(crate) fn create_editor_with_user_init_path(
+    mut runtime: Runtime,
+    app: &app::App,
+    user_init_path: Option<std::path::PathBuf>,
+) -> Result<Editor, Box<dyn std::error::Error>> {
+    // The checked-in UI modules contain intentional module-local bare names
+    // and historical alias declarations. Authored instruments/effects/scripts
+    // stay outside this exclusion and are always preflighted.
+    runtime.exclude_module_alias_scan_root(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"),
+    );
+    let (factory_init_source, factory_init_path) = read_eseqlisp_factory_init_source();
     let mut editor = Editor::new(
         runtime,
         EditorConfig {
-            init_source: Some(init_src),
-            init_source_path: init_path,
+            init_source: Some(factory_init_source),
+            init_source_path: factory_init_path,
             vim_mode: true,
         },
     );
@@ -57,10 +71,11 @@ pub(crate) fn create_editor(
         .into());
     }
     editor.process_lisp_reload_report(report);
-    apply_startup_grid_layout(&mut editor)?;
-    log_lisp_ui_load_diagnostics(&mut editor);
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
+    load_user_init(&mut editor, user_init_path.as_deref());
+    apply_startup_grid_layout(&mut editor)?;
+    log_lisp_ui_load_diagnostics(&mut editor);
     Ok(editor)
 }
 
@@ -100,8 +115,8 @@ pub(crate) fn apply_startup_grid_layout(
     Ok(())
 }
 
-fn read_eseqlisp_init_source() -> (String, Option<std::path::PathBuf>) {
-    eseqlisp_init_candidates()
+fn read_eseqlisp_factory_init_source() -> (String, Option<std::path::PathBuf>) {
+    eseqlisp_factory_init_candidates()
         .into_iter()
         .find_map(|path| {
             std::fs::read_to_string(&path)
@@ -111,8 +126,46 @@ fn read_eseqlisp_init_source() -> (String, Option<std::path::PathBuf>) {
         .unwrap_or_default()
 }
 
-fn eseqlisp_init_candidates() -> Vec<std::path::PathBuf> {
+fn eseqlisp_factory_init_candidates() -> Vec<std::path::PathBuf> {
     sequencer::paths::eseqlisp_init_candidates()
+}
+
+/// Evaluate the user tier only after every factory/content root. A failed
+/// transaction is rolled back wholesale, surfaced in the status line and
+/// `*lisp-reload*`, and never aborts application boot.
+pub(crate) fn load_user_init(editor: &mut Editor, path: Option<&std::path::Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            let message = format!("User init {} could not be read: {error}", path.display());
+            eprintln!("metal_seq: {message}");
+            editor.handle_host_event(eseqlisp::HostEvent::Error(message));
+            return;
+        }
+    };
+    if source.trim().is_empty() {
+        return;
+    }
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = editor.runtime_mut().eval_source_transactional(
+        Some(path.to_path_buf()),
+        &source,
+        overlays,
+    );
+    if report.success {
+        editor.refresh_runtime_side_effects();
+    } else {
+        eprintln!(
+            "metal_seq: user init {} failed; continuing with factory behavior: {}",
+            path.display(),
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+    }
 }
 
 fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
@@ -140,5 +193,62 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
                 eprintln!("metal_seq: Lisp UI buffer {name} was not created");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_user_init;
+    use eseqlisp::vm::Value;
+    use eseqlisp::{Editor, EditorConfig, Runtime};
+
+    fn temp_init_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "metal-seq-user-init-{tag}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create init fixture dir");
+        dir.join("init.lisp")
+    }
+
+    #[test]
+    fn user_init_error_is_visible_and_boot_keeps_factory_behavior() {
+        let path = temp_init_path("error");
+        std::fs::write(
+            &path,
+            "(def factory-value () 99)\n(missing-init-function)",
+        )
+        .expect("write init fixture");
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str("(def factory-value () 7)")
+            .expect("factory def");
+
+        load_user_init(&mut editor, Some(&path));
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(factory-value)")
+                .expect("factory still callable"),
+            Some(Value::Number(7.0)),
+            "the failed init transaction must roll back all partial changes"
+        );
+        assert!(
+            editor.buffers.iter().any(|buffer| buffer.name == "*lisp-reload*"),
+            "init diagnostics must be visible in the reload buffer"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_user_init_is_silent() {
+        let path = temp_init_path("missing");
+        let _ = std::fs::remove_file(&path);
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        load_user_init(&mut editor, Some(&path));
+        assert!(editor.runtime_mut().take_status_message().is_none());
+        assert!(!editor.buffers.iter().any(|buffer| buffer.name == "*lisp-reload*"));
     }
 }

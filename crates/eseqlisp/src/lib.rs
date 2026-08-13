@@ -51,6 +51,7 @@ pub mod ui;
 // Re-export submodules at crate root for backward-compatible paths
 // (e.g. crate::vm, crate::layout still work).
 pub use lang::compiler;
+pub use lang::modules;
 pub use lang::parser;
 pub use lang::vm;
 
@@ -72,6 +73,7 @@ pub mod host;
 pub mod hot_reload;
 pub mod live_audio;
 pub mod mode;
+pub mod module_alias_migration;
 pub mod reactive;
 pub mod runtime;
 pub mod sound_glyph_data;
@@ -2207,6 +2209,34 @@ mod tests {
         assert_eq!(
             layout.props.get("shader-state-val"),
             Some(&Value::Number(0.75))
+        );
+    }
+
+    #[test]
+    fn sdf_stdlib_is_the_module_pilot() {
+        // Acceptance test for module-system spec §9: sdf-stdlib carries a
+        // (module sdf) header and bare defmacro names, and consumers keep
+        // calling (sdf/circle …) verbatim as qualified references.
+        let mut runtime = Runtime::new();
+        assert!(
+            runtime.declared_modules().contains_key("sdf"),
+            "sdf-stdlib should declare (module sdf)"
+        );
+        for key in ["sdf/circle", "sdf/rounded-rect", "sdf/lit", "sdf/%hslider-fill"] {
+            assert!(
+                runtime.macros().contains_key(key),
+                "expected macro key {key}"
+            );
+        }
+        let shader = runtime
+            .eval_str("(sdf->metal '(sdf/layer (sdf/fill (sdf/circle 0.5) (rgba 1 0 0 1))))")
+            .expect("sdf->metal eval");
+        let Some(Value::String(shader)) = shader else {
+            panic!("sdf->metal should return a shader string");
+        };
+        assert!(
+            !shader.starts_with("error:"),
+            "shader compile failed: {shader}"
         );
     }
 

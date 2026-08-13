@@ -1,23 +1,31 @@
 ;; sdf-stdlib.lisp — SDF primitives and combinators
 ;; Loaded at editor startup. All shapes operate in normalized coords
 ;; with free variables x, y bound by the caller.
+;;
+;; This file is the module-system pilot (docs/module-system-spec.md §9):
+;; the (module sdf) header qualifies each defmacro as sdf/<name>, so the
+;; ~34 consumer files calling (sdf/circle …) etc. keep working verbatim —
+;; the names they always used are now real qualified references instead
+;; of lucky flat strings. %-prefixed macros are internal (spec §2).
+
+(module sdf)
 
 ;; ── Primitive Shapes ──────────────────────────────────────────────────
 
 ;; Circle centered at origin with radius r.
 ;; Returns negative inside, zero on boundary, positive outside.
-(defmacro sdf/circle (r)
+(defmacro circle (r)
   `(- (length (vec2 x y)) ,r))
 
 ;; Axis-aligned box centered at origin, half-extents w and h.
-(defmacro sdf/rect (w h)
+(defmacro rect (w h)
   `(let ((dx (- (abs x) ,w))
          (dy (- (abs y) ,h)))
      (+ (length (vec2 (max dx 0) (max dy 0)))
         (min (max dx dy) 0))))
 
 ;; Rounded rectangle: box with corner radius r.
-(defmacro sdf/rounded-rect (w h r)
+(defmacro rounded-rect (w h r)
   `(let ((dx (- (abs x) (- ,w ,r)))
          (dy (- (abs y) (- ,h ,r))))
      (- (+ (length (vec2 (max dx 0) (max dy 0)))
@@ -27,13 +35,13 @@
 ;; Aspect-aware rounded rect that fills the box minus an inset.
 ;; Uses the implicit `aspect` variable so the shape always covers
 ;; the full widget area regardless of rendered dimensions.
-(defmacro sdf/fill-rounded-rect (inset r)
+(defmacro fill-rounded-rect (inset r)
   `(sdf/rounded-rect (- (max aspect 1.0) ,inset)
                      (- (max (/ 1.0 aspect) 1.0) ,inset)
                      ,r))
 
 ;; Line segment from (ax,ay) to (bx,by). Returns distance from (x,y).
-(defmacro sdf/line (ax ay bx by)
+(defmacro line (ax ay bx by)
   `(let ((pax (- x ,ax))
          (pay (- y ,ay))
          (bax (- ,bx ,ax))
@@ -47,13 +55,13 @@
 ;; ── Transform Combinators ─────────────────────────────────────────────
 
 ;; Translate: shift the coordinate origin by (tx, ty).
-(defmacro sdf/translate (tx ty body)
+(defmacro translate (tx ty body)
   `(let ((x (- x ,tx))
          (y (- y ,ty)))
      ,body))
 
 ;; Scale: uniform scale by factor s.
-(defmacro sdf/scale (s body)
+(defmacro scale (s body)
   `(* (let ((x (/ x ,s))
             (y (/ y ,s)))
         ,body)
@@ -61,7 +69,7 @@
 
 ;; Rotate by angle (radians) counter-clockwise.
 ;; Saves old x/y before rebinding since let is sequential.
-(defmacro sdf/rotate (angle body)
+(defmacro rotate (angle body)
   `(let ((__rot_cos (cos ,angle))
          (__rot_sin (sin ,angle))
          (__rot_x x)
@@ -73,19 +81,19 @@
 ;; ── Boolean Combinators ───────────────────────────────────────────────
 
 ;; Union: combine two shapes (closest surface).
-(defmacro sdf/union (a b)
+(defmacro union (a b)
   `(min ,a ,b))
 
 ;; Subtract shape b from shape a.
-(defmacro sdf/subtract (a b)
+(defmacro subtract (a b)
   `(max ,a (- 0 ,b)))
 
 ;; Intersect: overlap of two shapes.
-(defmacro sdf/intersect (a b)
+(defmacro intersect (a b)
   `(max ,a ,b))
 
 ;; Smooth union with blending radius k.
-(defmacro sdf/smooth-union (k d1 d2)
+(defmacro smooth-union (k d1 d2)
   `(let ((h (clamp (+ 0.5 (/ (* 0.5 (- ,d2 ,d1)) ,k)) 0 1)))
      (- (mix ,d2 ,d1 h) (* ,k h (- 1 h)))))
 
@@ -96,7 +104,7 @@
 ;; height field, then samples at 4 offsets via central differences.
 ;; The edge-min/edge-max parameters control the curvature profile —
 ;; tighter range = sharper bevel, wider = softer dome.
-(defmacro sdf/normal (sdf-expr eps edge-min edge-max)
+(defmacro normal (sdf-expr eps edge-min edge-max)
   `(let ((__nr (smoothstep ,edge-min ,edge-max
                 (let ((x (+ x ,eps))) ,sdf-expr)))
          (__nl (smoothstep ,edge-min ,edge-max
@@ -111,12 +119,12 @@
 
 ;; Lambertian diffuse: max(0, dot(normal, light_dir)).
 ;; light-dir should be a normalized vec3.
-(defmacro sdf/diffuse (normal light-dir)
+(defmacro diffuse (normal light-dir)
   `(max 0.0 (dot ,normal ,light-dir)))
 
 ;; Blinn-Phong specular highlight.
 ;; view-dir and light-dir should be normalized vec3s.
-(defmacro sdf/specular (normal light-dir view-dir shininess)
+(defmacro specular (normal light-dir view-dir shininess)
   `(let ((__half (normalize (+ ,light-dir ,view-dir))))
      (pow (max 0.0 (dot ,normal __half)) ,shininess)))
 
@@ -127,7 +135,7 @@
 ;; Horizontal slider fill bar: rounded rect from left edge to value_t.
 ;; In SDF coords the fill center-x = aspect*(value_t - 1), halfW = aspect*value_t.
 ;; Vertical inset 0.64 (= (0.5 - 0.18) * 2 from UV padding), corner radius 0.24.
-(defmacro __hslider-fill ()
+(defmacro %hslider-fill ()
   `(sdf/translate (* aspect (- value_t 1.0)) 0.0
      (sdf/rounded-rect (* aspect value_t) 0.64 0.24)))
 
@@ -135,7 +143,7 @@
 ;; Compute the fill shape in UV-like local coordinates so `d` matches the
 ;; hardcoded slider geometry more closely. This keeps material edge logic
 ;; from collapsing into an outline on tall, narrow sliders.
-(defmacro __vslider-fill-with-material (mat)
+(defmacro %vslider-fill-with-material (mat)
   `(let ((__fill_lo (min value_t origin_t))
          (__fill_hi (max value_t origin_t))
          (__fill_span (- __fill_hi __fill_lo))
@@ -157,7 +165,7 @@
 ;;   tight range (e.g. -0.15, 0.02) = sharp bevel/rim
 ;;   wide range  (e.g. -0.7,  0.05) = soft dome
 ;; Returns an rgba suitable for use in (material :color ...).
-(defmacro sdf/lit (base-color sdf-expr edge-min edge-max)
+(defmacro lit (base-color sdf-expr edge-min edge-max)
   `(let ((__lit_n    (sdf/normal ,sdf-expr 0.01 ,edge-min ,edge-max))
          (__lit_l    (normalize (vec3 -0.9 -0.9 1.3)))
          (__lit_v    (vec3 0.0 0.0 1.0))

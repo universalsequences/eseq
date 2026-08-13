@@ -220,7 +220,7 @@ impl AgentToolRuntime {
                     "properties": {
                         "name": { "type": "string", "description": "Short artifact/effect name." },
                         "dsp_source": { "type": "string", "description": "Complete DGenLisp stereo audio effect dsp.lisp source. Must start with top-level forms such as `(def in_l (in 1 @name left))`, `(def in_r (in 2 @name right))`, `(param ...)`, and `(out ...)`; must not contain a `(defeffect ...)` wrapper." },
-                        "ui_source": { "type": "string", "description": "Complete eseqlisp ui.lisp source containing exactly one `(defeffect-ui ...)` form. Do not pass an effect name to `defeffect-ui`; use lego UI helpers such as `ui-control-block-*` and `ui-lego-knob-s`, not legacy `group`/`vgroup`/`hgroup`/`knob` wrappers." }
+                        "ui_source": { "type": "string", "description": "Complete eseqlisp ui.lisp source containing exactly one `(defeffect-ui ...)` form. Do not pass an effect name to `defeffect-ui`; use lego UI helpers such as `ui-control-block-*` and `eseq.effects.custom-ui-lego/ui-lego-knob-s`, not legacy `group`/`vgroup`/`hgroup`/`knob` wrappers." }
                     },
                     "required": ["name", "dsp_source", "ui_source"]
                 }),
@@ -236,7 +236,7 @@ impl AgentToolRuntime {
                         "artifact_id": { "type": "string", "description": "Current effect artifact id, if known." },
                         "name": { "type": "string", "description": "Optional replacement effect name." },
                         "dsp_source": { "type": "string", "description": "Complete replacement DGenLisp stereo audio effect dsp.lisp source. Must start with top-level forms such as `(def in_l (in 1 @name left))`, `(def in_r (in 2 @name right))`, `(param ...)`, and `(out ...)`; must not contain a `(defeffect ...)` wrapper." },
-                        "ui_source": { "type": "string", "description": "Complete replacement eseqlisp ui.lisp source containing exactly one `(defeffect-ui ...)` form. Do not pass an effect name to `defeffect-ui`; use lego UI helpers such as `ui-control-block-*` and `ui-lego-knob-s`, not legacy `group`/`vgroup`/`hgroup`/`knob` wrappers." }
+                        "ui_source": { "type": "string", "description": "Complete replacement eseqlisp ui.lisp source containing exactly one `(defeffect-ui ...)` form. Do not pass an effect name to `defeffect-ui`; use lego UI helpers such as `ui-control-block-*` and `eseq.effects.custom-ui-lego/ui-lego-knob-s`, not legacy `group`/`vgroup`/`hgroup`/`knob` wrappers." }
                     },
                     "required": ["dsp_source", "ui_source"]
                 }),

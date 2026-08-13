@@ -5,18 +5,53 @@
 ;; Factory buttons deliberately use the normal effect-param authoring path, so
 ;; they work for track effects, bus effects, and selected-step p-locks.
 
-(def multiverb-gold () (rgba 0.94 0.68 0.24 1.0))
-(def multiverb-blue () (rgba 0.32 0.68 0.96 1.0))
-(def multiverb-violet () (rgba 0.72 0.48 0.96 1.0))
-(def multiverb-green () (rgba 0.36 0.82 0.58 1.0))
+(module eseq.effects.builtin.multiverb)
 
-(def builtin-fx-multiverb-accent (mode)
-  (if (= mode 0) (multiverb-gold)
-    (if (= mode 1) (multiverb-blue)
-      (if (= mode 2) (multiverb-violet)
-        (multiverb-green)))))
+(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
+(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
+(import eseq.effects.param-controls :refer
+  (eseq.effects.param-controls/fx-param-numeric-value
+   eseq.effects.param-controls/fx-param-value-for
+   eseq.effects.param-controls/fx-set-effect-value
+   eseq.effects.param-controls/instrument-mod-target-source-slot
+   eseq.effects.param-controls/instrument-param-mod-targets
+   eseq.effects.param-controls/param-base-max-prop
+   eseq.effects.param-controls/param-base-min-prop
+   eseq.effects.param-controls/param-base-value-prop
+   eseq.effects.param-controls/param-control-key-mode
+   eseq.effects.param-controls/param-control-max
+   eseq.effects.param-controls/param-control-min
+   eseq.effects.param-controls/param-knob-mod-depth-prop
+   eseq.effects.param-controls/param-knob-mod-slot-prop
+   eseq.effects.param-controls/param-mod-wrapper
+   eseq.effects.param-controls/param-plock-active?
+   eseq.effects.param-controls/param-plock-color-b
+   eseq.effects.param-controls/param-plock-color-g
+   eseq.effects.param-controls/param-plock-color-r
+   eseq.effects.param-controls/param-plock-default
+   eseq.effects.param-controls/param-plock-text-color
+   eseq.effects.param-controls/param-selected-mod-slot-prop
+   eseq.effects.param-controls/param-set-control-value
+   eseq.effects.param-controls/param-set-option))
 
-(def builtin-fx-multiverb-characteristic? (mode name)
+;; Migration alias (module spec §10). `builtin-fx-multiverb-apply-preset` is
+;; eval'd by flat name from a Rust test
+;; (metal_seq_fx_multiverb_layout_contains_modes_presets_and_live_knobs in
+;; src/ui/state_values/tests.rs). Identity alias; delete when that test
+;; qualifies.
+
+(def %gold () (rgba 0.94 0.68 0.24 1.0))
+(def %blue () (rgba 0.32 0.68 0.96 1.0))
+(def %violet () (rgba 0.72 0.48 0.96 1.0))
+(def %green () (rgba 0.36 0.82 0.58 1.0))
+
+(def %accent (mode)
+  (if (= mode 0) (%gold)
+    (if (= mode 1) (%blue)
+      (if (= mode 2) (%violet)
+        (%green)))))
+
+(def %characteristic? (mode name)
   (or (= name "decay")
       (= name "size")
       (and (= mode 0) (or (= name "damp") (= name "diffusion") (= name "era")))
@@ -27,108 +62,108 @@
       (and (= mode 3) (or (= name "damp") (= name "diffusion")
                           (= name "mod rate") (= name "mod depth") (= name "mod shape")))))
 
-(def builtin-fx-multiverb-label-color (mode-p p)
-  (let ((mode (round (fx-param-numeric-value mode-p))))
-    (if (builtin-fx-multiverb-characteristic? mode (get p :name))
-      (builtin-fx-multiverb-accent mode)
+(def %label-color (mode-p p)
+  (let ((mode (round (eseq.effects.param-controls/fx-param-numeric-value mode-p))))
+    (if (%characteristic? mode (get p :name))
+      (%accent mode)
       :dim)))
 
-(def builtin-fx-multiverb-knob (fx mode-p label-text p decimals)
-  (param-mod-wrapper fx p (str "multiverb-param-" (get p :idx) "-mod-wrapper")
-    (subtree :key (str "multiverb-param-" (get p :idx) (param-control-key-mode fx p))
+(def %knob (fx mode-p label-text p decimals)
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str "multiverb-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "multiverb-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
-        :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
-        :base-value (param-base-value-prop fx p)
-        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
-        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
-        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
-        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
-        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
-        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :value (eseq.effects.param-controls/fx-param-value-for fx p)
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
+        :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
+        :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (param-plock-text-color fx p)
-        :label-color (builtin-fx-multiverb-label-color mode-p p)
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-default (param-plock-default fx p)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
+        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :label-color (%label-color mode-p p)
+        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
         :width 4.25 :height 2.48 :knob-size 1.82
-        :on-change (lambda (v) (param-set-control-value fx p v))))))
+        :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
-(def builtin-fx-multiverb-percent-knob (fx mode-p label-text p)
-  (param-mod-wrapper fx p (str "multiverb-param-" (get p :idx) "-mod-wrapper")
-    (subtree :key (str "multiverb-param-" (get p :idx) (param-control-key-mode fx p))
+(def %percent-knob (fx mode-p label-text p)
+  (eseq.effects.param-controls/param-mod-wrapper fx p (str "multiverb-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (str "multiverb-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
-        :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p)
+        :value (eseq.effects.param-controls/fx-param-value-for fx p)
+        :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p)
         :value-scale 100 :decimals 0
-        :base-value (param-base-value-prop fx p)
-        :base-min (param-base-min-prop fx p) :base-max (param-base-max-prop fx p)
-        :mod-range-0-slot (param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (param-knob-mod-depth-prop fx p 0)
-        :mod-range-1-slot (param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (param-knob-mod-depth-prop fx p 1)
-        :mod-range-2-slot (param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (param-knob-mod-depth-prop fx p 2)
-        :mod-range-3-slot (param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (param-knob-mod-depth-prop fx p 3)
-        :selected-mod-slot (param-selected-mod-slot-prop fx p)
+        :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
+        :base-min (eseq.effects.param-controls/param-base-min-prop fx p) :base-max (eseq.effects.param-controls/param-base-max-prop fx p)
+        :mod-range-0-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 0) :mod-range-0-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 0)
+        :mod-range-1-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 1) :mod-range-1-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 1)
+        :mod-range-2-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 2) :mod-range-2-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 2)
+        :mod-range-3-slot (eseq.effects.param-controls/param-knob-mod-slot-prop fx p 3) :mod-range-3-depth (eseq.effects.param-controls/param-knob-mod-depth-prop fx p 3)
+        :selected-mod-slot (eseq.effects.param-controls/param-selected-mod-slot-prop fx p)
         :font-size 9.5 :label-font-size 9.0
-        :text-color (param-plock-text-color fx p)
-        :label-color (builtin-fx-multiverb-label-color mode-p p)
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-default (param-plock-default fx p)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
+        :text-color (eseq.effects.param-controls/param-plock-text-color fx p)
+        :label-color (%label-color mode-p p)
+        :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+        :plock-default (eseq.effects.param-controls/param-plock-default fx p)
+        :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+        :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+        :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
         :width 4.25 :height 2.48 :knob-size 1.82
-        :on-change (lambda (v) (param-set-control-value fx p v))))))
+        :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 ;; ── Modes and factory settings ──
 
-(def builtin-fx-multiverb-mode-button (fx p index label-text)
-  (let ((selected (= (round (fx-param-numeric-value p)) index)))
+(def %mode-button (fx p index label-text)
+  (let ((selected (= (round (eseq.effects.param-controls/fx-param-numeric-value p)) index)))
     (button label-text
       :debug-name (str "multiverb-mode-" label-text)
       :width 2.72 :height 1.20 :padding 0 :font-size 8.5
-      :background-color (if selected (builtin-fx-multiverb-accent index) :mixer-control-bg)
+      :background-color (if selected (%accent index) :mixer-control-bg)
       :color (if selected :black :dim)
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-click |x y r| (fx-set-effect-value fx p index))))
+      :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
+      :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+      :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+      :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+      :on-click |x y r| (eseq.effects.param-controls/fx-set-effect-value fx p index))))
 
-(def builtin-fx-multiverb-clear-mod-depths (fx target-params)
+(def %clear-mod-depths (fx target-params)
   (each target-params |p|
-    (each (instrument-param-mod-targets p) |target|
-      (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0))))
+    (each (eseq.effects.param-controls/instrument-param-mod-targets p) |target|
+      (eseq.effects.param-controls/fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0))))
 
-(def builtin-fx-multiverb-source-section (fx source-slot)
+(def %source-section (fx source-slot)
   (nth
     (filter |section| (= (get section :slot) source-slot) (get fx :sources))
     0))
 
-(def builtin-fx-multiverb-set-mod-source (fx source-slot source-name)
-  (let ((section (builtin-fx-multiverb-source-section fx source-slot)))
+(def %set-mod-source (fx source-slot source-name)
+  (let ((section (%source-section fx source-slot)))
     (if section
       (let ((source-p (get section :source-param)))
-        (if source-p (param-set-option fx source-p source-name))))))
+        (if source-p (eseq.effects.param-controls/param-set-option fx source-p source-name))))))
 
-(def builtin-fx-multiverb-clear-mod-sources (fx)
+(def %clear-mod-sources (fx)
   (each (get fx :sources) |section|
     (let ((source-p (get section :source-param)))
-      (if source-p (param-set-option fx source-p "off")))))
+      (if source-p (eseq.effects.param-controls/param-set-option fx source-p "off")))))
 
-(def builtin-fx-multiverb-set-mod-depth (fx p source-slot depth)
+(def %set-mod-depth (fx p source-slot depth)
   (let ((target
           (nth
             (filter |candidate|
-              (= (instrument-mod-target-source-slot candidate) source-slot)
-              (instrument-param-mod-targets p))
+              (= (eseq.effects.param-controls/instrument-mod-target-source-slot candidate) source-slot)
+              (eseq.effects.param-controls/instrument-param-mod-targets p))
             0)))
     (if target
-      (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") depth))))
+      (eseq.effects.param-controls/fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") depth))))
 
-(def builtin-fx-multiverb-preset-values (name)
+(def %preset-values (name)
   (if (= name "Xtal Wash")
     (list (list "mode" 2) (list "decay" 0.84) (list "size" 0.52)
           (list "predelay" 18) (list "damp" 0.58) (list "bass" 0.65)
@@ -155,111 +190,111 @@
 
 (def builtin-fx-multiverb-apply-preset (fx name)
   (let ((params (get fx :params)))
-    (let ((decay-p (builtin-fx-param params "decay"))
-          (size-p (builtin-fx-param params "size"))
-          (depth-p (builtin-fx-param params "mod depth"))
-          (mix-p (builtin-fx-param params "mix")))
+    (let ((decay-p (eseq.effects.builtin.filter-core/builtin-fx-param params "decay"))
+          (size-p (eseq.effects.builtin.filter-core/builtin-fx-param params "size"))
+          (depth-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod depth"))
+          (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix")))
       (do
-        (builtin-fx-multiverb-clear-mod-sources fx)
-        (builtin-fx-multiverb-clear-mod-depths fx (list decay-p size-p depth-p mix-p))
-        (each (builtin-fx-multiverb-preset-values name) |setting|
-          (let ((p (builtin-fx-param params (nth setting 0))))
-            (if p (fx-set-effect-value fx p (nth setting 1)))))
+        (%clear-mod-sources fx)
+        (%clear-mod-depths fx (list decay-p size-p depth-p mix-p))
+        (each (%preset-values name) |setting|
+          (let ((p (eseq.effects.builtin.filter-core/builtin-fx-param params (nth setting 0))))
+            (if p (eseq.effects.param-controls/fx-set-effect-value fx p (nth setting 1)))))
         (if (= name "Xtal Wash")
           (do
-            (builtin-fx-multiverb-set-mod-depth fx decay-p 1 0.08)
-            (builtin-fx-multiverb-set-mod-source fx 1 "drift")))))))
+            (%set-mod-depth fx decay-p 1 0.08)
+            (%set-mod-source fx 1 "drift")))))))
 
-(def builtin-fx-multiverb-preset-button (fx label-text)
+(def %preset-button (fx label-text)
   (button label-text
     :debug-name (str "multiverb-preset-" label-text)
     :width 5.60 :height 1.00 :padding 0 :font-size 8.0
     :background-color :mixer-control-bg :color :dim
     :on-click |x y r| (builtin-fx-multiverb-apply-preset fx label-text)))
 
-(def builtin-fx-multiverb-mode-box (fx mode-p)
+(def %mode-box (fx mode-p)
   (box :debug-name "multiverb-mode-section"
     :width 13.2 :height 9.65 :padding 0.34
     :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.28 :align :center
       (label "MULTIVERB" :font-size 9.0 :width 11.8
-        :color (builtin-fx-multiverb-accent (round (fx-param-numeric-value mode-p))) :bg :transparent)
+        :color (%accent (round (eseq.effects.param-controls/fx-param-numeric-value mode-p))) :bg :transparent)
       (h-stack :gap 0.14
-        (builtin-fx-multiverb-mode-button fx mode-p 0 "Plate")
-        (builtin-fx-multiverb-mode-button fx mode-p 1 "Hall")
-        (builtin-fx-multiverb-mode-button fx mode-p 2 "Quad")
-        (builtin-fx-multiverb-mode-button fx mode-p 3 "Mod"))
+        (%mode-button fx mode-p 0 "Plate")
+        (%mode-button fx mode-p 1 "Hall")
+        (%mode-button fx mode-p 2 "Quad")
+        (%mode-button fx mode-p 3 "Mod"))
       (label (get mode-p :text-value) :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
       (box :height 0.25)
       (label "FACTORY" :font-size 8.0 :width 11.8 :color :dim :bg :transparent)
       (h-stack :gap 0.14
-        (builtin-fx-multiverb-preset-button fx "Gold Plate")
-        (builtin-fx-multiverb-preset-button fx "224 Bloom"))
+        (%preset-button fx "Gold Plate")
+        (%preset-button fx "224 Bloom"))
       (h-stack :gap 0.14
-        (builtin-fx-multiverb-preset-button fx "Xtal Wash")
-        (builtin-fx-multiverb-preset-button fx "Seasick")))))
+        (%preset-button fx "Xtal Wash")
+        (%preset-button fx "Seasick")))))
 
 ;; ── Control groups ──
 
-(def builtin-fx-multiverb-space-box (fx mode-p decay-p size-p predelay-p mix-p)
+(def %space-box (fx mode-p decay-p size-p predelay-p mix-p)
   (box :debug-name "multiverb-space-section"
        :width 9.45 :height 9.65 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.20 :align :center
       (label "SPACE" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (h-stack :gap 0.18
-        (builtin-fx-multiverb-percent-knob fx mode-p "decay" decay-p)
-        (builtin-fx-multiverb-percent-knob fx mode-p "size" size-p))
+        (%percent-knob fx mode-p "decay" decay-p)
+        (%percent-knob fx mode-p "size" size-p))
       (h-stack :gap 0.18
-        (builtin-fx-multiverb-knob fx mode-p "pre ms" predelay-p 0)
-        (builtin-fx-multiverb-percent-knob fx mode-p "mix" mix-p)))))
+        (%knob fx mode-p "pre ms" predelay-p 0)
+        (%percent-knob fx mode-p "mix" mix-p)))))
 
-(def builtin-fx-multiverb-tone-box (fx mode-p damp-p bass-p diffusion-p era-p)
+(def %tone-box (fx mode-p damp-p bass-p diffusion-p era-p)
   (box :debug-name "multiverb-tone-section"
        :width 9.45 :height 9.65 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.20 :align :center
       (label "TONE / GRAIN" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (h-stack :gap 0.18
-        (builtin-fx-multiverb-percent-knob fx mode-p "damp" damp-p)
-        (builtin-fx-multiverb-percent-knob fx mode-p "bass" bass-p))
+        (%percent-knob fx mode-p "damp" damp-p)
+        (%percent-knob fx mode-p "bass" bass-p))
       (h-stack :gap 0.18
-        (builtin-fx-multiverb-percent-knob fx mode-p "diffuse" diffusion-p)
-        (builtin-fx-multiverb-percent-knob fx mode-p "era" era-p)))))
+        (%percent-knob fx mode-p "diffuse" diffusion-p)
+        (%percent-knob fx mode-p "era" era-p)))))
 
-(def builtin-fx-multiverb-motion-box (fx mode-p rate-p depth-p shape-p width-p)
+(def %motion-box (fx mode-p rate-p depth-p shape-p width-p)
   (box :debug-name "multiverb-motion-section"
        :width 9.45 :height 9.65 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.20 :align :center
       (label "MOTION / STEREO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (h-stack :gap 0.18
-        (builtin-fx-multiverb-knob fx mode-p "rate hz" rate-p 2)
-        (builtin-fx-multiverb-percent-knob fx mode-p "depth" depth-p))
+        (%knob fx mode-p "rate hz" rate-p 2)
+        (%percent-knob fx mode-p "depth" depth-p))
       (h-stack :gap 0.18
-        (builtin-fx-multiverb-percent-knob fx mode-p "random" shape-p)
-        (builtin-fx-multiverb-percent-knob fx mode-p "width" width-p)))))
+        (%percent-knob fx mode-p "random" shape-p)
+        (%percent-knob fx mode-p "width" width-p)))))
 
 (def builtin-fx-multiverb-ui (fx)
   (let ((params (get fx :params)))
-    (let ((mode-p (builtin-fx-param params "mode"))
-          (decay-p (builtin-fx-param params "decay"))
-          (size-p (builtin-fx-param params "size"))
-          (predelay-p (builtin-fx-param params "predelay"))
-          (damp-p (builtin-fx-param params "damp"))
-          (bass-p (builtin-fx-param params "bass"))
-          (diffusion-p (builtin-fx-param params "diffusion"))
-          (rate-p (builtin-fx-param params "mod rate"))
-          (depth-p (builtin-fx-param params "mod depth"))
-          (shape-p (builtin-fx-param params "mod shape"))
-          (era-p (builtin-fx-param params "era"))
-          (width-p (builtin-fx-param params "width"))
-          (mix-p (builtin-fx-param params "mix")))
+    (let ((mode-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mode"))
+          (decay-p (eseq.effects.builtin.filter-core/builtin-fx-param params "decay"))
+          (size-p (eseq.effects.builtin.filter-core/builtin-fx-param params "size"))
+          (predelay-p (eseq.effects.builtin.filter-core/builtin-fx-param params "predelay"))
+          (damp-p (eseq.effects.builtin.filter-core/builtin-fx-param params "damp"))
+          (bass-p (eseq.effects.builtin.filter-core/builtin-fx-param params "bass"))
+          (diffusion-p (eseq.effects.builtin.filter-core/builtin-fx-param params "diffusion"))
+          (rate-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod rate"))
+          (depth-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod depth"))
+          (shape-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mod shape"))
+          (era-p (eseq.effects.builtin.filter-core/builtin-fx-param params "era"))
+          (width-p (eseq.effects.builtin.filter-core/builtin-fx-param params "width"))
+          (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix")))
       (if (and mode-p decay-p size-p predelay-p damp-p bass-p diffusion-p
                rate-p depth-p shape-p era-p width-p mix-p)
         (h-stack :gap 0.35 :align :start
-          (builtin-fx-multiverb-mode-box fx mode-p)
-          (builtin-fx-multiverb-space-box fx mode-p decay-p size-p predelay-p mix-p)
-          (builtin-fx-multiverb-tone-box fx mode-p damp-p bass-p diffusion-p era-p)
-          (builtin-fx-multiverb-motion-box fx mode-p rate-p depth-p shape-p width-p))
-        (fx-param-grid params fx)))))
+          (%mode-box fx mode-p)
+          (%space-box fx mode-p decay-p size-p predelay-p mix-p)
+          (%tone-box fx mode-p damp-p bass-p diffusion-p era-p)
+          (%motion-box fx mode-p rate-p depth-p shape-p width-p))
+        (eseq.effects.param-grid/fx-param-grid params fx)))))

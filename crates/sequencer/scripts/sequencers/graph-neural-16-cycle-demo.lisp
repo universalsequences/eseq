@@ -472,4 +472,4 @@
             ))))))
 
 (effect-buffer "*16x16-cycle*" (g16c-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

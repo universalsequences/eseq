@@ -64,7 +64,7 @@ pub(crate) struct PendingInlineWidgets {
 
 struct ActiveSubtreeReplacement {
     source_buffer_id: Option<BufferId>,
-    source_module: Option<PathBuf>,
+    source_file: Option<PathBuf>,
     target: EffectTarget,
     subtree_root_id: u64,
     tree: Value,
@@ -445,7 +445,7 @@ fn expand_sdf_expression(
     expr: &crate::parser::Expression,
     macros: &HashMap<String, crate::compiler::MacroDef>,
 ) -> crate::parser::Expression {
-    crate::compiler::Compiler::new_repl(
+    let compiler = crate::compiler::Compiler::new_repl(
         vec![],
         vec![],
         vec![],
@@ -455,8 +455,9 @@ fn expand_sdf_expression(
         0,
         macros.clone(),
         None,
-    )
-    .expand_macros(expr, 0)
+    );
+    // Module-owned shader macros must be referenced with qualified names.
+    compiler.expand_macros(expr, 0)
 }
 
 struct SdfCompileResult {
@@ -734,6 +735,11 @@ pub struct SymbolMetadata {
 
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeBridgeState {
+    /// The module of the chunk executing the current native call (None =
+    /// implicit eseq.vanilla). Stamped by `register_native_impl` before
+    /// each dispatch so registration natives (`bind-key`, `define-mode`,
+    /// …) can qualify late-bound handler-name strings (spec §5).
+    pub current_native_module: Option<String>,
     pub current_buffer_id: Option<BufferId>,
     pub current_buffer_name: String,
     pub current_buffer_path: Option<PathBuf>,
@@ -825,7 +831,29 @@ impl NativeContext {
         self.shared.borrow_mut().queued_commands.push(command);
     }
 
+    /// The declared module of the chunk executing this native call, if
+    /// any (None inside headerless eseq.vanilla code).
+    pub fn current_module(&self) -> Option<String> {
+        self.shared.borrow().current_native_module.clone()
+    }
+
+    /// Registry auto-qualification for late-bound handler-name strings
+    /// (spec §5): a `bind-key` / mode handler registered from a declared
+    /// module stores `module/handler` so dispatch resolves against the
+    /// registering module first (the editor falls back to the flat base
+    /// name when the module has no such global). Vanilla registrations
+    /// stay verbatim.
+    pub fn qualify_registration_name(&self, name: &str) -> String {
+        match self.current_module() {
+            Some(module) if !crate::modules::is_qualified(name) => {
+                crate::modules::qualify(&module, name)
+            }
+            _ => name.to_string(),
+        }
+    }
+
     pub fn bind_key(&mut self, key: String, handler: String) {
+        let handler = self.qualify_registration_name(&handler);
         self.shared.borrow_mut().lisp_bindings.insert(key, handler);
     }
 
@@ -864,6 +892,12 @@ impl NativeContext {
         on_enter: Option<String>,
         on_key: Option<String>,
     ) {
+        // Registry auto-qualification (spec §5): a declared module's mode
+        // name AND its late-bound handler strings capture the module
+        // current at definition time.
+        let name = self.qualify_registration_name(&name);
+        let on_enter = on_enter.map(|h| self.qualify_registration_name(&h));
+        let on_key = on_key.map(|h| self.qualify_registration_name(&h));
         self.shared
             .borrow_mut()
             .pending_mode_defs
@@ -871,6 +905,11 @@ impl NativeContext {
     }
 
     pub fn mode_bind_key(&mut self, mode: String, key: String, handler: String) {
+        // Mode references qualify against the current module first; the
+        // editor falls back to the flat mode name when the module has no
+        // mode of that name (referencing a vanilla mode from a module).
+        let mode = self.qualify_registration_name(&mode);
+        let handler = self.qualify_registration_name(&handler);
         self.shared
             .borrow_mut()
             .pending_mode_bindings
@@ -878,10 +917,12 @@ impl NativeContext {
     }
 
     pub fn set_buffer_mode(&mut self, mode: String) {
+        let mode = self.qualify_registration_name(&mode);
         self.shared.borrow_mut().pending_set_mode = Some(mode);
     }
 
     pub fn set_buffer_mode_for(&mut self, buffer_name: String, mode: String) {
+        let mode = self.qualify_registration_name(&mode);
         self.shared
             .borrow_mut()
             .pending_set_mode_for
@@ -935,7 +976,7 @@ impl NativeContext {
             .pending_buffer_widget_trees
             .push(PendingUiUpdate::FullTree(PendingWidgetTree {
                 source_buffer_id,
-                source_module: None,
+                source_file: None,
                 target: EffectTarget::BufferName(buffer_name),
                 tree: probed_shallow_clone("w2:render-widget-to-buffer", &tree),
                 reactive_dependencies: Vec::new(),
@@ -1201,7 +1242,7 @@ impl Runtime {
             .vm
             .register_native_with_vm("current-source-path", |_args, vm| {
                 vm.source_manager
-                    .current_module()
+                    .current_source_file()
                     .map(|path| Value::String(path.display().to_string()))
                     .unwrap_or_else(|| Value::String(String::new()))
             });
@@ -1255,7 +1296,11 @@ impl Runtime {
             let Some(val) = args.first() else {
                 return Value::String("error: sdf->metal requires 1 argument".into());
             };
-            match compile_sdf_value(val, &sdf_macros, &std::collections::HashSet::new()) {
+            match compile_sdf_value(
+                val,
+                &sdf_macros,
+                &std::collections::HashSet::new(),
+            ) {
                 Ok(result) => Value::String(result.output.shader_source),
                 Err(e) => Value::String(format!("error: {}", e)),
             }
@@ -1348,7 +1393,11 @@ impl Runtime {
                 for name in &widget_state_names {
                     state_bindings.insert(name.clone());
                 }
-                let compiled = match compile_sdf_value(&shader_val, &vm.macros, &state_bindings) {
+                let compiled = match compile_sdf_value(
+                    &shader_val,
+                    &vm.macros,
+                    &state_bindings,
+                ) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
                 };
@@ -1374,6 +1423,7 @@ impl Runtime {
                 let state_uniforms = compiled.state_symbols;
                 vm.register_native_with_vm(&name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
+                    vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
                         for state_name in &state_uniforms {
                             let explicit_value =
@@ -1404,6 +1454,7 @@ impl Runtime {
                 .vm
                 .register_native_with_vm(widget_name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&wtype, args);
+                    vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
@@ -1415,7 +1466,7 @@ impl Runtime {
                                     &wtype,
                                     &material_val,
                                     &vm.macros,
-                                    &keys,
+                                                    &keys,
                                     &prop_keys,
                                 ) {
                                     Ok(shader_name) => {
@@ -1702,7 +1753,13 @@ impl Runtime {
         F: Fn(Vec<Value>, &mut NativeContext) -> NativeResult + 'static,
     {
         let shared = self.shared.clone();
-        self.vm.register_native(name, move |args| {
+        self.vm.register_native_with_vm(name, move |args, vm| {
+            // Stamp the executing chunk's module so registration natives
+            // (bind-key, define-mode, …) can qualify late-bound handler
+            // names against the module current at their call site (spec §5).
+            let module = vm.current_module_name();
+            shared.borrow_mut().current_native_module =
+                (module != crate::modules::IMPLICIT_MODULE).then(|| module.to_string());
             let mut ctx = NativeContext::new(shared.clone());
             match f(args, &mut ctx) {
                 Ok(value) => value,
@@ -1721,6 +1778,14 @@ impl Runtime {
 
     pub fn macros(&self) -> &std::collections::HashMap<String, crate::compiler::MacroDef> {
         &self.vm.macros
+    }
+
+    /// Modules declared via `(module NAME)` → declaring file, if any
+    /// (module-system spec §2/§4).
+    pub fn declared_modules(
+        &self,
+    ) -> &std::collections::HashMap<String, Option<std::path::PathBuf>> {
+        &self.vm.declared_modules
     }
 
     fn snapshot_state(&self) -> RuntimeStateSnapshot {
@@ -1762,6 +1827,10 @@ impl Runtime {
         self.current_committed_ui_snapshot_generation =
             snapshot.current_committed_ui_snapshot_generation;
         self.last_ui_invalidation_trace = snapshot.last_ui_invalidation_trace;
+    }
+
+    pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
+        self.vm.source_manager.exclude_module_alias_scan_root(root);
     }
 
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
@@ -1828,6 +1897,7 @@ impl Runtime {
         self.vm.source_manager.set_overlays(overlays);
         self.vm.source_manager.begin_transaction();
         self.vm.set_preserve_state_on_redefinition(true);
+        self.vm.begin_import_pass();
         self.vm.begin_inline_widget_capture();
 
         let requested_path = path
@@ -1983,6 +2053,7 @@ impl Runtime {
     ) -> ReloadReport {
         let snapshot = self.snapshot_state();
         self.vm.set_current_effect_context(None);
+        self.vm.begin_import_pass();
         self.vm.begin_inline_widget_capture();
         self.vm.source_manager.set_overlays(overlays);
         self.vm.source_manager.begin_transaction();
@@ -2161,6 +2232,24 @@ impl Runtime {
         self.vm.global_value(name)
     }
 
+    pub fn has_global(&self, name: &str) -> bool {
+        self.vm.has_global(name)
+    }
+
+    /// Resolve a stored handler-name string for dispatch (spec §5): a
+    /// handler registered from a declared module was stored qualified
+    /// (`module/handler`); if that module never defined it, fall back to
+    /// the flat base name (the normal ladder — the handler was a vanilla
+    /// global or an editor builtin referenced from the module).
+    pub fn resolve_handler_name<'a>(&self, handler: &'a str) -> &'a str {
+        if let Some((_, base)) = crate::modules::split_qualified(handler)
+            && !self.vm.has_global(handler)
+        {
+            return base;
+        }
+        handler
+    }
+
     /// Borrows one field of a reactive namespace without cloning the whole
     /// namespace map. `global_value("SEQ")` clones every key/value pair in the
     /// namespace, so its cost grows with total UI state; prefer this whenever
@@ -2171,8 +2260,12 @@ impl Runtime {
 
     pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
         let map = self.reactive_registry.register(name, fields, writable);
-        self.vm.set_global_value(name, map);
+        // Mark the namespace reactive BEFORE the global write so the
+        // by-name ladder pins it to the flat slot; then alias any stale
+        // `eseq.vanilla/NAME` slot interned by code compiled earlier.
         self.vm.reactive_namespaces.insert(name.to_string());
+        self.vm.set_global_value(name, map);
+        self.vm.alias_stale_qualified_slot(name);
         if writable {
             self.vm
                 .writable_reactive_namespaces
@@ -2628,12 +2721,20 @@ impl Runtime {
             return symbols.clone();
         }
 
-        let mut symbols = self.vm.global_names().to_vec();
+        // Completions show bare names: `eseq.vanilla/foo` inserts and
+        // resolves as `foo` (module-system spec slice 0).
+        let mut symbols = self
+            .vm
+            .global_names()
+            .iter()
+            .map(|name| crate::modules::strip_implicit(name).to_string())
+            .collect::<Vec<_>>();
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
+                let display = crate::modules::strip_implicit(global);
                 let mut keys = map.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
-                symbols.extend(keys.into_iter().map(|key| format!("{global}.{key}")));
+                symbols.extend(keys.into_iter().map(|key| format!("{display}.{key}")));
             }
         }
         symbols.sort();
@@ -2650,13 +2751,14 @@ impl Runtime {
         let mut metadata = self.symbol_metadata.clone();
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
+                let display = crate::modules::strip_implicit(global);
                 let mut keys = map.keys().cloned().collect::<Vec<_>>();
                 keys.sort();
                 for key in keys {
-                    let label = format!("{global}.{key}");
+                    let label = format!("{display}.{key}");
                     metadata.entry(label).or_insert_with(|| SymbolMetadata {
-                        signature: format!("{global}.{key}"),
-                        docs: format!("Field '{key}' on runtime map '{global}'."),
+                        signature: format!("{display}.{key}"),
+                        docs: format!("Field '{key}' on runtime map '{display}'."),
                     });
                 }
             }
@@ -3479,7 +3581,7 @@ impl Runtime {
                     fallback_pending.extend(replacements.drain(..).map(|replacement| {
                         PendingUiUpdate::ReplaceSubtree {
                             source_buffer_id: replacement.source_buffer_id,
-                            source_module: replacement.source_module,
+                            source_file: replacement.source_file,
                             target: replacement.target,
                             subtree_root_id: replacement.subtree_root_id,
                             tree: replacement.tree,
@@ -3522,7 +3624,7 @@ impl Runtime {
                                             active_subtree_replacements.push(
                                                 ActiveSubtreeReplacement {
                                                     source_buffer_id: pending.source_buffer_id,
-                                                    source_module: pending.source_module.clone(),
+                                                    source_file: pending.source_file.clone(),
                                                     target: pending.target.clone(),
                                                     subtree_root_id,
                                                     tree: probed_shallow_clone(
@@ -3592,7 +3694,7 @@ impl Runtime {
                     } => {
                         active_subtree_replacements.push(ActiveSubtreeReplacement {
                             source_buffer_id: *source_buffer_id,
-                            source_module: pending.source_module().map(PathBuf::from),
+                            source_file: pending.source_file().map(PathBuf::from),
                             target: pending.target().clone(),
                             subtree_root_id: *subtree_root_id,
                             tree: probed_shallow_clone("w2:flush-replace-subtree", tree),

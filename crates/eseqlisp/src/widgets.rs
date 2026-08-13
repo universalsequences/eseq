@@ -71,6 +71,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         let widget_type = widget.to_string();
         vm.register_native_with_vm(widget, move |args, vm| {
             let mut widget = build_widget(&widget_type, args);
+            vm.qualify_widget_stable_key(&mut widget);
             if let Some(symbol) = vm.current_source_symbol() {
                 if let Value::Map(map) = &mut widget {
                     map.insert(
@@ -79,7 +80,7 @@ pub fn register_widget_natives(vm: &mut VM) {
                     );
                 }
             }
-            if let Some(module) = vm.current_source_module() {
+            if let Some(module) = vm.current_source_file() {
                 if let Value::Map(map) = &mut widget {
                     map.insert(
                         SOURCE_MODULE_PATH_PROP.to_string(),

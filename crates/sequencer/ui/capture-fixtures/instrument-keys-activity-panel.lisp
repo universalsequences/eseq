@@ -4,8 +4,8 @@
 
 ;; The headless capture has no running note source. Override only the activity
 ;; predicate so the production keys widget can be inspected in its lit state.
-(def instrument-key-note-active? (note)
-  (fx-list-contains? '(60 64 67) note))
+(def eseq.effects.panel-bodies/instrument-key-note-active? (note)
+  (eseq.effects.param-grid/fx-list-contains? '(60 64 67) note))
 
 (def capture-after-sync ()
-  (set! instrument-panel-tab 1))
+  (set! eseq.effects.state/instrument-panel-tab 1))

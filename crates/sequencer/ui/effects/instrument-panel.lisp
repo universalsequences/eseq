@@ -1,14 +1,41 @@
 ;; Instrument panel composition for sampler, rack, modulator, and synth tracks.
+(module eseq.effects.instrument-panel)
+
+(import eseq.macro-state :as ms)
+(import eseq.effects.state :as st)
+(import eseq.effects.param-controls :as pc)
+(import eseq.effects.drag-drop :as dd)
+(import eseq.effects.effect-panels :as ep)
+(import eseq.effects.panel-frame :as pf)
+(import eseq.effects.panel-bodies :as pb)
+;; Mutual imports with the sampler/modulator panels (this file dispatches to
+;; them; sampler-panel routes rack drops back through
+;; rack-selected-instrument-drop). Load-once terminates the cycle.
+(import eseq.effects.sampler-panel :as sp)
+(import eseq.effects.modulator-panel :as mp)
+
+;; Migration aliases (module spec §10), all identity: every name below keeps
+;; its spelling and is reached flat by an unconverted caller —
+;; ui/capture-fixtures/rack-macro-mapping-sidebar.lisp (rack-macro-arm) — or
+;; by Rust test evals in src/ui/state_values/tests.rs and src/ui/tests.rs
+;; (the rack-panel-toggle-*/rack-slot-*/rack-pad-*/drop entry points).
+;; (The buffers.lisp aliases retired with eseq.effects.buffers, which now
+;; imports this module.)
+
+;; `sbrowser-drop-sound-on-track` / `sbrowser-enter-preset-save` stay bare:
+;; owned by eseq.browser (a UI-root module that must not be imported from
+;; library code); reached through its compat aliases.
+
 (def rack-panel-toggle-slot-list ()
-  (set! rack-panel-slot-list-open (not rack-panel-slot-list-open)))
+  (set! st/rack-panel-slot-list-open (not st/rack-panel-slot-list-open)))
 
 (def rack-panel-toggle-selected-chain ()
-  (set! rack-panel-selected-chain-open (not rack-panel-selected-chain-open)))
+  (set! st/rack-panel-selected-chain-open (not st/rack-panel-selected-chain-open)))
 
 (def rack-panel-toggle-macros ()
   (do
-    (set! rack-panel-macros-open (not rack-panel-macros-open))
-    (if (not rack-panel-macros-open) (rack-macro-clear-mapping-arm) false)))
+    (set! st/rack-panel-macros-open (not st/rack-panel-macros-open))
+    (if (not st/rack-panel-macros-open) (ms/rack-clear-mapping-arm) false)))
 
 (defwidget rack-macro-view-icon
   :width 2.25 :height 1.05 :paint-margin 0.15 :state (active)
@@ -17,7 +44,7 @@
       (disc-border (if (= active 1)
           (rgba 1.0 0.58 0.25 1.0)
           :white
-          ))      
+          ))
       (disc-color (if (= active 1) (rgba 1.0 0.58 0.25 1.0) (rgba 0.24 0.25 0.26 1.0)))
       (glyph-color (if (= active 1) (rgba 0.10 0.10 0.11 1.0) (rgba 0.72 0.73 0.74 1.0))))
     (sdf/layer
@@ -86,7 +113,7 @@
       (sdf/fill (sdf/translate 0.12 0.32 (sdf/rounded-rect 0.36 0.09 0.035))
         (material :color glyph-color)))))
 
-(def rack-panel-view-toolbar ()
+(def %rack-panel-view-toolbar ()
   (box :debug-name "rack-view-toolbar"
     :width 2.85 :height 9.7
     :padding 0.2 :h-align :center :v-align :start
@@ -95,98 +122,100 @@
       (rack-chain-view-icon
         :key "rack-chain-view-toggle"
         :debug-name "rack-chain-view-toggle"
-        :active (if rack-panel-selected-chain-open 1 0)
+        :active (if st/rack-panel-selected-chain-open 1 0)
         :on-click |x y r| (rack-panel-toggle-selected-chain))
       (rack-slot-list-view-icon
         :key "rack-slot-list-view-toggle"
         :debug-name "rack-slot-list-view-toggle"
-        :active (if rack-panel-slot-list-open 1 0)
+        :active (if st/rack-panel-slot-list-open 1 0)
         :on-click |x y r| (rack-panel-toggle-slot-list))
       (rack-macro-view-icon
         :key "rack-macro-view-toggle"
         :debug-name "rack-macro-view-toggle"
-        :active (if rack-panel-macros-open 1 0)
+        :active (if st/rack-panel-macros-open 1 0)
         :on-click |x y r| (rack-panel-toggle-macros)))
     ))
 
-(def rack-macro-set (track macro value)
+(def %rack-macro-set (track macro value)
   (host-command (if (seq-has-selection?) "set-rack-macro-plock" "set-rack-macro-value")
     (dict :track track :id (get macro :id) :value value)))
 
-(def rack-macro-plock-row (macro)
+(def %rack-macro-plock-row (macro)
   (nth (filter |row|
     (and (= (get row :target) "rack-macro")
          (= (get row :param-idx) (get macro :id)))
     SEQ.track-plocks) 0))
 
-(def rack-macro-display-value (macro)
+(def %rack-macro-display-value (macro)
   (if (get macro :value-field)
     (bind-seq (get macro :value-field))
     (get macro :value)))
 
-(def rack-macro-plock-active (macro)
+(def %rack-macro-plock-active (macro)
   (if (get macro :plock-active-field)
     (bind-seq (get macro :plock-active-field))
     0))
 
-(def rack-macro-plock-default (macro)
+(def %rack-macro-plock-default (macro)
   (if (get macro :plock-default-field)
     (bind-seq (get macro :plock-default-field))
     (get macro :value)))
 
 (def rack-macro-arm (macro)
-  (let ((next (if (= rack-macro-mapping-selected (get macro :id)) -1 (get macro :id))))
+  (let ((next (if (= ms/rack-mapping-selected (get macro :id)) -1 (get macro :id))))
     (if (< next 0)
-      (rack-macro-clear-mapping-arm)
+      (ms/rack-clear-mapping-arm)
       (do
-        (macro-clear-mapping-arm)
-        (process-map-clear)
-        (set! instrument-mods-open false)
-        (set! effect-mods-open false)
-        (set! rack-macro-mapping-selected next)
-        (macro-mapping-sidebar-open-hook)
-        (macro-mapping-sidebar-refresh-hook)))))
+        (ms/clear-mapping-arm)
+        (pc/process-map-clear)
+        (set! st/instrument-mods-open false)
+        (set! st/effect-mods-open false)
+        (set! ms/rack-mapping-selected next)
+        ;; Hook natives register at runtime under flat names; inside a module,
+        ;; reach hooks through the data-addressed flat keyspace (spec §10 e).
+        (run-hook "macro-mapping-sidebar-open-hook")
+        (run-hook "macro-mapping-sidebar-refresh-hook")))))
 
-(def rack-macro-control (track macro)
-  (let ((plock-row (rack-macro-plock-row macro)))
+(def %rack-macro-control (track macro)
+  (let ((plock-row (%rack-macro-plock-row macro)))
     (box :key (str "rack-macro-" (get macro :id)) :width 5.7 :height 4.35 :padding 0.18
       :corner-radius 9
       :background-color :mixer-strip-bg :border-color
-      (if (= rack-macro-mapping-selected (get macro :id)) (rgba 0.18 0.85 0.42 0.9) :mixer-strip-border)
+      (if (= ms/rack-mapping-selected (get macro :id)) (rgba 0.18 0.85 0.42 0.9) :mixer-strip-border)
       (v-stack :gap 0.08 :align :center
         (text-input :key (str "rack-macro-name-" (get macro :id))
           :width 5.2 :height 0.9 :font-size 8.5 :value (get macro :name)
           :on-change (lambda (name) (host-command "rename-rack-macro"
               (dict :track track :id (get macro :id) :name name))))
         (knob-number :debug-name (str "rack-macro-knob-" (get macro :id))
-          :value (rack-macro-display-value macro) :min 0 :max 1 :decimals 2
+          :value (%rack-macro-display-value macro) :min 0 :max 1 :decimals 2
           :width 4.8 :height 2.45 :knob-size 1.8 :font-size 8 :label-font-size 8
           :track-color '(rgba 0.4, 0.4, 0.4, 1)
-          :plock-active (rack-macro-plock-active macro)
-          :plock-default (rack-macro-plock-default macro)
-          :plock-color-r (param-plock-color-r)
-          :plock-color-g (param-plock-color-g)
-          :plock-color-b (param-plock-color-b)
-          :on-change (lambda (value) (rack-macro-set track macro value)))
+          :plock-active (%rack-macro-plock-active macro)
+          :plock-default (%rack-macro-plock-default macro)
+          :plock-color-r (pc/param-plock-color-r)
+          :plock-color-g (pc/param-plock-color-g)
+          :plock-color-b (pc/param-plock-color-b)
+          :on-change (lambda (value) (%rack-macro-set track macro value)))
         (button (str "map " (get macro :mapping-count)) :width 4.6 :height 0.7 :font-size 7.5
-          :active (if (= rack-macro-mapping-selected (get macro :id)) 1 0)
+          :active (if (= ms/rack-mapping-selected (get macro :id)) 1 0)
           :background-color :mixer-control-bg
           :active-background-color (rgba 0.18 0.85 0.42 1.0)
           :border-color :transparent
           :color :dim :active-color :black
           :on-click (lambda (event) (rack-macro-arm macro)))))))
 
-(def rack-macro-bank (inst)
+(def %rack-macro-bank (inst)
   (let ((track (get inst :track)) (macros (get inst :macros)))
     (box :debug-name "rack-macro-bank" :width 24 :height 9.7 :padding 0.2
       :background-color :bg :border-color :buffer-bg :corner-radius 10
       (v-stack :gap 0.15
         (h-stack :gap 0.15
-          (rack-macro-control track (nth macros 0)) (rack-macro-control track (nth macros 1))
-          (rack-macro-control track (nth macros 2)) (rack-macro-control track (nth macros 3)))
+          (%rack-macro-control track (nth macros 0)) (%rack-macro-control track (nth macros 1))
+          (%rack-macro-control track (nth macros 2)) (%rack-macro-control track (nth macros 3)))
         (h-stack :gap 0.15
-          (rack-macro-control track (nth macros 4)) (rack-macro-control track (nth macros 5))
-          (rack-macro-control track (nth macros 6)) (rack-macro-control track (nth macros 7)))))))
+          (%rack-macro-control track (nth macros 4)) (%rack-macro-control track (nth macros 5))
+          (%rack-macro-control track (nth macros 6)) (%rack-macro-control track (nth macros 7)))))))
 
 (def rack-panel-drop-on-rack (event)
   (let ((payload (get event :payload))
@@ -221,9 +250,9 @@
               (status "Drop an instrument, not a folder"))
             (status "Drop a sample or instrument")))))))
 
-(def rack-panel-drop-on-container (event)
+(def %rack-panel-drop-on-container (event)
   (if (= (get event :drag-type) "sound")
-    (sbrowser-drop-sound-on-track event)
+    (eseq.browser/drop-sound-on-track event)
     (rack-panel-drop-on-rack event)))
 
 (def rack-selected-instrument-drop (event)
@@ -231,7 +260,7 @@
         (target (get event :target))
         (drag-type (get event :drag-type)))
     (if (= drag-type "sound")
-      (sbrowser-drop-sound-on-track event)
+      (eseq.browser/drop-sound-on-track event)
       (if (= drag-type "instrument")
         (let ((name (get payload :name)))
           (if name
@@ -268,7 +297,7 @@
   (host-command "select-rack-pad-bank"
     (dict :track (get inst :track) :bank-start (get bank :bank-start))))
 
-(def drum-rack-pad-bank-cell (inst bank)
+(def %drum-rack-pad-bank-cell (inst bank)
   (let ((selected (get bank :selected)))
     (box :key (str "drum-rack-bank-" (get bank :bank-start))
          :debug-name "drum-rack-pad-bank"
@@ -288,16 +317,16 @@
         :width :fill
         :text-align :center))))
 
-(def drum-rack-pad-bank-selector (inst)
+(def %drum-rack-pad-bank-selector (inst)
   (v-stack :debug-name "drum-rack-pad-bank-selector"
            :width 3.8
-           :height fx-panel-body-content-height
+           :height st/fx-panel-body-content-height
            :gap 0.055
            :align :center
     (each (get inst :pad-banks) |bank idx|
-      (drum-rack-pad-bank-cell inst bank))))
+      (%drum-rack-pad-bank-cell inst bank))))
 
-(def rack-drum-pad-cell (pad)
+(def %rack-drum-pad-cell (pad)
   (let ((occupied (get pad :occupied))
       (selected (get pad :selected)))
     (box :key (str "drum-rack-pad-" (get pad :pad-note))
@@ -339,63 +368,63 @@
               :width 1.0 :height 0.56 :padding 0 :font-size 6.5
               :background-color (if (get pad :mute) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
               :color (if (get pad :mute) :black :dim)
-              :on-click |x y r| (rack-slot-set-mute pad (not (get pad :mute))))
+              :on-click |x y r| (%rack-slot-set-mute pad (not (get pad :mute))))
             (button "S"
               :width 1.0 :height 0.56 :padding 0 :font-size 6.5
               :background-color (if (get pad :solo) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
               :color (if (get pad :solo) :black :dim)
-              :on-click |x y r| (rack-slot-set-solo pad (not (get pad :solo))))
+              :on-click |x y r| (%rack-slot-set-solo pad (not (get pad :solo))))
             (dropdown :value-index (get pad :choke-group)
-              :options (rack-choke-group-options)
+              :options (%rack-choke-group-options)
               :width 3.85
               :height 0.56
               :font-size 6.2
               :on-change (lambda (v) (rack-slot-set-choke-group-label pad v))))
           (box :width :fill :height 0.62))))))
 
-(def drum-rack-pad-row (pads row-start)
+(def %drum-rack-pad-row (pads row-start)
   (h-stack :width :fill :height 2.43 :gap 0.18 :align :center
-    (rack-drum-pad-cell (nth pads row-start))
-    (rack-drum-pad-cell (nth pads (+ row-start 1)))
-    (rack-drum-pad-cell (nth pads (+ row-start 2)))
-    (rack-drum-pad-cell (nth pads (+ row-start 3)))))
+    (%rack-drum-pad-cell (nth pads row-start))
+    (%rack-drum-pad-cell (nth pads (+ row-start 1)))
+    (%rack-drum-pad-cell (nth pads (+ row-start 2)))
+    (%rack-drum-pad-cell (nth pads (+ row-start 3)))))
 
-(def drum-rack-pad-grid (inst)
+(def %drum-rack-pad-grid (inst)
   (h-stack :debug-name "drum-rack-pad-grid"
            :width :fill
-           :height fx-panel-body-content-height
+           :height st/fx-panel-body-content-height
            :gap 0.24
            :align :center
-    (drum-rack-pad-bank-selector inst)
+    (%drum-rack-pad-bank-selector inst)
     (v-stack :debug-name "drum-rack-pad-grid-cells"
              :width :fill
-             :height fx-panel-body-content-height
+             :height st/fx-panel-body-content-height
              :gap 0.08
              :align :center
-      (drum-rack-pad-row (get inst :pads) 0)
-      (drum-rack-pad-row (get inst :pads) 4)
-      (drum-rack-pad-row (get inst :pads) 8)
-      (drum-rack-pad-row (get inst :pads) 12))))
+      (%drum-rack-pad-row (get inst :pads) 0)
+      (%drum-rack-pad-row (get inst :pads) 4)
+      (%drum-rack-pad-row (get inst :pads) 8)
+      (%drum-rack-pad-row (get inst :pads) 12))))
 
 (def rack-slot-select (slot)
   (host-command "select-rack-slot"
     (dict :track (get slot :track) :slot (get slot :idx))))
 
-(def rack-slot-delete-target-payload (slot)
+(def %rack-slot-delete-target-payload (slot)
   (dict :track (get slot :track) :slot (get slot :idx)))
 
 (def rack-slot-select-delete-target (slot)
   (do
     (rack-slot-select slot)
-    (seq-set-delete-target :rack-slot (rack-slot-delete-target-payload slot))))
+    (seq-set-delete-target :rack-slot (%rack-slot-delete-target-payload slot))))
 
-(def rack-slot-delete-target-binding (slot)
+(def %rack-slot-delete-target-binding (slot)
   (bind-seq (str "rack-slot-delete-target-" (get slot :track) "-" (get slot :idx))))
 
-(def rack-slot-delete-target? (slot)
-  (rack-slot-delete-target-binding slot))
+(def %rack-slot-delete-target? (slot)
+  (%rack-slot-delete-target-binding slot))
 
-(def rack-slot-set-param-or-plock (slot param default-command v)
+(def %rack-slot-set-param-or-plock (slot param default-command v)
   (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" default-command)
     (dict :track (get slot :track)
           :slot (get slot :idx)
@@ -403,27 +432,27 @@
           :value v)))
 
 (def rack-slot-set-gain (slot v)
-  (rack-slot-set-param-or-plock slot "gain" "set-rack-slot-gain" v))
+  (%rack-slot-set-param-or-plock slot "gain" "set-rack-slot-gain" v))
 
-(def rack-slot-set-pan (slot v)
-  (rack-slot-set-param-or-plock slot "pan" "set-rack-slot-pan" v))
+(def %rack-slot-set-pan (slot v)
+  (%rack-slot-set-param-or-plock slot "pan" "set-rack-slot-pan" v))
 
-(def rack-slot-set-base-note (slot v)
-  (rack-slot-set-param-or-plock slot "base-note" "set-rack-slot-base-note" v))
+(def %rack-slot-set-base-note (slot v)
+  (%rack-slot-set-param-or-plock slot "base-note" "set-rack-slot-base-note" v))
 
-(def rack-slot-set-max-polyphony (slot v)
-  (rack-slot-set-param-or-plock slot "max-polyphony" "set-rack-slot-max-polyphony" v))
+(def %rack-slot-set-max-polyphony (slot v)
+  (%rack-slot-set-param-or-plock slot "max-polyphony" "set-rack-slot-max-polyphony" v))
 
-(def rack-slot-set-mute (slot v)
-  (rack-slot-set-param-or-plock slot "mute" "set-rack-slot-mute" v))
+(def %rack-slot-set-mute (slot v)
+  (%rack-slot-set-param-or-plock slot "mute" "set-rack-slot-mute" v))
 
-(def rack-slot-set-solo (slot v)
-  (rack-slot-set-param-or-plock slot "solo" "set-rack-slot-solo" v))
+(def %rack-slot-set-solo (slot v)
+  (%rack-slot-set-param-or-plock slot "solo" "set-rack-slot-solo" v))
 
-(def rack-choke-group-options ()
+(def %rack-choke-group-options ()
   (list "Off" "1" "2" "3" "4" "5" "6" "7" "8" "9" "10" "11" "12" "13" "14" "15" "16"))
 
-(def rack-choke-group-label-value (label)
+(def %rack-choke-group-label-value (label)
   (if (= label "Off") 0
     (if (= label "1") 1
       (if (= label "2") 2
@@ -445,12 +474,12 @@
   (host-command "set-rack-slot-choke-group"
     (dict :track (get slot :track)
           :slot (get slot :idx)
-          :value (rack-choke-group-label-value label))))
+          :value (%rack-choke-group-label-value label))))
 
-(def rack-slot-drop-fx (slot event)
+(def %rack-slot-drop-fx (slot event)
   (let ((payload (get event :payload)))
     (if (= (get payload :kind) "rack-effect-instance")
-      (fx-drop-existing-effect payload
+      (dd/drop-existing-effect payload
         (dict :chain "append"
               :track (get slot :track)
               :rack-slot (get slot :idx)))
@@ -460,21 +489,21 @@
               :name (get payload :name)
               :builtin (get payload :builtin))))))
 
-(def rack-slot-display-value (slot prop field-prop)
+(def %rack-slot-display-value (slot prop field-prop)
   (if (get slot field-prop)
     (bind-seq (get slot field-prop))
     (get slot prop)))
 
 ;; Only used for mute/solo flags. bind-seq is a float binding (bools arrive as
 ;; 1.0/0.0) and `not` doesn't negate numbers, so normalize to a real boolean.
-(def rack-slot-display-scalar (slot prop field-prop)
+(def %rack-slot-display-scalar (slot prop field-prop)
   (let ((field (get slot field-prop)))
     (if field
       (> (reactive-value (bind-seq field)) 0.5)
       (get slot prop))))
 
-(def rack-slot-row (slot)
-  (let ((delete-target (rack-slot-delete-target? slot))
+(def %rack-slot-row (slot)
+  (let ((delete-target (%rack-slot-delete-target? slot))
       (selected (get slot :selected)))
     (box :key (str "rack-slot-row-" (get slot :idx))
       :width 34.6
@@ -496,7 +525,7 @@
         :track (get slot :track)
         :rack-slot (get slot :idx))
       :drop-hover-border-color :mixer-strip-selected-border
-      :on-drop (lambda (event) (rack-slot-drop-fx slot event))
+      :on-drop (lambda (event) (%rack-slot-drop-fx slot event))
       :on-click |x y r| (rack-slot-select slot)
       (h-stack :width :fill :height :fill :gap 0.15 :align :baseline
         (box :width 1)
@@ -521,18 +550,18 @@
               :active delete-target
               :active-color :white
               :bg :transparent)))
-        
+
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :base-note :base-note-field)
+          (number-picker :value (%rack-slot-display-value slot :base-note :base-note-field)
             :min (get slot :base-note-min) :max (get slot :base-note-max) :decimals 0
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
             :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-base-note slot v))))
+            :on-change (lambda (v) (%rack-slot-set-base-note slot v))))
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "G" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :gain :gain-field)
+          (number-picker :value (%rack-slot-display-value slot :gain :gain-field)
             :min (get slot :gain-min) :max (get slot :gain-max) :decimals 2
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
@@ -540,37 +569,37 @@
             :on-change (lambda (v) (rack-slot-set-gain slot v))))
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "P" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :pan :pan-field)
+          (number-picker :value (%rack-slot-display-value slot :pan :pan-field)
             :min (get slot :pan-min) :max (get slot :pan-max) :decimals 2
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
             :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-pan slot v))))
+            :on-change (lambda (v) (%rack-slot-set-pan slot v))))
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "V" :font-size 8.2 :color :dim :bg :transparent)
-          (number-picker :value (rack-slot-display-value slot :max-polyphony :max-polyphony-field)
+          (number-picker :value (%rack-slot-display-value slot :max-polyphony :max-polyphony-field)
             :min (get slot :max-polyphony-min) :max (get slot :max-polyphony-max) :decimals 0
             :noui true :font-size 9.4
             :text-align :center :text-color :dim :edit-color :yellow
             :width 3.55 :height 0.84
-            :on-change (lambda (v) (rack-slot-set-max-polyphony slot v))))
+            :on-change (lambda (v) (%rack-slot-set-max-polyphony slot v))))
         (button "M"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
           :border-color :transparent
-          :background-color (if (rack-slot-display-scalar slot :mute :mute-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (rack-slot-display-scalar slot :mute :mute-field) :black :dim)
-          :on-click |x y r| (rack-slot-set-mute slot (not (rack-slot-display-scalar slot :mute :mute-field))))
+          :background-color (if (%rack-slot-display-scalar slot :mute :mute-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+          :color (if (%rack-slot-display-scalar slot :mute :mute-field) :black :dim)
+          :on-click |x y r| (%rack-slot-set-mute slot (not (%rack-slot-display-scalar slot :mute :mute-field))))
         (button "S"
           :width 2.0 :height 1.02 :padding 0 :font-size 9
           :border-color :transparent
-          :background-color (if (rack-slot-display-scalar slot :solo :solo-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-          :color (if (rack-slot-display-scalar slot :solo :solo-field) :black :dim)
-          :on-click |x y r| (rack-slot-set-solo slot (not (rack-slot-display-scalar slot :solo :solo-field))))))))
+          :background-color (if (%rack-slot-display-scalar slot :solo :solo-field) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+          :color (if (%rack-slot-display-scalar slot :solo :solo-field) :black :dim)
+          :on-click |x y r| (%rack-slot-set-solo slot (not (%rack-slot-display-scalar slot :solo :solo-field))))))))
 
-(def rack-empty-selected-panel (inst)
+(def %rack-empty-selected-panel (inst)
   (box :debug-name "rack-empty-selected-panel"
        :width 34
-       :height fx-fixed-panel-height
+       :height st/fx-fixed-panel-height
        :background "fx-panel-bg"
        :color :instrument-panel-bg
        :header :fx-panel-header-bg
@@ -585,15 +614,15 @@
                         :routing (get inst :routing)
                         :pad-note (get inst :selected-pad-note))
        :drop-hover-border-color :mixer-strip-selected-border
-       :on-drop (lambda (event) (rack-panel-drop-on-container event))
+       :on-drop (lambda (event) (%rack-panel-drop-on-container event))
     (label "Drop an Instrument or Sample"
       :font-size 11 :color :dim :bg :transparent)))
 
-(def rack-selected-instrument-panel (inst)
+(def %rack-selected-instrument-panel (inst)
   (let ((selected (get inst :selected-instrument)))
     (if selected
       (instrument-panel selected)
-      (rack-empty-selected-panel inst))))
+      (%rack-empty-selected-panel inst))))
 
 (def rack-selected-fx-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))
@@ -603,10 +632,10 @@
         (if (= (len (get slot :effects)) 0)
           (box :width 0 :height 0)
           (h-stack :debug-name "rack-slot-fx-panel"
-                   :height fx-fixed-panel-height :gap 1 :align :stretch
+                   :height st/fx-fixed-panel-height :gap 1 :align :stretch
             (each (get slot :effects) |fx fx-idx|
               (subtree :key (str "rack-slot-fx-" (get fx :slot-idx) "-" (get fx :name))
-                (fx-panel (get fx :name) (get fx :params) fx)))))))))
+                (ep/fx-panel (get fx :name) (get fx :params) fx)))))))))
 
 (def rack-slot-fx-drop-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))
@@ -625,8 +654,8 @@
                               :rack-slot (get slot :idx))
              :drop-hover-border-color :mixer-strip-selected-border
              :drop-hover-background-color :mixer-control-bg
-             :on-drop (lambda (event) (rack-slot-drop-fx slot event))
-             :height fx-fixed-panel-height
+             :on-drop (lambda (event) (%rack-slot-drop-fx slot event))
+             :height st/fx-fixed-panel-height
              :width 34
              :padding 0
              :h-align :center
@@ -639,16 +668,16 @@
 
 (def rack-slot-track-fx-divider ()
   (v-stack :debug-name "rack-slot-track-fx-divider"
-           :width 1.2 :height fx-fixed-panel-height :gap 0 :align :center
+           :width 1.2 :height st/fx-fixed-panel-height :gap 0 :align :center
     (box :width 0.08 :flex 1 :background-color :mixer-strip-border)))
 
-(def rack-panel (inst)
+(def %rack-panel (inst)
   (box
     (v-stack :debug-name "rack-panel-vstack" :gap 0 :height :fill
       (box :debug-name "rack-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
         (h-stack :debug-name "rack-header-row" :gap 0.6 :align :center :width :fill
-          (fx-panel-header-leading-spacer)
-          (if rack-panel-slot-list-open
+          (pf/fx-panel-header-leading-spacer)
+          (if st/rack-panel-slot-list-open
             (h-stack :debug-name "rack-expanded-header-content" :gap 0.6 :align :center :flex 1
               (label (substring (get inst :display-name) 0 16)
                 :font-size 11 :color :white :bg :transparent)
@@ -657,23 +686,23 @@
               :flex 1 :height 0.8 :padding 0 :h-align :center :v-align :center
               (label "R" :width :fill :font-size 8 :text-align :center
                 :color :dim :bg :transparent)))
-          (if rack-panel-slot-list-open
+          (if st/rack-panel-slot-list-open
             (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
               (v-stack
                 (box :width 1 :height 0.1)
                 (fx-mini-save-icon
-                  :on-click |x y r| (sbrowser-enter-preset-save)
+                  :on-click |x y r| (eseq.browser/enter-preset-save)
                   :active 0)))
             (box :width 0 :height 0))
           (box :width 0.5)))
-      (fx-panel-body "rack-content-box"
+      (pf/fx-panel-body "rack-content-box"
         (h-stack :debug-name "rack-content-row" :gap 0.20
           :width :fill :align :stretch
-          (rack-panel-view-toolbar)
-          (if rack-panel-macros-open (rack-macro-bank inst) (box :width 0 :height 0))
-          (if rack-panel-slot-list-open
+          (%rack-panel-view-toolbar)
+          (if st/rack-panel-macros-open (%rack-macro-bank inst) (box :width 0 :height 0))
+          (if st/rack-panel-slot-list-open
             (if (= (get inst :routing) "by-pitch")
-              (drum-rack-pad-grid inst)
+              (%drum-rack-pad-grid inst)
               (box
                 :background-color :bg
                 :border-color :buffer-bg
@@ -681,7 +710,7 @@
                 (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
                   (if (> (len (get inst :slots)) 0)
                     (each (get inst :slots) |slot idx|
-                      (rack-slot-row slot))
+                      (%rack-slot-row slot))
                     (box :width :fill :height 9 :h-align :center :v-align :center
                       (label "Drop an Instrument or Sample"
                         :font-size 11 :color :dim :bg :transparent))))))
@@ -693,59 +722,59 @@
       :routing (get inst :routing)
       :pad-note (get inst :selected-pad-note))
     :drop-hover-border-color :mixer-strip-selected-border
-    :on-drop (lambda (event) (rack-panel-drop-on-container event))
+    :on-drop (lambda (event) (%rack-panel-drop-on-container event))
     :background "fx-panel-bg"
     :color :instrument-panel-bg
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
     :padding 0
-    :width (+ 3.35 (if rack-panel-slot-list-open 34.7 0) (if rack-panel-macros-open 24.2 0))
-    :height fx-fixed-panel-height
+    :width (+ 3.35 (if st/rack-panel-slot-list-open 34.7 0) (if st/rack-panel-macros-open 24.2 0))
+    :height st/fx-fixed-panel-height
     :selected 0))
 
-(def rack-instrument-panel-row (inst)
+(def %rack-instrument-panel-row (inst)
   (h-stack :debug-name "rack-instrument-panel-row"
            :gap 0.2
-           :height fx-fixed-panel-height
+           :height st/fx-fixed-panel-height
            :align :stretch
-    (rack-panel inst)
-    (if rack-panel-selected-chain-open
-      (rack-selected-instrument-panel inst)
+    (%rack-panel inst)
+    (if st/rack-panel-selected-chain-open
+      (%rack-selected-instrument-panel inst)
       (box :width 0 :height 0))))
 
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
-    (sampler-panel inst)
+    (sp/sampler-panel inst)
     (if (= (get inst :type) "rack")
-      (rack-instrument-panel-row inst)
+      (%rack-instrument-panel-row inst)
       (if (= (get inst :type) "modulator")
-        (modulator-panel inst)
+        (mp/modulator-panel inst)
         (box
           (v-stack :debug-name "instrument-panel-vstack" :gap 0 :height :fill
             (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
               (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
-                (fx-panel-header-leading-spacer)
-                (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
-                (h-stack :v-align :center :height fx-panel-header-height :gap 1 :padding 0.1
+                (pf/fx-panel-header-leading-spacer)
+                (ep/enabled-toggle (ep/enabled-param (get inst :synth)) false "instrument-enabled")
+                (h-stack :v-align :center :height st/fx-panel-header-height :gap 1 :padding 0.1
                   (label (substring (get inst :display-name) 0 12)
                     :font-size 11  :color :white :bg :transparent)
-                  (instrument-synth-button)
-                  (instrument-mods-toggle-button)
-                  (instrument-keys-button)
-                  (instrument-sound-binding-badge inst))
+                  (ep/instrument-synth-button)
+                  (ep/instrument-mods-toggle-button)
+                  (ep/instrument-keys-button)
+                  (ep/instrument-sound-binding-badge inst))
                 (box :flex 1 :height 0.15)
-                (instrument-header-actions-menu inst)
+                (pf/instrument-header-actions-menu inst)
                 (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center
                   (v-stack
                     (box :width 1 :height 0.1)
                     (fx-mini-save-icon
-                      :on-click |x y r| (sbrowser-enter-preset-save)
+                      :on-click |x y r| (eseq.browser/enter-preset-save)
                       :active 0))
                   )
                 (box :width 0.5)
                 ))
-            (fx-panel-body "instrument-content-box"
-              (instrument-synth-panel-body inst)))
+            (pf/fx-panel-body "instrument-content-box"
+              (pb/instrument-synth-panel-body inst)))
           :debug-name "instrument-panel"
           :background "fx-panel-bg"
           :color :instrument-panel-bg
@@ -764,8 +793,8 @@
           :drop-hover-border-color :mixer-strip-selected-border
           :on-drop (lambda (event)
             (if (= (get inst :rack-slot) nil)
-              (sbrowser-drop-sound-on-track event)
+              (eseq.browser/drop-sound-on-track event)
               (rack-selected-instrument-drop event)))
           :padding 0
-          :height fx-fixed-panel-height
+          :height st/fx-fixed-panel-height
           :selected 0)))))
