@@ -256,7 +256,9 @@ impl Editor {
         self.call_lisp_handler(name);
     }
 
-    pub(super) fn collect_mx_candidates(&mut self) -> Vec<String> {
+    /// Commands currently offered by M-x, including Lisp globals added by
+    /// user init files.
+    pub fn collect_mx_candidates(&mut self) -> Vec<String> {
         let mut names: Vec<String> = self.builtins.values().cloned().collect();
         let symbols = self.runtime.completion_symbols();
         names.extend(symbols);

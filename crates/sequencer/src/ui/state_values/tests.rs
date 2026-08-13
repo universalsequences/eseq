@@ -13673,6 +13673,14 @@
     }
 
     fn full_grid_editor_with_main_source(main_source: &str) -> eseqlisp::Editor {
+        full_grid_editor_with_post_factory_source(main_source, None, None)
+    }
+
+    fn full_grid_editor_with_post_factory_source(
+        main_source: &str,
+        post_factory_source: Option<&str>,
+        user_init_path: Option<&std::path::Path>,
+    ) -> eseqlisp::Editor {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
             fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
@@ -14006,6 +14014,21 @@
                 panic!("full grid lisp status after load: {status}");
             }
         }
+        if let Some(source) = post_factory_source {
+            let overlays = editor.snapshot_file_backed_sources();
+            let report = editor.runtime_mut().eval_source_transactional(
+                Some(std::env::temp_dir().join("metal-seq-init-payoff-factory.lisp")),
+                source,
+                overlays,
+            );
+            assert!(
+                report.success,
+                "post-factory content root failed: {:?}",
+                report.diagnostics
+            );
+            editor.process_lisp_reload_report(report);
+        }
+        super::super::editor_setup::load_user_init(&mut editor, user_init_path);
         for name in [
             "*transport*",
             "*sequencer*",
@@ -14036,6 +14059,79 @@
             "full grid test fixture should activate a sequencer widget layout"
         );
         editor
+    }
+
+    #[test]
+    fn user_init_boot_proves_hook_mx_theme_and_visible_around_override() {
+        let main_source = std::fs::read_to_string("ui/main.lisp").expect("read main");
+        let init_path = std::path::Path::new("ui/test-fixtures/user-init-payoff.lisp");
+        let factory_source = r#"
+(module test.init-factory)
+(defhook "test-init-payoff-hook")
+"#;
+        let mut editor = full_grid_editor_with_post_factory_source(
+            &main_source,
+            Some(factory_source),
+            Some(init_path),
+        );
+
+        assert!(
+            editor.drain_host_commands().iter().any(
+                |command| matches!(command, eseqlisp::HostCommand::Custom { name, .. }
+                    if name == "user-init-hook-ran")
+            ),
+            "the user init hook listener did not run"
+        );
+        assert!(
+            editor
+                .collect_mx_candidates()
+                .iter()
+                .any(|candidate| candidate == "test.user-init/init-payoff-command"),
+            "the init-defined command is missing from M-x"
+        );
+        let accent = eseqlisp::theme::ACCENT();
+        assert!((accent.r - 0.95).abs() < 0.001 && (accent.g - 0.25).abs() < 0.001);
+
+        let payoff_layout = |editor: &eseqlisp::Editor| {
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*patch-mixer*")
+                .and_then(|buffer| buffer.widget_tree.as_ref())
+                .expect("patch mixer widget tree");
+            eseqlisp::layout::LayoutEngine::new(24, 24, 1.0)
+                .layout(tree)
+                .expect("patch mixer layout")
+        };
+        let overridden_layout = payoff_layout(&editor);
+        let overridden = find_layout_node_by_text(&overridden_layout, "USER INIT")
+            .expect("around override must be visible in rendered output");
+        assert!(
+            overridden.rect.width.is_finite()
+                && overridden.rect.height.is_finite()
+                && overridden.rect.width > 0.0
+                && overridden.rect.height > 0.0,
+            "overridden label must have visible geometry: {:?}",
+            overridden.rect
+        );
+
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(init_path.to_path_buf()),
+            "(module test.user-init)\n(remove-override eseq.mixer/patch-mixer-strip)",
+            overlays,
+        );
+        assert!(report.success, "remove override failed: {:?}", report.diagnostics);
+        editor.process_lisp_reload_report(report);
+        let factory_layout = payoff_layout(&editor);
+        assert!(
+            find_layout_node_by_text(&factory_layout, "USER INIT").is_none(),
+            "removed advice must disappear immediately"
+        );
+        assert!(
+            find_layout_node_by_text(&factory_layout, "poly").is_some(),
+            "remove-override must restore the rendered stock patch mixer"
+        );
     }
 
     /// eseq-mods.12 acceptance: with import's compile-time half (spec §4)

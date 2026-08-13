@@ -277,6 +277,8 @@ param-controls.lisp under `"param-controls"`). Unit tests:
 
 ### 6.1 `override` — advice, not redefinition
 
+**BUILT 2026-08-13 (slice 4).**
+
 Hooks cover extension points the factory *anticipated*. The other half of
 the extension story is replacing a definition the factory did not
 anticipate anyone touching — a user swaps in their own step toggle, track
@@ -305,26 +307,45 @@ Semantics:
   structurally a sibling of `VM::extension_hooks` — included in
   `snapshot_state`/`restore_state`, one entry per (symbol, overriding
   module), last-write-per-module-wins so hot-reloading the user's init file
-  replaces rather than stacks.
-- Global **resolution checks the override registry before the owning def**
-  — one extra lookup at the same `resolve_symbol`/`ensure_global` choke
-  points. Because the override is a separate layer, the owner module
-  re-evaluating refreshes the factory definition *underneath* it without
-  disturbing it. Load order stops mattering.
+  replaces rather than stacks. If multiple modules advise one symbol, the
+  most recently evaluated registration is active; `remove-override` removes
+  the symbol's advice set and returns directly to factory behavior.
+- Global **reads check the override registry before returning the owning
+  def**. This check is in `VM::global_read_cell`, reached by cached
+  `LoadGlobal` indices as well as host by-name reads; a compiler-resolution
+  rung alone could not intercept chunks compiled before registration. The
+  no-override hot path is one `HashMap::is_empty()` branch and performs no
+  lookup or allocation. The factory cell is never mutated, so owner-module
+  re-evaluation refreshes the definition underneath without disturbing the
+  advice. Load order stops mattering.
 - `:around` receives the *current* underlying def as `original` at call
   time (not captured at override time), so the wrapper composes with
   factory updates.
 - `(remove-override eseq.mixer/track-strip)` is "revert to factory." The
   inspector can show provenance: *track-strip — overridden by
   ~/.eseq.d/init.lisp*.
-- **Graceful failure:** an override whose body errors at call time logs
-  (gated like hook-listener errors) and falls through to the factory def.
-  A broken user override degrades one component; it never bricks the app.
+- **Graceful failure:** an override whose body errors at call time emits one
+  diagnostic, quarantines that registration, and falls through to the
+  factory def. Later reads bypass the broken body until it is re-registered,
+  so a per-frame UI call cannot repeat the error indefinitely. A broken user
+  override degrades one component; it never bricks the app.
 - Overriding a `%`-private symbol warns, exactly like a qualified `%`
   reference (§2, decision 4): privates are the unstable rung, and the warning
   enumerates which overrides will break on update. Overriding *public*
   defs is the semi-stable API surface — `%` is the lever that keeps that
   surface deliberately small.
+
+`metal_seq` discovers the user entrypoint at `$ESEQ_CONFIG_DIR/init.lisp` when
+that test/development override is set, otherwise at `~/.eseq.d/init.lisp`.
+It evaluates the file **last**, after the distro root, custom instrument/effect
+UI, and project scratch content. Missing paths are silent. Evaluation is
+transactional: an error restores factory state, logs the failure, opens
+`*lisp-reload*`, and leaves boot running. Successful and initially-erroring
+existing init files are included in the external-path file watcher; saves are
+re-evaluated transactionally, so user advice and the factory definitions below
+it both hot-reload. Path-associated evaluation goes through
+`VM::eval_module_source`, so the durable old-spelling detector from
+eseq-mods.13 applies without an init-specific path.
 
 The recommended escalation ladder for users, each rung trading power for
 update-fragility: **customize** (`defcustom`, theme slots) → **extend**
@@ -2092,7 +2113,13 @@ stays as-is; real macro hygiene is out of scope for this spec.
     back to their flat native/pinned entry.
   - Runtime by-name globals: qualified exact → qualified core/vanilla flat
     fallback; bare reactive namespace flat entry → `eseq.vanilla/<name>` →
-    flat entry.
+    flat entry. Once an index is selected, the effective-read layer checks a
+    qualified override before returning the factory cell; an empty override
+    registry is a single branch with no hash lookup.
+  - Cached `LoadGlobal`: cached index → effective override dispatcher (when
+    present and healthy) → factory cell → late-binding heal. The dispatcher's
+    `original` handle bypasses the effective layer and resolves the current
+    factory cell by qualified name at each call.
   - Late binding: an empty qualified slot may heal through its
     `eseq.vanilla/<base>` spelling (for non-vanilla callers) and then the flat
     base. An empty flat slot has no cross-module fallback.
@@ -2109,11 +2136,14 @@ stays as-is; real macro hygiene is out of scope for this spec.
   from eseq-mods.13 remain independent safety infrastructure for external
   content. They deliberately outlive the runtime compatibility mechanism.
 
-- **Slice 4 — `defhook` + init inversion + `override`.** Convert the four
-  `macro-mapping-*-hook` stubs, delete ordering comments from `main.lisp`,
-  add `~/.eseq.d/init.lisp` loaded last. `override` (§6.1) lands here — it
-  is a name-keyed snapshot-aware registry like `extension_hooks`, and the
-  init inversion is what makes user overrides load in the right place.
+- **Slice 4 — `defhook` + init inversion + `override` (BUILT 2026-08-13).**
+  The four `macro-mapping-*-hook` stubs are `defhook` declarations, dead
+  ordering comments are gone from `main.lisp`, and `~/.eseq.d/init.lisp`
+  loads transactionally after every factory/content root and hot-reloads from
+  outside the repo. `override` (§6.1) is a name-keyed snapshot-aware registry
+  like `extension_hooks`; cached global reads add its effective-value rung.
+  Acceptance test:
+  `user_init_boot_proves_hook_mx_theme_and_visible_around_override`.
 - **Slice 5 — packages.** Manifest format, load path, author scoping,
   `defcustom`; generalize `defmacro_library.rs`.
 
