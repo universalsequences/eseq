@@ -128,6 +128,9 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_agent_generation_watermark: u64,
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_auto_follow: bool,
+    /// Browser sample preview: last published playing flag; the playhead
+    /// republishes every tick while true.
+    pub(crate) prev_browser_preview_playing: bool,
     pub(crate) prev_queued_transport_scene: Option<usize>,
     /// Per-track pattern id (-1 = none) with a pending quantized clip
     /// launch, for the mixer grid's queued-cell blink.

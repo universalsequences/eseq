@@ -106,6 +106,7 @@ pub(crate) fn run_event_loop(
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_sampler_analysis_key: None,
         prev_auto_follow: true,
+        prev_browser_preview_playing: false,
         prev_queued_transport_scene: None,
         prev_queued_track_clips: Vec::new(),
         song: SongFrameState::default(),

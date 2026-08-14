@@ -131,6 +131,7 @@ pub fn build_output_stream(
         transport_beats: 0.0,
         transport_was_playing: false,
         metronome: MetronomeState::default(),
+        preview: preview::PreviewVoice::default(),
     };
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),

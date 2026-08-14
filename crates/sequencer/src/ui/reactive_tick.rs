@@ -1343,6 +1343,36 @@ pub(crate) fn reactive_tick_and_render(
                 }
             }
         }
+        // Browser sample preview: mirror the audio-thread preview state so the
+        // play button and the strip's playhead track real playback (including
+        // the clip ending on its own).
+        {
+            let preview_playing = sequencer::audio::preview::is_playing();
+            if preview_playing != ctx.frame.prev_browser_preview_playing {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "browser-preview-playing",
+                    Value::Bool(preview_playing),
+                );
+                if !preview_playing {
+                    editor.runtime_mut().set_reactive(
+                        "SEQ",
+                        "browser-preview-playhead",
+                        Value::Number(0.0),
+                    );
+                }
+                ctx.frame.prev_browser_preview_playing = preview_playing;
+                needs_reactive_cycle = true;
+            }
+            if preview_playing {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "browser-preview-playhead",
+                    Value::Number(sequencer::audio::preview::position_seconds()),
+                );
+                needs_reactive_cycle = true;
+            }
+        }
         let auto_follow = auto_follow_enabled(&ctx.shared.auto_follow_override_until);
         if auto_follow != ctx.frame.prev_auto_follow {
             editor

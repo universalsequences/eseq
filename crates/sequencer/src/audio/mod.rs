@@ -35,6 +35,7 @@ namespace, mirroring the single-file `audio.rs` this was split from.
 
 pub mod audiograph;
 pub mod engine;
+pub mod preview;
 
 mod callback;
 mod device;

@@ -2,6 +2,8 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "audition-sample",
+    "preview-sample",
+    "stop-sample-preview",
     "reanalyze-sample",
     "load-sample-into-track",
     "convert-track-to-sampler",
@@ -69,6 +71,62 @@ pub(super) fn handle(
                     }
                 }
             }
+        }
+        // Browser preview: play the file straight off the audio callback's
+        // preview mixer (no track, no graph, not captured into exports).
+        "preview-sample" => {
+            let Some(path_str) = extract_path_from_payload(&payload) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "Choose a sample file to preview".to_string(),
+                ));
+                return;
+            };
+            let path = Path::new(&path_str);
+            match eseqlisp::audio::sample::load_wav_file(path) {
+                Ok(decoded) => {
+                    let channels = decoded.channels.max(1) as usize;
+                    let mut stereo = Vec::with_capacity(decoded.frames * 2);
+                    for frame in 0..decoded.frames {
+                        let base = frame * channels;
+                        let l = decoded.samples.get(base).copied().unwrap_or(0.0);
+                        let r = if channels > 1 {
+                            decoded.samples.get(base + 1).copied().unwrap_or(l)
+                        } else {
+                            l
+                        };
+                        stereo.push(l);
+                        stereo.push(r);
+                    }
+                    sequencer::audio::preview::play(
+                        std::sync::Arc::new(stereo),
+                        decoded.sample_rate,
+                    );
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "browser-preview-playing", Value::Bool(true));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.mark_needs_redraw();
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(&path_str);
+                    editor.handle_host_event(HostEvent::Status(format!("Preview: {name}")));
+                }
+                Err(e) => {
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Error previewing sample: {e}"
+                    )));
+                }
+            }
+        }
+        "stop-sample-preview" => {
+            sequencer::audio::preview::stop();
+            let rt = editor.runtime_mut();
+            rt.set_reactive("SEQ", "browser-preview-playing", Value::Bool(false));
+            rt.set_reactive("SEQ", "browser-preview-playhead", Value::Number(0.0));
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
         }
         "reanalyze-sample" => {
             let Some(track) = current_track_for_app(&mut app, &current_track) else {

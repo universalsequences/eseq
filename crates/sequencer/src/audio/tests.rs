@@ -40,7 +40,7 @@ use crate::sequencer::{
     RackMacroMapping, RackMacroTarget, RackRouting, RackSlotParam, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
 };
-use super::VoicePool;
+use super::{preview, VoicePool};
 
 fn active_keyboard_notes_fixture(
 ) -> [[Option<ActiveKeyboardNote>; crate::audio::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
@@ -56,6 +56,25 @@ fn metronome_mix_emits_a_click_at_a_quarter_boundary() {
     assert!(
         output.iter().any(|sample| sample.abs() > 1.0e-6),
         "a metronome block starting on a beat should contain a click"
+    );
+}
+
+#[test]
+fn preview_mix_plays_the_clip_then_reports_stopped() {
+    let mut voice = preview::PreviewVoice::default();
+    // 16 stereo frames at the device rate: shorter than one block, so the
+    // clip both sounds and finishes inside a single mix call.
+    preview::play(Arc::new(vec![0.5f32; 32]), 48_000);
+    assert!(preview::is_playing());
+    let mut output = vec![0.0f32; 64 * 2];
+    preview::mix_preview(&mut voice, &mut output, 2, 48_000.0);
+    assert!(
+        output.iter().any(|sample| sample.abs() > 1.0e-6),
+        "the preview clip should be mixed into the output"
+    );
+    assert!(
+        !preview::is_playing(),
+        "a finished preview should publish stopped state"
     );
 }
 

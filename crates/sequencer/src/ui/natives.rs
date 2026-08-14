@@ -2267,6 +2267,8 @@ pub(crate) fn init_runtime(
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),
                 ("sampler-playhead", Value::Number(0.0)),
+                ("browser-preview-playing", Value::Bool(false)),
+                ("browser-preview-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
                 ("track-drum-racks", build_track_drum_racks_value(&app)),
@@ -6226,6 +6228,25 @@ pub(crate) fn init_runtime(
             .tags_for(hash)
             .map_err(|error| format!("failed to query sample tags for {hash}: {error}"))?;
         Ok(build_string_list(&tags))
+    });
+    // Tolerant waveform loader for the browser preview strip: reuses an
+    // already-registered sample instead of re-decoding (unlike
+    // `sample-load-wav`), and answers `false` instead of erroring so a
+    // missing/undecodable file on tree-cursor moves never aborts the handler.
+    runtime.register_native("seq-sample-waveform", move |args, _ctx| {
+        let Some(Value::String(path)) = args.first() else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(sample) = eseqlisp::audio::sample::get_registered_sample(path) {
+            return Ok(sample.to_value());
+        }
+        match eseqlisp::audio::sample::SampleBuffer::load_wav(std::path::Path::new(path)) {
+            Ok(sample) => Ok(sample.register().to_value()),
+            Err(error) => {
+                eprintln!("browser preview: failed to load waveform for {path}: {error}");
+                Ok(Value::Bool(false))
+            }
+        }
     });
     runtime.register_native("seq-project-tree", move |args, _ctx| {
         let query = match args.first() {

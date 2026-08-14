@@ -2218,6 +2218,11 @@
                         .collect(),
                 ))
             });
+        // Test paths never resolve to real WAVs; the production native answers
+        // false for those, so the stub does the same.
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-waveform", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
@@ -4406,6 +4411,110 @@
                 );
             }
             other => panic!("expected audition-sample host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_cursor_auto_previews_with_headphone_toggle() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        // The fixture's seq-sample-waveform stub answers false (undecodable);
+        // this test needs a decodable sample, so override it with a buffer map.
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-waveform", |args, _ctx| {
+                let path = match args.first() {
+                    Some(Value::String(path)) => path.clone(),
+                    _ => String::new(),
+                };
+                Ok(map_value([
+                    ("path", Value::String(path)),
+                    ("duration", Value::Number(1.0)),
+                ]))
+            });
+
+        // Headphone defaults off: landing on a sample tracks it silently.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/select-sample
+                    (dict :label "kick.wav" :path "samples/kick.wav"))"#,
+            )
+            .expect("cursor onto sample");
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "cursor moves with the headphone off should not play anything"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.browser/%preview-path")
+                .expect("read preview path"),
+            Some(Value::String("samples/kick.wav".to_string()))
+        );
+
+        // Toggling the headphone on auditions the focused sample...
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/%toggle-auto-preview)")
+            .expect("headphone on");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "preview-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("preview payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected preview-sample host command, got {other:?}"),
+        }
+
+        // ...and cursor moves now auto-play each sample once.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/select-sample
+                    (dict :label "snare.wav" :path "samples/snare.wav"))"#,
+            )
+            .expect("cursor onto another sample");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "preview-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("preview payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/snare.wav".to_string()))
+                );
+            }
+            other => panic!("expected preview-sample host command, got {other:?}"),
+        }
+
+        // Toggling the headphone off stops the preview still in flight.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "browser-preview-playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/%toggle-auto-preview)")
+            .expect("headphone off");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, .. } => {
+                assert_eq!(name, "stop-sample-preview");
+            }
+            other => panic!("expected stop-sample-preview host command, got {other:?}"),
         }
     }
 
@@ -13565,6 +13674,9 @@
             .register_native("seq-sample-tags-for-path", |_args, _ctx| {
                 Ok(test_list(vec![]))
             });
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-waveform", |_args, _ctx| Ok(Value::Bool(false)));
         editor
             .runtime_mut()
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));

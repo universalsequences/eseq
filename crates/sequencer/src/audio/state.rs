@@ -139,6 +139,7 @@ pub(super) struct AudioCallbackData {
     pub(super) transport_beats: f64,
     pub(super) transport_was_playing: bool,
     pub(super) metronome: MetronomeState,
+    pub(super) preview: preview::PreviewVoice,
 }
 
 /// Stateful click oscillator. It lives in the callback data so a short click

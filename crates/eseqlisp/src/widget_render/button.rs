@@ -187,7 +187,7 @@ fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_
         return 0.001;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+    ((radius_px * 2.0) / px_h).clamp(0.001, 1.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -438,6 +438,7 @@ impl WidgetDefinition for ButtonWidget {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[
             "active",
+            "corner-radius",
             "plock-active",
             "plock-color-r",
             "plock-color-g",
@@ -906,11 +907,12 @@ mod tests {
     }
 
     #[test]
-    fn active_is_bindable_but_not_size_affecting() {
+    fn active_and_corner_radius_are_bindable_but_not_size_affecting() {
         assert_eq!(
             BUTTON_WIDGET.bindable_props(),
             &[
                 "active",
+                "corner-radius",
                 "plock-active",
                 "plock-color-r",
                 "plock-color-g",
@@ -918,6 +920,7 @@ mod tests {
             ]
         );
         assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
+        assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"corner-radius"));
     }
 
     #[test]
@@ -1014,30 +1017,100 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn button_metal_respects_custom_corner_radius() {
-        let node = test_button_node(HashMap::from([
-            ("text".to_string(), Value::String("Samples".to_string())),
-            (
-                "background-color".to_string(),
-                color_value(1.0, 1.0, 1.0, 0.07),
-            ),
-            ("corner-radius".to_string(), Value::Number(8.0)),
+    fn button_metal_respects_custom_corner_radius_and_keeps_existing_default() {
+        let background = (
+            "background-color".to_string(),
+            color_value(1.0, 1.0, 1.0, 0.07),
+        );
+        let custom_node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Custom".to_string())),
+            background.clone(),
+            ("corner-radius".to_string(), Value::Number(4.0)),
+        ]));
+        let default_node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Default".to_string())),
+            background.clone(),
+        ]));
+        let pill_node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Pill".to_string())),
+            background.clone(),
+            ("corner-radius".to_string(), Value::Number(15.0)),
+        ]));
+        let oversized_node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Oversized".to_string())),
+            background,
+            ("corner-radius".to_string(), Value::Number(100.0)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
-        let instance = prims
-            .iter()
-            .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
-                    widget_type,
-                    instance,
-                    is_background: true,
-                } if widget_type == "button" => Some(instance),
-                _ => None,
-            })
-            .expect("button background");
+        let corner_radius = |node: &LayoutNode| {
+            ButtonWidget
+                .build_metal_primitives("button", node, test_viewport())
+                .into_iter()
+                .find_map(|prim| match prim {
+                    MetalPrimitive::WidgetInstance {
+                        widget_type,
+                        instance,
+                        is_background: true,
+                    } if widget_type == "button" => Some(instance.corner_radius),
+                    _ => None,
+                })
+                .expect("button background")
+        };
 
-        assert!((instance.corner_radius - 0.5).abs() < 0.0001);
+        assert!((corner_radius(&custom_node) - (8.0 / 30.0)).abs() < 0.0001);
+        assert!((corner_radius(&default_node) - 0.8).abs() < 0.0001);
+        assert!((corner_radius(&pill_node) - 1.0).abs() < 0.0001);
+        assert!((corner_radius(&oversized_node) - 1.0).abs() < 0.0001);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn button_metal_resolves_reactive_corner_radius_at_draw_time() {
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let slot = slots.slot("BUTTON_TEST", "corner-radius");
+        slots.write_float("BUTTON_TEST", "corner-radius", 4.0);
+        let reactive_radius = Value::ReactiveRef {
+            namespace: "BUTTON_TEST".to_string(),
+            field: "corner-radius".to_string(),
+            index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot,
+        };
+        let widget = crate::widgets::build_widget(
+            "button",
+            vec![
+                Value::String("Reactive".to_string()),
+                Value::Keyword("corner-radius".to_string()),
+                reactive_radius.clone(),
+            ],
+        );
+        let Value::Map(widget) = widget else {
+            panic!("expected button widget map");
+        };
+        assert!(!widget.contains_key("__widget-diagnostic"));
+
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Reactive".to_string())),
+            ("corner-radius".to_string(), reactive_radius),
+        ]));
+        let render_radius = || {
+            ButtonWidget
+                .build_metal_primitives("button", &node, test_viewport())
+                .into_iter()
+                .find_map(|prim| match prim {
+                    MetalPrimitive::WidgetInstance {
+                        widget_type,
+                        instance,
+                        is_background: true,
+                    } if widget_type == "button" => Some(instance.corner_radius),
+                    _ => None,
+                })
+                .expect("button background")
+        };
+
+        assert!((render_radius() - (8.0 / 30.0)).abs() < 0.0001);
+        slots.write_float("BUTTON_TEST", "corner-radius", 2.0);
+        assert!((render_radius() - (4.0 / 30.0)).abs() < 0.0001);
     }
 
     #[cfg(target_os = "macos")]

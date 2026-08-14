@@ -43,6 +43,14 @@
 (defstate %last-sidebar-sample "")
 (defstate selected-sample "")
 (defstate selected-tags (list))
+;; Preview strip below the samples tree (Ableton-style): the sample the tree
+;; cursor last landed on, plus its waveform-buffer map from
+;; `seq-sample-waveform` (false while nothing decodable is focused). Cached
+;; here so the strip's build path never decodes. While the headphone toggle is
+;; on, landing on a sample also auto-plays it once.
+(defstate %preview-path "")
+(defstate %preview-buffer false)
+(defstate %auto-preview false)
 (defstate sbrowser-auditioned-sample "")
 (defstate eseq.vanilla/sbrowser-loading-instrument-name "")
 ;; Last instrument / custom effect highlighted in the browser tree. Fork acts on
@@ -344,6 +352,26 @@
         (material
           :color (rgba 0.45 0.47 0.50 1.0))))))
 
+;; Headphone toggle for the preview strip (Ableton-style auto-preview): a
+;; circular badge with the headphone glyph inside — headband arc (ring clipped
+;; to the top half) meeting two ear-cup capsules. Badge fills blue while
+;; auto-preview is armed.
+(defwidget preview-headphone-icon
+  :width 2.8 :height 1.8
+  :paint-margin 0.3
+  :state (active)
+  :shader
+  (let ((badge-col (if (= active 1) :accent (rgba 0.33 0.34 0.36 1.0)))
+        (glyph-col (if (= active 1) :bg (rgba 0.66 0.68 0.72 1.0)))
+        (band (max (- (abs (- (sqrt (+ (* x x) (* y y))) 0.36)) 0.06) y)))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.72) (material :color badge-col))
+      (sdf/fill band (material :color glyph-col))
+      (sdf/fill (sdf/translate -0.36 0.12 (sdf/rounded-rect 0.14 0.34 0.11))
+        (material :color glyph-col))
+      (sdf/fill (sdf/translate 0.36 0.12 (sdf/rounded-rect 0.14 0.34 0.11))
+        (material :color glyph-col)))))
+
 ;; ── Actions ──
 
 (def audition (item)
@@ -355,11 +383,40 @@
         (status (str "Audition: " (get item :label))))
       (status (str (get item :label))))))
 
+(def %sync-sample-preview (path)
+  (if (not (= path %preview-path))
+    (do
+      (set! %preview-path path)
+      (set! %preview-buffer (seq-sample-waveform path))
+      ;; With the headphone on, landing on a sample plays it once — the host
+      ;; player replaces any preview still in flight, so no explicit stop is
+      ;; needed. With it off, just silence whatever was still sounding.
+      (if (and %auto-preview %preview-buffer)
+        (host-command "preview-sample" (dict :path path))
+        (if SEQ.browser-preview-playing
+          (host-command "stop-sample-preview" (dict)))))))
+
 (def select-sample (item)
   (let ((path (get item :path)))
     (if path
-      (set! selected-sample path)
+      (do
+        (set! selected-sample path)
+        (%sync-sample-preview path))
       (status (str (get item :label))))))
+
+(def %toggle-auto-preview ()
+  (if %auto-preview
+    (do
+      (set! %auto-preview false)
+      (if SEQ.browser-preview-playing
+        (host-command "stop-sample-preview" (dict)))
+      (status "Sample preview off"))
+    (do
+      (set! %auto-preview true)
+      ;; Turning the headphone on immediately auditions the focused sample.
+      (if %preview-buffer
+        (host-command "preview-sample" (dict :path %preview-path)))
+      (status "Sample preview on"))))
 
 (def activate-sample (item)
   (let ((path (get item :path)))
@@ -475,16 +532,20 @@
     (button name
       :variant :ghost
       :background-color (if selected 
-        (rgba 1 0.6 0.3 1)
-        '(rgba 1 1 1 0.1))
-      :color (if selected (rgba 0.1 0.1 0.2 1) :white)
+        :accent
+        :bg)
+      :color (if selected (rgba 0.1 0.1 0.2 1) :dim)
       :border-color 
-        :transparent
-        
+      :transparent
+      
       :height 0.9
-      :padding 0.532
+      :padding 0.5532
       :font-size 11.0
-      :on-click |x y r| (%toggle-tag name))))
+      :corner-radius 24
+      :on-click |x y r| (do 
+        (set! search-filter "") 
+        (%toggle-tag name)
+        ))))
 
 (def %search-placeholder ()
   (if (= sbrowser-tab "samples") "Search samples..."
@@ -884,14 +945,14 @@
     :active (= sbrowser-tab name)
     :width :fill
     :height 1.45
-    :font-size 11.0
+    :font-size 11.5
     :h-align :left
     :background-color '(rgba 1 1 1 0.0)
-    :active-background-color '(rgba 1 1 1 0.07)
+    :active-background-color :dark-gray
     :border-color '(rgba 1 1 1 0.0)
     :highlight-color '(rgba 1 1 1 0.0)
     :shadow-color '(rgba 0 0 0 0.0)
-    :corner-radius 8
+    :corner-radius 16
     :drop-types (if (= name "sounds") (list "instrument-preset") (list))
     :drop-meta (dict :kind "browser-tab" :name name)
     :drop-hover-background-color '(rgba 0.15 0.45 0.70 0.28)
@@ -902,14 +963,44 @@
 
 (def tab-rail ()
   (let ((tabs (%tab-items)))
-    (box :key "tabs" :width 11.4 :height :fill :padding 0.35
-      (v-stack :width :fill :gap 0.18
-        (each (range 0 (len tabs)) |i|
-          (let ((tab (nth tabs i)))
-            (%tab-button
-              (get tab :name)
-              (get tab :label)
-              (get tab :icon))))))))
+    (box :key "tabs" :width 11.4 :height :fill 
+      (h-stack 
+        :align :start
+        (box :width 0.005 :height 0.1)
+        (v-stack :width :fill :gap 0.08
+          (box :height 0.5)
+          (each (range 0 (len tabs)) |i|
+            (let ((tab (nth tabs i)))
+              (%tab-button
+                (get tab :name)
+                (get tab :label)
+                (get tab :icon)))))))))
+
+(def %sample-preview-strip ()
+  (if %preview-buffer
+    (box :key "sample-preview-strip" :width :fill :height 1.5
+      :background-color :buffer-bg :corner-radius 8 :padding 0.03
+      (h-stack :width :fill :gap 0.35 :align :baseline
+        (box :key "sample-preview-headphone" :width 2.3 :height 2.2 :align :center
+          :on-click |x y r| (%toggle-auto-preview)
+          (preview-headphone-icon :active (if %auto-preview 1 0)))
+        (box :width 0 :flex 1 :height 2.3
+          (subtree :key (str "sample-preview-wave-" %preview-path)
+            (waveform
+              :height 2
+              :header-height 0
+              :bg :buffer-bg
+              :waveform-color :dim
+              :grid-major-color :transparent
+              :grid-minor-color :transparent
+              :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
+              :view-start 0
+              :view-duration (get %preview-buffer :duration)
+              :selection-start 0
+              :selection-end (get %preview-buffer :duration)
+              :playhead-time (bind-seq "browser-preview-playhead")
+              :buffer %preview-buffer)))))
+    (box :height 0)))
 
 (def %samples-panel ()
   (let ((browser (seq-sample-browser search-filter selected-tags)))
@@ -923,6 +1014,7 @@
                 :variant :ghost
                 :width :fill
                 :height 1.15
+                :border-color :transparent
                 :font-size 9
                 :on-click |x y r| (%clear-tags)
                 :color :white))
@@ -948,7 +1040,8 @@
                 :on-select (lambda (item) (select-sample item))
                 :on-cursor-change (lambda (item) (select-sample item))
                 :on-activate (lambda (item) (activate-sample item))
-                :on-modified-activate (lambda (item) (%modified-activate-sample item))))))))))
+                :on-modified-activate (lambda (item) (%modified-activate-sample item))))))
+        (%sample-preview-strip)))))
 
 (def %instruments-toolbar ()
   (box :width :fill :padding 0.25

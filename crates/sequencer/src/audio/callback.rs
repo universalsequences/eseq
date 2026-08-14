@@ -538,6 +538,13 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
     data.master_recorder.capture(output);
 
+    preview::mix_preview(
+        &mut data.preview,
+        output,
+        data.num_channels,
+        data.sample_rate,
+    );
+
     if transport_playing
         && data
             .state

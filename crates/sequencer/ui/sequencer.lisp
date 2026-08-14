@@ -839,6 +839,7 @@
         (button (str (+ i 1))
           :key (str "mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :border-color :transparent
           :background-color (%mute-bg (nth SEQ.track-mutes i))
           :color (if (nth SEQ.track-mutes i) :gray :black)
           :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-track-mute i)))
@@ -846,6 +847,7 @@
           :key (str "solo-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (%solo-bg (nth SEQ.track-solos i))
+          :border-color :transparent
           :color (if (nth SEQ.track-solos i) :white :gray)
           :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-track-solo i)))
         (box :width 8.6 :height 1

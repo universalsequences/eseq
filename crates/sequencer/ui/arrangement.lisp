@@ -1486,6 +1486,60 @@
     :scroll-mode :smooth
     :on-action |event| (scene-action event)))
 
+
+(def %bottom-lane ()
+  (timeline
+    :key "scene-lane"
+    :width 0 :flex 1
+    :height 0
+    :focusable true
+    :sidebar-width 0
+    :header-height 1
+    :header-bottom-gutter %cursor-gutter-height
+    :time-ruler (dict :mode :bars-beats :beats-per-bar %beats-per-bar)
+    :grid-density %grid-density
+    :background-color %timeline-background-color
+    :title-bar-height %clip-title-bar-height
+    :item-label-font-size %clip-label-font-size
+    :item-label-color %clip-label-color
+    :item-corner-radius %clip-corner-radius
+    :item-color (list 0.52 0.56 0.62)
+    :loop-color (list 0.92 0.72 0.25)
+    :playhead-time (bind-seq "song-position-beats")
+    ;; The ruler always owns the transport-start triangle, while the
+    ;; track-specific cursor line remains in the lane the user clicked.
+    :cursor-time cursor-time
+    :cursor-marker-visible true
+    :cursor-marker-scale 1.6
+    :cursor-marker-width-scale 1.5
+    :cursor-marker-height-scale 0.7
+    :cursor-line-visible false
+    :cursor-color %cursor-color
+    :drop-types (list "transport-scene")
+    :on-drop (lambda (event) (drop-scene event))
+    :items '()
+    :selection selection
+    :selection-rect (%scene-region-rect)
+    :view-start (bind "SEQV" "arr-view-start")
+    :view-duration (bind "SEQV" "arr-view-duration")
+    :zoom-min-duration %min-view-duration
+    :zoom-max-duration %max-view-duration
+    ;:content-length (bind "SEQV" "arr-content-length")
+    ;:content-length-min (content-length-min)
+    :content-length-max 8192
+    :lane-scroll 0
+    :snap %snap
+    :min-duration 1
+    :create-duration (* %beats-per-bar 4)
+    :move-snap-mode :alignment-helper
+    :resize-snap :grid
+    ;; Region drags quantize to the zoom-adaptive grid, min down / max up
+    ;; (region spec 4.3), so "grab exactly 4 bars" is a sloppy drag.
+    :marquee-snap :grid
+    :snap-mode :floor
+    :resize-snap-mode :alignment-helper
+    :scroll-mode :smooth
+    :on-action |event| (scene-action event)))
 ;; Headerless, sidebar-less, single-lane track instance (spec 4.2). Lane
 ;; scrolling is inert; the outer buffer viewport owns vertical navigation.
 (def %track-lane (i)
@@ -1669,4 +1723,13 @@
       (v-stack :width :fill :gap 0.0
         (each (eseq.track-collapse/visible-track-indices) |i|
           (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
-            (%track-row i)))))))
+            (%track-row i)))))
+    
+      (subtree :key "bottom-arr-ucene-row"
+      (box :width :fill :height 1
+        (h-stack :width :fill :align :start
+          (box :key "bottom-scene-header-spacer"
+            :width %header-width :height %scene-lane-height
+            )
+          (%bottom-lane))))    
+    ))
