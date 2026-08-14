@@ -2512,6 +2512,62 @@
     }
 
     #[test]
+    fn transport_pause_splits_recording_into_separate_undo_entries() {
+        let graph = TestLiveGraph::new("recording-pause-boundary-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track()
+            .expect("sampler track");
+        let mut open = false;
+
+        // Arming while stopped must not open the transaction: edits made
+        // before play would otherwise be swallowed by the take's snapshot.
+        app.sync_recording_history_boundary(true, false, &mut open)
+            .expect("armed while stopped");
+        assert!(!open);
+        assert!(app.recording_history.is_none());
+
+        // First play pass records step 2.
+        app.sync_recording_history_boundary(true, true, &mut open)
+            .expect("first play pass");
+        assert!(open);
+        app.state.pattern.patterns[0].toggle_step(2);
+        app.state.pattern.chord_data[0].add_note_with_timing(2, 3.0, 0.5, 0.125);
+        app.mark_recording_take_changed();
+
+        // Pause commits the first pass as its own entry.
+        app.sync_recording_history_boundary(true, false, &mut open)
+            .expect("pause commits first pass");
+        assert!(!open);
+        assert!(app.recording_history.is_none());
+        assert_eq!(app.history.undo_len(), 1);
+
+        // Second play pass records step 7; disarming while playing commits.
+        app.sync_recording_history_boundary(true, true, &mut open)
+            .expect("second play pass");
+        let pass_two_step_2 = app.state.capture_step_snapshot(0, 2);
+        app.state.pattern.patterns[0].toggle_step(7);
+        app.state.pattern.chord_data[0].add_note_with_timing(7, -4.0, 1.25, 0.0);
+        app.mark_recording_take_changed();
+        app.sync_recording_history_boundary(false, true, &mut open)
+            .expect("disarm commits second pass");
+        assert!(!open);
+        assert_eq!(app.history.undo_len(), 2);
+
+        // One undo peels back only the second pass; the first survives.
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!app.state.pattern.patterns[0].is_active(7));
+        assert!(app.state.pattern.patterns[0].is_active(2));
+        assert!(crate::app::history::step_snapshot_bit_exact_eq(
+            &pass_two_step_2,
+            &app.state.capture_step_snapshot(0, 2),
+        ));
+        graph.process_block();
+    }
+
+    #[test]
     fn cancelled_recording_take_restores_initial_state_without_history() {
         let graph = TestLiveGraph::new("recording-take-cancel-test");
         let mut app = test_app_with_track_count(&graph, 0);

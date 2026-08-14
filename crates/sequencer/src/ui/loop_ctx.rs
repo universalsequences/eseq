@@ -87,7 +87,11 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_cpu_load_bits: u32,
     pub(crate) prev_peak_l_level: f64,
     pub(crate) prev_peak_r_level: f64,
-    pub(crate) prev_recording: bool,
+    /// Whether the recording-take undo transaction is open. Mirrors
+    /// (recording armed && transport playing) via
+    /// `App::sync_recording_history_boundary`; force it false whenever
+    /// recording is forced off outside that seam.
+    pub(crate) recording_history_open: bool,
     pub(crate) prev_master_recording: bool,
     pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,

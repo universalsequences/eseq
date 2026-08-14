@@ -196,6 +196,33 @@ impl App {
         ).map(Some)
     }
 
+    /// Transport-scoped boundary for the recording-take undo transaction.
+    ///
+    /// The transaction is open exactly while recording is armed AND the
+    /// transport is running; either edge (stop/pause or disarm) commits it.
+    /// Each play pass while armed therefore lands as its own "Record take"
+    /// undo entry, so undo after a pause peels back one pass instead of
+    /// everything since the record button lit — and edits made while paused
+    /// stay outside the take's scene snapshot.
+    pub fn sync_recording_history_boundary(
+        &mut self,
+        recording_armed: bool,
+        playing: bool,
+        transaction_open: &mut bool,
+    ) -> Result<(), String> {
+        let should_be_open = recording_armed && playing;
+        if should_be_open == *transaction_open {
+            return Ok(());
+        }
+        let result = if should_be_open {
+            self.begin_recording_take_history()
+        } else {
+            self.finish_recording_take_history().map(|_| ())
+        };
+        *transaction_open = should_be_open && result.is_ok();
+        result
+    }
+
     pub fn cancel_recording_take_history(&mut self) -> Result<bool, String> {
         let Some(transaction) = self.recording_history.take() else {
             return Ok(false);

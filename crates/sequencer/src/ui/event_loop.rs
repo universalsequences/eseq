@@ -78,7 +78,7 @@ pub(crate) fn run_event_loop(
         prev_cpu_load_bits: u32::MAX,
         prev_peak_l_level: -1.0f64,
         prev_peak_r_level: -1.0f64,
-        prev_recording: false,
+        recording_history_open: false,
         prev_master_recording: false,
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
@@ -308,21 +308,15 @@ pub(crate) fn run_event_loop(
         );
         pull_shared_bus_state(&mut app, &shared.bus_state);
         let recording_now = shared.recording.load(Ordering::Relaxed);
-        if recording_now != frame.prev_recording {
-            let result = if recording_now {
-                app.begin_recording_take_history().map(|_| None)
-            } else {
-                app.finish_recording_take_history()
-            };
-            if let Err(error) = result {
-                shared.recording.store(false, Ordering::Relaxed);
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Recording history failed: {error}"
-                )));
-                frame.prev_recording = false;
-            } else {
-                frame.prev_recording = recording_now;
-            }
+        if let Err(error) = app.sync_recording_history_boundary(
+            recording_now,
+            shared.state.is_playing(),
+            &mut frame.recording_history_open,
+        ) {
+            shared.recording.store(false, Ordering::Relaxed);
+            editor.handle_host_event(HostEvent::Error(format!(
+                "Recording history failed: {error}"
+            )));
         }
         if !app.has_pending_project_load() {
             pull_named_scratch_buffer_into_project(&editor, &mut app);
@@ -588,7 +582,7 @@ pub(crate) fn run_event_loop(
                     if let Some(shortcut) = sequencer_history_shortcut(&editor, &raw_key) {
                         if shared.recording.load(Ordering::Relaxed) {
                             shared.recording.store(false, Ordering::Relaxed);
-                            frame.prev_recording = false;
+                            frame.recording_history_open = false;
                             app.ui.recording = false;
                         }
                         let track_count_before_replay = app.tracks.len();
@@ -1111,7 +1105,7 @@ pub(crate) fn run_event_loop(
                         *shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *shared.record_armed.lock().unwrap() = vec![false; track_names.len()];
                         shared.recording.store(false, Ordering::Relaxed);
-                        frame.prev_recording = false;
+                        frame.recording_history_open = false;
                         // Keep the shared bus mirror in sync with the loaded buses,
                         // else pull_shared_bus_state clobbers app.buses (length
                         // mismatch) and drops the group's backing bus from the UI.
