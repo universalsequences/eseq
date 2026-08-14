@@ -22,6 +22,33 @@
     }
 
     #[test]
+    fn stop_invalidates_the_record_clock_anchor_until_republished() {
+        use std::time::{Duration, Instant};
+        let state = SequencerState::new(1, vec![vec![]]);
+        // First publish initializes the monotonic clock origin; the real
+        // anchor sits 1 ms later so its origin-relative timestamp is
+        // non-zero (a zero anchor reads as "no anchor yet").
+        let now = Instant::now();
+        state.transport.record_clock.publish(0.0, now);
+        let anchor = now + Duration::from_millis(1);
+        state.transport.record_clock.publish(8.0, anchor);
+        let press = anchor + Duration::from_millis(2);
+        assert!(state.record_beats_at_instant(press).is_some());
+
+        // Stop freezes nothing: the stale anchor must read as absent, so a
+        // press racing the next Play's first audio block falls back to the
+        // reset playheads instead of the previous run's beat.
+        state.stop_playback();
+        assert_eq!(state.record_beats_at_instant(press), None);
+        assert_eq!(state.record_position_at_instant(0, press), None);
+
+        // The next playing audio block re-arms the clock.
+        state.start_playback();
+        state.transport.record_clock.publish(0.0, press);
+        assert!(state.record_beats_at_instant(press).is_some());
+    }
+
+    #[test]
     fn active_notes_merge_scheduled_expirations_with_live_note_state() {
         let state = SequencerState::new(1, vec![vec![]]);
         state.set_audio_rendered_sample(100);

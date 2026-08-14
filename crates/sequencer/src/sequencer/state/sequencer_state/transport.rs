@@ -100,6 +100,10 @@ impl SequencerState {
 
     pub fn stop_playback(&self) {
         self.transport.playing.store(false, Ordering::Relaxed);
+        // The audio callback only publishes the record-clock anchor while
+        // playing; left as-is it would freeze at the last played beat and a
+        // press racing the next Play's first audio block would stamp there.
+        self.transport.record_clock.invalidate();
         self.reset_playheads();
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
@@ -114,6 +118,7 @@ impl SequencerState {
     pub(crate) fn toggle_play_no_publish(&self) -> bool {
         if self.is_playing() {
             self.transport.playing.store(false, Ordering::Relaxed);
+            self.transport.record_clock.invalidate();
             self.reset_playheads();
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             false

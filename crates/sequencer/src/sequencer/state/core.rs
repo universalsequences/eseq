@@ -122,6 +122,20 @@ impl RecordClockAnchor {
         self.sequence.fetch_add(1, Ordering::Release);
     }
 
+    /// Invalidate the anchor so `sample` returns `None` until the audio
+    /// callback publishes a fresh one. Called on the playing→stopped
+    /// transition: the anchor otherwise freezes at the last played beat, and
+    /// a key press in the window between the next Play and the first playing
+    /// audio block would resolve against that stale clock (the note lands at
+    /// the previous run's playhead instead of the reset one).
+    pub fn invalidate(&self) {
+        self.sequence.fetch_add(1, Ordering::Release);
+        self.timestamp_nanos.store(0, Ordering::Relaxed);
+        self.beats_bits
+            .store(0.0_f64.to_bits(), Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
     /// Sample the anchor at `timestamp`, returning the anchor beat and the
     /// SIGNED elapsed seconds from the anchor to `timestamp`. The elapsed
     /// term is negative when `timestamp` predates the newest anchor — the
