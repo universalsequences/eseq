@@ -149,6 +149,9 @@
 (def %patcher-canvas-layout-spec (patcher-buffer)
   (list :buf patcher-buffer :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-height 20))
 
+(def %patch-learn-buffer-layout-spec (learn-buffer)
+  (list :buf learn-buffer :hide-status true :border-radius buffer-radius :border-width 4 :background-color :buffer-bg :min-width 28 :min-height 20))
+
 (def %patcher-main-layout-spec (patcher-buffer)
   (if eseq.seq-core-state/patch-macros-panel-visible
     (list :cols :gap 1
@@ -185,6 +188,29 @@
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
         0.95 main-layout))))
 
+;; Patch Learn is a real sibling buffer in the editor's tile tree. Keeping it
+;; outside the patcher render root prevents either pane from clipping, sizing,
+;; or routing pointer input through the other one.
+(def instrument-patcher-learn-layout-spec (patcher-buffer learn-buffer)
+  (let ((patcher-and-learn
+          (list :cols :gap 1 :remember (str "instrument-patcher-learn:" patcher-buffer)
+            0.68 (%patcher-canvas-layout-spec patcher-buffer)
+            0.32 (%patch-learn-buffer-layout-spec learn-buffer)))
+        (main-layout
+          (if eseq.seq-core-state/patch-macros-panel-visible
+            (list :cols :gap 1
+              0.15 (%patch-macros-panel-layout-spec)
+              0.85 patcher-and-learn)
+            patcher-and-learn)))
+    (if (%patcher-bottom-bar-visible?)
+      (list :rows :gap 1
+        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.80 main-layout
+        0.15 (%patcher-bottom-bar-layout-spec))
+      (list :rows :gap 1
+        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.95 main-layout))))
+
 (def apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
     (set! eseq.seq-step-tabs/seq-layout-mode :lower-panel)
@@ -207,6 +233,7 @@
     (set! eseq.seq-step-tabs/seq-layout-mode :instrument-patcher)
     (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
     (set! eseq.seq-step-tabs/seq-patcher-source-buffer "")
+    (set! eseq.seq-step-tabs/seq-patcher-learn-buffer "")
     (set-layout (instrument-patcher-layout-spec patcher-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
@@ -216,14 +243,27 @@
     (set! eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-source)
     (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
     (set! eseq.seq-step-tabs/seq-patcher-source-buffer source-buffer)
+    (set! eseq.seq-step-tabs/seq-patcher-learn-buffer "")
     (set-layout (instrument-patcher-source-layout-spec patcher-buffer source-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
+(def apply-instrument-patcher-learn-layout (patcher-buffer learn-buffer)
+  (do
+    (set! eseq.seq-step-tabs/remembered-step-panel-buffer (eseq.seq-panels/seq-current-step-buffer))
+    (set! eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-learn)
+    (set! eseq.seq-step-tabs/seq-patcher-buffer patcher-buffer)
+    (set! eseq.seq-step-tabs/seq-patcher-source-buffer "")
+    (set! eseq.seq-step-tabs/seq-patcher-learn-buffer learn-buffer)
+    (set-layout (instrument-patcher-learn-layout-spec patcher-buffer learn-buffer))
+    (host-command "refresh-mixer-ui" (dict))))
+
 (def refresh-current-layout ()
-  (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-source) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")) (not (= eseq.seq-step-tabs/seq-patcher-source-buffer "")))
-    (apply-instrument-patcher-source-layout eseq.seq-step-tabs/seq-patcher-buffer eseq.seq-step-tabs/seq-patcher-source-buffer)
-    (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")))
-      (apply-instrument-patcher-layout eseq.seq-step-tabs/seq-patcher-buffer)
-      (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
-        (apply-piano-roll-layout)
-        (apply-fx-layout)))))
+  (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-learn) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")) (not (= eseq.seq-step-tabs/seq-patcher-learn-buffer "")))
+    (apply-instrument-patcher-learn-layout eseq.seq-step-tabs/seq-patcher-buffer eseq.seq-step-tabs/seq-patcher-learn-buffer)
+    (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher-source) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")) (not (= eseq.seq-step-tabs/seq-patcher-source-buffer "")))
+      (apply-instrument-patcher-source-layout eseq.seq-step-tabs/seq-patcher-buffer eseq.seq-step-tabs/seq-patcher-source-buffer)
+      (if (and (= eseq.seq-step-tabs/seq-layout-mode :instrument-patcher) (not (= eseq.seq-step-tabs/seq-patcher-buffer "")))
+        (apply-instrument-patcher-layout eseq.seq-step-tabs/seq-patcher-buffer)
+        (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
+          (apply-piano-roll-layout)
+          (apply-fx-layout))))))

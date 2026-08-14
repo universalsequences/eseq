@@ -62,6 +62,7 @@ pub(crate) fn run_event_loop(
         script_draft_session: None,
         pending_agentic_bubbles: HashMap::new(),
         pending_learn_job: None,
+        learn_param_preview: None,
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {
@@ -387,11 +388,13 @@ pub(crate) fn run_event_loop(
             backend.agent_instrument_stub_animation_visible(),
         );
         let widget_animation_active = editor.visible_widgets_animating();
-        let frame_interval = if stub_animation_active || widget_animation_active {
-            animation_frame_interval
-        } else {
-            idle_frame_interval
-        };
+        let learn_ui_active = sessions.pending_learn_job.is_some();
+        let frame_interval =
+            if stub_animation_active || widget_animation_active || learn_ui_active {
+                animation_frame_interval
+            } else {
+                idle_frame_interval
+            };
 
         let sdf_animation_active =
             eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(
@@ -435,6 +438,10 @@ pub(crate) fn run_event_loop(
             frame_interval
                 .saturating_sub(last_render_at.elapsed())
                 .max(Duration::from_millis(8))
+        } else if learn_ui_active {
+            frame_interval
+                .saturating_sub(last_render_at.elapsed())
+                .max(Duration::from_millis(4))
         } else if editor.needs_redraw() {
             Duration::from_millis(4)
         } else {
@@ -1909,7 +1916,7 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
-        poll_learn_job(&mut sessions, &mut editor);
+        poll_learn_job(&mut app, &mut sessions, &mut editor);
         let mut completed_agentic = Vec::new();
         for (key, pending) in &sessions.pending_agentic_bubbles {
             match pending.receiver.try_recv() {

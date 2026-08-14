@@ -65,6 +65,7 @@ pub enum LearnEvent {
         abs_distance: f64,
         basin_check: String,
         deltas: BTreeMap<String, ParamDelta>,
+        seeded_wav: Option<PathBuf>,
         final_wav: PathBuf,
         raw: Value,
     },
@@ -120,6 +121,10 @@ impl LearnEvent {
                 abs_distance: number(&value, "abs_distance")?,
                 basin_check: string(&value, "basin_check")?,
                 deltas: parse_field(&value, "deltas")?,
+                seeded_wav: value
+                    .get("seeded_wav")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from),
                 final_wav: PathBuf::from(string(&value, "final_wav")?),
                 raw: value,
             }),
@@ -502,6 +507,14 @@ fn build_argv(
         "direction".to_string(),
         "--epochs".to_string(),
         spec.epochs.to_string(),
+        // Patch Learn previews every optimizer step. Checkpoint WAV cadence is
+        // independent and remains controlled by DGenLisp's checkpoint option.
+        "--report-every".to_string(),
+        "1".to_string(),
+        // Surrogate disabled: the freq SVF surrogate's backward pass is unfaithful
+        // (bright-biased objective). See dgen docs/SVF_FREQ_SURROGATE_SPEC.md.
+        "--filter-surrogate".to_string(),
+        "none".to_string(),
     ];
     if let Some(gate_frames) = spec.gate_frames {
         argv.extend(["--gate-frames".to_string(), gate_frames.to_string()]);
@@ -708,6 +721,21 @@ mod tests {
                 steps: BTreeMap::new(),
             }
         );
+    }
+
+    #[test]
+    fn trainer_argv_requests_an_epoch_event_for_every_optimizer_step() {
+        let root = temp_dir("report-cadence");
+        let job_spec = spec(&root, false);
+        let argv = build_argv(
+            &root.join("patch.lisp"),
+            &job_spec,
+            &root.join("seed.json"),
+            &root.join("job"),
+        );
+        let report_flag = argv.iter().position(|arg| arg == "--report-every").unwrap();
+        assert_eq!(argv.get(report_flag + 1).map(String::as_str), Some("1"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

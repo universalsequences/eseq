@@ -358,7 +358,9 @@ fn tab_locked_to_patch_editor(editor: &mut Editor) -> bool {
     matches!(
         editor.runtime_mut().eval_str("eseq.seq-step-tabs/seq-layout-mode"),
         Ok(Some(Value::Keyword(mode)))
-            if mode == "instrument-patcher" || mode == "instrument-patcher-source"
+            if mode == "instrument-patcher"
+                || mode == "instrument-patcher-source"
+                || mode == "instrument-patcher-learn"
     )
 }
 

@@ -1,18 +1,9 @@
-;; Patch-learning target picker, rendered beside the production patcher widget
-;; at the same proportions used by an instrument edit session. Later phases
-;; are driven by readonly host state and covered by layout assertions.
+;; Patch-learning target picker in its production standalone buffer. The
+;; two-buffer patcher/learn split is asserted separately by the layout test;
+;; capture isolates this buffer so typography and spacing remain inspectable.
 (capture-project
   (track :instrument "core/drift"))
 
-(def capture-after-sync ()
-  (set! eseq.patch-learn/%open true))
-
 (effect-buffer "*patch-learn*"
-  (h-stack :width :fill :height :fill :align :stretch :gap 0.35
-    (patcher
-      :intent :instrument
-      :width 0
-      :flex 1
-      :height :fill
-      :path "instruments/core/drift/dsp.lisp")
+  (box :width :fill :height :fill
     (eseq.patch-learn/panel)))

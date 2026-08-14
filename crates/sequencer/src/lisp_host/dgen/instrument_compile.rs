@@ -239,6 +239,15 @@ pub(in crate::lisp_host) fn effect_preamble(sample_rate: u32) -> String {
     instrument_preamble(sample_rate)
 }
 
+/// Produce the exact instrument source handed to DGenLisp after factory
+/// defmacro imports, the instrument preamble, and param hoisting are applied.
+/// Long-lived external-tool workflows must snapshot this form rather than the
+/// raw editor document so their evaluator sees the same language as hot-swap.
+pub fn effective_instrument_source(source: &str, sample_rate: u32) -> Result<String, String> {
+    let effective = effective_dgen_source(DGenCompileKind::Instrument, source, sample_rate)?;
+    Ok(finalize_effective_dgen_source(&effective))
+}
+
 pub fn compile_instrument(source: &str, sample_rate: u32) -> Result<String, String> {
     compile_instrument_with_asset_base(source, sample_rate, None)
 }

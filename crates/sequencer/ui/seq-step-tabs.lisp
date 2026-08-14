@@ -40,6 +40,7 @@
 (defstate seq-layout-mode :lower-panel)
 (defstate seq-patcher-buffer "")
 (defstate seq-patcher-source-buffer "")
+(defstate seq-patcher-learn-buffer "")
 (defstate seq-registered-step-tabs '())
 
 ;; Moved home from eseq.piano-roll (eseq-mods.12): the layout hub owning

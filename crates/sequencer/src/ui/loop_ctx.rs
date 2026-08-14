@@ -17,6 +17,7 @@ pub(crate) struct EditSessionState {
     pub(crate) script_draft_session: Option<ScriptDraftSession>,
     pub(crate) pending_agentic_bubbles: HashMap<String, PendingAgenticBubble>,
     pub(crate) pending_learn_job: Option<PendingLearnJob>,
+    pub(crate) learn_param_preview: Option<LearnParamPreview>,
     pub(crate) pending_lisp_history_transactions: HashMap<
         u64,
         (

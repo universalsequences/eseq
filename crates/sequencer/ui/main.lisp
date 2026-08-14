@@ -28,6 +28,12 @@
 (import eseq.transport)
 (import eseq.agent)
 
+;; Deliberately command-only for now: Patch Learn has no button in the patch
+;; editor. Invoke this while the instrument patcher buffer is active.
+(def open-learn-patch ()
+  (host-command "open-learn-patch"
+    (dict :patcher-buffer (current-buffer-name))))
+
 (def seq-clear-ui-selection ()
   (do
     (seq-clear-selection)))

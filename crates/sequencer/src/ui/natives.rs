@@ -2777,6 +2777,7 @@ pub(crate) fn init_runtime(
                 ("editor-active-macro-name", Value::String(String::new())),
                 ("editor-active-macro-action", Value::String(String::new())),
                 ("learn-target-path", Value::String(String::new())),
+                ("learn-target-name", Value::String(String::new())),
                 ("learn-phase", Value::String("pick".to_string())),
                 ("learn-plan-params", Value::List(vec![])),
                 ("learn-epochs", Value::Number(300.0)),

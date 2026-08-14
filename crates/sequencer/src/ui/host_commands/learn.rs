@@ -1,11 +1,14 @@
 use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
+    "open-learn-patch",
     "set-learn-target",
     "configure-learn",
     "start-learn-job",
     "stop-learn-job",
     "replan-learn-job",
+    "apply-learn-result",
+    "close-learn-patch",
 ];
 
 pub(super) fn handle(
@@ -16,10 +19,49 @@ pub(super) fn handle(
     ctx: &mut LoopCtx<'_>,
 ) {
     match name {
+        "open-learn-patch" => {
+            let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
+                editor.handle_host_event(HostEvent::Status(
+                    "Open Patch Learn from an instrument patcher buffer".to_string(),
+                ));
+                return;
+            };
+            let patcher_buffer = session.buffer_name.clone();
+            let requested_buffer = extract_string_from_payload(&payload, "patcher-buffer");
+            if requested_buffer.as_deref() != Some(patcher_buffer.as_str()) {
+                editor.handle_host_event(HostEvent::Status(
+                    "Open Patch Learn from the active instrument patcher buffer".to_string(),
+                ));
+                return;
+            }
+            match open_patch_learn_buffer(editor, &patcher_buffer) {
+                Ok(()) => editor.handle_host_event(HostEvent::Status(
+                    "Opened Patch Learn".to_string(),
+                )),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
         "set-learn-target" => {
+            clear_learn_param_preview(
+                app,
+                editor.runtime_mut(),
+                &mut ctx.sessions.learn_param_preview,
+            );
             let path = extract_string_from_payload(&payload, "path")
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from);
+            let target_name = path.as_ref().map(|path| {
+                extract_string_from_payload(&payload, "name")
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| sequencer::sample_db::display_title_for_sample_path(path))
+                    .or_else(|| {
+                        path.file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "Untitled sample".to_string())
+            });
             if let Some(path) = path.as_ref() {
                 if !path.is_file() {
                     show_error(editor, format!("Learn target does not exist: {}", path.display()));
@@ -31,6 +73,7 @@ pub(super) fn handle(
                 return;
             };
             session.learn_target_path = path.clone();
+            session.learn_target_name = target_name;
             if path.is_none() {
                 if let Some(pending) = ctx.sessions.pending_learn_job.take() {
                     let _ = pending.job.cancel();
@@ -38,6 +81,7 @@ pub(super) fn handle(
                 let rt = editor.runtime_mut();
                 reset_learn_reactive(rt);
                 rt.set_reactive("SEQ", "learn-target-path", Value::String(String::new()));
+                rt.set_reactive("SEQ", "learn-target-name", Value::String(String::new()));
                 finish_reactive(editor);
                 return;
             }
@@ -48,6 +92,11 @@ pub(super) fn handle(
                     "SEQ",
                     "learn-target-path",
                     Value::String(path.as_ref().unwrap().to_string_lossy().into_owned()),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "learn-target-name",
+                    Value::String(session.learn_target_name.clone().unwrap_or_default()),
                 );
                 rt.set_reactive("SEQ", "learn-phase", Value::String("planning".to_string()));
             }
@@ -78,6 +127,11 @@ pub(super) fn handle(
             finish_reactive(editor);
         }
         "start-learn-job" => {
+            clear_learn_param_preview(
+                app,
+                editor.runtime_mut(),
+                &mut ctx.sessions.learn_param_preview,
+            );
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 show_error(editor, "No instrument patch editor is active".to_string());
                 return;
@@ -100,7 +154,15 @@ pub(super) fn handle(
             }
         }
         "stop-learn-job" => {
+            let preview_cleared = clear_learn_param_preview(
+                app,
+                editor.runtime_mut(),
+                &mut ctx.sessions.learn_param_preview,
+            );
             let Some(pending) = ctx.sessions.pending_learn_job.as_mut() else {
+                if preview_cleared {
+                    finish_reactive(editor);
+                }
                 return;
             };
             pending.cancel_requested = true;
@@ -108,9 +170,15 @@ pub(super) fn handle(
                 show_error(editor, error);
             } else {
                 editor.handle_host_event(HostEvent::Status("Stopping patch learning...".to_string()));
+                finish_reactive(editor);
             }
         }
         "replan-learn-job" => {
+            clear_learn_param_preview(
+                app,
+                editor.runtime_mut(),
+                &mut ctx.sessions.learn_param_preview,
+            );
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 return;
             };
@@ -128,8 +196,79 @@ pub(super) fn handle(
                 Err(error) => show_error(editor, error),
             }
         }
+        "apply-learn-result" => {
+            let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
+                show_error(editor, "No instrument patch editor is active".to_string());
+                return;
+            };
+            if ctx
+                .sessions
+                .learn_param_preview
+                .as_ref()
+                .is_some_and(|preview| preview.track != session.track)
+            {
+                show_error(editor, "The learned result belongs to a different track".to_string());
+                return;
+            }
+            match apply_learn_param_preview(app, &mut ctx.sessions.learn_param_preview) {
+                Ok(_) => {
+                    editor
+                        .runtime_mut()
+                        .set_reactive("SEQ", "learn-applied", Value::Bool(true));
+                    ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    finish_reactive(editor);
+                    editor.handle_host_event(HostEvent::Status(
+                        "Applied learned parameters as one undoable edit".to_string(),
+                    ));
+                }
+                Err(error) => show_error(editor, error),
+            }
+        }
+        "close-learn-patch" => {
+            clear_learn_param_preview(
+                app,
+                editor.runtime_mut(),
+                &mut ctx.sessions.learn_param_preview,
+            );
+            if let Some(pending) = ctx.sessions.pending_learn_job.take() {
+                let _ = pending.job.cancel();
+            }
+            finish_reactive(editor);
+        }
         _ => {}
     }
+}
+
+/// Mounts Patch Learn as its own render root before installing the split.
+///
+/// Named effects evaluated from inside another Lisp function are emitted as
+/// subtree updates. That cannot initialize a tile-created scratch buffer, so
+/// this editor-owned boundary deliberately evaluates `effect-buffer` as a
+/// top-level form and commits it before changing the layout.
+pub(crate) fn open_patch_learn_buffer(
+    editor: &mut Editor,
+    patcher_buffer: &str,
+) -> Result<(), String> {
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(effect-buffer "*patch-learn*"
+                  (box :width :fill :height :fill
+                    (eseq.patch-learn/panel)))"#,
+        )
+        .map_err(|error| format!("Could not create Patch Learn UI: {error:?}"))?;
+    editor.refresh_runtime_side_effects();
+
+    let patcher_buffer = escape_lisp_string(patcher_buffer);
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            "(eseq.seq-layout/apply-instrument-patcher-learn-layout \"{patcher_buffer}\" \"*patch-learn*\")"
+        ))
+        .map_err(|error| format!("Could not open Patch Learn layout: {error:?}"))?;
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    Ok(())
 }
 
 fn extract_number_from_payload(payload: &Value, key: &str) -> Option<f64> {

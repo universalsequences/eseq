@@ -17,6 +17,17 @@ pub(crate) struct PendingLearnJob {
     pub(crate) losses: Vec<f64>,
 }
 
+/// Engine-only instrument parameter values streamed by Patch Learn.
+///
+/// The slot defaults remain the source of truth while this layer is active.
+/// Keeping only the affected parameter indices is enough to restore the
+/// effective document/macro value without ever creating an undo entry.
+pub(crate) struct LearnParamPreview {
+    pub(crate) track: usize,
+    param_indices: Vec<usize>,
+    stored_values: std::collections::BTreeMap<usize, f32>,
+}
+
 pub(crate) fn learn_seed_for_session(
     app: &app::App,
     session: &InstrumentEditSession,
@@ -70,9 +81,13 @@ pub(crate) fn launch_learn_job(
     }
     let seed = learn_seed_for_session(app, session)?;
     let expected_seed = seed.params.clone();
+    let patch_source = sequencer::lisp_host::effective_instrument_source(
+        &session.last_valid_source,
+        app.graph.sample_rate,
+    )?;
     let spec = sequencer::learn_job::LearnJobSpec {
         patch_path: session.path.clone(),
-        patch_source: session.last_valid_source.clone(),
+        patch_source,
         target_path,
         seed,
         epochs,
@@ -119,84 +134,302 @@ pub(crate) fn reset_learn_reactive(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "learn-abs-distance", Value::Number(0.0));
     rt.set_reactive("SEQ", "learn-basin-check", Value::String(String::new()));
     rt.set_reactive("SEQ", "learn-result-deltas", Value::List(vec![]));
+    rt.set_reactive("SEQ", "learn-seeded-wav", Value::String(String::new()));
     rt.set_reactive("SEQ", "learn-final-wav", Value::String(String::new()));
+    rt.set_reactive("SEQ", "learn-applied", Value::Bool(false));
     rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
 }
 
-pub(crate) fn poll_learn_job(sessions: &mut EditSessionState, editor: &mut Editor) {
+pub(crate) fn poll_learn_job(
+    app: &mut app::App,
+    sessions: &mut EditSessionState,
+    editor: &mut Editor,
+) {
     if sessions.instrument_edit_session.is_none() {
         if let Some(pending) = sessions.pending_learn_job.take() {
             let _ = pending.job.cancel();
         }
+        if clear_learn_param_preview(
+            app,
+            editor.runtime_mut(),
+            &mut sessions.learn_param_preview,
+        ) {
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
         return;
     }
+    let preview_track = sessions
+        .instrument_edit_session
+        .as_ref()
+        .map(|session| session.track)
+        .expect("instrument edit session checked above");
     let mut finished = false;
     let mut dirty = false;
+    let mut clear_preview = false;
     let Some(pending) = sessions.pending_learn_job.as_mut() else {
         return;
     };
-    loop {
-        match pending.job.receiver.try_recv() {
-            Ok(update) => {
-                dirty = true;
-                let rt = editor.runtime_mut();
-                match update {
-                    sequencer::learn_job::LearnJobUpdate::Event(event) => {
-                        pending.saw_terminal |= event.is_terminal();
-                        pending.saw_plan |= matches!(event, sequencer::learn_job::LearnEvent::Plan { .. });
-                        publish_event(rt, pending, &event);
+    let (updates, disconnected) = take_learn_updates_through_epoch(&pending.job.receiver);
+    for update in updates {
+        dirty = true;
+        let rt = editor.runtime_mut();
+        match update {
+            sequencer::learn_job::LearnJobUpdate::Event(event) => {
+                pending.saw_terminal |= event.is_terminal();
+                pending.saw_plan |=
+                    matches!(event, sequencer::learn_job::LearnEvent::Plan { .. });
+                publish_event(rt, pending, &event);
+                let preview_values = match &event {
+                    sequencer::learn_job::LearnEvent::Epoch { params, .. } => {
+                        Some(params.clone())
                     }
-                    sequencer::learn_job::LearnJobUpdate::ProtocolError { error, .. }
-                    | sequencer::learn_job::LearnJobUpdate::IoError(error) => {
+                    sequencer::learn_job::LearnEvent::Result { deltas, .. } => Some(
+                        deltas
+                            .iter()
+                            .map(|(name, delta)| (name.clone(), delta.to))
+                            .collect(),
+                    ),
+                    sequencer::learn_job::LearnEvent::Error { .. } => {
+                        clear_preview = true;
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(values) = preview_values {
+                    if let Err(error) = set_learn_param_preview(
+                        app,
+                        rt,
+                        &mut sessions.learn_param_preview,
+                        preview_track,
+                        &values,
+                    ) {
                         pending.saw_host_error = true;
+                        let _ = pending.job.cancel();
                         rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
                         rt.set_reactive("SEQ", "learn-error", Value::String(error));
-                    }
-                    sequencer::learn_job::LearnJobUpdate::Exited { success, code } => {
-                        if !pending.saw_terminal && !pending.saw_host_error {
-                            if pending.kind == LearnLaunchKind::Plan && success && pending.saw_plan {
-                                rt.set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
-                            } else if pending.cancel_requested {
-                                rt.set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
-                                rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
-                            } else {
-                                rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "learn-error",
-                                    Value::String(format!("Learning job died without a terminal event (exit {code:?})")),
-                                );
-                            }
-                        }
-                        finished = true;
+                        clear_preview = true;
                     }
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => break,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                if !finished {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
-                    rt.set_reactive(
-                        "SEQ",
-                        "learn-error",
-                        Value::String("Learning job event stream disconnected".to_string()),
-                    );
-                    dirty = true;
+            sequencer::learn_job::LearnJobUpdate::ProtocolError { error, .. }
+            | sequencer::learn_job::LearnJobUpdate::IoError(error) => {
+                pending.saw_host_error = true;
+                clear_preview = true;
+                rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
+                rt.set_reactive("SEQ", "learn-error", Value::String(error));
+            }
+            sequencer::learn_job::LearnJobUpdate::Exited { success, code } => {
+                if !pending.saw_terminal && !pending.saw_host_error {
+                    if pending.kind == LearnLaunchKind::Plan && success && pending.saw_plan {
+                        rt.set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
+                    } else if pending.cancel_requested {
+                        clear_preview = true;
+                        rt.set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
+                        rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
+                    } else {
+                        rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
+                        rt.set_reactive(
+                            "SEQ",
+                            "learn-error",
+                            Value::String(format!("Learning job died without a terminal event (exit {code:?})")),
+                        );
+                    }
                 }
                 finished = true;
-                break;
             }
         }
     }
+    if disconnected {
+        if !finished {
+            let rt = editor.runtime_mut();
+            rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
+            rt.set_reactive(
+                "SEQ",
+                "learn-error",
+                Value::String("Learning job event stream disconnected".to_string()),
+            );
+            dirty = true;
+            clear_preview = true;
+        }
+        finished = true;
+    }
     if finished {
         sessions.pending_learn_job = None;
+    }
+    if clear_preview {
+        clear_learn_param_preview(app, editor.runtime_mut(), &mut sessions.learn_param_preview);
     }
     if dirty {
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
     }
+}
+
+pub(crate) fn clear_learn_param_preview(
+    app: &app::App,
+    rt: &mut Runtime,
+    preview: &mut Option<LearnParamPreview>,
+) -> bool {
+    let Some(preview) = preview.take() else {
+        return false;
+    };
+    for param_idx in preview.param_indices {
+        if let Some(value) = app.effective_instrument_param_value(preview.track, param_idx) {
+            app.send_instrument_param(preview.track, param_idx, value);
+            if let Some(param) = app
+                .graph
+                .instrument_descriptors
+                .get(preview.track)
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+            {
+                rt.set_reactive(
+                    "SEQ",
+                    &instrument_param_value_field(preview.track, param_idx, &param.name),
+                    Value::Number(f64::from(param.stored_to_user(value))),
+                );
+            }
+        }
+    }
+    true
+}
+
+fn set_learn_param_preview(
+    app: &app::App,
+    rt: &mut Runtime,
+    preview: &mut Option<LearnParamPreview>,
+    track: usize,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Result<(), String> {
+    if preview.as_ref().is_some_and(|active| active.track != track) {
+        clear_learn_param_preview(app, rt, preview);
+    }
+    let descriptor = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .ok_or_else(|| "The edited track lost its instrument descriptor".to_string())?;
+    let mut resolved = Vec::with_capacity(params.len());
+    for (name, natural_value) in params {
+        if !natural_value.is_finite() {
+            return Err(format!("Trainer returned a non-finite value for {name}"));
+        }
+        let (param_idx, param) = descriptor
+            .params
+            .iter()
+            .enumerate()
+            .find(|(_, param)| param.name == *name)
+            .ok_or_else(|| format!("Trainer returned unknown instrument parameter {name}"))?;
+        let stored = param.clamp(param.user_input_to_stored(*natural_value as f32));
+        resolved.push((param_idx, stored, param.name.clone()));
+    }
+    for (param_idx, stored, name) in &resolved {
+        let param_idx = *param_idx;
+        let stored = *stored;
+        app.send_instrument_param(track, param_idx, stored);
+        let display_value = descriptor.params[param_idx].stored_to_user(stored);
+        rt.set_reactive(
+            "SEQ",
+            &instrument_param_value_field(track, param_idx, name),
+            Value::Number(f64::from(display_value)),
+        );
+    }
+    let active = preview.get_or_insert_with(|| LearnParamPreview {
+        track,
+        param_indices: Vec::new(),
+        stored_values: std::collections::BTreeMap::new(),
+    });
+    for (param_idx, stored, _) in resolved {
+        if !active.param_indices.contains(&param_idx) {
+            active.param_indices.push(param_idx);
+        }
+        active.stored_values.insert(param_idx, stored);
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_learn_param_preview(
+    app: &mut app::App,
+    preview: &mut Option<LearnParamPreview>,
+) -> Result<sequencer::app::edit::EditOutcome, String> {
+    let active = preview
+        .as_ref()
+        .ok_or_else(|| "There is no learned result to apply".to_string())?;
+    if active.stored_values.is_empty() {
+        return Err("The learned result contains no parameter values".to_string());
+    }
+    let track = active.track;
+    let values = active.stored_values.clone();
+    let result = sequencer::app::edit::apply_recorded_instrument_values_mutation(
+        app,
+        track,
+        "Apply Patch Learn result",
+        move |app| {
+            let slot = app
+                .state
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "The learned instrument slot no longer exists".to_string())?;
+            for (param_idx, value) in &values {
+                slot.defaults.set(*param_idx, *value);
+                app.send_instrument_param(track, *param_idx, *value);
+            }
+            if let Some(meta) = app
+                .state
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get_mut(track)
+            {
+                meta.dirty = true;
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("Could not apply learned parameters: {error:?}"))?;
+    *preview = None;
+    Ok(result)
+}
+
+/// Drain status events eagerly, but stop after one epoch. Epochs are visual
+/// progress units: collapsing several into one reactive cycle makes training
+/// appear frozen even though the protocol is streaming correctly.
+fn take_learn_updates_through_epoch(
+    receiver: &std::sync::mpsc::Receiver<sequencer::learn_job::LearnJobUpdate>,
+) -> (Vec<sequencer::learn_job::LearnJobUpdate>, bool) {
+    let mut updates = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(update) => {
+                let is_epoch = matches!(
+                    &update,
+                    sequencer::learn_job::LearnJobUpdate::Event(
+                        sequencer::learn_job::LearnEvent::Epoch { .. }
+                    )
+                );
+                updates.push(update);
+                if is_epoch {
+                    return (updates, false);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return (updates, false),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return (updates, true),
+        }
+    }
+}
+
+fn append_loss(losses: &mut Vec<f64>, loss: f64) -> Value {
+    losses.push(loss);
+    Value::List(
+        losses
+            .iter()
+            .map(|loss| Rc::new(RefCell::new(Value::Number(*loss))))
+            .collect(),
+    )
 }
 
 fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequencer::learn_job::LearnEvent) {
@@ -236,10 +469,6 @@ fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequen
             rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
         }
         LearnEvent::Epoch { epoch, total, loss, params, steps } => {
-            pending.losses.push(*loss);
-            if pending.losses.len() > 180 {
-                pending.losses.remove(0);
-            }
             rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
             rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(*epoch as f64));
             rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(*total as f64));
@@ -247,20 +476,35 @@ fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequen
             rt.set_reactive(
                 "SEQ",
                 "learn-losses",
-                Value::List(pending.losses.iter().map(|loss| Rc::new(RefCell::new(Value::Number(*loss)))).collect()),
+                append_loss(&mut pending.losses, *loss),
             );
-            rt.set_reactive("SEQ", "learn-epoch-params", epoch_params_value(params, steps));
+            rt.set_reactive(
+                "SEQ",
+                "learn-epoch-params",
+                epoch_params_value(&pending.expected_seed, params, steps),
+            );
         }
         LearnEvent::Checkpoint { wav, .. } => {
             rt.set_reactive("SEQ", "learn-checkpoint-wav", Value::String(wav.to_string_lossy().into_owned()));
         }
-        LearnEvent::Result { improvement_pct, abs_distance, basin_check, deltas, final_wav, .. } => {
+        LearnEvent::Result { improvement_pct, abs_distance, basin_check, deltas, seeded_wav, final_wav, .. } => {
             rt.set_reactive("SEQ", "learn-phase", Value::String("result".to_string()));
             rt.set_reactive("SEQ", "learn-improvement-pct", Value::Number(*improvement_pct));
             rt.set_reactive("SEQ", "learn-abs-distance", Value::Number(*abs_distance));
             rt.set_reactive("SEQ", "learn-basin-check", Value::String(basin_check.clone()));
             rt.set_reactive("SEQ", "learn-result-deltas", deltas_value(deltas));
+            rt.set_reactive(
+                "SEQ",
+                "learn-seeded-wav",
+                Value::String(
+                    seeded_wav
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                ),
+            );
             rt.set_reactive("SEQ", "learn-final-wav", Value::String(final_wav.to_string_lossy().into_owned()));
+            rt.set_reactive("SEQ", "learn-applied", Value::Bool(false));
         }
         LearnEvent::Error { message } => {
             rt.set_reactive("SEQ", "learn-phase", Value::String("error".to_string()));
@@ -333,12 +577,15 @@ fn plan_params_value(
 }
 
 fn epoch_params_value(
+    seed: &std::collections::BTreeMap<String, f64>,
     params: &std::collections::BTreeMap<String, f64>,
     steps: &std::collections::BTreeMap<String, f64>,
 ) -> Value {
     Value::List(params.iter().map(|(name, value)| Rc::new(RefCell::new(values::map_value([
         ("name", Value::String(name.clone())),
+        ("from", Value::Number(seed.get(name).copied().unwrap_or(*value))),
         ("value", Value::Number(*value)),
+        ("change", Value::Number(*value - seed.get(name).copied().unwrap_or(*value))),
         ("step", Value::Number(steps.get(name).copied().unwrap_or(0.0))),
     ])))).collect())
 }
@@ -354,8 +601,63 @@ fn deltas_value(deltas: &std::collections::BTreeMap<String, sequencer::learn_job
 
 #[cfg(test)]
 mod tests {
-    use super::seed_echo_error;
+    use super::{
+        append_loss, apply_learn_param_preview, clear_learn_param_preview, seed_echo_error,
+        set_learn_param_preview,
+        take_learn_updates_through_epoch,
+    };
+    use crate::{app, instrument_param_value_field, Runtime, Value};
+    use sequencer::learn_job::{LearnEvent, LearnJobUpdate};
     use std::collections::BTreeMap;
+
+    fn test_instrument_app(
+        descriptor: sequencer::effects::EffectDescriptor,
+    ) -> sequencer::app::App {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![vec![]],
+        ));
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(
+                    std::sync::Arc::new(Vec::new()),
+                )),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.instrument_descriptors = vec![descriptor];
+        app
+    }
+
+    fn reactive_number(runtime: &Runtime, field: &str) -> f64 {
+        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
+            panic!("SEQ should be a map");
+        };
+        let value = seq
+            .get(field)
+            .unwrap_or_else(|| panic!("missing reactive field {field}"))
+            .borrow()
+            .clone();
+        let Value::Number(number) = value else {
+            panic!("reactive field {field} should be numeric");
+        };
+        number
+    }
 
     #[test]
     fn seed_echo_validation_accepts_json_rounding_but_rejects_unit_drift() {
@@ -375,5 +677,150 @@ mod tests {
         ]);
         let error = seed_echo_error(&expected, &wrong_units).expect("unit mismatch");
         assert!(error.contains("cutoff: sent 1234.5, trainer read 0.5"));
+    }
+
+    #[test]
+    fn learn_update_batches_present_each_epoch_separately() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(LearnJobUpdate::Event(LearnEvent::Stage {
+                name: "fit".to_string(),
+                total: 2,
+            }))
+            .unwrap();
+        for epoch in 1..=2 {
+            sender
+                .send(LearnJobUpdate::Event(LearnEvent::Epoch {
+                    epoch,
+                    total: 2,
+                    loss: 1.0 / epoch as f64,
+                    params: BTreeMap::new(),
+                    steps: BTreeMap::new(),
+                }))
+                .unwrap();
+        }
+        sender
+            .send(LearnJobUpdate::Exited {
+                success: true,
+                code: Some(0),
+            })
+            .unwrap();
+        drop(sender);
+
+        let (first, disconnected) = take_learn_updates_through_epoch(&receiver);
+        assert!(!disconnected);
+        assert_eq!(first.len(), 2);
+        assert!(matches!(
+            first.last(),
+            Some(LearnJobUpdate::Event(LearnEvent::Epoch { epoch: 1, .. }))
+        ));
+
+        let (second, disconnected) = take_learn_updates_through_epoch(&receiver);
+        assert!(!disconnected);
+        assert_eq!(second.len(), 1);
+        assert!(matches!(
+            second.last(),
+            Some(LearnJobUpdate::Event(LearnEvent::Epoch { epoch: 2, .. }))
+        ));
+
+        let (terminal, disconnected) = take_learn_updates_through_epoch(&receiver);
+        assert!(disconnected);
+        assert!(matches!(terminal.as_slice(), [LearnJobUpdate::Exited { success: true, .. }]));
+    }
+
+    #[test]
+    fn loss_trajectory_retains_every_epoch() {
+        let mut losses = Vec::new();
+        let mut published = Value::Nil;
+        for epoch in 0..250 {
+            published = append_loss(&mut losses, 1.0 / (epoch + 1) as f64);
+        }
+        assert_eq!(losses.len(), 250);
+        let Value::List(values) = published else {
+            panic!("loss trajectory should be a list");
+        };
+        assert_eq!(values.len(), 250);
+        assert_eq!(*values[0].borrow(), Value::Number(1.0));
+        assert_eq!(*values[249].borrow(), Value::Number(1.0 / 250.0));
+    }
+
+    #[test]
+    fn learn_preview_updates_knob_field_and_clear_restores_document_value() {
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = descriptor
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let cutoff = &descriptor.params[cutoff_idx];
+        let app = test_instrument_app(descriptor.clone());
+        let seed_stored = cutoff.user_input_to_stored(520.0);
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, seed_stored);
+        let field = instrument_param_value_field(0, cutoff_idx, &cutoff.name);
+        let mut runtime = Runtime::new();
+        let mut preview = None;
+
+        set_learn_param_preview(
+            &app,
+            &mut runtime,
+            &mut preview,
+            0,
+            &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
+        )
+        .unwrap();
+        assert!((reactive_number(&runtime, &field) - 1125.0).abs() < 0.01);
+        assert!((cutoff.stored_to_user(app.state.pattern.instrument_slots[0].defaults.get(cutoff_idx))
+            - 520.0)
+            .abs()
+            < 0.01, "preview must not mutate the saved instrument default");
+
+        assert!(clear_learn_param_preview(&app, &mut runtime, &mut preview));
+        assert!((reactive_number(&runtime, &field) - 520.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn applying_learn_preview_is_one_undoable_instrument_value_edit() {
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = descriptor
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let cutoff = descriptor.params[cutoff_idx].clone();
+        let mut app = test_instrument_app(descriptor);
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, cutoff.user_input_to_stored(520.0));
+        let mut runtime = Runtime::new();
+        let mut preview = None;
+        set_learn_param_preview(
+            &app,
+            &mut runtime,
+            &mut preview,
+            0,
+            &BTreeMap::from([("cutoff".to_string(), 1125.0)]),
+        )
+        .unwrap();
+
+        apply_learn_param_preview(&mut app, &mut preview).unwrap();
+        assert!(preview.is_none());
+        assert_eq!(app.history.undo_len(), 1);
+        assert!((cutoff.stored_to_user(
+            app.state.pattern.instrument_slots[0].defaults.get(cutoff_idx),
+        ) - 1125.0)
+            .abs()
+            < 0.01);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!((cutoff.stored_to_user(
+            app.state.pattern.instrument_slots[0].defaults.get(cutoff_idx),
+        ) - 520.0)
+            .abs()
+            < 0.01);
     }
 }

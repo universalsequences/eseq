@@ -408,6 +408,13 @@ pub(crate) fn hoist_defmacro_params(source: &str) -> String {
     out
 }
 
+/// Final source transform immediately before invoking DGenLisp. External
+/// tool flows such as Patch Learn must use this too; handing them the editor
+/// source directly omits both the instrument preamble and this hoisting pass.
+pub(crate) fn finalize_effective_dgen_source(effective_source: &str) -> String {
+    hoist_defmacro_params(effective_source)
+}
+
 pub(crate) fn compile_effective_dgen_source_to_dir(
     kind: DGenCompileKind,
     effective_source: &str,
@@ -416,7 +423,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     dir: &Path,
     dylib_name: &str,
 ) -> Result<String, String> {
-    let effective_source = &hoist_defmacro_params(effective_source);
+    let effective_source = &finalize_effective_dgen_source(effective_source);
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
     let source_name = match kind {
         DGenCompileKind::Effect => "effect",

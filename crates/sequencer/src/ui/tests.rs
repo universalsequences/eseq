@@ -1333,7 +1333,23 @@
         assert!(source.contains(":intent :instrument"));
         assert!(source.contains(":path \"instruments/digitone/dsp.lisp\""));
         assert!(source.contains("(host-command \"preview-instrument-patch\" event)"));
+        assert!(!source.contains("eseq.patch-learn"));
+        assert!(!source.contains("patch-learn-open"));
         assert!(!source.contains("defmacro"));
+    }
+
+    #[test]
+    fn patch_learn_effective_source_contains_the_instrument_preamble_before_the_patch() {
+        let source = "(def env (adsr gate trigger attack decay sustain release))";
+        let effective = sequencer::lisp_host::effective_instrument_source(source, 44_100)
+            .expect("prepare Patch Learn source");
+        let definition = effective
+            .find("(defmacro adsr ")
+            .expect("instrument preamble should define adsr");
+        let call = effective
+            .rfind("(adsr gate trigger attack decay sustain release)")
+            .expect("editor patch should retain its adsr call");
+        assert!(definition < call, "adsr must be defined before the patch is evaluated");
     }
 
     #[test]

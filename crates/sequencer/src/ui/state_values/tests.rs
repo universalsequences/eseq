@@ -4422,7 +4422,7 @@
             .runtime_mut()
             .eval_str(
                 r#"(eseq.browser/%choose-learn-target
-                    (dict :label "kick.wav" :path "samples/kick.wav"))"#,
+                    (dict :label "Acoustic Kick 808" :path "samples/abc123.wav"))"#,
             )
             .expect("choose patch-learning target");
 
@@ -4436,7 +4436,11 @@
                 };
                 assert_eq!(
                     payload.get("path").map(|value| value.borrow().clone()),
-                    Some(Value::String("samples/kick.wav".to_string()))
+                    Some(Value::String("samples/abc123.wav".to_string()))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Acoustic Kick 808".to_string()))
                 );
             }
             other => panic!("expected set-learn-target host command, got {other:?}"),
@@ -4444,7 +4448,7 @@
 
         let picker = editor
             .runtime_mut()
-            .eval_str(r#"(eseq.browser/sample-browser-widget true "")"#)
+            .eval_str(r#"(eseq.browser/sample-browser-widget true "" "")"#)
             .expect("build samples-only picker")
             .expect("samples-only picker value");
         assert!(
@@ -4460,11 +4464,21 @@
         let selected = editor
             .runtime_mut()
             .eval_str(
-                r#"(eseq.browser/sample-browser-widget true "samples/kick.wav")"#,
+                r#"(eseq.browser/sample-browser-widget
+                    true
+                    "samples/72a634c18e3035e7526edd85d31cb675806a3834b48ed7c53d8.wav"
+                    "Tim Maia – Est Dificil (Original Studio Recording 1971)")"#,
             )
             .expect("build selected target row")
             .expect("selected target row value");
-        assert!(value_contains_string(&selected, "kick.wav"));
+        assert!(value_contains_string(
+            &selected,
+            "Tim Maia – Est Dificil (Origi…"
+        ));
+        assert!(!value_contains_string(
+            &selected,
+            "72a634c18e3035e7526edd85d31cb675806a3834b48ed7c53d8.wav"
+        ));
         assert!(value_contains_string(&selected, "Change"));
         assert!(!value_contains_string(&selected, "learn-target-samples-tree"));
     }
@@ -14161,6 +14175,26 @@
                 ("editor-error", Value::String(String::new())),
                 ("editor-active-macro-name", Value::String(String::new())),
                 ("editor-active-macro-action", Value::String(String::new())),
+                ("learn-target-path", Value::String(String::new())),
+                ("learn-target-name", Value::String(String::new())),
+                ("learn-phase", Value::String("pick".to_string())),
+                ("learn-plan-params", Value::List(vec![])),
+                ("learn-epochs", Value::Number(300.0)),
+                ("learn-pitch-hz", Value::Number(0.0)),
+                ("learn-gate-frames", Value::Number(0.0)),
+                ("learn-stage", Value::String(String::new())),
+                ("learn-current-epoch", Value::Number(0.0)),
+                ("learn-total-epochs", Value::Number(0.0)),
+                ("learn-loss", Value::Number(0.0)),
+                ("learn-losses", Value::List(vec![])),
+                ("learn-epoch-params", Value::List(vec![])),
+                ("learn-checkpoint-wav", Value::String(String::new())),
+                ("learn-improvement-pct", Value::Number(0.0)),
+                ("learn-abs-distance", Value::Number(0.0)),
+                ("learn-basin-check", Value::String(String::new())),
+                ("learn-result-deltas", Value::List(vec![])),
+                ("learn-final-wav", Value::String(String::new())),
+                ("learn-error", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),
@@ -15630,7 +15664,16 @@
     }
 
     #[test]
-    fn metal_seq_patch_learn_configure_panel_has_visible_measured_children() {
+    fn metal_seq_open_learn_patch_creates_a_separate_visible_sibling_buffer() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_open_learn_patch_creates_a_separate_visible_sibling_buffer_impl)
+            .expect("spawn Patch Learn split layout test")
+            .join()
+            .expect("Patch Learn split layout test thread");
+    }
+
+    fn metal_seq_open_learn_patch_creates_a_separate_visible_sibling_buffer_impl() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
             .runtime_mut()
@@ -15639,6 +15682,13 @@
             "SEQ",
             "learn-target-path",
             Value::String("samples/drums/kick.wav".to_string()),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "learn-target-name",
+            Value::String(
+                "Tim Maia – Est Dificil (Original Studio Recording 1971)".to_string(),
+            ),
         );
         editor.runtime_mut().set_reactive(
             "SEQ",
@@ -15657,39 +15707,99 @@
             .set_reactive("SEQ", "learn-gate-frames", Value::Number(8820.0));
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.patch-learn/%open true)")
-            .expect("open patch-learning pane");
-        editor
-            .runtime_mut()
             .eval_str(&crate::edit_sessions::instrument_patcher_buffer_source(
                 "*instrument-patcher:learn-test*",
                 std::path::Path::new("instruments/test/dsp.lisp"),
             ))
-            .expect("build patcher with learning pane");
+            .expect("build instrument patcher");
         editor.refresh_runtime_side_effects();
-        let buffer_id = editor
+        let patcher_buffer_id = editor
             .buffers
             .iter()
             .find(|buffer| buffer.name == "*instrument-patcher:learn-test*")
             .expect("patcher buffer")
             .id;
-        editor.set_active_buffer(buffer_id);
+        editor.set_active_buffer(patcher_buffer_id);
         editor.set_layout_viewport(180, 48);
 
-        let layout = editor.widget_layout().expect("patch-learning layout");
+        let patcher_only_layout = editor.widget_layout().expect("instrument patcher layout");
+        assert!(
+            find_layout_node_by_widget_type(&patcher_only_layout, "patcher").is_some(),
+            "instrument patcher buffer should still own its patcher widget"
+        );
+        assert!(
+            find_layout_node_by_stable_key_suffix(&patcher_only_layout, "/patch-learn-pane").is_none()
+                && find_layout_node_by_text(&patcher_only_layout, "Learn").is_none(),
+            "the patcher buffer must not embed Patch Learn UI or a Learn button"
+        );
+        assert!(
+            editor.collect_mx_candidates().iter().any(|name| name == "open-learn-patch"),
+            "manual Patch Learn command should be discoverable through M-x"
+        );
+
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(open-learn-patch)")
+            .expect("execute the M-x Patch Learn command");
+        editor.refresh_runtime_side_effects();
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected open-learn-patch command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, "open-learn-patch");
+        let Value::Map(payload) = payload else {
+            panic!("open-learn-patch payload should be a dict: {payload:?}");
+        };
+        assert_eq!(
+            payload.get("patcher-buffer").map(|value| value.borrow().clone()),
+            Some(Value::String("*instrument-patcher:learn-test*".to_string()))
+        );
+
+        crate::host_commands::open_patch_learn_buffer(
+            &mut editor,
+            "*instrument-patcher:learn-test*",
+        )
+        .expect("host mounts Patch Learn and installs its split layout");
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 48);
+        let tile = |name: &str| {
+            frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == name)
+                .unwrap_or_else(|| panic!("expected tile for {name}"))
+                .rect
+        };
+        let patcher_tile = tile("*instrument-patcher:learn-test*");
+        let learn_tile = tile("*patch-learn*");
+        assert!(
+            patcher_tile.col + patcher_tile.width <= learn_tile.col
+                && (patcher_tile.row - learn_tile.row).abs() <= 0.1
+                && (patcher_tile.height - learn_tile.height).abs() <= 0.75,
+            "Patch Learn must be a side-by-side sibling tile: patcher={patcher_tile:?} learn={learn_tile:?}"
+        );
+
+        let layout = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*patch-learn*")
+            .and_then(|tile| tile.frame.widget_layout.clone())
+            .expect("Patch Learn tile layout");
         assert_finite_layout_tree(&layout);
         let pane = find_layout_node_by_stable_key_suffix(&layout, "/patch-learn-pane")
-            .expect("open patch-learning pane");
+            .expect("Patch Learn buffer root");
         assert!(pane.rect.width > 0.0 && pane.rect.height > 0.0, "{:#?}", pane.rect);
-        let patcher = find_layout_node_by_widget_type(&layout, "patcher")
-            .expect("instrument patcher");
         assert!(
-            patcher.rect.col + patcher.rect.width <= pane.rect.col,
-            "patcher and learning pane must occupy disjoint columns: patcher={:?}, pane={:?}",
-            patcher.rect,
-            pane.rect
+            find_layout_node_by_widget_type(&layout, "patcher").is_none(),
+            "Patch Learn buffer must not contain the patcher widget"
         );
-        for text in ["PATCH LEARN", "cutoff", "Start training"] {
+        for text in [
+            "PATCH LEARN",
+            "Tim Maia – Est Dificil (Origi…",
+            "cutoff",
+            "Start training",
+        ] {
             let node = find_layout_node_by_text(&layout, text)
                 .unwrap_or_else(|| panic!("visible label {text:?}"));
             assert!(
@@ -15723,6 +15833,189 @@
             payload.get("epochs").map(|value| value.borrow().clone()),
             Some(Value::Number(750.0))
         );
+    }
+
+    #[test]
+    fn metal_seq_patch_learn_training_binds_the_full_loss_trajectory_to_a_linegraph() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let mut editor = full_grid_editor_for_scroll_tests();
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-phase",
+                    Value::String("training".to_string()),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-stage",
+                    Value::String("training".to_string()),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-target-path",
+                    Value::String("samples/drums/kick.wav".to_string()),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-target-name",
+                    Value::String("Studio Kick".to_string()),
+                );
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "learn-current-epoch", Value::Number(3.0));
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "learn-total-epochs", Value::Number(300.0));
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "learn-loss", Value::Number(0.0625));
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-losses",
+                    test_number_list(&[1.0, 0.25, 0.0625]),
+                );
+                editor
+                    .runtime_mut()
+                    .eval_str(
+                        r#"(effect-buffer "*patch-learn-training-test*"
+                              (box :width :fill :height :fill
+                                (eseq.patch-learn/panel)))"#,
+                    )
+                    .expect("mount Patch Learn training panel");
+                editor.refresh_runtime_side_effects();
+                let buffer_id = editor
+                    .buffers
+                    .iter()
+                    .find(|buffer| buffer.name == "*patch-learn-training-test*")
+                    .expect("Patch Learn training buffer")
+                    .id;
+                editor.set_active_buffer(buffer_id);
+                editor.set_layout_viewport(58, 48);
+
+                let layout = editor.widget_layout().expect("Patch Learn training layout");
+                assert_finite_layout_tree(&layout);
+                let graph = find_layout_node_by_widget_type(&layout, "linegraph")
+                    .expect("loss linegraph");
+                assert!(
+                    graph.rect.width > 0.0 && graph.rect.height > 0.0,
+                    "loss linegraph must have visible geometry: {:?}",
+                    graph.rect
+                );
+                let Some(Value::List(losses)) = graph.props.get("values") else {
+                    panic!("linegraph must receive the complete loss trajectory: {:?}", graph.props);
+                };
+                assert_eq!(losses.len(), 3);
+                assert_eq!(graph.props.get("scale"), Some(&Value::Keyword("log".to_string())));
+
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-losses",
+                    test_number_list(&[1.0, 0.25, 0.0625, 0.015625]),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                let updated_layout = editor
+                    .widget_layout()
+                    .expect("updated Patch Learn training layout");
+                let updated_graph = find_layout_node_by_widget_type(&updated_layout, "linegraph")
+                    .expect("updated loss linegraph");
+                let Some(Value::List(updated_losses)) = updated_graph.props.get("values") else {
+                    panic!("updated linegraph must retain its trajectory binding");
+                };
+                assert_eq!(updated_losses.len(), 4);
+            })
+            .expect("spawn Patch Learn linegraph layout test")
+            .join()
+            .expect("Patch Learn linegraph layout test thread");
+    }
+
+    #[test]
+    fn metal_seq_patch_learn_result_param_travel_has_visible_geometry() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let mut editor = full_grid_editor_for_scroll_tests();
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-phase",
+                    Value::String("result".to_string()),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-target-path",
+                    Value::String("samples/drums/kick.wav".to_string()),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-target-name",
+                    Value::String("Studio Kick".to_string()),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-improvement-pct",
+                    Value::Number(27.3),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-abs-distance",
+                    Value::Number(3.688_417),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-result-deltas",
+                    test_list(vec![map_value([
+                        ("name", Value::String("cutoff".to_string())),
+                        ("from", Value::Number(520.0)),
+                        ("to", Value::Number(1125.7611)),
+                        ("change", Value::Number(605.7611)),
+                    ])]),
+                );
+                editor
+                    .runtime_mut()
+                    .eval_str(
+                        r#"(effect-buffer "*patch-learn-result-test*"
+                              (box :width :fill :height :fill
+                                (eseq.patch-learn/panel)))"#,
+                    )
+                    .expect("mount Patch Learn result panel");
+                editor.refresh_runtime_side_effects();
+                let buffer_id = editor
+                    .buffers
+                    .iter()
+                    .find(|buffer| buffer.name == "*patch-learn-result-test*")
+                    .expect("Patch Learn result buffer")
+                    .id;
+                editor.set_active_buffer(buffer_id);
+                editor.set_layout_viewport(58, 48);
+
+                let layout = editor.widget_layout().expect("Patch Learn result layout");
+                assert_finite_layout_tree(&layout);
+                for text in [
+                    "PARAMETER TRAVEL",
+                    "cutoff",
+                    "520.0000 → 1125.7611",
+                    "+605.7611",
+                ] {
+                    let node = find_layout_node_by_text(&layout, text)
+                        .unwrap_or_else(|| panic!("visible result label {text:?}"));
+                    assert!(
+                        node.rect.width > 0.0 && node.rect.height > 0.0,
+                        "{text:?} must have visible measured geometry: {:?}",
+                        node.rect
+                    );
+                }
+                let result_list =
+                    find_layout_node_by_stable_key_suffix(&layout, "/learn-result-list")
+                        .expect("result list container");
+                assert!(
+                    result_list.rect.width > 0.0 && result_list.rect.height > 0.0,
+                    "result list must occupy visible panel space: {:?}",
+                    result_list.rect
+                );
+            })
+            .expect("spawn Patch Learn layout test")
+            .join()
+            .expect("Patch Learn layout test thread");
     }
 
     /// The picker writes through `agent/set-patch-model` and re-reads the

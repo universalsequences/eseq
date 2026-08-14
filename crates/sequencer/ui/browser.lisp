@@ -434,7 +434,8 @@
       (do
         (set! selected-sample path)
         (%sync-sample-preview path)
-        (host-command "set-learn-target" (dict :path path)))
+        (host-command "set-learn-target"
+          (dict :path path :name (get item :label))))
       (status "Choose a sample file, not a folder"))))
 
 (def %change-learn-target ()
@@ -1065,7 +1066,14 @@
 ;; waveform loading, and auto-preview all stay on the same path as the main
 ;; browser. Tree activation is the double-click/Enter action and chooses the
 ;; target instead of loading it into a track.
-(def sample-browser-widget (samples-only target-path)
+(def %learn-target-display-name (target-path target-name)
+  (let ((name (if (= target-name "") (path-filename target-path) target-name))
+        (max-chars 30))
+    (if (> (len name) max-chars)
+      (str (substring name 0 (- max-chars 1)) "…")
+      name)))
+
+(def sample-browser-widget (samples-only target-path target-name)
   (if samples-only
     (if (= target-path "")
       (v-stack :key "learn-target-picker" :width :fill :height :fill :gap 0.15 :flex 1
@@ -1078,8 +1086,8 @@
         (h-stack :width :fill :height :fill :gap 0.5 :align :center
           (v-stack :width 0 :flex 1 :gap 0.2
             (label "LEARN TARGET" :font-size 8 :color :gray :bg :transparent)
-            (label (path-filename target-path)
-              :font-size 11 :color :white :bg :transparent)
+            (label (%learn-target-display-name target-path target-name)
+              :width :fill :font-size 11 :color :white :bg :transparent)
             (if %preview-buffer
               (waveform
                 :height 1.25
