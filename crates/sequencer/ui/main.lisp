@@ -24,6 +24,7 @@
 (import eseq.macros)
 (import eseq.piano-roll)
 (import eseq.choose-model)
+(import eseq.patch-learn)
 (import eseq.transport)
 (import eseq.agent)
 

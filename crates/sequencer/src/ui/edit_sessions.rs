@@ -107,6 +107,10 @@ pub(super) struct InstrumentEditSession {
     pub(super) mode: InstrumentEditMode,
     /// `Some` only for drafts produced by forking a live edit session.
     pub(super) fork_restore: Option<ForkRestore>,
+    /// Sample selected by the patch-learning browser. This belongs to the
+    /// editor session rather than the browser's global UI state so switching
+    /// buffers cannot silently retarget a training run.
+    pub(super) learn_target_path: Option<PathBuf>,
 }
 
 impl InstrumentEditSession {
@@ -134,6 +138,7 @@ impl InstrumentEditSession {
             surface,
             mode: InstrumentEditMode::EditExisting { persisted_source },
             fork_restore: None,
+            learn_target_path: None,
         }
     }
 
@@ -166,6 +171,7 @@ impl InstrumentEditSession {
                 original_track,
             },
             fork_restore: None,
+            learn_target_path: None,
         }
     }
 }
@@ -848,7 +854,7 @@ pub(super) fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -
         // buffer rather than a sibling tile: a modal only receives pointer
         // input through the *active* tile's layout, and the patch editor's
         // canvas is the active tile. Closed, it has zero layout footprint.
-        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (patcher\n      :intent :instrument\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (h-stack :width :fill :height :fill :flex 1 :gap 0.35 :align :stretch\n      (patcher\n        :intent :instrument\n        :width 0\n        :flex 1\n        :height :fill\n        :path \"{path}\"\n        :agent-model (eseq.choose-model/current-label)\n        :on-change (lambda (event)\n          (if (= (get event :status) :agentic-choose-model)\n            (eseq.choose-model/open)\n            (host-command \"preview-instrument-patch\" event))))\n      (eseq.patch-learn/panel))))\n"
     )
 }
 

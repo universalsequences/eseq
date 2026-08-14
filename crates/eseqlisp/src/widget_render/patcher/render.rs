@@ -108,6 +108,10 @@ pub(super) fn build_metal_primitives_for_patcher(
     viewport: WidgetViewport,
 ) -> Vec<MetalPrimitive> {
     let mut prims = Vec::new();
+    // A patcher may occupy only part of a tile (for example beside an
+    // inspector pane). Its cables and panned nodes must not paint across
+    // sibling widgets merely because the tile-level scissor is wider.
+    prims.push(MetalPrimitive::PushClipRect(node.rect));
     prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
         rect: node.rect,
         color: theme::PATCHER_BG(),
@@ -232,6 +236,7 @@ pub(super) fn build_metal_primitives_for_patcher(
             ));
         }
     }
+    prims.push(MetalPrimitive::PopClipRect);
     prims
 }
 

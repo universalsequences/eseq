@@ -428,6 +428,18 @@
           (status "Drop samples onto a sampler track or the new-track drop zone")))
       (status "Choose a sample file, not a folder"))))
 
+(def %choose-learn-target (item)
+  (let ((path (get item :path)))
+    (if path
+      (do
+        (set! selected-sample path)
+        (%sync-sample-preview path)
+        (host-command "set-learn-target" (dict :path path)))
+      (status "Choose a sample file, not a folder"))))
+
+(def %change-learn-target ()
+  (host-command "set-learn-target" (dict :path "")))
+
 (def sample-selected-path ()
   (if (= selected-sample "")
     SEQ.sidebar-selected-sample
@@ -1002,7 +1014,7 @@
               :buffer %preview-buffer)))))
     (box :height 0)))
 
-(def %samples-panel ()
+(def %samples-panel-with-activation (tree-key activation)
   (let ((browser (seq-sample-browser search-filter selected-tags)))
     (let ((tags (get browser :tags))
         (items (get browser :items)))
@@ -1029,7 +1041,7 @@
                 "No samples found."))
             (scroll :key "samples-tab-scroll" :width :fill :flex 1
               (tree
-                :key "samples-tab-tree"
+                :key tree-key
                 :width :fill
                 :focusable true
                 :background-color :buffer-bg
@@ -1039,9 +1051,58 @@
                 :drag-type "sample"
                 :on-select (lambda (item) (select-sample item))
                 :on-cursor-change (lambda (item) (select-sample item))
-                :on-activate (lambda (item) (activate-sample item))
+                :on-activate activation
                 :on-modified-activate (lambda (item) (%modified-activate-sample item))))))
         (%sample-preview-strip)))))
+
+(def %samples-panel ()
+  (%samples-panel-with-activation
+    "samples-tab-tree"
+    (lambda (item) (activate-sample item))))
+
+;; Embedded patch-learning browser. `samples-only` is an explicit widget mode,
+;; not a second browser implementation: search, tag filters, selection,
+;; waveform loading, and auto-preview all stay on the same path as the main
+;; browser. Tree activation is the double-click/Enter action and chooses the
+;; target instead of loading it into a track.
+(def sample-browser-widget (samples-only target-path)
+  (if samples-only
+    (if (= target-path "")
+      (v-stack :key "learn-target-picker" :width :fill :height :fill :gap 0.15 :flex 1
+        (search-header)
+        (%samples-panel-with-activation
+          "learn-target-samples-tree"
+          (lambda (item) (%choose-learn-target item))))
+      (box :key "learn-target-row" :width :fill :height 3.2
+        :background-color :buffer-bg :corner-radius 8 :padding 0.35
+        (h-stack :width :fill :height :fill :gap 0.5 :align :center
+          (v-stack :width 0 :flex 1 :gap 0.2
+            (label "LEARN TARGET" :font-size 8 :color :gray :bg :transparent)
+            (label (path-filename target-path)
+              :font-size 11 :color :white :bg :transparent)
+            (if %preview-buffer
+              (waveform
+                :height 1.25
+                :header-height 0
+                :bg :buffer-bg
+                :waveform-color :dim
+                :grid-major-color :transparent
+                :grid-minor-color :transparent
+                :view-start 0
+                :view-duration (get %preview-buffer :duration)
+                :selection-start 0
+                :selection-end (get %preview-buffer :duration)
+                :buffer %preview-buffer)
+              (box :height 1.25)))
+          (button "Change"
+            :key "learn-target-change"
+            :variant :secondary
+            :width 5.5
+            :height 1.3
+            :font-size 9.5
+            :on-click |x y r| (%change-learn-target)
+            :color :white))))
+    (tabbed-content)))
 
 (def %instruments-toolbar ()
   (box :width :fill :padding 0.25

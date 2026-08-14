@@ -893,7 +893,7 @@ enum Token {
     String(String),
 }
 
-fn asset_references(source: &str) -> Result<Vec<String>, String> {
+pub(crate) fn asset_references(source: &str) -> Result<Vec<String>, String> {
     let tokens = tokenize_lisp(source)?;
     let mut refs = Vec::new();
     let mut idx = 0;

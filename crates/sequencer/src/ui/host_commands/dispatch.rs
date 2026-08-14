@@ -17,6 +17,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::song::COMMANDS.contains(&n) => super::song::handle(name, payload, app, editor, ctx),
         n if super::rack::COMMANDS.contains(&n) => super::rack::handle(name, payload, app, editor, ctx),
         n if super::instrument_params::COMMANDS.contains(&n) => super::instrument_params::handle(name, payload, app, editor, ctx),
+        n if super::learn::COMMANDS.contains(&n) => super::learn::handle(name, payload, app, editor, ctx),
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),
         n if super::bus_steps::COMMANDS.contains(&n) => super::bus_steps::handle(name, payload, app, editor, ctx),
         n if super::routing::COMMANDS.contains(&n) => super::routing::handle(name, payload, app, editor, ctx),

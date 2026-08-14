@@ -1923,6 +1923,36 @@ fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_patcher_primitives_are_clipped_to_the_widget_rect() {
+    let path = temp_patcher_source_path("primitive-clip");
+    fs::write(&path, "(def signal (sin 440))\n(out signal)").expect("write patch");
+    let node = patcher_test_node(&path);
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 100.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+    assert!(matches!(
+        prims.first(),
+        Some(MetalPrimitive::PushClipRect(rect)) if *rect == node.rect
+    ));
+    assert!(matches!(prims.last(), Some(MetalPrimitive::PopClipRect)));
+    let _ = fs::remove_file(path);
+}
+
 fn set_patch_node_position(patch: &mut Patch, node_id: &str, position: (f32, f32)) {
     patch
         .nodes

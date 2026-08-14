@@ -219,6 +219,19 @@ impl AppPaths {
         }
     }
 
+    /// Persistent patch-learning job artifacts. These are deliberately kept
+    /// outside the transient compiler scratch directory: a completed or
+    /// interrupted job is useful after restart for replay and diagnosis.
+    pub fn learn_jobs_dir(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => workspace_root.join(".eseq").join("learn-jobs"),
+            AppPaths::Release {
+                application_support,
+                ..
+            } => application_support.join("learn-jobs"),
+        }
+    }
+
     /// Output dir for uncached compiles (the pre-cache `output_dir()`).
     pub fn dgen_scratch_dir(&self) -> PathBuf {
         match self {
@@ -321,6 +334,10 @@ mod tests {
         assert_eq!(
             paths.dgen_cache_root(),
             PathBuf::from("/ws/.eseq/dgenlisp-cache")
+        );
+        assert_eq!(
+            paths.learn_jobs_dir(),
+            PathBuf::from("/ws/.eseq/learn-jobs")
         );
         assert_eq!(
             paths.dgen_scratch_dir(),

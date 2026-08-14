@@ -841,6 +841,7 @@
             "ui/piano-roll.lisp",
             "ui/mixer.lisp",
             "ui/patch-macros.lisp",
+            "ui/patch-learn.lisp",
             "ui/choose-model.lisp",
             "ui/transport.lisp",
             "ui/agent.lisp",
@@ -4412,6 +4413,60 @@
             }
             other => panic!("expected audition-sample host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_browser_samples_only_activation_chooses_learn_target() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/%choose-learn-target
+                    (dict :label "kick.wav" :path "samples/kick.wav"))"#,
+            )
+            .expect("choose patch-learning target");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-learn-target");
+                let Value::Map(payload) = payload else {
+                    panic!("learn-target payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected set-learn-target host command, got {other:?}"),
+        }
+
+        let picker = editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.browser/sample-browser-widget true "")"#)
+            .expect("build samples-only picker")
+            .expect("samples-only picker value");
+        assert!(
+            value_contains_string(&picker, "learn-target-samples-tree"),
+            "samples-only mode should render the shared sample tree"
+        );
+        assert!(
+            !value_contains_string(&picker, "Instruments")
+                && !value_contains_string(&picker, "Sounds"),
+            "samples-only mode must not expose non-sample tabs"
+        );
+
+        let selected = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/sample-browser-widget true "samples/kick.wav")"#,
+            )
+            .expect("build selected target row")
+            .expect("selected target row value");
+        assert!(value_contains_string(&selected, "kick.wav"));
+        assert!(value_contains_string(&selected, "Change"));
+        assert!(!value_contains_string(&selected, "learn-target-samples-tree"));
     }
 
     #[test]
@@ -15571,6 +15626,102 @@
             dropdown.rect.width > 0.0 && dropdown.rect.height > 0.0,
             "dropdown should occupy real space; got {:?}",
             dropdown.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_learn_configure_panel_has_visible_measured_children() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "learn-phase", Value::String("configure".to_string()));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "learn-target-path",
+            Value::String("samples/drums/kick.wav".to_string()),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "learn-plan-params",
+            test_list(vec![map_value([
+                ("name", Value::String("cutoff".to_string())),
+                ("status", Value::String("learnable".to_string())),
+                ("reason", Value::String(String::new())),
+            ])]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "learn-pitch-hz", Value::Number(49.2));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "learn-gate-frames", Value::Number(8820.0));
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.patch-learn/%open true)")
+            .expect("open patch-learning pane");
+        editor
+            .runtime_mut()
+            .eval_str(&crate::edit_sessions::instrument_patcher_buffer_source(
+                "*instrument-patcher:learn-test*",
+                std::path::Path::new("instruments/test/dsp.lisp"),
+            ))
+            .expect("build patcher with learning pane");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*instrument-patcher:learn-test*")
+            .expect("patcher buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(180, 48);
+
+        let layout = editor.widget_layout().expect("patch-learning layout");
+        assert_finite_layout_tree(&layout);
+        let pane = find_layout_node_by_stable_key_suffix(&layout, "/patch-learn-pane")
+            .expect("open patch-learning pane");
+        assert!(pane.rect.width > 0.0 && pane.rect.height > 0.0, "{:#?}", pane.rect);
+        let patcher = find_layout_node_by_widget_type(&layout, "patcher")
+            .expect("instrument patcher");
+        assert!(
+            patcher.rect.col + patcher.rect.width <= pane.rect.col,
+            "patcher and learning pane must occupy disjoint columns: patcher={:?}, pane={:?}",
+            patcher.rect,
+            pane.rect
+        );
+        for text in ["PATCH LEARN", "cutoff", "Start training"] {
+            let node = find_layout_node_by_text(&layout, text)
+                .unwrap_or_else(|| panic!("visible label {text:?}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "{text:?} must have visible measured geometry: {:?}",
+                node.rect
+            );
+        }
+        let epochs_callback = find_layout_node_by_stable_key_suffix(&layout, "/learn-epochs")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("epoch control callback");
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(epochs_callback, vec![Value::Number(750.0)])
+            .expect("change learning epochs");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected configure-learn command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, "configure-learn");
+        let Value::Map(payload) = payload else {
+            panic!("configure-learn payload should be a dict: {payload:?}");
+        };
+        assert_eq!(
+            payload.get("epochs").map(|value| value.borrow().clone()),
+            Some(Value::Number(750.0))
         );
     }
 

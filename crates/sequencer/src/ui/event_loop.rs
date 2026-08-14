@@ -61,6 +61,7 @@ pub(crate) fn run_event_loop(
         pending_effect_cancel_restore: None,
         script_draft_session: None,
         pending_agentic_bubbles: HashMap::new(),
+        pending_learn_job: None,
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {
@@ -1683,6 +1684,7 @@ pub(crate) fn run_event_loop(
                 })
         {
             let _ = sessions.pending_instrument_preview.take();
+            let mut replan_after_preview = false;
             match completed_preview {
                 Ok((generation, source, layout, compile_result)) => {
                     if let Some(session) = sessions.instrument_edit_session.as_mut() {
@@ -1698,6 +1700,7 @@ pub(crate) fn run_event_loop(
                                         session.last_valid_source = source;
                                         session.last_valid_layout = layout;
                                         session.visible_revision_valid = true;
+                                        replan_after_preview = session.learn_target_path.is_some();
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
                                             "SEQ",
@@ -1755,6 +1758,40 @@ pub(crate) fn run_event_loop(
                         );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
+                    }
+                }
+            }
+            if replan_after_preview {
+                if let Some(session) = sessions.instrument_edit_session.as_ref() {
+                    match launch_learn_job(
+                        &app,
+                        session,
+                        LearnLaunchKind::Plan,
+                        300,
+                        None,
+                        None,
+                    ) {
+                        Ok(job) => {
+                            replace_learn_job(&mut sessions.pending_learn_job, job);
+                            editor.runtime_mut().set_reactive(
+                                "SEQ",
+                                "learn-phase",
+                                Value::String("planning".to_string()),
+                            );
+                            editor.runtime_mut().run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                        }
+                        Err(error) => {
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "learn-phase",
+                                Value::String("error".to_string()),
+                            );
+                            rt.set_reactive("SEQ", "learn-error", Value::String(error));
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                        }
                     }
                 }
             }
@@ -1872,6 +1909,7 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
+        poll_learn_job(&mut sessions, &mut editor);
         let mut completed_agentic = Vec::new();
         for (key, pending) in &sessions.pending_agentic_bubbles {
             match pending.receiver.try_recv() {

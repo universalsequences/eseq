@@ -52,6 +52,7 @@ pub mod crash;
 #[allow(dead_code)]
 pub mod effects;
 pub mod instruments;
+pub mod learn_job;
 #[allow(dead_code)]
 pub mod lisp_host;
 pub mod macro_engine;

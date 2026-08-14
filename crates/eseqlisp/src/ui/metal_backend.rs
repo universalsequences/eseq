@@ -3897,13 +3897,6 @@ fragment float4 live_spectrogram_frag(
                 let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                 build_text_quads(frame, atlas, cell_w, cell_h, vp_w, vp_h)
             };
-            let Some(atlas) = &mut self.atlas else {
-                return Ok(());
-            };
-            let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
-            let (primitive_bg_runs, primitive_fg_runs) =
-                partition_widget_instance_runs(&primitive_scene);
-
             let render_desc = MTLRenderPassDescriptor::new();
             let attach = unsafe { render_desc.colorAttachments().objectAtIndexedSubscript(0) };
             attach.setTexture(Some(texture));
@@ -3923,44 +3916,16 @@ fragment float4 live_spectrogram_frag(
             let enc = cmdbuf
                 .renderCommandEncoderWithDescriptor(&render_desc)
                 .ok_or(BackendError::MetalError)?;
-            enc.setScissorRect(MTLScissorRect {
+            let scene_scissor = MTLScissorRect {
                 x: 0,
                 y: 0,
                 width: texture.width(),
                 height: texture.height(),
-            });
+            };
+            enc.setScissorRect(scene_scissor);
 
-            for (widget_type, instances) in &primitive_bg_runs {
-                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                    continue;
-                };
-                draw_widget_instances(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    wpipe,
-                    instances.as_slice(),
-                );
-            }
-
-            if let Some(image_pipeline) = self.image_pipeline.clone() {
-                let mut image_load_budget = usize::MAX;
-                let images = collect_image_primitives(&primitive_scene);
-                self.draw_image_primitives(
-                    &enc,
-                    &image_pipeline,
-                    &images,
-                    None,
-                    &mut image_load_budget,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                    time_seconds,
-                );
-            }
-
+            // Match the live tiled renderer: editor text first, followed by
+            // ordered widget segments with nested clip markers honored.
             draw_vertices(
                 &enc,
                 &self.device,
@@ -3970,141 +3935,25 @@ fragment float4 live_spectrogram_frag(
                 &text_atlas_texture,
                 text_quads.as_slice(),
             );
-            draw_vertices(
-                &enc,
-                &self.device,
-                &mut self.upload_arena,
-                &mut self.stats,
-                &pipeline,
-                &atlas_texture,
-                primitive_quads.as_slice(),
-            );
-
-            if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
-                let clip = MTLScissorRect {
-                    x: 0,
-                    y: 0,
-                    width: texture.width(),
-                    height: texture.height(),
-                };
-                let cables = collect_patch_cable_primitives(
-                    &primitive_scene,
-                    clip,
+            let mut image_load_budget = usize::MAX;
+            let segments =
+                split_prim_segment_ranges(&primitive_scene, scene_scissor, cell_w, cell_h);
+            for (seg_scissor, seg_range) in &segments {
+                enc.setScissorRect(*seg_scissor);
+                self.draw_dynamic_segment_all(
+                    &enc,
+                    *seg_scissor,
+                    &primitive_scene[seg_range.clone()],
+                    &atlas_texture,
                     cell_w,
                     cell_h,
                     vp_w,
                     vp_h,
-                );
-                draw_patch_cable_instances(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &cable_pipeline,
-                    &cables,
+                    &mut image_load_budget,
+                    time_seconds,
                 );
             }
-
-            if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
-                let waveform_primitives = collect_waveform_primitives(&primitive_scene);
-                self.draw_waveform_primitives(
-                    &enc,
-                    &waveform_pipeline,
-                    &waveform_primitives,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                );
-            }
-
-            if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
-                let wavetable_primitives = collect_wavetable_primitives(&primitive_scene);
-                self.draw_wavetable_primitives(
-                    &enc,
-                    &wavetable_pipeline,
-                    &wavetable_primitives,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                );
-            }
-
-            if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
-                let spectrogram_primitives = collect_live_spectrogram_primitives(&primitive_scene);
-                self.draw_live_spectrogram_primitives(
-                    &enc,
-                    &live_spectrogram_pipeline,
-                    &spectrogram_primitives,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                );
-            }
-
-            for (widget_type, instances) in &primitive_fg_runs {
-                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                    continue;
-                };
-                draw_widget_instances(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    wpipe,
-                    instances.as_slice(),
-                );
-            }
-
-            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
-            draw_vertices(
-                &enc,
-                &self.device,
-                &mut self.upload_arena,
-                &mut self.stats,
-                &pipeline,
-                &atlas_texture,
-                circle_quads.as_slice(),
-            );
-
-            let foreground_rect_quads =
-                build_foreground_rect_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
-            draw_vertices(
-                &enc,
-                &self.device,
-                &mut self.upload_arena,
-                &mut self.stats,
-                &pipeline,
-                &atlas_texture,
-                foreground_rect_quads.as_slice(),
-            );
-
-            if let (Some(prop_atlas), Some(prop_pipe)) =
-                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-            {
-                let prop_verts = build_proportional_text_quads_cached(
-                    &primitive_scene,
-                    prop_atlas,
-                    &mut self.prop_text_layout_cache,
-                    &mut self.stats,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                );
-                let prop_tex = prop_atlas.texture.clone();
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    prop_pipe,
-                    &prop_tex,
-                    prop_verts.as_slice(),
-                );
-            }
+            enc.setScissorRect(scene_scissor);
 
             // ── Overlay stage (dropdown menus, modal panels, etc.) ─────────
             // Drawn after the main scene with the same ordered, clip-
@@ -4117,7 +3966,6 @@ fragment float4 live_spectrogram_frag(
                     width: vp_w as usize,
                     height: vp_h as usize,
                 };
-                let mut image_load_budget = usize::MAX;
                 let segments =
                     split_prim_segment_ranges(&overlay_scene, overlay_scissor, cell_w, cell_h);
                 for (seg_scissor, seg_range) in &segments {
@@ -7012,6 +6860,7 @@ fragment float4 live_spectrogram_frag(
                     &cable_pipeline,
                     &cables,
                 );
+                enc.setScissorRect(clip);
             }
 
             if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
@@ -8267,25 +8116,53 @@ fragment float4 live_spectrogram_frag(
 
     fn collect_patch_cable_primitives(
         primitives: &[widget_render::MetalPrimitive],
-        clip: MTLScissorRect,
+        base_clip: MTLScissorRect,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
     ) -> Vec<PatchCableDrawInstance> {
-        primitives
-            .iter()
-            .filter_map(
-                |primitive| match widget_render::innermost_primitive(primitive) {
-                    widget_render::MetalPrimitive::PatchCable(cable) => {
-                        patch_cable_draw_instance_from_primitive(
-                            cable, clip, cell_w, cell_h, vp_w, vp_h,
-                        )
+        // Some render paths draw a whole scene in one pass instead of first
+        // splitting it into clip segments. Preserve the clip stack here too,
+        // otherwise patcher cables escape their widget and paint over sibling
+        // panes in captures and single-frame rendering.
+        let mut clips = vec![base_clip];
+        let mut cables = Vec::new();
+        for primitive in primitives {
+            match primitive {
+                widget_render::MetalPrimitive::PushClipRect(rect) => {
+                    let current = *clips.last().unwrap();
+                    let nested = MTLScissorRect {
+                        x: (rect.col * cell_w).max(0.0) as usize,
+                        y: (rect.row * cell_h).max(0.0) as usize,
+                        width: (rect.width * cell_w).max(0.0) as usize,
+                        height: (rect.height * cell_h).max(0.0) as usize,
+                    };
+                    clips.push(intersect_scissor_rects(current, nested));
+                }
+                widget_render::MetalPrimitive::PopClipRect => {
+                    if clips.len() > 1 {
+                        clips.pop();
                     }
-                    _ => None,
-                },
-            )
-            .collect()
+                }
+                _ => {
+                    if let widget_render::MetalPrimitive::PatchCable(cable) =
+                        widget_render::innermost_primitive(primitive)
+                        && let Some(instance) = patch_cable_draw_instance_from_primitive(
+                            cable,
+                            *clips.last().unwrap(),
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        )
+                    {
+                        cables.push(instance);
+                    }
+                }
+            }
+        }
+        cables
     }
 
     fn patch_cable_draw_instance_from_primitive(

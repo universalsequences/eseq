@@ -4,6 +4,7 @@ mod dispatch;
 mod effects;
 mod instrument_authoring;
 mod instrument_params;
+mod learn;
 mod misc;
 mod project;
 mod rack;
