@@ -1075,6 +1075,95 @@
     {
       "aliases": [],
       "arity": {
+        "maximum": 8,
+        "minimum": 8
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 8,
+        "minimum": 8
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "gate_sig",
+          "required": true,
+          "summary": "Gate signal; nonzero while the note is held."
+        },
+        {
+          "kind": "signal|float",
+          "name": "trigger_sig",
+          "required": true,
+          "summary": "Trigger signal for envelope restart."
+        },
+        {
+          "kind": "signal|float",
+          "name": "attack_ms",
+          "required": true,
+          "summary": "Attack time in milliseconds."
+        },
+        {
+          "kind": "signal|float",
+          "name": "decay_ms",
+          "required": true,
+          "summary": "Decay time in milliseconds."
+        },
+        {
+          "kind": "signal|float",
+          "name": "sustain",
+          "required": true,
+          "summary": "Sustain level, usually 0..1."
+        },
+        {
+          "kind": "signal|float",
+          "name": "release_ms",
+          "required": true,
+          "summary": "Release time in milliseconds."
+        },
+        {
+          "kind": "signal|float",
+          "name": "attack_curve",
+          "required": true,
+          "summary": "Positive attack exponent: 1 is linear, below 1 is concave, above 1 is convex."
+        },
+        {
+          "kind": "signal|float",
+          "name": "fall_curve",
+          "required": true,
+          "summary": "Positive decay/release exponent: 1 is linear, below 1 is concave, above 1 is convex."
+        }
+      ],
+      "name": "adsrexp",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(adsrexp gate_sig trigger_sig attack_ms decay_ms sustain release_ms attack_curve fall_curve)"
+      ],
+      "summary": "Finite-duration ADSR with independent power curves for attack and for decay/release. Curves are positive exponents; 1 is linear."
+    },
+    {
+      "aliases": [],
+      "arity": {
         "maximum": 3,
         "minimum": 3
       },

@@ -5159,6 +5159,7 @@ fn instrument_preamble_helpers_project_as_documented_operators() {
     let patch = parse(
         r#"
         (def env (adsr gate trigger 1 2 0.5 4))
+        (def curved_env (adsrexp gate trigger 1 2 0.5 4 0.3 4))
         (def lfo (mod_unipolar osc))
         (def pitch (apply_pitch_mod_semi base mod1 12))
         (def cutoff (apply_cutoff_mod_safe base mod1 2000))
@@ -5175,6 +5176,7 @@ fn instrument_preamble_helpers_project_as_documented_operators() {
 
     for op in [
         "adsr",
+        "adsrexp",
         "mod_unipolar",
         "apply_pitch_mod_semi",
         "apply_cutoff_mod_safe",
@@ -15486,6 +15488,56 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
     };
     set_patcher_interaction_state(key, state);
     assert!(patcher_has_text_edit(&node));
+}
+
+#[test]
+fn patcher_autocomplete_documents_adsrexp_preamble_macro() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "adsre".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 5,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let adsrexp = suggestions
+        .iter()
+        .find(|suggestion| suggestion.name == "adsrexp")
+        .expect("adsrexp completion");
+    let docs = adsrexp
+        .documentation
+        .as_ref()
+        .expect("adsrexp documentation");
+
+    assert_eq!(docs.category.as_deref(), Some("macro"));
+    assert_eq!(
+        docs.signatures,
+        vec![
+            "(adsrexp gate_sig trigger_sig attack_ms decay_ms sustain release_ms attack_curve fall_curve)"
+        ]
+    );
+    assert_eq!(
+        docs.inputs
+            .iter()
+            .filter_map(|input| input.name.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            "gate_sig",
+            "trigger_sig",
+            "attack_ms",
+            "decay_ms",
+            "sustain",
+            "release_ms",
+            "attack_curve",
+            "fall_curve",
+        ]
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert_eq!(edit.text, "adsrexp ");
 }
 
 #[test]

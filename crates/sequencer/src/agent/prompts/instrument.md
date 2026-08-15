@@ -167,10 +167,16 @@ Critical syntax rules:
   example `(wrap (+ base_phase phase_offset) 0 1)`.
 - Use `(out signal 1 @name audio)` for the final mono output.
 - Use valid operators and preamble macros from local examples such as `def`,
-  `defmacro`, `param`, `in`, `out`, `adsr`, `phasor`, `sin`, `cos`, `tan`,
-  `atan`, `atan2`, `tanh`, `noise`,
+  `defmacro`, `param`, `in`, `out`, `adsr`, `adsrexp`, `phasor`, `sin`, `cos`,
+  `tan`, `atan`, `atan2`, `tanh`, `noise`,
   `polyblep`, `polyblep_saw`, `polyblep_pulse`, `svf`, `ladder`, `biquad`, `clip`,
   `wrap`, `%`, `+`, `-`, `*`, `/`, `exp`, `log`, `pow`, `min`, `max`.
+- For tight plucks and filter envelopes, use
+  `(adsrexp gate trigger attack_ms decay_ms sustain release_ms attack_curve
+  fall_curve)`. Both curves are positive exponents: `1` is linear, values above
+  `1` are convex, and values below `1` are concave. Typical analog-style values
+  are `0.1..0.5` for `attack_curve` and `2..6` for `fall_curve`. Ordinary `adsr`
+  remains available for its existing linear-attack/one-pole behavior.
 - Prefer the preamble PolyBLEP oscillator helpers for bright saw and pulse
   sounds:
   - `(polyblep_saw phase freq)` returns an anti-aliased saw wave from a `phasor`

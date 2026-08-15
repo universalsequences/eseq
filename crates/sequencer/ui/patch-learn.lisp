@@ -177,7 +177,7 @@
 
 (def %optimization-loss-row (stage index loss)
   (h-stack :key (str "learn-optimization-loss-" index) :width :fill :align :baseline
-    (label (if (= stage "cma-es") (str "Elite " (+ index 1)) "Mean batch loss")
+    (label (if (= stage "cma-es") (str "Candidate " (+ index 1)) "Mean batch loss")
       :font-size 8 :color :dim :bg :transparent)
     (box :width 0 :flex 1)
     (label (fmt "{:.6}" loss) :font-size 8.5 :color :white :bg :transparent)))

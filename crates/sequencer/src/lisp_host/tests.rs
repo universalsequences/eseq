@@ -11926,6 +11926,86 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn adsrexp_runtime_shapes_attack_and_falling_segments_independently() {
+        let source = r#"
+            (def gate (in 1 @name gate))
+            (def trigger (in 4 @name trigger))
+            (out (adsrexp gate trigger 3.0 3.0 0.25 3.0 1.0 2.0) 1 @name audio)
+        "#;
+        let report = super::render_instrument_source_for_test(
+            source,
+            None,
+            &super::InstrumentRenderOptions {
+                sample_rate: 1_000,
+                block_size: 4,
+                frames: 12,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 8,
+                voice_index: 0,
+                param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .expect("adsrexp should compile and render through the instrument host");
+
+        assert_eq!(report.non_finite_samples, 0, "report={report:?}");
+        for (frame, expected) in [
+            (0, 0.25),
+            (1, 0.5),
+            (3, 1.0),
+            (7, 0.25),
+            (8, 0.140625),
+        ] {
+            assert!(
+                (report.first_samples[frame] - expected).abs() < 0.0001,
+                "frame {frame} should be {expected}, report={report:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn adsrexp_restarts_full_attack_after_completed_release() {
+        let source = r#"
+            (def frame (accum 1.0 0.0 0.0 1000.0))
+            (def first_gate (* (gte frame 1.0) (lt frame 7.0)))
+            (def second_gate (* (gte frame 14.0) (lt frame 22.0)))
+            (def test_gate (+ first_gate second_gate))
+            (def env (adsrexp test_gate 0.0 3.0 1.0 0.25 1.0 1.0 2.0))
+            (out env 1 @name audio)
+        "#;
+        let report = super::render_instrument_source_for_test(
+            source,
+            None,
+            &super::InstrumentRenderOptions {
+                sample_rate: 1_000,
+                block_size: 4,
+                frames: 28,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 28,
+                voice_index: 0,
+                param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .expect("repeated adsrexp notes should compile and render");
+
+        assert_eq!(report.non_finite_samples, 0, "report={report:?}");
+        for offset in 0..6 {
+            let first = report.first_samples[1 + offset];
+            let second = report.first_samples[14 + offset];
+            assert!(
+                (first - second).abs() < 0.0001,
+                "second note should repeat the full first attack at offset {offset}, report={report:?}",
+            );
+        }
+        assert!(report.first_samples[17] > 0.999, "report={report:?}");
+    }
+
+    #[test]
     fn effect_compile_injects_shared_preamble_helpers() {
         let source = r#"
             (def in_l (in 1 @name left))

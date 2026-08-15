@@ -330,6 +330,24 @@ HIDDEN_OPERATORS = {"wavetable", "wavetable-param"}
 
 
 CURATED_OPERATOR_INPUTS = {
+    "adsr": [
+        {"name": "gate_sig", "kind": "signal|float", "summary": "Gate signal; nonzero while the note is held.", "required": True},
+        {"name": "trigger_sig", "kind": "signal|float", "summary": "Trigger signal for envelope restart.", "required": True},
+        {"name": "attack_ms", "kind": "signal|float", "summary": "Attack time in milliseconds.", "required": True},
+        {"name": "decay_ms", "kind": "signal|float", "summary": "Decay time in milliseconds.", "required": True},
+        {"name": "sustain", "kind": "signal|float", "summary": "Sustain level, usually 0..1.", "required": True},
+        {"name": "release_ms", "kind": "signal|float", "summary": "Release time in milliseconds.", "required": True},
+    ],
+    "adsrexp": [
+        {"name": "gate_sig", "kind": "signal|float", "summary": "Gate signal; nonzero while the note is held.", "required": True},
+        {"name": "trigger_sig", "kind": "signal|float", "summary": "Trigger signal for envelope restart.", "required": True},
+        {"name": "attack_ms", "kind": "signal|float", "summary": "Attack time in milliseconds.", "required": True},
+        {"name": "decay_ms", "kind": "signal|float", "summary": "Decay time in milliseconds.", "required": True},
+        {"name": "sustain", "kind": "signal|float", "summary": "Sustain level, usually 0..1.", "required": True},
+        {"name": "release_ms", "kind": "signal|float", "summary": "Release time in milliseconds.", "required": True},
+        {"name": "attack_curve", "kind": "signal|float", "summary": "Positive attack exponent: 1 is linear, below 1 is concave, above 1 is convex.", "required": True},
+        {"name": "fall_curve", "kind": "signal|float", "summary": "Positive decay/release exponent: 1 is linear, below 1 is concave, above 1 is convex.", "required": True},
+    ],
     "delay": [
         {"name": "signal", "kind": "signal|float|tensor", "summary": "Input signal. A tensor gets one independent delay line per lane.", "required": True},
         {"name": "time_in_samples", "kind": "signal|float|tensor", "summary": "Delay time in samples (clamped to [0, max-delay - 1], interpolated). A scalar broadcasts to every lane; a tensor gives per-lane delay times and requires a tensor input signal.", "required": True},
@@ -391,6 +409,24 @@ CURATED_OPERATOR_INPUTS = {
 }
 
 PREAMBLE_OPERATORS = [
+    {
+        "name": "adsr",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Instrument preamble envelope helper with attack, decay, sustain, and release controls. Returns an amplitude envelope signal.",
+        "signatures": ["(adsr gate_sig trigger_sig attack_ms decay_ms sustain release_ms)"],
+        "arity": {"minimum": 6, "maximum": 6},
+        "attributes": [],
+    },
+    {
+        "name": "adsrexp",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Finite-duration ADSR with independent power curves for attack and for decay/release. Curves are positive exponents; 1 is linear.",
+        "signatures": ["(adsrexp gate_sig trigger_sig attack_ms decay_ms sustain release_ms attack_curve fall_curve)"],
+        "arity": {"minimum": 8, "maximum": 8},
+        "attributes": [],
+    },
     {
         "name": "wavetable-read",
         "aliases": [],
@@ -965,7 +1001,9 @@ def build_operators(operator_map, attrs_by_fn, preserved_preamble_operators=None
             }
         )
     existing_names = {operator["name"] for operator in operators}
-    for operator in [*preserved_preamble_operators, *PREAMBLE_OPERATORS]:
+    # Canonical declarations in this generator override preserved manifest
+    # entries; preservation exists only for preamble helpers not curated yet.
+    for operator in [*PREAMBLE_OPERATORS, *preserved_preamble_operators]:
         if operator["name"] in existing_names:
             continue
         if all(

@@ -1340,16 +1340,28 @@
 
     #[test]
     fn patch_learn_effective_source_contains_the_instrument_preamble_before_the_patch() {
-        let source = "(def env (adsr gate trigger attack decay sustain release))";
+        let source = r#"
+            (def env (adsr gate trigger attack decay sustain release))
+            (def curved
+              (adsrexp gate trigger attack decay sustain release attack_curve fall_curve))
+        "#;
         let effective = sequencer::lisp_host::effective_instrument_source(source, 44_100)
             .expect("prepare Patch Learn source");
-        let definition = effective
-            .find("(defmacro adsr ")
-            .expect("instrument preamble should define adsr");
-        let call = effective
-            .rfind("(adsr gate trigger attack decay sustain release)")
-            .expect("editor patch should retain its adsr call");
-        assert!(definition < call, "adsr must be defined before the patch is evaluated");
+        for (name, call_source) in [
+            ("adsr", "(adsr gate trigger attack decay sustain release)"),
+            (
+                "adsrexp",
+                "(adsrexp gate trigger attack decay sustain release attack_curve fall_curve)",
+            ),
+        ] {
+            let definition = effective
+                .find(&format!("(defmacro {name}"))
+                .unwrap_or_else(|| panic!("instrument preamble should define {name}"));
+            let call = effective
+                .rfind(call_source)
+                .unwrap_or_else(|| panic!("editor patch should retain its {name} call"));
+            assert!(definition < call, "{name} must be defined before the patch is evaluated");
+        }
     }
 
     #[test]

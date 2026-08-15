@@ -16021,7 +16021,7 @@
                     find_layout_node_by_widget_type(&cma_layout, "linegraph").is_none(),
                     "CMA generations must not be presented as an epoch loss graph"
                 );
-                for text in ["EVOLUTIONARY SEARCH", "Generation 3 / 12", "Elite 1", "Elite 3"] {
+                for text in ["EVOLUTIONARY SEARCH", "Generation 3 / 12", "Candidate 1", "Candidate 3"] {
                     let node = find_layout_node_by_text(&cma_layout, text)
                         .unwrap_or_else(|| panic!("missing CMA stage feedback {text:?}"));
                     assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{text}: {:?}", node.rect);

@@ -228,6 +228,115 @@ pub(in crate::lisp_host) const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrumen
   (write-history gate_hist gate_sig)
   (write-history stage_hist stage)
   level)
+
+; A finite-duration, power-curved ADSR. Both curve arguments are positive
+; exponents: 1 is linear, values above 1 are convex, and values below 1 are
+; concave. Separate attack/fall curves can model the concave attack and convex
+; decay/release typical of analog RC envelopes. Sustain remains literal.
+(defmacro adsrexp
+  (gate_sig trigger_sig attack_ms decay_ms sustain release_ms attack_curve fall_curve)
+  (make-history env)
+  (make-history gate_hist)
+  (make-history stage_hist)
+  (make-history phase_hist)
+  (make-history release_start_hist)
+
+  (def sr samplerate)
+  (def reset_samples (* 0.003 sr))
+  (def reset_coeff (- 1.0 (exp (/ -6.907755 reset_samples))))
+  ; The differentiable one-sample floor also matches the train-time analytic
+  ; lowering exactly, including at a zero-millisecond duration.
+  (def attack_samples (+ 1.0 (* attack_ms 0.001 sr)))
+  (def decay_samples (+ 1.0 (* decay_ms 0.001 sr)))
+  (def release_samples (+ 1.0 (* release_ms 0.001 sr)))
+  (def attack_shape (max 0.01 attack_curve))
+  (def fall_shape (max 0.01 fall_curve))
+  ; Keep power bases strictly positive so learning either curve never
+  ; encounters log(0), then normalize both shaped ranges to exact endpoints.
+  (def curve_epsilon 0.000001)
+  (def curve_domain (- 1.0 curve_epsilon))
+  (def attack_curve_floor (pow curve_epsilon attack_shape))
+  (def attack_curve_scale (/ 1.0 (- 1.0 attack_curve_floor)))
+  (def fall_curve_floor (pow curve_epsilon fall_shape))
+  (def fall_curve_scale (/ 1.0 (- 1.0 fall_curve_floor)))
+
+  (def prev_env (read-history env))
+  (def prev_gate (read-history gate_hist))
+  (def prev_stage (read-history stage_hist))
+  (def prev_phase (read-history phase_hist))
+  (def prev_release_start (read-history release_start_hist))
+
+  (def gate_on (gt gate_sig 0.5))
+  (def gate_rising (* gate_on (lte prev_gate 0.5)))
+  (def gate_falling (* (lte gate_sig 0.5) (gt prev_gate 0.5)))
+  (def retrigger (max gate_rising trigger_sig))
+  (def attack_stage 1.0)
+  (def decay_stage 2.0)
+  (def reset_stage 3.0)
+  (def reset_done (lte prev_env 0.0001))
+  ; A completed release also leaves phase at 1. Only treat that phase as an
+  ; attack completion when this is a continuation of the previous attack,
+  ; never on a fresh gate or trigger.
+  (def attack_done
+    (* (eq prev_stage attack_stage)
+       (lte retrigger 0.5)
+       (gte prev_phase 1.0)))
+
+  (def stage_from_gate
+    (gswitch gate_on
+      (gswitch retrigger
+        (gswitch (gt prev_env 0.0001) reset_stage attack_stage)
+        prev_stage)
+      0.0))
+  (def stage
+    (gswitch (eq stage_from_gate reset_stage)
+      (gswitch reset_done attack_stage reset_stage)
+      (gswitch (eq stage_from_gate attack_stage)
+        (gswitch attack_done decay_stage attack_stage)
+        stage_from_gate)))
+
+  (def phase_start
+    (gswitch (eq stage prev_stage) prev_phase 0.0))
+  (def phase_step
+    (gswitch (eq stage attack_stage)
+      (/ 1.0 attack_samples)
+      (gswitch (eq stage decay_stage)
+        (/ 1.0 decay_samples)
+        (gswitch gate_on 0.0 (/ 1.0 release_samples)))))
+  (def phase
+    (gswitch (eq stage reset_stage)
+      0.0
+      (clip (+ phase_start phase_step) 0.0 1.0)))
+
+  (def release_start
+    (gswitch gate_falling prev_env prev_release_start))
+  (def attack_level
+    (* (- (pow (+ curve_epsilon (* curve_domain phase)) attack_shape)
+          attack_curve_floor)
+       attack_curve_scale))
+  (def remaining (- 1.0 phase))
+  (def shaped_remaining
+    (* (- (pow (+ curve_epsilon (* curve_domain remaining)) fall_shape)
+          fall_curve_floor)
+       fall_curve_scale))
+  (def decay_level
+    (+ sustain (* (- 1.0 sustain) shaped_remaining)))
+  (def release_level (* release_start shaped_remaining))
+  (def reset_level (+ prev_env (* reset_coeff (- 0.0 prev_env))))
+  (def level_raw
+    (gswitch gate_on
+      (gswitch (eq stage reset_stage)
+        reset_level
+        (gswitch (eq stage attack_stage) attack_level decay_level))
+      release_level))
+  (def level (clip level_raw 0.0 1.0))
+
+  (write-history env level)
+  (write-history gate_hist gate_sig)
+  (write-history stage_hist stage)
+  (write-history phase_hist phase)
+  (write-history release_start_hist release_start)
+  level)
 "#;
 
 pub(in crate::lisp_host) fn instrument_preamble(sample_rate: u32) -> String {
@@ -723,6 +832,9 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 ; Modulatable: add @mod true @mod-mode additive
 ;   then use (mod name) to read the modulated value
 ; Envelope: (adsr gate trigger attack_ms decay_ms sustain release_ms)
+; Curved envelope:
+;   (adsrexp gate trigger attack_ms decay_ms sustain release_ms attack_curve fall_curve)
+;   curves are positive exponents; 1 is linear, >1 convex, and <1 concave.
 ; Oscillators: (phasor freq_hz), (sin expr), (noise)
 ; Math: +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max
 ; Constants: twopi, samplerate
