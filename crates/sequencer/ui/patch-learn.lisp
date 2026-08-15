@@ -175,20 +175,33 @@
   (and (not (= stage "")) (not (= stage "starting"))
     (not (= stage "cma-es")) (not (= stage "cma-refine-batched"))))
 
-(def %non-epoch-stage-progress (stage total)
-  (box :key "learn-stage-progress" :width :fill :height 4.2
+(def %optimization-loss-row (stage index loss)
+  (h-stack :key (str "learn-optimization-loss-" index) :width :fill :align :baseline
+    (label (if (= stage "cma-es") (str "Elite " (+ index 1)) "Mean batch loss")
+      :font-size 8 :color :dim :bg :transparent)
+    (box :width 0 :flex 1)
+    (label (fmt "{:.6}" loss) :font-size 8.5 :color :white :bg :transparent)))
+
+(def %non-epoch-stage-progress (stage current total optimization-losses losses)
+  (box :key "learn-stage-progress" :width :fill :height 6.5
     :background-color :bg :corner-radius 7 :padding 0.55
-    (v-stack :width :fill :height :fill :gap 0.35 :align :center
+    (v-stack :width :fill :height :fill :gap 0.35
       (label (if (or (= stage "") (= stage "starting")) "Preparing training job…"
           (if (= stage "cma-es")
-            (str "Searching up to " total " generations")
-            (str total " batched Adam epochs")))
+            (str "Generation " current " / " total)
+            (str "Epoch " current " / " total)))
         :font-size 10 :color :white :bg :transparent)
-      (label (if (or (= stage "") (= stage "starting")) "Waiting for the trainer's first stage."
-          "This trainer stage does not yet emit incremental progress.")
-        :font-size 7.5 :color :dim :bg :transparent :width :fill :wrap true))))
+      (if (= (len optimization-losses) 0)
+        (label "Waiting for the first optimizer update…"
+          :font-size 7.5 :color :dim :bg :transparent)
+        (v-stack :width :fill :gap 0.15
+          (each (range 0 (len optimization-losses)) |i|
+            (%optimization-loss-row stage i (nth optimization-losses i)))))
+      (if (and (= stage "cma-refine-batched") (> (len losses) 1))
+        (%loss-graph losses total)
+        (box :height 0)))))
 
-(def training-panel (target-path target-name stage current-epoch total-epochs loss losses epoch-params)
+(def training-panel (target-path target-name stage current-epoch total-epochs loss losses optimization-losses epoch-params)
   (v-stack :key "learn-training" :width :fill :height :fill :gap 0.5
     (eseq.browser/sample-browser-widget true target-path target-name)
     (label (%stage-label stage) :font-size 7.5 :color :blue :bg :transparent)
@@ -200,7 +213,7 @@
           (box :width 0 :flex 1)
           (label (fmt "loss {:.6}" loss) :font-size 9 :color :dim :bg :transparent))
         (%loss-graph losses total-epochs))
-      (%non-epoch-stage-progress stage total-epochs))
+      (%non-epoch-stage-progress stage current-epoch total-epochs optimization-losses losses))
     (box :width :fill :height 0 :flex 1 :background-color :bg :corner-radius 7 :padding 0.35
       (scroll :width :fill :height :fill
         (v-stack :width :fill :gap 0.3
@@ -276,7 +289,8 @@
           (training-panel
             SEQ.learn-target-path SEQ.learn-target-name
             SEQ.learn-stage SEQ.learn-current-epoch SEQ.learn-total-epochs
-            SEQ.learn-loss SEQ.learn-losses SEQ.learn-epoch-params)
+            SEQ.learn-loss SEQ.learn-losses SEQ.learn-optimization-losses
+            SEQ.learn-epoch-params)
           (if (= SEQ.learn-phase "result")
             (result-panel
               SEQ.learn-target-path SEQ.learn-target-name

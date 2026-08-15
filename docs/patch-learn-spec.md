@@ -114,6 +114,9 @@ spectrogram frames) written to the job dir and referenced by path.
  "frozen":[{"name":"base_note","reason":"f0-adjoint-unreliable"}],
  "unsupported":[],"seed_echo":{"sinefm":0.06,"ratio":0.05},
  "pitch_hz":49.2,"gate_frames":8820,"crop_frames":32768}
+{"type":"stage","name":"cma-es","total":12}
+{"type":"optimization_progress","current":3,"total":12,
+ "losses":[0.031,0.044,0.052]}
 {"type":"stage","name":"train","total":300}
 {"type":"epoch","epoch":50,"total":300,"loss":0.104,
  "params":{"sinefm":0.061,"ratio":0.048},
@@ -136,6 +139,10 @@ Rules:
   died", never an infinite spinner.
 - Always report **absolute distance alongside improvement %** (the 808's
   84.55% → 77.53% corrected-baseline lesson).
+- **`optimization_progress` reports non-scalar optimizer work** after each
+  completed iteration. `current` and `total` count generations for CMA-ES and
+  epochs for batched Adam. `losses` is best-first for independently scored
+  CMA candidates (up to five values); batched Adam reports its mean lane loss.
 - **`params` in `epoch` events are natural/knob units** — the same units as
   the seed and the patch's `param` nodes — never the trainer's transformed
   coordinates. Same discipline as the seed echo (the `naturalValues()` bug

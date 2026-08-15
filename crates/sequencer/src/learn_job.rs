@@ -49,6 +49,11 @@ pub enum LearnEvent {
         name: String,
         total: u64,
     },
+    OptimizationProgress {
+        current: u64,
+        total: u64,
+        losses: Vec<f64>,
+    },
     Epoch {
         epoch: u64,
         total: u64,
@@ -100,6 +105,11 @@ impl LearnEvent {
             "stage" => Ok(Self::Stage {
                 name: string(&value, "name")?,
                 total: unsigned(&value, "total")?,
+            }),
+            "optimization_progress" => Ok(Self::OptimizationProgress {
+                current: unsigned(&value, "current")?,
+                total: unsigned(&value, "total")?,
+                losses: parse_field(&value, "losses")?,
             }),
             "epoch" => Ok(Self::Epoch {
                 epoch: unsigned(&value, "epoch")?,
@@ -836,6 +846,21 @@ mod tests {
                 loss: 0.4,
                 params: BTreeMap::from([("cutoff".to_string(), 1234.5)]),
                 steps: BTreeMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn event_parser_decodes_optimizer_progress_with_ranked_losses() {
+        assert_eq!(
+            LearnEvent::parse(
+                r#"{"type":"optimization_progress","current":3,"total":12,"losses":[0.031,0.044,0.052]}"#,
+            )
+            .unwrap(),
+            LearnEvent::OptimizationProgress {
+                current: 3,
+                total: 12,
+                losses: vec![0.031, 0.044, 0.052],
             }
         );
     }

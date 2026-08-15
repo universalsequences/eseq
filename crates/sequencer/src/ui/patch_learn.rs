@@ -128,6 +128,7 @@ pub(crate) fn reset_learn_reactive(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(0.0));
     rt.set_reactive("SEQ", "learn-loss", Value::Number(0.0));
     rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
+    rt.set_reactive("SEQ", "learn-optimization-losses", Value::List(vec![]));
     rt.set_reactive("SEQ", "learn-epoch-params", Value::List(vec![]));
     rt.set_reactive("SEQ", "learn-checkpoint-wav", Value::String(String::new()));
     rt.set_reactive("SEQ", "learn-improvement-pct", Value::Number(0.0));
@@ -395,9 +396,9 @@ pub(crate) fn apply_learn_param_preview(
     Ok(result)
 }
 
-/// Drain status events eagerly, but stop after one epoch. Epochs are visual
-/// progress units: collapsing several into one reactive cycle makes training
-/// appear frozen even though the protocol is streaming correctly.
+/// Drain status events eagerly, but stop after one visual progress unit.
+/// Collapsing several epochs or optimizer iterations into one reactive cycle
+/// makes training appear frozen even though the protocol is streaming.
 fn take_learn_updates_through_epoch(
     receiver: &std::sync::mpsc::Receiver<sequencer::learn_job::LearnJobUpdate>,
 ) -> (Vec<sequencer::learn_job::LearnJobUpdate>, bool) {
@@ -405,14 +406,15 @@ fn take_learn_updates_through_epoch(
     loop {
         match receiver.try_recv() {
             Ok(update) => {
-                let is_epoch = matches!(
+                let is_progress = matches!(
                     &update,
                     sequencer::learn_job::LearnJobUpdate::Event(
                         sequencer::learn_job::LearnEvent::Epoch { .. }
+                            | sequencer::learn_job::LearnEvent::OptimizationProgress { .. }
                     )
                 );
                 updates.push(update);
-                if is_epoch {
+                if is_progress {
                     return (updates, false);
                 }
             }
@@ -422,14 +424,18 @@ fn take_learn_updates_through_epoch(
     }
 }
 
-fn append_loss(losses: &mut Vec<f64>, loss: f64) -> Value {
-    losses.push(loss);
+fn number_list(values: &[f64]) -> Value {
     Value::List(
-        losses
+        values
             .iter()
-            .map(|loss| Rc::new(RefCell::new(Value::Number(*loss))))
+            .map(|value| Rc::new(RefCell::new(Value::Number(*value))))
             .collect(),
     )
+}
+
+fn append_loss(losses: &mut Vec<f64>, loss: f64) -> Value {
+    losses.push(loss);
+    number_list(losses)
 }
 
 fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequencer::learn_job::LearnEvent) {
@@ -467,6 +473,22 @@ fn publish_event(rt: &mut Runtime, pending: &mut PendingLearnJob, event: &sequen
             rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(0.0));
             rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(*total as f64));
             rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
+            rt.set_reactive("SEQ", "learn-optimization-losses", Value::List(vec![]));
+        }
+        LearnEvent::OptimizationProgress { current, total, losses } => {
+            rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
+            rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(*current as f64));
+            rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(*total as f64));
+            rt.set_reactive("SEQ", "learn-optimization-losses", number_list(losses));
+            if !losses.is_empty() {
+                let loss = losses[0];
+                rt.set_reactive("SEQ", "learn-loss", Value::Number(loss));
+                rt.set_reactive(
+                    "SEQ",
+                    "learn-losses",
+                    append_loss(&mut pending.losses, loss),
+                );
+            }
         }
         LearnEvent::Epoch { epoch, total, loss, params, steps } => {
             rt.set_reactive("SEQ", "learn-phase", Value::String("training".to_string()));
@@ -726,6 +748,35 @@ mod tests {
         let (terminal, disconnected) = take_learn_updates_through_epoch(&receiver);
         assert!(disconnected);
         assert!(matches!(terminal.as_slice(), [LearnJobUpdate::Exited { success: true, .. }]));
+    }
+
+    #[test]
+    fn learn_update_batches_present_each_optimizer_iteration_separately() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for current in 1..=2 {
+            sender
+                .send(LearnJobUpdate::Event(LearnEvent::OptimizationProgress {
+                    current,
+                    total: 2,
+                    losses: vec![1.0 / current as f64],
+                }))
+                .unwrap();
+        }
+        drop(sender);
+
+        let (first, disconnected) = take_learn_updates_through_epoch(&receiver);
+        assert!(!disconnected);
+        assert!(matches!(
+            first.as_slice(),
+            [LearnJobUpdate::Event(LearnEvent::OptimizationProgress { current: 1, .. })]
+        ));
+        let (second, disconnected) = take_learn_updates_through_epoch(&receiver);
+        assert!(!disconnected);
+        assert!(matches!(
+            second.as_slice(),
+            [LearnJobUpdate::Event(LearnEvent::OptimizationProgress { current: 2, .. })]
+        ));
+        assert!(take_learn_updates_through_epoch(&receiver).1);
     }
 
     #[test]

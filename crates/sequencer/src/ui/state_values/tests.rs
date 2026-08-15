@@ -14198,6 +14198,7 @@
                 ("learn-total-epochs", Value::Number(0.0)),
                 ("learn-loss", Value::Number(0.0)),
                 ("learn-losses", Value::List(vec![])),
+                ("learn-optimization-losses", Value::List(vec![])),
                 ("learn-epoch-params", Value::List(vec![])),
                 ("learn-checkpoint-wav", Value::String(String::new())),
                 ("learn-improvement-pct", Value::Number(0.0)),
@@ -16008,6 +16009,11 @@
                 editor
                     .runtime_mut()
                     .set_reactive("SEQ", "learn-total-epochs", Value::Number(12.0));
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-optimization-losses",
+                    test_number_list(&[0.031, 0.044, 0.052]),
+                );
                 editor.runtime_mut().run_reactive_cycle();
                 let cma_layout = editor.widget_layout().expect("CMA search stage layout");
                 assert_finite_layout_tree(&cma_layout);
@@ -16015,11 +16021,40 @@
                     find_layout_node_by_widget_type(&cma_layout, "linegraph").is_none(),
                     "CMA generations must not be presented as an epoch loss graph"
                 );
-                for text in ["EVOLUTIONARY SEARCH", "Searching up to 12 generations"] {
+                for text in ["EVOLUTIONARY SEARCH", "Generation 3 / 12", "Elite 1", "Elite 3"] {
                     let node = find_layout_node_by_text(&cma_layout, text)
-                        .unwrap_or_else(|| panic!("missing CMA stage label {text:?}"));
+                        .unwrap_or_else(|| panic!("missing CMA stage feedback {text:?}"));
                     assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{text}: {:?}", node.rect);
                 }
+
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-stage",
+                    Value::String("cma-refine-batched".to_string()),
+                );
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "learn-current-epoch", Value::Number(2.0));
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "learn-total-epochs", Value::Number(5.0));
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-optimization-losses",
+                    test_number_list(&[0.021]),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                let batched_layout = editor.widget_layout().expect("batched Adam stage layout");
+                assert_finite_layout_tree(&batched_layout);
+                for text in ["BATCHED SHORTLIST POLISH", "Epoch 2 / 5", "Mean batch loss"] {
+                    let node = find_layout_node_by_text(&batched_layout, text)
+                        .unwrap_or_else(|| panic!("missing batched Adam feedback {text:?}"));
+                    assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{text}: {:?}", node.rect);
+                }
+                assert!(
+                    find_layout_node_by_widget_type(&batched_layout, "linegraph").is_some(),
+                    "batched Adam should graph its incremental mean loss"
+                );
             })
             .expect("spawn Patch Learn linegraph layout test")
             .join()

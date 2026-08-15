@@ -191,6 +191,7 @@ pub(super) fn handle(
                     rt.set_reactive("SEQ", "learn-current-epoch", Value::Number(0.0));
                     rt.set_reactive("SEQ", "learn-total-epochs", Value::Number(0.0));
                     rt.set_reactive("SEQ", "learn-losses", Value::List(vec![]));
+                    rt.set_reactive("SEQ", "learn-optimization-losses", Value::List(vec![]));
                     rt.set_reactive("SEQ", "learn-error", Value::String(String::new()));
                     finish_reactive(editor);
                 }

@@ -2799,6 +2799,7 @@ pub(crate) fn init_runtime(
                 ("learn-total-epochs", Value::Number(0.0)),
                 ("learn-loss", Value::Number(0.0)),
                 ("learn-losses", Value::List(vec![])),
+                ("learn-optimization-losses", Value::List(vec![])),
                 ("learn-epoch-params", Value::List(vec![])),
                 ("learn-checkpoint-wav", Value::String(String::new())),
                 ("learn-improvement-pct", Value::Number(0.0)),
