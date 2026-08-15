@@ -1774,7 +1774,7 @@ pub(crate) fn run_event_loop(
                         &app,
                         session,
                         LearnLaunchKind::Plan,
-                        300,
+                        sequencer::learn_job::LearnTrainingConfig::default(),
                         None,
                         None,
                     ) {

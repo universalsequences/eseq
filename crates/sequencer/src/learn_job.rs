@@ -190,6 +190,50 @@ pub struct LearnSeed {
     pub params: BTreeMap<String, f64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "search", rename_all = "kebab-case")]
+pub enum LearnTrainingConfig {
+    Legacy {
+        epochs: u64,
+    },
+    CmaEs {
+        generations: u64,
+        population: u64,
+        sigma: f64,
+        seed: u64,
+        forward_batch: u64,
+        local_epochs: u64,
+        continue_candidates: u64,
+        refine_epochs: u64,
+        refine_mode: CmaRefineMode,
+        final_epochs: u64,
+    },
+}
+
+impl Default for LearnTrainingConfig {
+    fn default() -> Self {
+        Self::Legacy { epochs: 300 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CmaRefineMode {
+    Auto,
+    Scalar,
+    Batched,
+}
+
+impl CmaRefineMode {
+    fn cli_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Scalar => "scalar",
+            Self::Batched => "batched",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LearnJobSpec {
     pub patch_path: PathBuf,
@@ -198,7 +242,7 @@ pub struct LearnJobSpec {
     pub patch_source: String,
     pub target_path: PathBuf,
     pub seed: LearnSeed,
-    pub epochs: u64,
+    pub training: LearnTrainingConfig,
     pub pitch_hz: Option<f64>,
     pub gate_frames: Option<u64>,
     pub plan_only: bool,
@@ -211,7 +255,7 @@ pub struct PersistedLearnRequest {
     pub argv: Vec<String>,
     pub patch_path: PathBuf,
     pub target_path: PathBuf,
-    pub epochs: u64,
+    pub training: LearnTrainingConfig,
     pub pitch_hz: Option<f64>,
     pub gate_frames: Option<u64>,
     pub plan_only: bool,
@@ -264,7 +308,7 @@ impl LearnJobLauncher {
             argv: argv.clone(),
             patch_path: spec.patch_path,
             target_path: spec.target_path,
-            epochs: spec.epochs,
+            training: spec.training,
             pitch_hz: spec.pitch_hz,
             gate_frames: spec.gate_frames,
             plan_only: spec.plan_only,
@@ -430,8 +474,47 @@ fn validate_spec(spec: &LearnJobSpec) -> Result<(), String> {
     if !spec.target_path.is_file() {
         return Err(format!("target sample does not exist: {}", spec.target_path.display()));
     }
-    if spec.epochs == 0 {
-        return Err("epoch count must be greater than zero".to_string());
+    match &spec.training {
+        LearnTrainingConfig::Legacy { epochs } => {
+            if *epochs == 0 || *epochs > 2000 {
+                return Err("legacy epoch count must be between 1 and 2000".to_string());
+            }
+        }
+        LearnTrainingConfig::CmaEs {
+            generations,
+            population,
+            sigma,
+            forward_batch,
+            local_epochs,
+            continue_candidates,
+            refine_epochs,
+            final_epochs,
+            ..
+        } => {
+            if *generations == 0 {
+                return Err("CMA generation count must be greater than zero".to_string());
+            }
+            if *population != 0 && *population < 4 {
+                return Err("CMA population must be zero (automatic) or at least four".to_string());
+            }
+            if !sigma.is_finite() || *sigma <= 0.0 {
+                return Err("CMA sigma must be finite and greater than zero".to_string());
+            }
+            for (label, value) in [
+                ("CMA forward batch", *forward_batch),
+                ("local epochs", *local_epochs),
+                ("continued candidates", *continue_candidates),
+                ("refinement epochs", *refine_epochs),
+                ("final epochs", *final_epochs),
+            ] {
+                if value > 4096 {
+                    return Err(format!("{label} exceeds the supported limit of 4096"));
+                }
+            }
+            if *local_epochs > 2000 || *refine_epochs > 2000 || *final_epochs > 2000 {
+                return Err("Adam stage epoch counts must not exceed 2000".to_string());
+            }
+        }
     }
     if matches!(spec.pitch_hz, Some(value) if !value.is_finite() || value <= 0.0) {
         return Err("pitch override must be finite and greater than zero".to_string());
@@ -505,8 +588,6 @@ fn build_argv(
         job_dir.to_string_lossy().into_owned(),
         "--mode".to_string(),
         "direction".to_string(),
-        "--epochs".to_string(),
-        spec.epochs.to_string(),
         // Patch Learn previews every optimizer step. Checkpoint WAV cadence is
         // independent and remains controlled by DGenLisp's checkpoint option.
         "--report-every".to_string(),
@@ -516,6 +597,42 @@ fn build_argv(
         "--filter-surrogate".to_string(),
         "none".to_string(),
     ];
+    match &spec.training {
+        LearnTrainingConfig::Legacy { epochs } => {
+            argv.extend([
+                "--search".to_string(),
+                "legacy".to_string(),
+                "--epochs".to_string(),
+                epochs.to_string(),
+            ]);
+        }
+        LearnTrainingConfig::CmaEs {
+            generations,
+            population,
+            sigma,
+            seed,
+            forward_batch,
+            local_epochs,
+            continue_candidates,
+            refine_epochs,
+            refine_mode,
+            final_epochs,
+        } => {
+            argv.extend([
+                "--search".to_string(), "cma-es".to_string(),
+                "--cma-generations".to_string(), generations.to_string(),
+                "--cma-population".to_string(), population.to_string(),
+                "--cma-sigma".to_string(), sigma.to_string(),
+                "--cma-seed".to_string(), seed.to_string(),
+                "--cma-forward-batch".to_string(), forward_batch.to_string(),
+                "--local-epochs".to_string(), local_epochs.to_string(),
+                "--cma-continue".to_string(), continue_candidates.to_string(),
+                "--cma-refine-epochs".to_string(), refine_epochs.to_string(),
+                "--cma-refine-mode".to_string(), refine_mode.cli_name().to_string(),
+                "--cma-final-epochs".to_string(), final_epochs.to_string(),
+            ]);
+        }
+    }
     if let Some(gate_frames) = spec.gate_frames {
         argv.extend(["--gate-frames".to_string(), gate_frames.to_string()]);
     }
@@ -698,7 +815,7 @@ mod tests {
             seed: LearnSeed {
                 params: BTreeMap::from([("gain".to_string(), 0.5)]),
             },
-            epochs: 50,
+            training: LearnTrainingConfig::Legacy { epochs: 50 },
             pitch_hz: None,
             gate_frames: None,
             plan_only,
@@ -739,6 +856,46 @@ mod tests {
     }
 
     #[test]
+    fn trainer_argv_explicitly_configures_the_complete_cma_pipeline() {
+        let root = temp_dir("cma-argv");
+        let mut job_spec = spec(&root, false);
+        job_spec.training = LearnTrainingConfig::CmaEs {
+            generations: 12,
+            population: 64,
+            sigma: 0.15,
+            seed: 7,
+            forward_batch: 16,
+            local_epochs: 20,
+            continue_candidates: 8,
+            refine_epochs: 5,
+            refine_mode: CmaRefineMode::Batched,
+            final_epochs: 400,
+        };
+        let argv = build_argv(
+            &root.join("patch.lisp"),
+            &job_spec,
+            &root.join("seed.json"),
+            &root.join("job"),
+        );
+        for pair in [
+            ["--search", "cma-es"],
+            ["--cma-generations", "12"],
+            ["--cma-population", "64"],
+            ["--cma-sigma", "0.15"],
+            ["--cma-seed", "7"],
+            ["--cma-forward-batch", "16"],
+            ["--local-epochs", "20"],
+            ["--cma-continue", "8"],
+            ["--cma-refine-epochs", "5"],
+            ["--cma-refine-mode", "batched"],
+            ["--cma-final-epochs", "400"],
+        ] {
+            assert!(argv.windows(2).any(|args| args == pair), "missing {pair:?} in {argv:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn launcher_snapshots_stream_and_reloads_job() {
         let root = temp_dir("stream");
         let tool = executable_script(
@@ -766,6 +923,7 @@ mod tests {
 
         let snapshot = launcher.load(&id).unwrap();
         assert_eq!(snapshot.request.argv.first().map(String::as_str), Some("train"));
+        assert_eq!(snapshot.request.training, LearnTrainingConfig::Legacy { epochs: 50 });
         assert_eq!(fs::read_to_string(snapshot.job_dir.join("patch.lisp")).unwrap(),
             "(param gain @default 0.5 @min 0 @max 1)");
         assert!(matches!(snapshot.terminal_event(), Some(LearnEvent::Result { .. })));

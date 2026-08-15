@@ -45,17 +45,86 @@
       :on-change (lambda (v)
         (host-command "configure-learn" (dict field v))))))
 
+(def %dropdown-control (label-text value options key-name field)
+  (v-stack :width :fill :gap 0.15
+    (label label-text :font-size 8 :color :dim :bg :transparent)
+    (dropdown :key key-name :width :fill :height 1.25
+      :value value :options options
+      :on-change (lambda (v)
+        (host-command "configure-learn" (dict field v))))))
+
+(def cma-config ()
+  (v-stack :width :fill :gap 0.45
+    (%config-control "GENERATIONS" SEQ.learn-cma-generations 1 1000 0
+      "learn-cma-generations" :cma-generations)
+    (%config-control "CANDIDATES / GENERATION (0 = AUTO)" SEQ.learn-cma-population 0 4096 0
+      "learn-cma-population" :cma-population)
+    (label
+      (str (if (= SEQ.learn-cma-population 0) "Estimated up to " "Up to ")
+        (* SEQ.learn-cma-generations
+          (if (= SEQ.learn-cma-population 0) 32 SEQ.learn-cma-population))
+        " candidate evaluations"
+        (if (= SEQ.learn-cma-population 0) " (trainer resolves auto population)" ""))
+      :font-size 7.5 :color :dim :bg :transparent)
+    (%config-control "INITIAL SPREAD (SIGMA)" SEQ.learn-cma-sigma 0.01 10 3
+      "learn-cma-sigma" :cma-sigma)
+    (%config-control "RANDOM SEED" SEQ.learn-cma-seed 0 4294967295 0
+      "learn-cma-seed" :cma-seed)
+    (%config-control "FORWARD BATCH (0 = AUTO)" SEQ.learn-cma-forward-batch 0 4096 0
+      "learn-cma-forward-batch" :cma-forward-batch)
+    (if (= SEQ.learn-method "Evolutionary search only")
+      (box :height 0)
+      (v-stack :width :fill :gap 0.45
+        (%config-control "LOCAL FALLBACK EPOCHS (0 = OFF)" SEQ.learn-local-epochs 0 2000 0
+          "learn-local-epochs" :local-epochs)
+        (%config-control "SHORTLIST CANDIDATES (0 = BEST ONLY)" SEQ.learn-cma-continue 0 4096 0
+          "learn-cma-continue" :cma-continue)
+        (%config-control "SHORTLIST ADAM EPOCHS (0 = OFF)" SEQ.learn-cma-refine-epochs 0 2000 0
+          "learn-cma-refine-epochs" :cma-refine-epochs)
+        (%dropdown-control "SHORTLIST EXECUTION" SEQ.learn-cma-refine-mode
+          (list "Batched" "Scalar" "Auto") "learn-cma-refine-mode" :cma-refine-mode)
+        (%config-control "WINNER TRAINING EPOCHS (0 = OFF)" SEQ.learn-cma-final-epochs 0 2000 0
+          "learn-cma-final-epochs" :cma-final-epochs)))))
+
+(def %start-label ()
+  (if (= SEQ.learn-method "Local fit + basin check") "Start local training"
+    (if (= SEQ.learn-method "Evolutionary search only") "Start evolutionary search"
+      "Search, polish, and train winner")))
+
+(def %start-payload ()
+  (dict
+    :method SEQ.learn-method
+    :epochs SEQ.learn-epochs
+    :cma-generations SEQ.learn-cma-generations
+    :cma-population SEQ.learn-cma-population
+    :cma-sigma SEQ.learn-cma-sigma
+    :cma-seed SEQ.learn-cma-seed
+    :cma-forward-batch SEQ.learn-cma-forward-batch
+    :local-epochs SEQ.learn-local-epochs
+    :cma-continue SEQ.learn-cma-continue
+    :cma-refine-epochs SEQ.learn-cma-refine-epochs
+    :cma-refine-mode SEQ.learn-cma-refine-mode
+    :cma-final-epochs SEQ.learn-cma-final-epochs
+    :pitch-hz SEQ.learn-pitch-hz
+    :gate-frames SEQ.learn-gate-frames))
+
 (def %configure-panel ()
   (v-stack :key "learn-configure" :width :fill :height :fill :gap 0.45
     (%target-picker)
     (%plan-list)
-    (%config-control "EPOCHS" SEQ.learn-epochs 50 1000 0 "learn-epochs" :epochs)
-    (%config-control "PITCH (HZ)" SEQ.learn-pitch-hz 10 20000 2 "learn-pitch" :pitch-hz)
-    (%config-control "GATE (FRAMES)" SEQ.learn-gate-frames 1 192000 0 "learn-gate" :gate-frames)
-    (button "Start training" :key "learn-start" :variant :primary :width :fill :height 1.45
-      :on-click |x y r|
-      (host-command "start-learn-job"
-        (dict :epochs SEQ.learn-epochs :pitch-hz SEQ.learn-pitch-hz :gate-frames SEQ.learn-gate-frames))
+    (box :width :fill :height 0 :flex 1
+      (scroll :width :fill :height :fill
+        (v-stack :width :fill :gap 0.45
+          (%dropdown-control "TRAINING METHOD" SEQ.learn-method
+            (list "Local fit + basin check" "Evolutionary search only" "Evolutionary search + training")
+            "learn-method" :method)
+          (if (= SEQ.learn-method "Local fit + basin check")
+            (%config-control "ADAM EPOCHS" SEQ.learn-epochs 1 2000 0 "learn-epochs" :epochs)
+            (cma-config))
+          (%config-control "PITCH (HZ)" SEQ.learn-pitch-hz 10 20000 2 "learn-pitch" :pitch-hz)
+          (%config-control "GATE (FRAMES)" SEQ.learn-gate-frames 1 192000 0 "learn-gate" :gate-frames))))
+    (button (%start-label) :key "learn-start" :variant :primary :width :fill :height 1.45
+      :on-click |x y r| (host-command "start-learn-job" (%start-payload))
       :color :white)))
 
 (def %step-glyph (step)
@@ -81,26 +150,57 @@
     (label (fmt "{:.4} → {:.4}" (get param :from) (get param :value))
       :font-size 7.5 :color :dim :bg :transparent)))
 
-(def %loss-graph (losses)
+(def %loss-graph (losses total-epochs)
   (box :key "learn-loss-curve" :width :fill :height 3.0 :background-color :bg :corner-radius 7 :padding 0.25
     (linegraph
       :width :fill :height :fill
       :values losses
-      :scale :log
+      :total-points total-epochs
+      :min 0
+      :y-axis true
       :line-color :blue
       :area true)))
+
+(def %stage-label (stage)
+  (if (or (= stage "") (= stage "starting")) "STARTING"
+    (if (= stage "cma-es") "EVOLUTIONARY SEARCH"
+    (if (= stage "cma-refine-batched") "BATCHED SHORTLIST POLISH"
+      (if (= stage "cma-final") "WINNER TRAINING"
+        (if (= stage "basin-check") "BASIN CHECK"
+          (if (= stage "train")
+            (if (= SEQ.learn-method "Local fit + basin check") "LOCAL TRAINING" "LOCAL FALLBACK")
+            "SHORTLIST POLISH")))))))
+
+(def %stage-has-epochs (stage)
+  (and (not (= stage "")) (not (= stage "starting"))
+    (not (= stage "cma-es")) (not (= stage "cma-refine-batched"))))
+
+(def %non-epoch-stage-progress (stage total)
+  (box :key "learn-stage-progress" :width :fill :height 4.2
+    :background-color :bg :corner-radius 7 :padding 0.55
+    (v-stack :width :fill :height :fill :gap 0.35 :align :center
+      (label (if (or (= stage "") (= stage "starting")) "Preparing training job…"
+          (if (= stage "cma-es")
+            (str "Searching up to " total " generations")
+            (str total " batched Adam epochs")))
+        :font-size 10 :color :white :bg :transparent)
+      (label (if (or (= stage "") (= stage "starting")) "Waiting for the trainer's first stage."
+          "This trainer stage does not yet emit incremental progress.")
+        :font-size 7.5 :color :dim :bg :transparent :width :fill :wrap true))))
 
 (def training-panel (target-path target-name stage current-epoch total-epochs loss losses epoch-params)
   (v-stack :key "learn-training" :width :fill :height :fill :gap 0.5
     (eseq.browser/sample-browser-widget true target-path target-name)
-    (label (if (= stage "basin-check") "BASIN CHECK" "TRAINING")
-      :font-size 7.5 :color :blue :bg :transparent)
-    (h-stack :width :fill :align :baseline
-      (label (str "Epoch " current-epoch " / " total-epochs)
-        :font-size 10 :color :white :bg :transparent)
-      (box :width 0 :flex 1)
-      (label (fmt "loss {:.6}" loss) :font-size 9 :color :dim :bg :transparent))
-    (%loss-graph losses)
+    (label (%stage-label stage) :font-size 7.5 :color :blue :bg :transparent)
+    (if (%stage-has-epochs stage)
+      (v-stack :width :fill :gap 0.5
+        (h-stack :width :fill :align :baseline
+          (label (str "Epoch " current-epoch " / " total-epochs)
+            :font-size 10 :color :white :bg :transparent)
+          (box :width 0 :flex 1)
+          (label (fmt "loss {:.6}" loss) :font-size 9 :color :dim :bg :transparent))
+        (%loss-graph losses total-epochs))
+      (%non-epoch-stage-progress stage total-epochs))
     (box :width :fill :height 0 :flex 1 :background-color :bg :corner-radius 7 :padding 0.35
       (scroll :width :fill :height :fill
         (v-stack :width :fill :gap 0.3
@@ -195,4 +295,5 @@
         (box :width 0 :flex 1)
         (button "×" :variant :ghost :width 2.2 :height 1.1
           :on-click |x y r| (%close) :color :dim))
-      (%body))))
+      (box :key "patch-learn-body" :width :fill :height 0 :flex 1
+        (%body)))))

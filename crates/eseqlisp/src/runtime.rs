@@ -1710,6 +1710,7 @@ impl Runtime {
             "vslider",
             "toggle",
             "piano-keyboard",
+            "linegraph",
             "matrix",
             "knob",
             "knob-number",

@@ -14179,7 +14179,18 @@
                 ("learn-target-name", Value::String(String::new())),
                 ("learn-phase", Value::String("pick".to_string())),
                 ("learn-plan-params", Value::List(vec![])),
+                ("learn-method", Value::String("Local fit + basin check".to_string())),
                 ("learn-epochs", Value::Number(300.0)),
+                ("learn-cma-generations", Value::Number(12.0)),
+                ("learn-cma-population", Value::Number(0.0)),
+                ("learn-cma-sigma", Value::Number(0.2)),
+                ("learn-cma-seed", Value::Number(1.0)),
+                ("learn-cma-forward-batch", Value::Number(0.0)),
+                ("learn-local-epochs", Value::Number(0.0)),
+                ("learn-cma-continue", Value::Number(8.0)),
+                ("learn-cma-refine-epochs", Value::Number(5.0)),
+                ("learn-cma-refine-mode", Value::String("Batched".to_string())),
+                ("learn-cma-final-epochs", Value::Number(300.0)),
                 ("learn-pitch-hz", Value::Number(0.0)),
                 ("learn-gate-frames", Value::Number(0.0)),
                 ("learn-stage", Value::String(String::new())),
@@ -15794,11 +15805,31 @@
             find_layout_node_by_widget_type(&layout, "patcher").is_none(),
             "Patch Learn buffer must not contain the patcher widget"
         );
+        for key in ["/learn-method", "/learn-epochs"] {
+            let control = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("missing Patch Learn configuration control {key}"));
+            assert!(
+                control.rect.width.is_finite()
+                    && control.rect.height.is_finite()
+                    && control.rect.width > 0.0
+                    && control.rect.height > 0.0,
+                "{key} must remain measurable in the real split layout: {:?}",
+                control.rect
+            );
+            assert!(
+                control.rect.row >= pane.rect.row
+                    && control.rect.row + control.rect.height
+                        <= pane.rect.row + pane.rect.height + 0.01,
+                "{key} must be inside the visible Patch Learn pane: control={:?}, pane={:?}",
+                control.rect,
+                pane.rect
+            );
+        }
         for text in [
             "PATCH LEARN",
             "Tim Maia – Est Dificil (Origi…",
             "cutoff",
-            "Start training",
+            "Start local training",
         ] {
             let node = find_layout_node_by_text(&layout, text)
                 .unwrap_or_else(|| panic!("visible label {text:?}"));
@@ -15833,6 +15864,48 @@
             payload.get("epochs").map(|value| value.borrow().clone()),
             Some(Value::Number(750.0))
         );
+
+        let learn_buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-learn*")
+            .expect("Patch Learn buffer")
+            .id;
+        editor.set_active_buffer(learn_buffer_id);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "learn-method",
+            Value::String("Evolutionary search + training".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(58, 48);
+        let cma_layout = editor.widget_layout().expect("evolutionary Patch Learn layout");
+        assert_finite_layout_tree(&cma_layout);
+        for key in [
+            "/learn-method",
+            "/learn-cma-generations",
+            "/learn-cma-population",
+            "/learn-cma-sigma",
+            "/learn-cma-seed",
+            "/learn-cma-forward-batch",
+            "/learn-local-epochs",
+            "/learn-cma-continue",
+            "/learn-cma-refine-epochs",
+            "/learn-cma-refine-mode",
+            "/learn-cma-final-epochs",
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(&cma_layout, key)
+                .unwrap_or_else(|| panic!("missing evolutionary control {key}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "{key} must have finite, nonzero geometry: {:?}",
+                node.rect
+            );
+        }
     }
 
     #[test]
@@ -15906,7 +15979,10 @@
                     panic!("linegraph must receive the complete loss trajectory: {:?}", graph.props);
                 };
                 assert_eq!(losses.len(), 3);
-                assert_eq!(graph.props.get("scale"), Some(&Value::Keyword("log".to_string())));
+                assert_eq!(graph.props.get("total-points"), Some(&Value::Number(300.0)));
+                assert_eq!(graph.props.get("min"), Some(&Value::Number(0.0)));
+                assert_eq!(graph.props.get("y-axis"), Some(&Value::Bool(true)));
+                assert!(!graph.props.contains_key("scale"));
 
                 editor.runtime_mut().set_reactive(
                     "SEQ",
@@ -15923,6 +15999,27 @@
                     panic!("updated linegraph must retain its trajectory binding");
                 };
                 assert_eq!(updated_losses.len(), 4);
+
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "learn-stage",
+                    Value::String("cma-es".to_string()),
+                );
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "learn-total-epochs", Value::Number(12.0));
+                editor.runtime_mut().run_reactive_cycle();
+                let cma_layout = editor.widget_layout().expect("CMA search stage layout");
+                assert_finite_layout_tree(&cma_layout);
+                assert!(
+                    find_layout_node_by_widget_type(&cma_layout, "linegraph").is_none(),
+                    "CMA generations must not be presented as an epoch loss graph"
+                );
+                for text in ["EVOLUTIONARY SEARCH", "Searching up to 12 generations"] {
+                    let node = find_layout_node_by_text(&cma_layout, text)
+                        .unwrap_or_else(|| panic!("missing CMA stage label {text:?}"));
+                    assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{text}: {:?}", node.rect);
+                }
             })
             .expect("spawn Patch Learn linegraph layout test")
             .join()

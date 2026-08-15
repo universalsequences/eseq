@@ -162,6 +162,7 @@ fn is_widget_name(name: &str) -> bool {
             | "vslider"
             | "toggle"
             | "piano-keyboard"
+            | "linegraph"
             | "matrix"
             | "knob"
             | "meter"

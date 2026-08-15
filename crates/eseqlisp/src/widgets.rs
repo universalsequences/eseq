@@ -18,6 +18,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "toggle",
     "event-view",
     "piano-keyboard",
+    "linegraph",
     "matrix",
     "knob",
     "knob-number",

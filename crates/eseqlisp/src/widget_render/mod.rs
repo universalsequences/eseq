@@ -18,6 +18,7 @@ pub mod knob_number;
 pub mod label;
 pub mod lane_preview;
 pub mod live_audio;
+pub mod linegraph;
 pub mod matrix;
 pub mod mixer_meter;
 pub mod modal;
@@ -1038,6 +1039,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &toggle::TOGGLE_WIDGET,
     &event_view::EVENT_VIEW_WIDGET,
     &piano_keyboard::PIANO_KEYBOARD_WIDGET,
+    &linegraph::LINEGRAPH_WIDGET,
     &matrix::MATRIX_WIDGET,
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
@@ -1261,6 +1263,7 @@ fn cacheable_widget_primitives(widget_type: &str) -> bool {
             | "vslider"
             | "toggle"
             | "knob"
+            | "linegraph"
             | "tabs"
             | "box"
     )

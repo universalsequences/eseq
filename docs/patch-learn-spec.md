@@ -1,6 +1,11 @@
-# Patch Learning ("SynthId in the editor") — Spec rev 1
+# Patch Learning ("SynthId in the editor") — Spec rev 2
 
-Status: DESIGN — nothing built. Companion to the dgen repo's
+Status: PHASE 1 BUILT (dgenlisp `train` CLI per §3/§4/§6/§7 exists in the dgen
+repo). The core Phase 2 eseq learn-buffer state machine, job host, live preview,
+result application, and configurable legacy/CMA pipelines are built; the
+round-trip host score and spectrogram diff in §8 remain future work. Rev 2
+rewrites §8 around the learn-buffer state machine, adds `--plan-only` (§3) and
+per-param step directions in `epoch` events (§4). Companion to the dgen repo's
 `Examples/SynthID/SUBTRACTIVE_SPEC.md` (E4 "direction-finding mode"), which this
 feature productizes. This document owns the cross-repo protocol; the dgen repo
 implements the trainer side, eseq implements the UI/host side.
@@ -63,9 +68,16 @@ dgenlisp train \
   --mode direction \            # v1: E4 seeded short run + cold basin check
   [--epochs 300] \
   [--gate-frames N] \           # default: derived from target envelope, see §6
-  [--pitch-hz F]                # default: CPU-estimated from target, see §6
+  [--pitch-hz F] \              # default: CPU-estimated from target, see §6
+  [--plan-only]                 # run lowering only, emit `plan`, exit 0
 ```
 
+- `--plan-only`: run the §7 lowering pass, emit the `plan` event, and exit —
+  no GPU time. The host calls this the moment a target sample is chosen so the
+  learnable/frozen/unsupported verdict (and the estimated `pitch_hz` /
+  `gate_frames`) are on screen *before* the user configures and starts the real
+  job. The subsequent full run re-emits `plan` as its first event as usual; the
+  host may diff the two and treat a mismatch as a bug.
 - `--mode direction` (v1 only mode): seed from the user's patch, ~100–300
   epochs, small LR, plus one background cold restart as a basin check. If the
   cold restart decisively beats the seeded run, report `"basin_check":
@@ -104,7 +116,8 @@ spectrogram frames) written to the job dir and referenced by path.
  "pitch_hz":49.2,"gate_frames":8820,"crop_frames":32768}
 {"type":"stage","name":"train","total":300}
 {"type":"epoch","epoch":50,"total":300,"loss":0.104,
- "params":{"sinefm":0.061,"ratio":0.048}}
+ "params":{"sinefm":0.061,"ratio":0.048},
+ "steps":{"sinefm":0.7,"ratio":-0.2}}
 {"type":"checkpoint","epoch":100,"wav":"<job-dir>/epoch0100.wav"}
 {"type":"result","improvement_pct":54.2,"abs_distance":0.0116,
  "basin_check":"ok",
@@ -123,6 +136,16 @@ Rules:
   died", never an infinite spinner.
 - Always report **absolute distance alongside improvement %** (the 808's
   84.55% → 77.53% corrected-baseline lesson).
+- **`params` in `epoch` events are natural/knob units** — the same units as
+  the seed and the patch's `param` nodes — never the trainer's transformed
+  coordinates. Same discipline as the seed echo (the `naturalValues()` bug
+  class); the host drives live knob preview directly from these values.
+- **`steps` is the per-param post-Adam step direction** for that epoch,
+  normalized to roughly [-1, 1] per param (sign = which way the knob is being
+  pushed, magnitude = how hard relative to its own recent history). Raw
+  gradients are NOT sent: they live in transformed coordinates and their
+  magnitudes aren't comparable across params. `steps` is optional per event;
+  hosts render it as a signed nudge indicator, not as numbers.
 - Cadence: a few events/sec at 0.27–1 s/epoch; `checkpoint` (preview WAV) every
   ~25 epochs.
 
@@ -193,34 +216,104 @@ as frozen in `SPEC.md` §4; waveform MSE and friends remain banned. Adam with
 per-group LRs in transformed coordinates; ~2× above the legacy production LRs
 per `BATCH_REFINE_FINDING.md`.
 
-## 8. eseq pane behavior
+## 8. eseq pane behavior — the learn buffer
 
-- Split the patch-editor pane (as mocked): job launcher (sample picker from
-  library or file drop) + live progress region.
-- Background thread: `BufReader::lines` on child stdout → parse → channel →
-  reactive cell; the pane is an ordinary widget bound to that cell. Reuse the
-  agentic-bubble subprocess-streaming seam.
-- Display: loss curve; per-param delta arrows **on the actual param widgets**
-  (knob ghosts from old→new value); spectrogram diff of target vs latest
-  checkpoint render; frozen/unsupported params marked from the `plan` event.
-- On `result`: A/B audition (target / seeded render / learned render), then
-  **apply** (write values into `param` nodes, undoable) or apply per-param.
+The patch-editor pane splits (as mocked): patch source on one side, a
+**learn buffer** on the other. The learn buffer is a state machine with four
+states. Plumbing throughout: background thread, `BufReader::lines` on child
+stdout → parse → channel → reactive cell; the buffer is an ordinary widget
+bound to that cell (reuse the agentic-bubble subprocess-streaming seam).
+
+### 8.1 State: PICK — sample browser reuse
+
+The buffer hosts the existing sample browser in a **samples-only mode** (no
+samples/sounds/instruments tabs — a mode flag on the browser widget). All its
+affordances carry over unchanged: search, tag chips, and the eseq-357
+single-click auto-preview (`src/audio/preview.rs` works outside tracks).
+Single click = preview, **double click = choose as learn target**. On choose,
+the browser collapses to a compact target row (filename + waveform strip +
+"change" affordance that returns to PICK).
+
+### 8.2 State: CONFIGURE — plan preview + knobs
+
+The moment a target is chosen, the host runs `dgenlisp train --plan-only`
+(§3) against the current patch + target and renders the `plan` verdict before
+any GPU time:
+
+- **Param list**: every `param` node, marked learnable / frozen (with the
+  trainer's reason) / unsupported. Missing `@min`/`@max` surfaces here as
+  refuse-and-report (§9 → decided: refuse).
+- **Training method** selects one of three presets: local Adam plus midpoint
+  basin check (the default), CMA-ES search only, or CMA-ES search followed by
+  shortlist Adam refinement and winner training.
+- **Local controls** expose the full Adam epoch count (default 300).
+- **CMA controls** expose generations, population (`0` = automatic), sigma,
+  deterministic seed, forward batch (`0` = automatic), independent local
+  fallback epochs, shortlist count, shortlist Adam epochs and execution mode,
+  and winner-only final epochs. The search-only preset explicitly disables all
+  Adam stages. The search-plus-training preset defaults to 8 candidates, 5
+  explicitly batched refinement epochs, 300 winner epochs, and no local
+  fallback. Every setting remains editable rather than being hidden in argv
+  construction.
+- Pitch override (prefilled from `plan.pitch_hz`) and gate frames (prefilled
+  from `plan.gate_frames`) remain common to all methods.
+- The start button names the selected pipeline rather than using a generic
+  training label.
+
+If the patch is edited while in CONFIGURE, the plan is stale: re-run
+`--plan-only` (it's cheap) rather than showing a lying param list.
+
+### 8.3 State: TRAINING — live progress
+
+On Start the host writes the job dir (§5), spawns the full run, and:
+
+- Config controls **disable** (reduced opacity); a **Stop** button appears
+  (SIGTERM per §3; artifacts on disk survive, last checkpoint remains
+  auditionable).
+- Progress is stage-aware. Scalar Adam stages show epoch progress and a loss
+  curve. `cma-es` and `cma-refine-batched` show honest indeterminate stage
+  status because the current trainer protocol emits no per-generation or
+  batched-refinement-step events; generations are never mislabeled as epochs.
+  Spectrogram diff uses the latest `checkpoint` render.
+- **Live knob preview** — the signature interaction: each `epoch` event's
+  `params` (natural units, §4) are pushed into the *running engine* so the
+  loaded instrument audibly and visibly morphs, knobs moving on screen.
+  Constraint: this stream MUST bypass the document/undo path entirely — it is
+  a preview layer over the engine, not edits. Document values stay at the
+  seed; no history transactions are opened per epoch (else 300 undo entries
+  and the p-lock identity / snapshot-clobber bug class reopens). Stop without
+  apply drops the layer and knobs snap back to seed.
+- **Step-direction indicators** from `steps` (§4): a small signed bar/arrow
+  per learnable param — which way and how hard each knob is being pushed.
+- Frozen/unsupported params render dimmed with their reason from `plan`.
+- Process death with no terminal event renders as "job died" (never a
+  spinner); nonzero exit likewise.
+
+### 8.4 State: RESULT — audition + apply
+
+On `result`:
+
+- **A/B audition**: target / seeded render / learned render.
+- **Apply** — write learned values into the `param` nodes as ONE undoable
+  transaction — or apply per-param. This is the only moment the document
+  changes.
 - **Round-trip verification before showing the final number**: render the
-  learned params back through the actual eseq patch and score THAT against the
-  target — not the trainer's internal render. (This is what the independent CPU
-  metric already does on the dgen side; the host repeats it through its own
-  render path.)
-- `basin_check: wrong_neighborhood` renders as an honest "your patch is in the
-  wrong neighborhood for this sample" state, offering the cold-restart result
-  as an alternative instead of deltas.
+  learned params back through the actual eseq patch and score THAT against
+  the target — not the trainer's internal render. (This is what the
+  independent CPU metric already does on the dgen side; the host repeats it
+  through its own render path.)
+- `basin_check: wrong_neighborhood` renders as an honest "your patch is in
+  the wrong neighborhood for this sample" state, offering the cold-restart
+  result as an alternative instead of deltas.
+- "Back" returns to CONFIGURE (same target, tweak and rerun) or PICK.
 
 ## 9. Open questions
 
 - Where the `dgenlisp` binary lives / how eseq locates it (env var? bundled?).
 - Poly patches: v1 forces 1 voice; is that always well-defined for existing
   instruments?
-- Params without `@min`/`@max`: refuse to learn, or apply default bounds?
-  Leaning refuse-and-report in `plan` (explicit beats guessed search spaces).
+- ~~Params without `@min`/`@max`~~: DECIDED — refuse-and-report in `plan`
+  (explicit beats guessed search spaces); surfaced in CONFIGURE (§8.2).
 - Stereo targets: v1 mono-sums the target? Trainer renders mono?
 - Whether `--mode full` (basin search) ever makes sense seeded from a UI patch,
   given the v2 finding that init proximity did not predict refinement outcome.

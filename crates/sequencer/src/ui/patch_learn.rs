@@ -68,7 +68,7 @@ pub(crate) fn launch_learn_job(
     app: &app::App,
     session: &InstrumentEditSession,
     kind: LearnLaunchKind,
-    epochs: u64,
+    training: sequencer::learn_job::LearnTrainingConfig,
     pitch_hz: Option<f64>,
     gate_frames: Option<u64>,
 ) -> Result<PendingLearnJob, String> {
@@ -90,7 +90,7 @@ pub(crate) fn launch_learn_job(
         patch_source,
         target_path,
         seed,
-        epochs,
+        training,
         pitch_hz,
         gate_frames,
         plan_only: kind == LearnLaunchKind::Plan,
