@@ -874,6 +874,12 @@ pub trait WidgetDefinition: Sync {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[]
     }
+    /// Public Lisp keyword arguments understood by this widget constructor.
+    /// This drives context-aware text completion and should include layout,
+    /// styling, interaction, and reactive properties accepted by the widget.
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn measure(
         &self,
         node: &Value,

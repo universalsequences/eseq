@@ -284,6 +284,18 @@ impl WidgetDefinition for BoxWidget {
         &["selected", "muted", "macro-owned"]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "background", "background-color", "border-color", "border-width", "corner-radius",
+            "padding", "width", "height", "aspect", "align", "h-align", "v-align", "flex",
+            "selected", "selected-background-color", "selected-border-color", "muted",
+            "muted-background-color", "muted-border-color", "drop-hover-background-color",
+            "drop-hover-border-color", "drag-type", "drag-payload", "drag-modifier",
+            "capture-pointer", "focusable", "key", "on-click", "on-double-click", "on-drag",
+            "on-drop", "on-mouse-down", "on-mouse-up",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

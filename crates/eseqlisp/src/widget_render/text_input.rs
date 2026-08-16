@@ -711,6 +711,13 @@ impl WidgetDefinition for TextInputWidget {
         &["value", "placeholder", "width", "height", "font-size"]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "placeholder", "width", "height", "font-size", "text-color",
+            "placeholder-color", "bg", "bg-color", "cursor-color", "ring-color", "on-change",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,
@@ -1094,6 +1101,14 @@ impl WidgetDefinition for TextboxWidget {
             "font-size",
             "min-lines",
             "max-lines",
+        ]
+    }
+
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "placeholder", "width", "height", "font-size", "min-lines", "max-lines",
+            "text-color", "placeholder-color", "bg", "bg-color", "cursor-color", "ring-color",
+            "on-change",
         ]
     }
 

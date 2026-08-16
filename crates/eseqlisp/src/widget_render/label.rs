@@ -285,6 +285,13 @@ impl WidgetDefinition for LabelWidget {
         &["active"]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "text", "color", "active", "active-color", "hover-color", "bg", "font-size",
+            "width", "height", "wrap", "h-align", "v-align",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

@@ -174,10 +174,14 @@ pub(in crate::lisp_host) fn register_process_natives(
     let process_authoring_for_def = Arc::clone(&process_authoring);
     let publish_for_def = publish.clone();
     let chain_state_for_def = process_chain_state.clone();
-    runtime.register_vm_native_with_docs(
+    runtime.register_vm_native_with_docs_and_keywords(
         "def-process",
-        "(def-process name :in (...) :out (...) :state (...) :every (beats n) :run body)",
-        "Define a scheduler-side musical process class.",
+        "(def-process name :doc text :in (...) :out (...) :state (...) :every duration :seed policy :target target :targets (...) :listen (...) :phase value :init body :run body)",
+        "Define a scheduler-side musical process class. Event handlers use dynamic :on-<listen-name> keys and therefore are not a fixed completion set.",
+        [
+            ":doc", ":in", ":out", ":state", ":every", ":seed", ":target", ":targets",
+            ":listen", ":phase", ":init", ":run",
+        ],
         move |args, vm| match register_process_def(
             args,
             vm,

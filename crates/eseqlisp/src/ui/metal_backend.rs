@@ -47,7 +47,7 @@ mod inner {
         AUTOCOMPLETE_ANCHOR_GAP_PX, AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
         AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
-        TiledRenderFrame,
+        TiledRenderFrame, completion_panel_columns,
     };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
@@ -5804,29 +5804,16 @@ fragment float4 live_spectrogram_frag(
                         .unwrap_or(0)
                         .max(12)
                         .min(34);
-                    let has_doc = comp.doc.is_some();
-                    let doc_gap = if has_doc { 1 } else { 0 };
-                    let desired_pane_w = if has_doc { 54 } else { label_w + 4 };
-                    let max_pane_w = if has_doc {
-                        total_cols
-                            .saturating_sub(popup_col + doc_gap + 2)
-                            .saturating_div(2)
-                            .max(label_w + 4)
-                    } else {
-                        total_cols.saturating_sub(popup_col + 2)
-                    };
-                    let pane_w = desired_pane_w.min(max_pane_w).max(label_w + 4).min(64);
-                    let show_doc = has_doc && pane_w >= 26;
-                    let total_panel_w = if show_doc {
-                        pane_w * 2 + doc_gap
-                    } else {
-                        pane_w
-                    };
-                    let popup_col = if popup_col + total_panel_w + 1 > total_cols {
-                        total_cols.saturating_sub(total_panel_w + 1)
-                    } else {
-                        popup_col
-                    };
+                    let panel_columns = completion_panel_columns(
+                        popup_col,
+                        total_cols,
+                        label_w,
+                        comp.doc.is_some(),
+                    );
+                    let popup_col = panel_columns.popup_col;
+                    let pane_w = panel_columns.pane_width;
+                    let show_doc = panel_columns.show_doc;
+                    let doc_gap = usize::from(show_doc);
                     let doc_col = popup_col + pane_w + doc_gap;
                     let doc_pad_x = 3usize;
                     let doc_pad_top = 1usize;

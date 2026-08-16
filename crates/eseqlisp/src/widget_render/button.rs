@@ -446,6 +446,16 @@ impl WidgetDefinition for ButtonWidget {
         ]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "text", "icon", "width", "height", "font-size", "padding", "active", "disabled",
+            "variant", "shape", "color", "active-color", "background-color",
+            "active-background-color", "border-color", "highlight-color", "shadow-color",
+            "corner-radius", "h-align", "v-align", "on-click", "on-press", "on-release",
+            "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

@@ -252,6 +252,15 @@ impl WidgetDefinition for VerticalSliderWidget {
         ]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "min", "max", "height", "fill", "color", "dot-color", "origin",
+            "items", "font-size", "haptic-min", "haptic-max", "haptic-value", "active",
+            "track-r", "track-g", "track-b", "on-change", "material", "plock-active",
+            "plock-color-r", "plock-color-g", "plock-color-b",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

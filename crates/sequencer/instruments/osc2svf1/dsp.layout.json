@@ -3,6 +3,28 @@
   "authored": true,
   "root": {
     "nodes": {
+      "+#0": {
+        "x": 25.264698,
+        "y": 98.36001
+      },
+      "+#1": {
+        "x": 97.205666,
+        "y": 120.060005,
+        "width": 22.015244
+      },
+      "+#2": {
+        "x": 210.62949,
+        "y": 116.96001,
+        "width": 16.612854
+      },
+      "add": {
+        "x": 101.377785,
+        "y": 40.312836
+      },
+      "add-2": {
+        "x": 141.58119,
+        "y": 46.95862
+      },
       "adsr-2": {
         "x": 172.9499,
         "y": 31.858263
@@ -14,54 +36,6 @@
       "audio": {
         "x": 110.62877,
         "y": 52.451866
-      },
-      "created-0": {
-        "x": 81.14697,
-        "y": 44.471542
-      },
-      "created-1": {
-        "x": 91.51186,
-        "y": 40.073017
-      },
-      "created-10": {
-        "x": 163.0434,
-        "y": 45.147327
-      },
-      "created-11": {
-        "x": 134.25781,
-        "y": 49.247776
-      },
-      "created-2": {
-        "x": 153.80997,
-        "y": 40.312836
-      },
-      "created-3": {
-        "x": 146.80693,
-        "y": 43.789143
-      },
-      "created-4": {
-        "x": 146.80693,
-        "y": 51.068558
-      },
-      "created-5": {
-        "x": 163.85883,
-        "y": 47.955368
-      },
-      "created-6": {
-        "x": 146.70996,
-        "y": 55.234375
-      },
-      "created-7": {
-        "x": 163.11832,
-        "y": 51.25861
-      },
-      "created-8": {
-        "x": 101.377785,
-        "y": 40.312836
-      },
-      "created-9": {
-        "x": 141.58119,
-        "y": 46.95862
       },
       "cut": {
         "x": 30.92994,
@@ -95,6 +69,14 @@
         "x": 175.40828,
         "y": 34.92194
       },
+      "filt_cutoff_lfo_depth": {
+        "x": 163.11832,
+        "y": 51.25861
+      },
+      "filt_lfo_rate": {
+        "x": 153.80997,
+        "y": 40.312836
+      },
       "floor-2": {
         "x": 135.43497,
         "y": 23.234373
@@ -115,6 +97,10 @@
         "x": 41.330566,
         "y": 10.275191
       },
+      "lfo_shape": {
+        "x": 163.85883,
+        "y": 47.955368
+      },
       "lfoenv": {
         "x": 119.39217,
         "y": 11.085459
@@ -129,22 +115,26 @@
         "width": 34.480774
       },
       "mul": {
-        "x": 113.79038,
-        "y": 20.289822
+        "x": 146.70996,
+        "y": 55.234375
       },
       "mul-0": {
         "x": 103.0,
         "y": 36.126476
       },
       "mul-2": {
+        "x": 113.79038,
+        "y": 20.289822
+      },
+      "mul-2-2": {
         "x": 45.87835,
         "y": 45.202797
       },
-      "mul-2-2": {
+      "mul-2-2-2": {
         "x": 108.6,
         "y": 44.907406
       },
-      "mul-2-2-2": {
+      "mul-2-2-2-2": {
         "x": 141.58119,
         "y": 37.279743
       },
@@ -160,7 +150,15 @@
         "x": 135.03268,
         "y": 30.559269
       },
+      "phase": {
+        "x": 163.0434,
+        "y": 45.147327
+      },
       "phasor-2": {
+        "x": 146.80693,
+        "y": 43.789143
+      },
+      "phasor-2-2": {
         "x": 118.39818,
         "y": 0.40050983
       },
@@ -208,11 +206,19 @@
         "x": 4.0,
         "y": 13.360001
       },
+      "svf-2": {
+        "x": 81.14697,
+        "y": 44.471542
+      },
       "tanh-2": {
         "x": 110.62877,
         "y": 48.080257
       },
       "triangle-2": {
+        "x": 146.80693,
+        "y": 51.068558
+      },
+      "triangle-2-2": {
         "x": 113.79038,
         "y": 15.690688
       },
@@ -221,10 +227,14 @@
         "y": 8.0
       },
       "value": {
+        "x": 91.51186,
+        "y": 40.073017
+      },
+      "value-2": {
         "x": 83.94697,
         "y": 32.43008
       },
-      "value-2": {
+      "value-2-2": {
         "x": 90.87874,
         "y": 32.084988
       },
@@ -235,9 +245,25 @@
       "width": {
         "x": 125.59802,
         "y": 18.268501
+      },
+      "wrap-2": {
+        "x": 134.25781,
+        "y": 49.247776
       }
     },
     "cables": {
+      "+#0:0->pitch-transpose-2-2:1": {
+        "segmented": true,
+        "y": 102.335014
+      },
+      "+#1:0->mul-0:0": {
+        "segmented": true,
+        "y": 122.39001
+      },
+      "+#2:0->add:1": {
+        "segmented": true,
+        "y": 119.3
+      },
       "attack:0->env:2": {
         "segmented": true,
         "y": 9.93
@@ -246,6 +272,10 @@
         "segmented": true,
         "y": 12.610001
       },
+      "detune:0->+#0:0": {
+        "segmented": true,
+        "y": 28.690002
+      },
       "fatk:0->adsr-2:2": {
         "segmented": true,
         "y": 26.010002
@@ -253,6 +283,10 @@
       "fdec:0->adsr-2:3": {
         "segmented": true,
         "y": 28.690002
+      },
+      "floor-2:0->+#0:1": {
+        "segmented": true,
+        "y": 96.05001
       },
       "frelease:0->adsr-2:5": {
         "segmented": true,
@@ -269,6 +303,22 @@
       "gate:0->env:0": {
         "segmented": true,
         "y": 18.49
+      },
+      "mix-2:0->+#1:0": {
+        "segmented": true,
+        "y": 119.3
+      },
+      "mul-2-2-2-2:0->+#2:1": {
+        "segmented": true,
+        "y": 109.69
+      },
+      "mul-2-2:0->+#1:1": {
+        "segmented": true,
+        "y": 108.76001
+      },
+      "mul:0->+#2:0": {
+        "segmented": true,
+        "y": 114.340004
       },
       "release:0->env:5": {
         "segmented": true,
@@ -288,6 +338,10 @@
       }
     },
     "inputPresentation": {
+      "add-2:0": "cable",
+      "add-2:1": "cable",
+      "add:0": "cable",
+      "add:1": "cable",
       "adsr-2:0": "cable",
       "adsr-2:1": "cable",
       "adsr-2:2": "inline-raw-param",
@@ -295,20 +349,6 @@
       "adsr-2:4": "inline-raw-param",
       "adsr-2:5": "inline-raw-param",
       "audio:0": "cable",
-      "created-0:0": "cable",
-      "created-0:1": "cable",
-      "created-0:2": "cable",
-      "created-0:3": "cable",
-      "created-11:0": "cable",
-      "created-3:0": "cable",
-      "created-4:0": "cable",
-      "created-4:1": "cable",
-      "created-6:0": "cable",
-      "created-6:1": "cable",
-      "created-8:0": "cable",
-      "created-8:1": "cable",
-      "created-9:0": "cable",
-      "created-9:1": "cable",
       "env:2": "inline-raw-param",
       "env:3": "inline-raw-param",
       "env:4": "inline-raw-param",
@@ -318,6 +358,8 @@
       "mix-2:1": "cable",
       "mix-2:2": "cable",
       "mul-0:0": "cable",
+      "mul-2-2-2-2:0": "cable",
+      "mul-2-2-2-2:1": "cable",
       "mul-2-2-2:0": "cable",
       "mul-2-2-2:1": "cable",
       "mul-2-2:0": "cable",
@@ -326,6 +368,7 @@
       "mul-2:1": "cable",
       "mul:0": "cable",
       "mul:1": "cable",
+      "phasor-2-2:0": "cable",
       "phasor-2:0": "cable",
       "pitch-transpose-2-2:0": "cable",
       "pitch-transpose-2-2:1": "cable",
@@ -338,8 +381,15 @@
       "sub1-3:0": "cable",
       "sub1-3:1": "cable",
       "sub1-3:2": "cable",
+      "svf-2:0": "cable",
+      "svf-2:1": "cable",
+      "svf-2:2": "cable",
+      "svf-2:3": "cable",
       "tanh-2:0": "cable",
-      "triangle-2:0": "cable"
+      "triangle-2-2:0": "cable",
+      "triangle-2:0": "cable",
+      "triangle-2:1": "cable",
+      "wrap-2:0": "cable"
     }
   },
   "macros": {
@@ -614,7 +664,7 @@
         }
       },
       {
-        "id": "mul-2-2-2",
+        "id": "mul-2-2-2-2",
         "op": "*",
         "kind": "builtin",
         "label": "*",
@@ -660,7 +710,7 @@
         "id": "res",
         "op": "param",
         "kind": "param",
-        "label": "param res @min 0 @max 1  @default 0.5",
+        "label": "param res @min 0.3 @max 9  @default 0.5",
         "outputs": [
           "out"
         ],
@@ -696,7 +746,7 @@
         }
       },
       {
-        "id": "value-2",
+        "id": "value-2-2",
         "op": "0",
         "kind": "constant",
         "label": "0",
@@ -718,7 +768,7 @@
         }
       },
       {
-        "id": "mul-2-2",
+        "id": "mul-2-2-2",
         "op": "*",
         "kind": "builtin",
         "label": "*",
@@ -776,7 +826,7 @@
         ]
       },
       {
-        "id": "value",
+        "id": "value-2",
         "op": "1",
         "kind": "constant",
         "label": "1",
@@ -1021,7 +1071,7 @@
         ]
       },
       {
-        "id": "mul-2",
+        "id": "mul-2-2",
         "op": "*",
         "kind": "builtin",
         "label": "*",
@@ -1077,7 +1127,7 @@
         }
       },
       {
-        "id": "triangle-2",
+        "id": "triangle-2-2",
         "op": "triangle",
         "kind": "builtin",
         "label": "triangle",
@@ -1111,10 +1161,44 @@
         ]
       },
       {
-        "id": "mul",
+        "id": "mul-2",
         "op": "*",
         "kind": "builtin",
         "label": "*",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "connected"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "phasor-2-2",
+        "op": "phasor",
+        "kind": "builtin",
+        "label": "phasor",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "connected"
+          }
+        ],
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "add",
+        "op": "+",
+        "kind": "builtin",
+        "label": "+",
         "args": [
           {
             "kind": "connected"
@@ -1145,41 +1229,7 @@
         ]
       },
       {
-        "id": "created-8",
-        "op": "+",
-        "kind": "builtin",
-        "label": "+",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "created-3",
-        "op": "phasor",
-        "kind": "builtin",
-        "label": "phasor",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "connected"
-          }
-        ],
-        "outputs": [
-          "out"
-        ]
-      },
-      {
-        "id": "created-0",
+        "id": "svf-2",
         "op": "svf",
         "kind": "builtin",
         "label": "svf",
@@ -1202,7 +1252,7 @@
         ]
       },
       {
-        "id": "created-4",
+        "id": "triangle-2",
         "op": "triangle",
         "kind": "builtin",
         "label": "triangle",
@@ -1219,7 +1269,7 @@
         ]
       },
       {
-        "id": "created-2",
+        "id": "filt_lfo_rate",
         "op": "param",
         "kind": "param",
         "label": "param filt_lfo_rate @min 0.2 @max 4 @default 1",
@@ -1232,7 +1282,7 @@
         }
       },
       {
-        "id": "created-1",
+        "id": "value",
         "op": "0",
         "kind": "constant",
         "label": "0",
@@ -1241,7 +1291,7 @@
         ]
       },
       {
-        "id": "created-6",
+        "id": "mul",
         "op": "*",
         "kind": "builtin",
         "label": "*",
@@ -1258,7 +1308,7 @@
         ]
       },
       {
-        "id": "created-7",
+        "id": "filt_cutoff_lfo_depth",
         "op": "param",
         "kind": "param",
         "label": "param filt_cutoff_lfo_depth @min 0 @max 3000 @default 0",
@@ -1271,7 +1321,7 @@
         }
       },
       {
-        "id": "created-11",
+        "id": "wrap-2",
         "op": "wrap",
         "kind": "builtin",
         "label": "wrap 0 1",
@@ -1293,7 +1343,7 @@
         ]
       },
       {
-        "id": "created-5",
+        "id": "lfo_shape",
         "op": "param",
         "kind": "param",
         "label": "param lfo_shape @min 0 @max 1 @default 0.4",
@@ -1306,7 +1356,7 @@
         }
       },
       {
-        "id": "created-9",
+        "id": "add-2",
         "op": "+",
         "kind": "builtin",
         "label": "+",
@@ -1323,7 +1373,7 @@
         ]
       },
       {
-        "id": "created-10",
+        "id": "phase",
         "op": "param",
         "kind": "param",
         "label": "param phase @min 0 @max 1",
@@ -1402,7 +1452,7 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "mul-2-2",
+        "fromNode": "mul-2-2-2",
         "fromOutput": 0,
         "toNode": "tanh-2",
         "toInput": 0,
@@ -1428,7 +1478,7 @@
       {
         "fromNode": "adsr-2",
         "fromOutput": 0,
-        "toNode": "mul-2-2-2",
+        "toNode": "mul-2-2-2-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -1436,7 +1486,7 @@
       {
         "fromNode": "fenv",
         "fromOutput": 0,
-        "toNode": "mul-2-2-2",
+        "toNode": "mul-2-2-2-2",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
@@ -1444,7 +1494,7 @@
       {
         "fromNode": "drive",
         "fromOutput": 0,
-        "toNode": "mul-2-2",
+        "toNode": "mul-2-2-2",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
@@ -1612,13 +1662,13 @@
       {
         "fromNode": "noisegain",
         "fromOutput": 0,
-        "toNode": "mul-2",
+        "toNode": "mul-2-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "mul-2",
+        "fromNode": "mul-2-2",
         "fromOutput": 0,
         "toNode": "mul-0",
         "toInput": 0,
@@ -1628,6 +1678,22 @@
       {
         "fromNode": "scale-2",
         "fromOutput": 0,
+        "toNode": "mul-2-2",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "lforate",
+        "fromOutput": 0,
+        "toNode": "triangle-2-2",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "lfoenv",
+        "fromOutput": 0,
         "toNode": "mul-2",
         "toInput": 1,
         "kind": "forward",
@@ -1636,37 +1702,21 @@
       {
         "fromNode": "lforate",
         "fromOutput": 0,
-        "toNode": "triangle-2",
+        "toNode": "phasor-2-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "lfoenv",
+        "fromNode": "triangle-2-2",
         "fromOutput": 0,
-        "toNode": "mul",
-        "toInput": 1,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "lforate",
-        "fromOutput": 0,
-        "toNode": "phasor-2",
+        "toNode": "mul-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "triangle-2",
-        "fromOutput": 0,
-        "toNode": "mul",
-        "toInput": 0,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "mul",
+        "fromNode": "mul-2",
         "fromOutput": 0,
         "toNode": "pitch-transpose-2",
         "toInput": 1,
@@ -1698,25 +1748,25 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "mul-2-2-2",
+        "fromNode": "mul-2-2-2-2",
         "fromOutput": 0,
-        "toNode": "created-8",
+        "toNode": "add",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-0",
+        "fromNode": "svf-2",
         "fromOutput": 0,
-        "toNode": "mul-2-2",
+        "toNode": "mul-2-2-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-6",
+        "fromNode": "mul",
         "fromOutput": 0,
-        "toNode": "created-8",
+        "toNode": "add",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
@@ -1724,47 +1774,47 @@
       {
         "fromNode": "cut",
         "fromOutput": 0,
-        "toNode": "created-8",
+        "toNode": "add",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-1",
+        "fromNode": "value",
         "fromOutput": 0,
-        "toNode": "created-0",
+        "toNode": "svf-2",
         "toInput": 3,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-2",
+        "fromNode": "filt_lfo_rate",
         "fromOutput": 0,
-        "toNode": "created-3",
+        "toNode": "phasor-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-4",
+        "fromNode": "triangle-2",
         "fromOutput": 0,
-        "toNode": "created-6",
+        "toNode": "mul",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-8",
+        "fromNode": "add",
         "fromOutput": 0,
-        "toNode": "created-0",
+        "toNode": "svf-2",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-7",
+        "fromNode": "filt_cutoff_lfo_depth",
         "fromOutput": 0,
-        "toNode": "created-6",
+        "toNode": "mul",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
@@ -1772,7 +1822,7 @@
       {
         "fromNode": "mul-0",
         "fromOutput": 0,
-        "toNode": "created-0",
+        "toNode": "svf-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -1780,47 +1830,47 @@
       {
         "fromNode": "res",
         "fromOutput": 0,
-        "toNode": "created-0",
+        "toNode": "svf-2",
         "toInput": 2,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-3",
+        "fromNode": "phasor-2",
         "fromOutput": 0,
-        "toNode": "created-9",
+        "toNode": "add-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-9",
+        "fromNode": "add-2",
         "fromOutput": 0,
-        "toNode": "created-11",
+        "toNode": "wrap-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-11",
+        "fromNode": "wrap-2",
         "fromOutput": 0,
-        "toNode": "created-4",
+        "toNode": "triangle-2",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-10",
+        "fromNode": "phase",
         "fromOutput": 0,
-        "toNode": "created-9",
+        "toNode": "add-2",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "created-5",
+        "fromNode": "lfo_shape",
         "fromOutput": 0,
-        "toNode": "created-4",
+        "toNode": "triangle-2",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"

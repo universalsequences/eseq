@@ -731,6 +731,22 @@ pub enum LayoutSpec {
 pub struct SymbolMetadata {
     pub signature: String,
     pub docs: String,
+    /// Accepted keyword argument names, normalized to include the leading `:`.
+    /// Explicit metadata avoids confusing keyword-valued examples for names.
+    pub keyword_args: Vec<String>,
+}
+
+fn normalize_keyword_args<I, S>(keyword_args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    keyword_args
+        .into_iter()
+        .map(|keyword| format!(":{}", keyword.as_ref().trim_start_matches(':')))
+        .filter(|keyword| keyword.len() > 1 && seen.insert(keyword.clone()))
+        .collect()
 }
 
 #[derive(Clone, Default)]
@@ -1547,6 +1563,49 @@ impl Runtime {
         self.register_native_impl(name, Some(signature.into()), Some(docs.into()), f);
     }
 
+    pub fn register_native_with_docs_and_keywords<F, I, S>(
+        &mut self,
+        name: &str,
+        signature: impl Into<String>,
+        docs: impl Into<String>,
+        keyword_args: I,
+        f: F,
+    ) where
+        F: Fn(Vec<Value>, &mut NativeContext) -> NativeResult + 'static,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.register_native_impl(name, Some(signature.into()), Some(docs.into()), f);
+        if let Some(metadata) = self.symbol_metadata.get_mut(name) {
+            metadata.keyword_args = normalize_keyword_args(keyword_args);
+        }
+        self.invalidate_symbol_cache();
+    }
+
+    pub fn register_vm_native_with_docs_and_keywords<F, I, S>(
+        &mut self,
+        name: &str,
+        signature: impl Into<String>,
+        docs: impl Into<String>,
+        keyword_args: I,
+        f: F,
+    ) where
+        F: Fn(Vec<Value>, &mut crate::vm::VM) -> Value + 'static,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.vm.register_native_with_vm(name, f);
+        self.symbol_metadata.insert(
+            name.to_string(),
+            SymbolMetadata {
+                signature: signature.into(),
+                docs: docs.into(),
+                keyword_args: normalize_keyword_args(keyword_args),
+            },
+        );
+        self.invalidate_symbol_cache();
+    }
+
     pub fn register_vm_native_with_docs<F>(
         &mut self,
         name: &str,
@@ -1562,6 +1621,7 @@ impl Runtime {
             SymbolMetadata {
                 signature: signature.into(),
                 docs: docs.into(),
+                keyword_args: Vec::new(),
             },
         );
         self.invalidate_symbol_cache();
@@ -1589,6 +1649,28 @@ impl Runtime {
             SymbolMetadata {
                 signature: signature.into(),
                 docs: docs.into(),
+                keyword_args: Vec::new(),
+            },
+        );
+        self.invalidate_symbol_cache();
+    }
+
+    pub fn document_symbol_with_keywords<I, S>(
+        &mut self,
+        name: impl Into<String>,
+        signature: impl Into<String>,
+        docs: impl Into<String>,
+        keyword_args: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.symbol_metadata.insert(
+            name.into(),
+            SymbolMetadata {
+                signature: signature.into(),
+                docs: docs.into(),
+                keyword_args: normalize_keyword_args(keyword_args),
             },
         );
         self.invalidate_symbol_cache();
@@ -1604,6 +1686,7 @@ impl Runtime {
                 SymbolMetadata {
                     signature: signature.to_string(),
                     docs: docs.to_string(),
+                    keyword_args: Vec::new(),
                 },
             );
         }
@@ -1617,6 +1700,11 @@ impl Runtime {
                 "ui/style",
                 "(ui/style :state style-map ...)",
                 "Return a widget style map, commonly keyed by :pressed, :hover, or :focused.",
+            ),
+            (
+                "box",
+                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :focusable bool :key value :on-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
+                "Create a layout container with optional background, border, interaction, drag/drop, and selection styling.",
             ),
             (
                 "get",
@@ -1701,47 +1789,31 @@ impl Runtime {
             ("shadow", "(shadow :key value ...)", "Return a tagged SDF shadow expression."),
         ]);
 
-        for widget in [
-            "label",
-            "button",
-            "badge",
-            "slider",
-            "hslider",
-            "vslider",
-            "toggle",
-            "piano-keyboard",
-            "linegraph",
-            "matrix",
-            "knob",
-            "knob-number",
-            "adsr-editor",
-            "meter",
-            "text-input",
-            "number-picker",
-            "dropdown",
-            "menu-button",
-            "select",
-            "v-stack",
-            "h-stack",
-            "wrap",
-            "box",
-            "modal",
-            "grid",
-            "tabs",
-            "response-curve-editor",
-            "eq8-editor",
-            "timeline",
-            "transport-clock",
-            "waveform",
-            "scroll",
-            "tree",
-        ] {
-            self.document_symbol(
-                widget,
-                format!("({widget} [children-or-props ...])"),
-                format!("Construct a {widget} UI widget map."),
-            );
+        for &widget in crate::widgets::BUILTIN_WIDGET_NAMES {
+            let definition = crate::widget_render::widget_definition(widget).or_else(|| {
+                if widget == "select" {
+                    // `select` is the lightweight constructor alias for dropdowns.
+                    crate::widget_render::widget_definition("dropdown")
+                } else {
+                    None
+                }
+            });
+            let metadata = self
+                .symbol_metadata
+                .entry(widget.to_string())
+                .or_insert_with(|| SymbolMetadata {
+                    signature: format!("({widget} [children-or-props ...])"),
+                    docs: format!("Construct a {widget} UI widget map."),
+                    keyword_args: Vec::new(),
+                });
+            if let Some(definition) = definition {
+                let props = definition.completion_props();
+                if !props.is_empty() {
+                    metadata.keyword_args = normalize_keyword_args(props.iter().copied());
+                }
+            }
         }
+        self.invalidate_symbol_cache();
     }
 
     fn register_native_impl<F>(
@@ -1772,7 +1844,11 @@ impl Runtime {
         });
         if let (Some(signature), Some(docs)) = (signature, docs) {
             self.symbol_metadata
-                .insert(name.to_string(), SymbolMetadata { signature, docs });
+                .insert(name.to_string(), SymbolMetadata {
+                    signature,
+                    docs,
+                    keyword_args: Vec::new(),
+                });
         }
         self.invalidate_symbol_cache();
     }
@@ -2730,6 +2806,11 @@ impl Runtime {
             .iter()
             .map(|name| crate::modules::strip_implicit(name).to_string())
             .collect::<Vec<_>>();
+        symbols.extend(
+            self.symbol_metadata
+                .keys()
+                .map(|name| crate::modules::strip_implicit(name).to_string()),
+        );
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
                 let display = crate::modules::strip_implicit(global);
@@ -2760,6 +2841,7 @@ impl Runtime {
                     metadata.entry(label).or_insert_with(|| SymbolMetadata {
                         signature: format!("{display}.{key}"),
                         docs: format!("Field '{key}' on runtime map '{display}'."),
+                        keyword_args: Vec::new(),
                     });
                 }
             }

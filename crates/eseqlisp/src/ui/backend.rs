@@ -117,6 +117,52 @@ pub const AUTOCOMPLETE_TEXT_CELL_SCALE: f32 = 0.82;
 /// Gap between the bottom of the cursor's text row and the top of the popup.
 pub const AUTOCOMPLETE_ANCHOR_GAP_PX: f32 = 3.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompletionPanelColumns {
+    pub popup_col: usize,
+    pub pane_width: usize,
+    pub show_doc: bool,
+}
+
+/// Lay out the completion panel against the whole viewport, then clamp the
+/// combined list/document surface around its cursor anchor. Basing doc
+/// visibility only on columns to the right of the anchor made the documentation
+/// disappear one character at a time even when both panes fit after shifting.
+pub(crate) fn completion_panel_columns(
+    anchor_col: usize,
+    total_cols: usize,
+    label_width: usize,
+    has_doc: bool,
+) -> CompletionPanelColumns {
+    const DOC_GAP: usize = 1;
+    const MIN_DOC_PANE_WIDTH: usize = 26;
+    const DESIRED_DOC_PANE_WIDTH: usize = 54;
+    const MAX_PANE_WIDTH: usize = 64;
+
+    let viewport_width = total_cols.saturating_sub(1).max(1);
+    let min_list_width = label_width.saturating_add(4).min(viewport_width);
+    let max_two_pane_width = viewport_width.saturating_sub(DOC_GAP) / 2;
+    let show_doc = has_doc
+        && max_two_pane_width >= MIN_DOC_PANE_WIDTH
+        && max_two_pane_width >= min_list_width;
+    let pane_width = if show_doc {
+        DESIRED_DOC_PANE_WIDTH
+            .min(max_two_pane_width)
+            .max(min_list_width)
+            .min(MAX_PANE_WIDTH)
+    } else {
+        min_list_width.max(12).min(viewport_width).min(MAX_PANE_WIDTH)
+    };
+    let total_panel_width = if show_doc {
+        pane_width * 2 + DOC_GAP
+    } else {
+        pane_width
+    };
+    let popup_col = anchor_col.min(total_cols.saturating_sub(total_panel_width + 1));
+
+    CompletionPanelColumns { popup_col, pane_width, show_doc }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompletionEntry {
     pub label: String,
@@ -255,4 +301,29 @@ pub trait Backend {
     }
     fn poll_event(&mut self, timeout: Duration) -> Option<Event>;
     fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::completion_panel_columns;
+
+    #[test]
+    fn completion_docs_stay_visible_as_anchor_moves_right() {
+        let early = completion_panel_columns(6, 72, 12, true);
+        let later = completion_panel_columns(18, 72, 12, true);
+
+        assert!(early.show_doc);
+        assert!(later.show_doc);
+        assert_eq!(early.pane_width, later.pane_width);
+        assert!(later.popup_col <= early.popup_col + 12);
+        assert!(later.popup_col + later.pane_width * 2 + 1 < 72);
+    }
+
+    #[test]
+    fn completion_docs_hide_only_when_viewport_is_genuinely_too_narrow() {
+        let panel = completion_panel_columns(8, 48, 12, true);
+
+        assert!(!panel.show_doc);
+        assert!(panel.popup_col + panel.pane_width < 48);
+    }
 }

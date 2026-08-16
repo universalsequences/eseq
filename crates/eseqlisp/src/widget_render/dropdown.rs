@@ -452,6 +452,16 @@ impl WidgetDefinition for DropdownWidget {
         ]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "options", "value", "value-index", "value-index-offset", "width", "height",
+            "font-size", "icon", "focusable", "action-menu", "badge-color", "bg-color",
+            "border-color", "border-width", "check-color", "chevron-color", "hover-bg",
+            "menu-bg", "menu-border-color", "ring-color", "scrollbar-color", "text-color",
+            "on-change", "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
+        ]
+    }
+
     fn renders_own_focus(&self) -> bool {
         true
     }

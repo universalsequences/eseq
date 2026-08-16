@@ -6048,6 +6048,61 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn sequencer_authoring_forms_document_contextual_completion_keywords() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        register_sequencer_natives(
+            &mut runtime,
+            state,
+            new_eval_context(0, 0),
+            shared_native_metadata(
+                fallback_effect_descriptors(1),
+                fallback_instrument_descriptors(1),
+            ),
+        );
+
+        let metadata = runtime
+            .symbol_metadata()
+            .get("def-sequencer")
+            .expect("def-sequencer completion metadata");
+
+        assert!(metadata.keyword_args.iter().any(|keyword| keyword == ":tick"));
+        assert!(metadata.keyword_args.iter().any(|keyword| keyword == ":shape"));
+        assert!(!metadata.keyword_args.iter().any(|keyword| keyword == ":16"));
+
+        let seq_emit = runtime
+            .symbol_metadata()
+            .get("seq-emit")
+            .expect("seq-emit completion metadata");
+        assert!(seq_emit.keyword_args.iter().any(|keyword| keyword == ":track"));
+        assert!(seq_emit.keyword_args.iter().any(|keyword| keyword == ":quantize"));
+        assert!(!seq_emit.keyword_args.iter().any(|keyword| keyword == ":now"));
+    }
+
+    #[test]
+    fn def_process_documents_contextual_completion_keywords() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        register_published_process_authoring_natives(
+            &mut runtime,
+            state,
+            Arc::new(AtomicUsize::new(0)),
+        );
+
+        let metadata = runtime
+            .symbol_metadata()
+            .get("def-process")
+            .expect("def-process completion metadata");
+
+        for expected in [":doc", ":in", ":targets", ":listen", ":run"] {
+            assert!(
+                metadata.keyword_args.iter().any(|keyword| keyword == expected),
+                "def-process should offer {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn seq_track_steps_returns_list_value() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
