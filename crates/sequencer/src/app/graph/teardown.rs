@@ -278,7 +278,7 @@ impl GraphController<'_> {
             }
             unsafe {
                 crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
-                crate::effects::conv_reverb::clear_instance(node_id as i32);
+                crate::effects::dgen_builtin::clear_instance(node_id as i32);
                 if modulator_node_id != 0 {
                     crate::audiograph::delete_node(self.app.graph.lg.0, modulator_node_id as i32);
                 }
@@ -327,7 +327,7 @@ impl GraphController<'_> {
                         );
                     }
                 }
-                crate::effects::conv_reverb::clear_instance(effect.node_id as i32);
+                crate::effects::dgen_builtin::clear_instance(effect.node_id as i32);
             }
             self.app.editor.effect_chain_leases.retire_host(
                 FxChainLocator::RackSlot {

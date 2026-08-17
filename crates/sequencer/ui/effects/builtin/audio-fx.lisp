@@ -15,6 +15,7 @@
 (import eseq.effects.builtin.multiband :as mb)
 (import eseq.effects.builtin.tape :as tape)
 (import eseq.effects.builtin.convolution-reverb :as cr)
+(import eseq.effects.builtin.filter-table :as ft)
 (import eseq.effects.builtin.filterbank :as fb)
 
 ;; Migration alias (module spec §10). builtin-audio-fx-ui keeps its spelling —
@@ -55,6 +56,8 @@
                   (tape/tape-ui fx)
                   (if (= (get fx :name) "Convolution Reverb")
                     (cr/convolution-reverb-ui fx)
-                    (if (= (get fx :name) "Filterbank")
-                      (fb/panel fx)
-                      false)))))))))))))))))
+                    (if (= (get fx :name) "Filter Table")
+                      (ft/filter-table-ui fx)
+                      (if (= (get fx :name) "Filterbank")
+                        (fb/panel fx)
+                        false))))))))))))))))))

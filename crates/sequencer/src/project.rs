@@ -419,7 +419,7 @@ impl ProjectEffectSource {
             return Self::Builtin { name: name.to_string() };
         }
         if crate::effects::EffectDescriptor::builtin_insert(name).is_some()
-            || crate::effects::conv_reverb::is_dgen_builtin(name)
+            || crate::effects::dgen_builtin::contains(name)
         {
             return Self::Builtin { name: name.to_string() };
         }
@@ -1312,9 +1312,9 @@ pub struct ProjectEffectSlot {
     pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
-    /// Effect-specific instance data that isn't a numeric param. Currently just
-    /// the Convolution Reverb's impulse-response reference (sample hash/stem).
+    /// Host-managed effect source references that are not numeric parameters.
     pub ir: Option<String>,
+    pub table: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1729,6 +1729,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
             ir: value.ir.clone(),
+            table: value.table.clone(),
         }
     }
 }
@@ -1757,6 +1758,7 @@ impl ProjectEffectSlot {
             param_node_spans: self.param_node_spans,
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: self.ir,
+            table: self.table,
         }
     }
 }
@@ -2604,6 +2606,8 @@ struct SparseProjectEffectSlot {
     param_node_spans: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2624,6 +2628,8 @@ struct DenseProjectEffectSlot {
     param_node_spans: Vec<u32>,
     #[serde(default)]
     ir: Option<String>,
+    #[serde(default)]
+    table: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2728,6 +2734,7 @@ impl Serialize for ProjectEffectSlot {
             && key_locks_sparse.is_empty()
             && tensor_params.is_empty()
             && self.ir.is_none()
+            && self.table.is_none()
         {
             return Option::<()>::None.serialize(serializer);
         }
@@ -2741,6 +2748,7 @@ impl Serialize for ProjectEffectSlot {
             param_node_indices: self.param_node_indices.clone(),
             param_node_spans: self.param_node_spans.clone(),
             ir: self.ir.clone(),
+            table: self.table.clone(),
         }
         .serialize(serializer)
     }
@@ -2792,6 +2800,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     param_node_indices: slot.param_node_indices,
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
+                    table: slot.table,
                 }
             }
             ProjectEffectSlotRepr::Dense(slot) => Self {
@@ -2809,6 +2818,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 param_node_indices: slot.param_node_indices,
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
+                table: slot.table,
             },
             ProjectEffectSlotRepr::Empty(_) => Self {
                 num_params: 0,
@@ -2821,6 +2831,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
+                table: None,
             },
         })
     }
@@ -2991,6 +3002,7 @@ mod tests {
                         param_node_spans: vec![1, 1],
                         tensor_params: Vec::new(),
                         ir: None,
+                        table: None,
                     },
                     ProjectEffectSlot {
                         num_params: 0,
@@ -3003,6 +3015,7 @@ mod tests {
                         param_node_spans: vec![],
                         tensor_params: Vec::new(),
                         ir: None,
+                        table: None,
                     },
                 ],
                 instrument_base_note_offsets: vec![0.0, 12.0],
@@ -4585,7 +4598,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_slot_persists_ir_reference() {
+    fn effect_slot_persists_host_managed_asset_references() {
         let slot = ProjectEffectSlot {
             num_params: 2,
             defaults: vec![0.35, 1.0],
@@ -4597,11 +4610,14 @@ mod tests {
             param_node_spans: vec![1, 1],
             tensor_params: Vec::new(),
             ir: Some("lexicon-300-rich-plate".to_string()),
+            table: Some("vowel-bank".to_string()),
         };
-        let json = serde_json::to_string(&slot).expect("serialize slot with ir");
+        let json = serde_json::to_string(&slot).expect("serialize slot with assets");
         assert!(json.contains("\"ir\":\"lexicon-300-rich-plate\""), "{json}");
-        let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip slot with ir");
+        assert!(json.contains("\"table\":\"vowel-bank\""), "{json}");
+        let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip assets");
         assert_eq!(back.ir.as_deref(), Some("lexicon-300-rich-plate"));
+        assert_eq!(back.table.as_deref(), Some("vowel-bank"));
     }
 
     #[test]
@@ -4630,6 +4646,7 @@ mod tests {
             param_node_spans: vec![1, 1],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let json = serde_json::to_string(&slot).expect("serialize key-lock slot");
@@ -4668,6 +4685,7 @@ mod tests {
                 plocks: tensor_plocks,
             }],
             ir: None,
+            table: None,
         };
 
         let json = serde_json::to_string(&slot).expect("serialize tensor slot");

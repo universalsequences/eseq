@@ -62,6 +62,7 @@ pub struct EffectRenderOptions {
     pub block_size: usize,
     pub frames: usize,
     pub param_overrides: Vec<(String, f32)>,
+    pub tensor_overrides: Vec<(String, Vec<f32>)>,
     pub input_overrides: Vec<(usize, f32)>,
 }
 

@@ -479,7 +479,7 @@ impl App {
                     crate::audiograph::delete_node(self.graph.lg.0, slot.modulator_node_id);
                 }
             }
-            crate::effects::conv_reverb::clear_instance(slot.node_id);
+            crate::effects::dgen_builtin::clear_instance(slot.node_id);
         }
         self.editor.effect_chain_leases.remap_slots(locator, &source_slots, batch.serial)?;
         drop(batch);
@@ -491,6 +491,11 @@ impl App {
             if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
                 self.restore_prepared_rack_effect_ir(
                     track, rack_slot, slot, reference, ir.clone(),
+                )?;
+            }
+            if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+                self.restore_prepared_rack_filter_table(
+                    track, rack_slot, slot, reference, table.clone(),
                 )?;
             }
         }
@@ -862,7 +867,7 @@ impl App {
                     crate::audiograph::delete_node(self.graph.lg.0, slot.modulator_node_id);
                 }
             }
-            crate::effects::conv_reverb::clear_instance(slot.node_id);
+            crate::effects::dgen_builtin::clear_instance(slot.node_id);
         }
         self.editor.effect_chain_leases.remap_slots(locator, &source_slots, batch.serial)?;
         drop(batch);
@@ -879,6 +884,9 @@ impl App {
         for (slot, values) in target.live_values.iter().enumerate() {
             if let (Some(reference), Some(ir)) = (&values.ir, &values.prepared_ir) {
                 self.restore_prepared_bus_effect_ir(bus_idx, slot, reference, ir.clone())?;
+            }
+            if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+                self.restore_prepared_bus_filter_table(bus_idx, slot, reference, table.clone())?;
             }
         }
         let ids = target.instances.iter().map(|instance| instance.id).collect::<Vec<_>>();
@@ -1069,12 +1077,12 @@ impl App {
                     source
                 } else if EffectDescriptor::builtin_insert(&name).is_some() {
                     RetainedEffectSource::NativeBuiltin { name }
-                } else if crate::effects::conv_reverb::is_dgen_builtin(&name) {
+                } else if let Some(builtin) = crate::effects::dgen_builtin::find(&name) {
                     RetainedEffectSource::Compiled {
                         name,
-                        source: crate::effects::conv_reverb::dsp_source().to_string(),
+                        source: builtin.source.to_string(),
                         asset_base: None,
-                        origin: crate::lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+                        origin: builtin.origin,
                     }
                 } else {
                     let path = crate::lisp_host::effect_source_path(&name);
@@ -1427,7 +1435,7 @@ impl App {
                     crate::audiograph::delete_node(self.graph.lg.0, slot.modulator_node_id);
                 }
             }
-            crate::effects::conv_reverb::clear_instance(slot.node_id);
+            crate::effects::dgen_builtin::clear_instance(slot.node_id);
         }
         self.editor
             .effect_chain_leases
@@ -1468,6 +1476,16 @@ impl App {
                             BUILTIN_SLOT_COUNT + offset,
                             reference,
                             ir.clone(),
+                        )?;
+                    }
+                    if let (Some(reference), Some(table)) =
+                        (&values.table, &values.prepared_table)
+                    {
+                        self.restore_prepared_track_filter_table(
+                            track,
+                            BUILTIN_SLOT_COUNT + offset,
+                            reference,
+                            table.clone(),
                         )?;
                     }
                 }
@@ -3754,6 +3772,7 @@ fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnap
         param_node_spans: _,
         transport_phase_param_idx: _,
         ir,
+        table,
     } = snapshot;
     bytes.usize(*num_params as usize);
     bytes.f32_slice(defaults);
@@ -3788,6 +3807,11 @@ fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnap
     if let Some(ir) = ir {
         bytes.usize(ir.len());
         bytes.0.extend_from_slice(ir.as_bytes());
+    }
+    bytes.bool(table.is_some());
+    if let Some(table) = table {
+        bytes.usize(table.len());
+        bytes.0.extend_from_slice(table.as_bytes());
     }
 }
 
@@ -5861,6 +5885,62 @@ pub fn apply_recorded_track_effect_ir_mutation(
     Ok(EditOutcome::Applied(history_move))
 }
 
+pub fn apply_recorded_track_filter_table_mutation(
+    app: &mut App,
+    track: usize,
+    slot_idx: usize,
+    source_path: &std::path::Path,
+    reference: &str,
+) -> Result<EditOutcome, EditError> {
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = ResolvedDeviceTarget {
+        id: DeviceId::AudioEffect(app.device_registry.audio_effect(track_id, slot_idx)),
+        track,
+        pattern,
+        slot_idx: Some(slot_idx),
+    };
+    let before = capture_device_value_snapshot(app, target)?;
+    let prepared = std::sync::Arc::new(
+        crate::effects::filter_table::prepare_table(source_path)
+            .map_err(EditError::InvalidTarget)?,
+    );
+    finish_active_gesture(app);
+    let node_id = app.state.pattern.effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+        .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+        .ok_or_else(|| EditError::InvalidTarget("Track effect slot not found".to_string()))?;
+    app.apply_prepared_filter_table_to_node(node_id, prepared, reference, source_path)
+        .map_err(EditError::InvalidTarget)?;
+    let after = capture_device_value_snapshot(app, target)?;
+    if before.bit_exact_eq(&after) {
+        return Ok(EditOutcome::NoOp);
+    }
+    restore_device_value_snapshot(app, target, &after)?;
+    app.state.publish_scheduler_snapshot();
+    let patch = DeviceValuesPatch {
+        target: target.id,
+        pattern,
+        before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    let history_move = app.history.commit(
+        format!("Load Filter Table '{reference}'"),
+        None,
+        EditPatch::DeviceValues(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
+}
+
 fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
     match cmd {
         AppCommand::ToggleTrackGate { track }
@@ -7568,6 +7648,10 @@ fn replay_bus_effect_values_patch(
             app.restore_prepared_bus_effect_ir(bus_idx, slot, reference, ir.clone())
                 .map_err(EditError::ReplayFailed)?;
         }
+        if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+            app.restore_prepared_bus_filter_table(bus_idx, slot, reference, table.clone())
+                .map_err(EditError::ReplayFailed)?;
+        }
         app.push_bus_effect_slot_defaults(bus_idx, slot);
         app.publish_bus_gate_runtime();
     }
@@ -7661,6 +7745,15 @@ fn push_live_device_values(
                     )
                     .map_err(EditError::ReplayFailed)?;
                 }
+                if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+                    app.restore_prepared_track_filter_table(
+                        target.track,
+                        slot_idx,
+                        reference,
+                        table.clone(),
+                    )
+                    .map_err(EditError::ReplayFailed)?;
+                }
             }
         }
         DeviceId::MidiEffect(_) => {}
@@ -7693,6 +7786,18 @@ fn push_live_device_values(
                             effect_slot,
                             reference,
                             ir.clone(),
+                        )
+                        .map_err(EditError::ReplayFailed)?;
+                    }
+                    if let (Some(reference), Some(table)) =
+                        (&effect.table, &effect.prepared_table)
+                    {
+                        app.restore_prepared_rack_filter_table(
+                            target.track,
+                            slot_idx,
+                            effect_slot,
+                            reference,
+                            table.clone(),
                         )
                         .map_err(EditError::ReplayFailed)?;
                     }

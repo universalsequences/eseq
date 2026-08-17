@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
@@ -22,6 +23,53 @@ pub struct WavetableBank {
     pub frame_len: usize,
     pub wave_count: usize,
     pub data: Arc<Vec<f32>>,
+    pub revision: u64,
+}
+
+fn live_banks() -> &'static Mutex<HashMap<String, Arc<WavetableBank>>> {
+    static BANKS: OnceLock<Mutex<HashMap<String, Arc<WavetableBank>>>> = OnceLock::new();
+    BANKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Publish frame-major data for GPU widgets without serializing large banks
+/// through Lisp values. Re-publishing the same Arc is free; replacing it bumps
+/// the revision so the Metal buffer is updated in place.
+pub fn publish_bank(key: impl Into<String>, frame_len: usize, data: Arc<Vec<f32>>) -> bool {
+    if frame_len < 2 || data.len() < frame_len || data.len() % frame_len != 0 {
+        return false;
+    }
+    let key = key.into();
+    let Ok(mut banks) = live_banks().lock() else {
+        return false;
+    };
+    if banks
+        .get(&key)
+        .is_some_and(|bank| bank.frame_len == frame_len && Arc::ptr_eq(&bank.data, &data))
+    {
+        return true;
+    }
+    static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+    let revision = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
+    banks.insert(
+        key,
+        Arc::new(WavetableBank {
+            frame_len,
+            wave_count: data.len() / frame_len,
+            data,
+            revision,
+        }),
+    );
+    true
+}
+
+pub fn remove_published_bank(key: &str) {
+    if let Ok(mut banks) = live_banks().lock() {
+        banks.remove(key);
+    }
+}
+
+pub(crate) fn published_bank(key: &str) -> Option<Arc<WavetableBank>> {
+    live_banks().lock().ok()?.get(key).cloned()
 }
 
 fn bank_cache() -> &'static Mutex<HashMap<String, Option<Arc<WavetableBank>>>> {
@@ -70,6 +118,7 @@ fn read_bank_file(path: &str) -> Option<WavetableBank> {
         frame_len,
         wave_count,
         data: Arc::new(data),
+        revision: 0,
     })
 }
 
@@ -121,7 +170,7 @@ impl WidgetDefinition for WavetableViewerWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["set", "wave", "warp", "fold"]
+        &["set", "wave", "warp", "fold", "cutoff", "resonance"]
     }
 
     fn measure(
@@ -183,10 +232,17 @@ impl WidgetDefinition for WavetableViewerWidget {
             color: bg_color,
         })];
 
-        let Some(path) = prop_str(&node.props, "file") else {
-            return primitives;
-        };
-        let Some(bank) = load_bank(&path) else {
+        let (bank_key, bank) = if let Some(key) = prop_str(&node.props, "data-key") {
+            let Some(bank) = published_bank(&key) else {
+                return primitives;
+            };
+            (key, bank)
+        } else if let Some(path) = prop_str(&node.props, "file") {
+            let Some(bank) = load_bank(&path) else {
+                return primitives;
+            };
+            (path, bank)
+        } else {
             return primitives;
         };
         if bank.wave_count == 0 {
@@ -200,7 +256,10 @@ impl WidgetDefinition for WavetableViewerWidget {
         if waves_in_set == 0 {
             return primitives;
         }
-        let wave_pos = prop_num(&node.props, "wave", 0.0);
+        let mut wave_pos = prop_num(&node.props, "wave", 0.0);
+        if matches!(node.props.get("wave-normalized"), Some(Value::Bool(true))) {
+            wave_pos *= waves_in_set.saturating_sub(1) as f32;
+        }
         let warp = prop_num(&node.props, "warp", 0.0).clamp(0.0, 1.0);
         let fold = prop_num(&node.props, "fold", 0.0).clamp(0.0, 1.0);
 
@@ -212,16 +271,19 @@ impl WidgetDefinition for WavetableViewerWidget {
             Color::rgba(0.46, 0.46, 0.48, 0.55),
         );
 
+        let magnitude = matches!(node.props.get("domain"), Some(Value::Keyword(value)) if value == "magnitude");
         primitives.push(MetalPrimitive::Wavetable(MetalWavetablePrimitive {
             rect: node.rect,
-            bank_key: path,
+            bank_key,
             data: bank.data.clone(),
+            data_revision: bank.revision,
             frame_len: bank.frame_len as u32,
             set_base: (set * waves_per_set) as u32,
             waves_in_set: waves_in_set as u32,
             wave_pos: wave_pos.clamp(0.0, (waves_in_set - 1) as f32),
             warp,
             fold,
+            domain: if magnitude { 1 } else { 0 },
             selected_color,
             inactive_color,
             bg_color,
@@ -233,6 +295,21 @@ impl WidgetDefinition for WavetableViewerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_banks_replace_data_with_a_new_revision() {
+        let key = "wavetable-viewer-published-bank-test";
+        let first = Arc::new(vec![0.0, 1.0, 0.0, -1.0]);
+        assert!(publish_bank(key, 4, first.clone()));
+        let initial = published_bank(key).expect("published bank");
+        assert!(Arc::ptr_eq(&initial.data, &first));
+        assert!(publish_bank(key, 4, first));
+        assert_eq!(published_bank(key).unwrap().revision, initial.revision);
+        assert!(publish_bank(key, 4, Arc::new(vec![1.0, 0.0, -1.0, 0.0])));
+        assert!(published_bank(key).unwrap().revision > initial.revision);
+        remove_published_bank(key);
+        assert!(published_bank(key).is_none());
+    }
 
     #[test]
     fn warp_zero_is_identity() {

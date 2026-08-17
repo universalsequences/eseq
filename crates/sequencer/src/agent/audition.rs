@@ -64,6 +64,7 @@ fn default_effect_options(sample_rate: u32) -> EffectRenderOptions {
         block_size: 128,
         frames: 26_460,
         param_overrides: Vec::new(),
+        tensor_overrides: Vec::new(),
         input_overrides: Vec::new(),
     }
 }

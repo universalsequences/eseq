@@ -644,12 +644,15 @@ pub struct MetalWavetablePrimitive {
     pub bank_key: String,
     /// Full bank data, wave-major; uploaded once per bank_key.
     pub data: std::sync::Arc<Vec<f32>>,
+    pub data_revision: u64,
     pub frame_len: u32,
     pub set_base: u32,
     pub waves_in_set: u32,
     pub wave_pos: f32,
     pub warp: f32,
     pub fold: f32,
+    /// 0 = bipolar time-domain waveform, 1 = non-negative magnitudes.
+    pub domain: u32,
     pub selected_color: Color,
     pub inactive_color: Color,
     pub bg_color: Color,

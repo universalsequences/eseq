@@ -3,6 +3,7 @@
 #[allow(dead_code)]
 pub mod compressor;
 pub mod conv_reverb;
+pub mod dgen_builtin;
 #[allow(dead_code)]
 pub(crate) mod delay;
 #[allow(dead_code)]
@@ -17,6 +18,7 @@ pub(crate) mod eq8;
 pub(crate) mod filter;
 #[allow(dead_code)]
 pub mod filterbank;
+pub mod filter_table;
 #[allow(dead_code)]
 pub(crate) mod gatepitch;
 #[allow(dead_code)]
@@ -677,6 +679,29 @@ mod tests {
     }
 
     #[test]
+    fn device_value_snapshot_retains_prepared_filter_table_for_fileless_redo() {
+        let descriptor = EffectDescriptor::builtin_filter();
+        let slot = EffectSlotState::new(&descriptor, 424_243);
+        let prepared = std::sync::Arc::new(crate::effects::filter_table::default_table());
+        crate::effects::filter_table::record_prepared_table(
+            424_243,
+            "vowel-bank",
+            "Vowel Bank",
+            prepared.clone(),
+        );
+
+        let snapshot = EffectSlotSnapshot::capture_authoring_values(&slot);
+
+        assert_eq!(snapshot.table.as_deref(), Some("vowel-bank"));
+        assert!(std::sync::Arc::ptr_eq(
+            snapshot.prepared_table.as_ref().expect("prepared table memento"),
+            &prepared,
+        ));
+        assert!(snapshot.bit_exact_eq(&snapshot.clone()));
+        crate::effects::filter_table::clear_instance(424_243);
+    }
+
+    #[test]
     fn sync_to_descriptor_rebinds_loaded_plock_and_key_lock_ids_to_live_node_id() {
         let desc = EffectDescriptor {
             name: "test".to_string(),
@@ -722,6 +747,7 @@ mod tests {
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
         snapshot.plocks[3][0] = Some(0.9);
         snapshot.plock_param_ids[3][0] = Some(ParamNodeId {
@@ -8773,6 +8799,8 @@ pub struct EffectSlotValuesSnapshot {
     pub tensor_params: Vec<TensorParamSnapshot>,
     pub ir: Option<String>,
     pub prepared_ir: Option<Arc<conv_reverb::StereoIr>>,
+    pub table: Option<String>,
+    pub prepared_table: Option<Arc<filter_table::MagnitudeTable>>,
 }
 
 impl EffectSlotValuesSnapshot {
@@ -8785,6 +8813,8 @@ impl EffectSlotValuesSnapshot {
             tensor_params: left_tensor_params,
             ir: left_ir,
             prepared_ir: left_prepared_ir,
+            table: left_table,
+            prepared_table: left_prepared_table,
         } = self;
         let Self {
             num_params: right_num_params,
@@ -8794,6 +8824,8 @@ impl EffectSlotValuesSnapshot {
             tensor_params: right_tensor_params,
             ir: right_ir,
             prepared_ir: right_prepared_ir,
+            table: right_table,
+            prepared_table: right_prepared_table,
         } = other;
         left_num_params == right_num_params
             && f32_slice_bits_eq(left_defaults, right_defaults)
@@ -8807,6 +8839,11 @@ impl EffectSlotValuesSnapshot {
             && tensor_snapshots_bits_eq(left_tensor_params, right_tensor_params)
             && left_ir == right_ir
             && prepared_ir_bits_eq(left_prepared_ir.as_deref(), right_prepared_ir.as_deref())
+            && left_table == right_table
+            && prepared_table_bits_eq(
+                left_prepared_table.as_deref(),
+                right_prepared_table.as_deref(),
+            )
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -8817,7 +8854,9 @@ impl EffectSlotValuesSnapshot {
             key_locks,
             tensor_params,
             ir,
-            prepared_ir: _,
+            prepared_ir,
+            table,
+            prepared_table,
         } = self;
         std::mem::size_of::<Self>()
             + defaults.capacity() * std::mem::size_of::<f32>()
@@ -8834,6 +8873,28 @@ impl EffectSlotValuesSnapshot {
                 .map(tensor_snapshot_retained_bytes)
                 .sum::<usize>()
             + ir.as_ref().map_or(0, String::capacity)
+            + prepared_ir.as_ref().map_or(0, |ir| {
+                (ir.left.re.capacity()
+                    + ir.left.im.capacity()
+                    + ir.right.re.capacity()
+                    + ir.right.im.capacity())
+                    * std::mem::size_of::<f32>()
+            })
+            + table.as_ref().map_or(0, String::capacity)
+            + prepared_table.as_ref().map_or(0, |table| {
+                table.data.capacity() * std::mem::size_of::<f32>()
+            })
+    }
+}
+
+fn prepared_table_bits_eq(
+    left: Option<&filter_table::MagnitudeTable>,
+    right: Option<&filter_table::MagnitudeTable>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => f32_slice_bits_eq(&left.data, &right.data),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -8959,9 +9020,9 @@ pub struct EffectSlotSnapshot {
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     pub transport_phase_param_idx: u32,
-    /// Convolution Reverb IR reference (sample hash/stem) carried through
-    /// save/restore. None for every other effect.
+    /// Host-managed source references carried through save/restore.
     pub ir: Option<String>,
+    pub table: Option<String>,
 }
 
 impl EffectSlotSnapshot {
@@ -8988,6 +9049,8 @@ impl EffectSlotSnapshot {
             tensor_params: self.tensor_params.clone(),
             ir: self.ir.clone(),
             prepared_ir: conv_reverb::prepared_ir_for(self.node_id as i32),
+            table: self.table.clone(),
+            prepared_table: filter_table::prepared_table_for(self.node_id as i32),
         }
     }
 
@@ -9018,6 +9081,7 @@ impl EffectSlotSnapshot {
         self.key_locks.clone_from(&values.key_locks);
         self.tensor_params.clone_from(&values.tensor_params);
         self.ir.clone_from(&values.ir);
+        self.table.clone_from(&values.table);
         self.rebuild_lock_param_ids();
         Ok(())
     }
@@ -9120,6 +9184,7 @@ impl EffectSlotSnapshot {
             param_node_spans,
             transport_phase_param_idx: slot.transport_phase_param_idx.load(Ordering::Relaxed),
             ir: crate::effects::conv_reverb::ir_ref_for(node_id as i32),
+            table: crate::effects::filter_table::table_ref_for(node_id as i32),
         }
     }
 
@@ -9199,6 +9264,7 @@ impl EffectSlotSnapshot {
                 .transport_phase_param_idx()
                 .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
             ir: None,
+            table: None,
         }
     }
 
@@ -9217,6 +9283,7 @@ impl EffectSlotSnapshot {
             param_node_spans: Vec::new(),
             transport_phase_param_idx: NO_TRANSPORT_PHASE_PARAM,
             ir: None,
+            table: None,
         }
     }
 

@@ -134,24 +134,37 @@ pub(crate) fn build_effects_value(
                 "builtin".to_string(),
                 Rc::new(RefCell::new(Value::Bool(
                     sequencer::effects::EffectDescriptor::builtin_insert(&desc.name).is_some()
-                        || sequencer::effects::conv_reverb::is_dgen_builtin(&desc.name),
+                        || sequencer::effects::dgen_builtin::contains(&desc.name),
                 ))),
             );
 
             let slot = chain.get(slot_idx);
 
-            // Convolution Reverb: surface the current IR's display name for the
-            // panel label (keyed by the live node id).
-            if sequencer::effects::conv_reverb::is_dgen_builtin(&desc.name) {
-                let node_id = slot
-                    .map(|s| s.node_id.load(Ordering::Relaxed) as i32)
-                    .unwrap_or(0);
-                let ir_name = sequencer::effects::conv_reverb::ir_name_for(node_id)
+            let node_id = slot
+                .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+                .unwrap_or(0);
+            if desc.name == sequencer::effects::conv_reverb::NAME {
+                let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
                     .unwrap_or_else(|| "No IR".to_string());
                 slot_map.insert(
                     "ir-name".to_string(),
-                    Rc::new(RefCell::new(Value::String(ir_name))),
+                    Rc::new(RefCell::new(Value::String(name))),
                 );
+            } else if desc.name == sequencer::effects::filter_table::NAME {
+                let name = sequencer::effects::filter_table::table_name_for(node_id)
+                    .unwrap_or_else(|| "No table".to_string());
+                slot_map.insert(
+                    "table-name".to_string(),
+                    Rc::new(RefCell::new(Value::String(name))),
+                );
+                if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
+                    slot_map.insert(
+                        "table-data-key".to_string(),
+                        Rc::new(RefCell::new(Value::String(
+                            sequencer::effects::filter_table::visualization_key(node_id),
+                        ))),
+                    );
+                }
             }
             let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
             for target in desc
@@ -743,22 +756,36 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         Rc::new(RefCell::new(Value::Bool(
                             sequencer::effects::EffectDescriptor::builtin_insert(&desc.name)
                                 .is_some()
-                                || sequencer::effects::conv_reverb::is_dgen_builtin(&desc.name),
+                                || sequencer::effects::dgen_builtin::contains(&desc.name),
                         ))),
                     );
-                    // Convolution Reverb: surface the current IR name for the label.
-                    if sequencer::effects::conv_reverb::is_dgen_builtin(&desc.name) {
-                        let node_id = bus
-                            .effect_slots
-                            .get(slot_idx)
-                            .map(|s| s.node_id as i32)
-                            .unwrap_or(0);
-                        let ir_name = sequencer::effects::conv_reverb::ir_name_for(node_id)
+                    let node_id = bus
+                        .effect_slots
+                        .get(slot_idx)
+                        .map(|slot| slot.node_id as i32)
+                        .unwrap_or(0);
+                    if desc.name == sequencer::effects::conv_reverb::NAME {
+                        let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
                             .unwrap_or_else(|| "No IR".to_string());
                         slot_map.insert(
                             "ir-name".to_string(),
-                            Rc::new(RefCell::new(Value::String(ir_name))),
+                            Rc::new(RefCell::new(Value::String(name))),
                         );
+                    } else if desc.name == sequencer::effects::filter_table::NAME {
+                        let name = sequencer::effects::filter_table::table_name_for(node_id)
+                            .unwrap_or_else(|| "No table".to_string());
+                        slot_map.insert(
+                            "table-name".to_string(),
+                            Rc::new(RefCell::new(Value::String(name))),
+                        );
+                        if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
+                            slot_map.insert(
+                                "table-data-key".to_string(),
+                                Rc::new(RefCell::new(Value::String(
+                                    sequencer::effects::filter_table::visualization_key(node_id),
+                                ))),
+                            );
+                        }
                     }
 
                     let slot = bus.effect_slots.get(slot_idx);

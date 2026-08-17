@@ -305,7 +305,7 @@ pub(super) fn handle(
                     let is_builtin = builtin
                         || sequencer::effects::EffectDescriptor::builtin_insert(&name)
                             .is_some()
-                        || sequencer::effects::conv_reverb::is_dgen_builtin(&name);
+                        || sequencer::effects::dgen_builtin::contains(&name);
                     let result = app.apply_recorded_rack_effect_chain_mutation(
                         track,
                         rack_slot,

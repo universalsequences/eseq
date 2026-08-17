@@ -2,6 +2,7 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "set-convolution-reverb-ir",
+    "set-filter-table-source",
     "set-effect-param-batch",
     "set-effect-plock-batch",
     "set-effect-param",
@@ -120,6 +121,82 @@ pub(super) fn handle(
                 }
                 _ => editor.handle_host_event(HostEvent::Status(
                     "set-convolution-reverb-ir: need slot, path".to_string(),
+                )),
+            }
+        }
+        "set-filter-table-source" => {
+            let path_str = extract_path_from_payload(&payload);
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let track = extract_usize_from_payload(&payload, "track");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            match (slot, path_str) {
+                (Some(slot), Some(path_str)) => {
+                    let path = Path::new(&path_str);
+                    let reference = path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or(path_str.as_str())
+                        .to_string();
+                    let result = if let Some(bus_idx) = bus {
+                        app.apply_recorded_bus_effect_value_mutation(
+                            bus_idx,
+                            slot,
+                            "Set bus Filter Table",
+                            "filter-table-source",
+                            |app| app.set_filter_table_source_bus(
+                                bus_idx,
+                                slot,
+                                path,
+                                &reference,
+                            ),
+                        )
+                    } else if let Some(track) = track {
+                        app::edit::apply_recorded_track_filter_table_mutation(
+                            &mut app,
+                            track,
+                            slot,
+                            path,
+                            &reference,
+                        )
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"))
+                    } else {
+                        Err("need a track or bus".to_string())
+                    };
+                    match result {
+                        Ok(()) => {
+                            let runtime = editor.runtime_mut();
+                            if bus.is_some() {
+                                runtime.set_reactive(
+                                    "SEQ",
+                                    "bus-effects",
+                                    build_bus_effects_value_for_selection(
+                                        &app,
+                                        Some(&selected_steps),
+                                    ),
+                                );
+                            } else if let Some(track) = track {
+                                runtime.set_reactive(
+                                    "SEQ",
+                                    "effects",
+                                    build_effects_value(
+                                        &state,
+                                        track,
+                                        &app.graph.effect_descriptors,
+                                        &selected_steps,
+                                    ),
+                                );
+                            }
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Loaded Filter Table: {reference}"
+                            )));
+                        }
+                        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                            "Error loading Filter Table: {error}"
+                        ))),
+                    }
+                }
+                _ => editor.handle_host_event(HostEvent::Status(
+                    "set-filter-table-source: need slot, path".to_string(),
                 )),
             }
         }

@@ -1045,8 +1045,12 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
             .iter()
             .map(|name| (*name).to_string())
             .collect();
-    // dgenlisp-backed builtins (DSP body is dgenlisp, but added via the builtin path)
-    builtin_names.push(sequencer::effects::conv_reverb::NAME.to_string());
+    // DGenLisp-backed builtins are still presented through the builtin path.
+    builtin_names.extend(
+        sequencer::effects::dgen_builtin::NAMES
+            .iter()
+            .map(|name| (*name).to_string()),
+    );
     build_audio_effect_tree_from_names(
         query,
         builtin_names,

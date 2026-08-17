@@ -698,6 +698,38 @@ pub fn render_loaded_effect_for_test(
         memory[cell_id] = *value;
     }
 
+    for (name, values) in &options.tensor_overrides {
+        let tensor = manifest
+            .tensors
+            .iter()
+            .find(|tensor| tensor.name == *name)
+            .ok_or_else(|| format!("unknown effect tensor '{name}'"))?;
+        let expected_len = tensor.shape.iter().product::<usize>();
+        if values.len() != expected_len {
+            return Err(format!(
+                "effect tensor '{}' override has {} values, expected {} for shape {:?}",
+                name,
+                values.len(),
+                expected_len,
+                tensor.shape,
+            ));
+        }
+        let end = tensor
+            .cell_offset
+            .checked_add(expected_len)
+            .ok_or_else(|| format!("effect tensor '{name}' memory range overflow"))?;
+        let destination = memory.get_mut(tensor.cell_offset..end).ok_or_else(|| {
+            format!(
+                "effect tensor '{}' cells {}..{} are outside memory size {}",
+                name,
+                tensor.cell_offset,
+                end,
+                total_slots,
+            )
+        })?;
+        destination.copy_from_slice(values);
+    }
+
     let n_inputs = manifest.n_inputs.max(2);
     let n_outputs = manifest.n_outputs.max(2);
     let mut rendered = Vec::with_capacity(options.frames * 2);

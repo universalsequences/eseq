@@ -31,9 +31,11 @@ pub(crate) fn build_available_builtin_effects() -> Value {
             .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string()))))
             .collect();
     // dgenlisp-backed builtins (added through the builtin path, DSP is dgenlisp)
-    items.push(Rc::new(RefCell::new(Value::String(
-        sequencer::effects::conv_reverb::NAME.to_string(),
-    ))));
+    items.extend(
+        sequencer::effects::dgen_builtin::NAMES
+            .iter()
+            .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string())))),
+    );
     Value::List(items)
 }
 

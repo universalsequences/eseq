@@ -182,12 +182,12 @@ impl App {
                 name: name.to_string(),
             });
         }
-        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+        if let Some(builtin) = crate::effects::dgen_builtin::find(name) {
             return Ok(RetainedEffectSource::Compiled {
                 name: name.to_string(),
-                source: crate::effects::conv_reverb::dsp_source().to_string(),
+                source: builtin.source.to_string(),
                 asset_base: None,
-                origin: lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+                origin: builtin.origin,
             });
         }
         let source_path = lisp_host::effect_source_path(name);
@@ -1630,9 +1630,8 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
-        // Convolution Reverb is a builtin whose DSP body is dgenlisp: route it
-        // through the compile/apply path instead of a native vtable.
-        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+        // Some builtins own host-managed assets but use DGenLisp for DSP.
+        if crate::effects::dgen_builtin::contains(name) {
             return self.load_dgen_builtin_to_slot_sync(track, slot_idx, name);
         }
         let mut desc = EffectDescriptor::builtin_insert(name)
@@ -1660,61 +1659,76 @@ impl App {
         Ok(())
     }
 
-    /// Load a dgenlisp-backed builtin (e.g. Convolution Reverb) onto a track
-    /// slot: compile the bundled source fresh, apply it through the dgenlisp
-    /// path, and record the instance's IR tensor offsets for the IR loader.
+    /// Compile and install a host-integrated DGenLisp builtin on a track.
     pub(super) fn load_dgen_builtin_to_slot_sync(
         &mut self,
         track: usize,
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
-        let source = if crate::effects::conv_reverb::is_dgen_builtin(name) {
-            crate::effects::conv_reverb::dsp_source()
-        } else {
-            return Err(format!("Unknown dgenlisp builtin '{name}'"));
-        };
+        let builtin = crate::effects::dgen_builtin::find(name)
+            .ok_or_else(|| format!("Unknown dgenlisp builtin '{name}'"))?;
         let result = self.editor.dylib_cache.acquire(
             lisp_host::DGenCompileKind::Effect,
-            lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
-            source,
+            builtin.origin,
+            builtin.source,
             self.graph.sample_rate,
             None,
         )?;
-        // Capture IR tensor offsets before `result` is consumed by apply.
-        let slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+        let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+        let table_slot = crate::effects::filter_table::TableSlot::from_manifest(&result.manifest);
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
         self.retain_effect_source(
             FxChainLocator::Track(track),
             slot_idx,
             RetainedEffectSource::Compiled {
                 name: name.to_string(),
-                source: source.to_string(),
+                source: builtin.source.to_string(),
                 asset_base: None,
-                origin: lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+                origin: builtin.origin,
             },
         )?;
         let node_id = self.state.pattern.effect_chains[track][slot_idx]
             .node_id
             .load(Ordering::Relaxed) as i32;
-        match slots {
-            Some(slots) => crate::effects::conv_reverb::record_ir_slots(node_id, slots),
-            None => return Err(format!("'{name}' compiled without the expected IR tensors")),
-        }
-        // Auto-load the bundled default IR so a fresh instance is audible.
-        // Non-fatal: if the asset is missing the effect still works (silent).
-        if let Some(path) = crate::effects::conv_reverb::default_ir_path() {
-            if let Err(e) = self.set_conv_reverb_ir(
-                track,
-                slot_idx,
-                &path,
-                crate::effects::conv_reverb::DEFAULT_IR_REF,
-            ) {
-                self.editor.status_message = Some((
-                    format!("Convolution Reverb: default IR not loaded ({e})"),
-                    Instant::now(),
-                ));
+        self.initialize_dgen_builtin_node(name, node_id, ir_slots, table_slot)
+    }
+
+    fn initialize_dgen_builtin_node(
+        &mut self,
+        name: &str,
+        node_id: i32,
+        ir_slots: Option<crate::effects::conv_reverb::StereoIrSlots>,
+        table_slot: Option<crate::effects::filter_table::TableSlot>,
+    ) -> Result<(), String> {
+        if name == crate::effects::conv_reverb::NAME {
+            let slots = ir_slots
+                .ok_or_else(|| format!("'{name}' compiled without the expected IR tensors"))?;
+            crate::effects::conv_reverb::record_ir_slots(node_id, slots);
+            if let Some(path) = crate::effects::conv_reverb::default_ir_path() {
+                if let Err(error) = self.apply_conv_reverb_ir_to_node(
+                    node_id,
+                    &path,
+                    crate::effects::conv_reverb::DEFAULT_IR_REF,
+                ) {
+                    self.editor.status_message = Some((
+                        format!("Convolution Reverb: default IR not loaded ({error})"),
+                        Instant::now(),
+                    ));
+                }
             }
+        } else if name == crate::effects::filter_table::NAME {
+            let slot = table_slot
+                .ok_or_else(|| format!("'{name}' compiled without table_magnitudes"))?;
+            crate::effects::filter_table::record_slot(node_id, slot);
+            self.apply_prepared_filter_table_to_node(
+                node_id,
+                Arc::new(crate::effects::filter_table::default_table()),
+                crate::effects::filter_table::DEFAULT_TABLE_REF,
+                std::path::Path::new("Procedural Shapes"),
+            )?;
+        } else {
+            return Err(format!("Unknown dgenlisp builtin '{name}'"));
         }
         Ok(())
     }
@@ -1891,6 +1905,143 @@ impl App {
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| "Rack-slot effect not found".to_string())?;
         self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
+    }
+
+    fn apply_filter_table_to_node(
+        &self,
+        node_id: i32,
+        source_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let table = Arc::new(crate::effects::filter_table::prepare_table(source_path)?);
+        self.apply_prepared_filter_table_to_node(node_id, table, reference, source_path)
+    }
+
+    pub(crate) fn apply_prepared_filter_table_to_node(
+        &self,
+        node_id: i32,
+        table: Arc<crate::effects::filter_table::MagnitudeTable>,
+        reference: &str,
+        source_path: &std::path::Path,
+    ) -> Result<(), String> {
+        if node_id == 0 {
+            return Err("Filter Table node not live".to_string());
+        }
+        unsafe {
+            crate::effects::filter_table::apply_table_to_node(
+                self.graph.lg.0,
+                node_id,
+                table.as_ref(),
+            )?;
+        }
+        let display = if reference == crate::effects::filter_table::DEFAULT_TABLE_REF {
+            "Procedural Shapes".to_string()
+        } else {
+            crate::sample_db::display_title_for_sample_path(source_path)
+                .unwrap_or_else(|| reference.to_string())
+        };
+        crate::effects::filter_table::record_prepared_table(
+            node_id,
+            reference,
+            &display,
+            table,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn restore_prepared_track_filter_table(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        reference: &str,
+        table: Arc<crate::effects::filter_table::MagnitudeTable>,
+    ) -> Result<(), String> {
+        let node_id = self.state.pattern.effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .ok_or_else(|| "Track effect slot not found".to_string())?;
+        self.apply_prepared_filter_table_to_node(
+            node_id,
+            table,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
+    pub(crate) fn restore_prepared_bus_filter_table(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        reference: &str,
+        table: Arc<crate::effects::filter_table::MagnitudeTable>,
+    ) -> Result<(), String> {
+        let node_id = self.buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Bus effect slot not found".to_string())?;
+        self.apply_prepared_filter_table_to_node(
+            node_id,
+            table,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
+    pub(crate) fn restore_prepared_rack_filter_table(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        reference: &str,
+        table: Arc<crate::effects::filter_table::MagnitudeTable>,
+    ) -> Result<(), String> {
+        let node_id = self.rack_slot_effect_snapshot(track, rack_slot)?
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack effect slot not found".to_string())?;
+        self.apply_prepared_filter_table_to_node(
+            node_id,
+            table,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
+    pub fn set_filter_table_source(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        source_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let node_id = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .ok_or_else(|| "Track effect slot not found".to_string())?;
+        self.apply_filter_table_to_node(node_id, source_path, reference)
+    }
+
+    pub fn set_filter_table_source_bus(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        source_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let node_id = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| format!("Bus {} effect slot {} not found", bus_idx + 1, slot_idx + 1))?;
+        self.apply_filter_table_to_node(node_id, source_path, reference)
     }
 
     pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
@@ -2793,19 +2944,17 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
-        let source = if crate::effects::conv_reverb::is_dgen_builtin(name) {
-            crate::effects::conv_reverb::dsp_source()
-        } else {
-            return Err(format!("Unknown dgenlisp builtin '{name}'"));
-        };
+        let builtin = crate::effects::dgen_builtin::find(name)
+            .ok_or_else(|| format!("Unknown dgenlisp builtin '{name}'"))?;
         let result = self.editor.dylib_cache.acquire(
             lisp_host::DGenCompileKind::Effect,
-            lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
-            source,
+            builtin.origin,
+            builtin.source,
             self.graph.sample_rate,
             None,
         )?;
-        let slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+        let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+        let table_slot = crate::effects::filter_table::TableSlot::from_manifest(&result.manifest);
         self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
         let node_id = self
             .buses
@@ -2813,25 +2962,7 @@ impl App {
             .and_then(|bus| bus.effect_slots.get(slot_idx))
             .map(|slot| slot.node_id as i32)
             .unwrap_or(0);
-        match slots {
-            Some(slots) => crate::effects::conv_reverb::record_ir_slots(node_id, slots),
-            None => return Err(format!("'{name}' compiled without the expected IR tensors")),
-        }
-        // Auto-load the bundled default IR so a fresh instance is audible.
-        if let Some(path) = crate::effects::conv_reverb::default_ir_path() {
-            if let Err(e) = self.set_conv_reverb_ir_bus(
-                bus_idx,
-                slot_idx,
-                &path,
-                crate::effects::conv_reverb::DEFAULT_IR_REF,
-            ) {
-                self.editor.status_message = Some((
-                    format!("Convolution Reverb: default IR not loaded ({e})"),
-                    Instant::now(),
-                ));
-            }
-        }
-        Ok(())
+        self.initialize_dgen_builtin_node(name, node_id, ir_slots, table_slot)
     }
 
     pub fn load_builtin_bus_effect_to_slot_sync(
@@ -2840,7 +2971,7 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
-        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+        if crate::effects::dgen_builtin::contains(name) {
             return self.load_dgen_builtin_bus_to_slot_sync(bus_idx, slot_idx, name);
         }
         let mut desc = EffectDescriptor::builtin_insert(name)
@@ -3404,7 +3535,7 @@ impl App {
         name: &str,
     ) -> Result<usize, String> {
         if EffectDescriptor::builtin_insert(name).is_none()
-            && !crate::effects::conv_reverb::is_dgen_builtin(name)
+            && !crate::effects::dgen_builtin::contains(name)
         {
             return Err(format!("Unknown built-in effect '{name}'"));
         }
@@ -3441,16 +3572,18 @@ impl App {
         effect_slot: usize,
         name: &str,
     ) -> Result<(), String> {
-        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+        if let Some(builtin) = crate::effects::dgen_builtin::find(name) {
             let result = self.editor.dylib_cache.acquire(
                 lisp_host::DGenCompileKind::Effect,
-                lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
-                crate::effects::conv_reverb::dsp_source(),
+                builtin.origin,
+                builtin.source,
                 self.graph.sample_rate,
                 None,
             )?;
             let ir_slots =
                 crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+            let table_slot =
+                crate::effects::filter_table::TableSlot::from_manifest(&result.manifest);
             self.apply_compiled_rack_slot_effect_to_slot_sync(
                 track,
                 rack_slot,
@@ -3462,20 +3595,7 @@ impl App {
                 .rack_slot_effect_snapshot(track, rack_slot)?
                 .effect_slots[effect_slot]
                 .node_id as i32;
-            match ir_slots {
-                Some(slots) => crate::effects::conv_reverb::record_ir_slots(node_id, slots),
-                None => return Err(format!("'{name}' compiled without the expected IR tensors")),
-            }
-            if let Some(path) = crate::effects::conv_reverb::default_ir_path() {
-                self.set_conv_reverb_ir_rack_slot(
-                    track,
-                    rack_slot,
-                    effect_slot,
-                    &path,
-                    crate::effects::conv_reverb::DEFAULT_IR_REF,
-                )?;
-            }
-            return Ok(());
+            return self.initialize_dgen_builtin_node(name, node_id, ir_slots, table_slot);
         }
         let mut descriptor = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;

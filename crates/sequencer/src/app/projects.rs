@@ -317,17 +317,18 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
             .map(|param| param.node_param_span.max(1))
             .collect(),
         ir: None,
+        table: None,
     }
 }
 
 fn project_builtin_effect_name_for_save(name: &str) -> Option<String> {
     let trimmed = name.trim();
     crate::effects::EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
-        crate::effects::conv_reverb::is_dgen_builtin(trimmed).then(|| {
+        crate::effects::dgen_builtin::find(trimmed).map(|builtin| {
             format!(
                 "{}{}",
                 crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX,
-                crate::effects::conv_reverb::NAME
+                builtin.name
             )
         })
     })
@@ -343,8 +344,8 @@ fn project_builtin_effect_name_for_load(name: &str) -> Option<String> {
         .trim()
         .strip_prefix(crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX)?
         .trim();
-    crate::effects::conv_reverb::is_dgen_builtin(stripped)
-        .then(|| crate::effects::conv_reverb::NAME.to_string())
+    crate::effects::dgen_builtin::find(stripped)
+        .map(|builtin| builtin.name.to_string())
 }
 
 fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
@@ -352,7 +353,7 @@ fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
         let Some(raw_name) = name.as_deref() else {
             return;
         };
-        if crate::effects::conv_reverb::is_dgen_builtin(raw_name.trim()) {
+        if crate::effects::dgen_builtin::contains(raw_name.trim()) {
             *name = project_builtin_effect_name_for_save(raw_name);
         }
     }
@@ -434,7 +435,7 @@ fn project_effect_name_is_dgen_hosted(name: Option<&str>) -> bool {
         return false;
     };
     match crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
-        Some(builtin) => crate::effects::conv_reverb::is_dgen_builtin(builtin),
+        Some(builtin) => crate::effects::dgen_builtin::contains(builtin),
         None => true,
     }
 }
@@ -732,6 +733,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .transport_phase_param_idx()
             .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
         ir: slot.ir.clone(),
+        table: slot.table.clone(),
     };
     snapshot.recompute_modulation_active_params(desc);
     snapshot
@@ -869,6 +871,7 @@ fn project_bus_pattern_snapshot_from_ui(
                     param_node_indices: Vec::new(),
                     param_node_spans: Vec::new(),
                     ir: None,
+                    table: None,
                 }
             })
             .collect(),
@@ -1137,7 +1140,7 @@ impl App {
                     unsafe {
                         crate::audiograph::delete_node(self.graph.lg.0, slot.node_id as i32);
                     }
-                    crate::effects::conv_reverb::clear_instance(slot.node_id as i32);
+                    crate::effects::dgen_builtin::clear_instance(slot.node_id as i32);
                 }
                 if slot.modulator_node_id != 0 {
                     unsafe {
@@ -2706,6 +2709,46 @@ impl App {
         }
     }
 
+    fn restore_filter_table_track(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        table_ref: Option<&str>,
+    ) {
+        let Some(table_ref) = table_ref else { return };
+        if table_ref.is_empty() || table_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
+            return;
+        }
+        if let Some(path) = self.resolve_sample_path_by_name(table_ref) {
+            if let Err(error) = self.set_filter_table_source(track, slot_idx, &path, table_ref) {
+                eprintln!("project-load: Filter Table '{table_ref}' not restored: {error}");
+            }
+        } else {
+            eprintln!("project-load: Filter Table '{table_ref}' could not be resolved");
+        }
+    }
+
+    fn restore_filter_table_bus(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        table_ref: Option<&str>,
+    ) {
+        let Some(table_ref) = table_ref else { return };
+        if table_ref.is_empty() || table_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
+            return;
+        }
+        if let Some(path) = self.resolve_sample_path_by_name(table_ref) {
+            if let Err(error) =
+                self.set_filter_table_source_bus(bus_idx, slot_idx, &path, table_ref)
+            {
+                eprintln!("project-load: bus Filter Table '{table_ref}' not restored: {error}");
+            }
+        } else {
+            eprintln!("project-load: bus Filter Table '{table_ref}' could not be resolved");
+        }
+    }
+
     /// Bus counterpart of `restore_conv_reverb_ir_track`.
     fn restore_conv_reverb_ir_bus(
         &mut self,
@@ -3136,6 +3179,17 @@ impl App {
                             BUILTIN_SLOT_COUNT + offset,
                             saved_ir.as_deref(),
                         );
+                        let saved_table = pending.project.patterns.iter().find_map(|pattern| {
+                            pattern.effect_slots
+                                .get(track_idx)
+                                .and_then(|slots| slots.get(offset))
+                                .and_then(|slot| slot.table.clone())
+                        });
+                        self.restore_filter_table_track(
+                            track_idx,
+                            BUILTIN_SLOT_COUNT + offset,
+                            saved_table.as_deref(),
+                        );
                     }
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx,
@@ -3429,6 +3483,7 @@ impl App {
                 .collect();
         for (bus_idx, slot_idx, name, saved_slot) in saved_bus_effects {
             let saved_ir = saved_slot.ir.clone();
+            let saved_table = saved_slot.table.clone();
             if let Some(builtin_name) = project_builtin_effect_name_for_load(&name) {
                 self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, &builtin_name)?;
             } else {
@@ -3445,6 +3500,7 @@ impl App {
             // Restore a saved Convolution Reverb IR (the default was auto-loaded
             // on create, so only override for a non-default reference).
             self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref());
+            self.restore_filter_table_bus(bus_idx, slot_idx, saved_table.as_deref());
         }
         let default_bus_snapshot = self.capture_bus_pattern_snapshot();
         self.state
@@ -3934,6 +3990,7 @@ impl App {
                                     param_node_indices: Vec::new(),
                                     param_node_spans: Vec::new(),
                                     ir: None,
+                                    table: None,
                                 }
                             });
                         if saved_slot.num_params >= 4 {
@@ -3982,6 +4039,7 @@ impl App {
                                     .transport_phase_param_idx()
                                     .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
                                 ir: None,
+                                table: None,
                             }
                         }
                     } else {
@@ -3998,6 +4056,7 @@ impl App {
                                 param_node_indices: Vec::new(),
                                 param_node_spans: Vec::new(),
                                 ir: None,
+                                table: None,
                             }
                         });
                         if slot.num_params == 0 {
@@ -4305,6 +4364,7 @@ mod tests {
             param_node_indices: vec![4, 6, 9, crate::instruments::voice_modulator::MOD_PARAM_BASE + 3],
             param_node_spans: vec![1; 4],
             ir: None,
+            table: None,
         };
 
         migrate_legacy_dgen_effect_slot(&mut slot);
@@ -4342,6 +4402,9 @@ mod tests {
         assert!(project_effect_name_is_dgen_hosted(Some("my-custom-fx")));
         assert!(project_effect_name_is_dgen_hosted(Some(
             "builtin:Convolution Reverb"
+        )));
+        assert!(project_effect_name_is_dgen_hosted(Some(
+            "builtin:Filter Table"
         )));
         assert!(!project_effect_name_is_dgen_hosted(Some("builtin:EQ8")));
         assert!(!project_effect_name_is_dgen_hosted(Some("builtin:OTT")));
@@ -4437,6 +4500,7 @@ mod tests {
             param_node_spans: vec![1],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let restored =
@@ -4521,6 +4585,7 @@ mod tests {
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         }
     }
 
@@ -4616,21 +4681,29 @@ mod tests {
     }
 
     #[test]
-    fn convolution_reverb_project_names_are_treated_as_builtin() {
-        let project_name = format!(
-            "{}{}",
-            EffectDescriptor::BUILTIN_INSERT_PREFIX,
-            crate::effects::conv_reverb::NAME
-        );
-        assert_eq!(
-            project_builtin_effect_name_for_save(crate::effects::conv_reverb::NAME),
-            Some(project_name.clone())
-        );
-        assert_eq!(
-            project_builtin_effect_name_for_load(&project_name),
-            Some(crate::effects::conv_reverb::NAME.to_string())
-        );
+    fn dgen_builtin_project_names_are_treated_as_builtin() {
+        for name in [
+            crate::effects::conv_reverb::NAME,
+            crate::effects::filter_table::NAME,
+        ] {
+            let project_name = format!(
+                "{}{}",
+                EffectDescriptor::BUILTIN_INSERT_PREFIX,
+                name,
+            );
+            assert_eq!(
+                project_builtin_effect_name_for_save(name),
+                Some(project_name.clone()),
+            );
+            assert_eq!(
+                project_builtin_effect_name_for_load(&project_name),
+                Some(name.to_string()),
+            );
+        }
 
+        let project_name = project_builtin_effect_name_for_save(
+            crate::effects::conv_reverb::NAME,
+        ).unwrap();
         let mut project = minimal_project_with_effect_slots(
             vec![Some(crate::effects::conv_reverb::NAME.to_string())],
             Vec::new(),
@@ -4834,6 +4907,7 @@ mod tests {
             param_node_spans: vec![1; shimmer_values.len()],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
         let mut slots = vec![shimmer_slot];
         slots.resize_with(crate::lisp_host::MAX_CUSTOM_FX, Default::default);
@@ -4880,6 +4954,7 @@ mod tests {
             param_node_spans: vec![1, 1, 1, 1],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -4945,6 +5020,7 @@ mod tests {
             param_node_spans: vec![1, 1, 1, 1],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -4998,6 +5074,7 @@ mod tests {
             param_node_spans: vec![1, 1, 1, 1],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -5098,6 +5175,7 @@ mod tests {
                 .collect(),
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let restored =
@@ -5167,6 +5245,7 @@ mod tests {
             param_node_spans: vec![1, 4, 1, 1],
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let restored =
@@ -5217,6 +5296,7 @@ mod tests {
                 .collect(),
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         };
 
         let renamed_desc = crate::effects::EffectDescriptor {

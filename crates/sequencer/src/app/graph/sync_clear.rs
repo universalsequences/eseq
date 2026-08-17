@@ -307,7 +307,7 @@ impl GraphController<'_> {
 
                 for effect_id in active_effect_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, effect_id);
-                    crate::effects::conv_reverb::clear_instance(effect_id);
+                    crate::effects::dgen_builtin::clear_instance(effect_id);
                 }
                 for modulator_id in active_effect_modulator_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);

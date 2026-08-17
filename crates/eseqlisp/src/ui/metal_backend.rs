@@ -774,6 +774,7 @@ struct WavetableInstance {
     float wave_pos;
     float warp;
     float fold;
+    uint domain;
     packed_float4 selected_color;
     packed_float4 inactive_color;
     packed_float4 bg_color;
@@ -790,6 +791,7 @@ struct WavetableVaryings {
     float wave_pos [[flat]];
     float warp [[flat]];
     float fold [[flat]];
+    uint domain [[flat]];
     float4 selected_color [[flat]];
     float4 inactive_color [[flat]];
     float4 bg_color [[flat]];
@@ -818,6 +820,7 @@ vertex WavetableVaryings wavetable_vert(
     out.wave_pos = inst.wave_pos;
     out.warp = inst.warp;
     out.fold = inst.fold;
+    out.domain = inst.domain;
     out.selected_color = inst.selected_color;
     out.inactive_color = inst.inactive_color;
     out.bg_color = inst.bg_color;
@@ -839,14 +842,16 @@ float wt_fold(float y, float fold) {
 }
 
 float wt_sample(device const float* bank, uint base, uint frame_len,
-                float phase, float warp, float fold)
+                float phase, float warp, float fold, uint domain)
 {
-    float p = wt_warp_phase(clamp(phase, 0.0, 1.0), warp);
-    float pos = p * float(frame_len);
+    float p = domain == 1u
+        ? clamp(phase, 0.0, 1.0)
+        : wt_warp_phase(clamp(phase, 0.0, 1.0), warp);
+    float pos = p * float(frame_len - (domain == 1u ? 1u : 0u));
     uint i0 = min(uint(pos), frame_len - 1);
-    uint i1 = (i0 + 1) % frame_len;
+    uint i1 = domain == 1u ? min(i0 + 1, frame_len - 1) : (i0 + 1) % frame_len;
     float y = mix(bank[base + i0], bank[base + i1], pos - float(i0));
-    return wt_fold(y, fold);
+    return domain == 1u ? max(y, 0.0) : wt_fold(y, fold);
 }
 
 fragment float4 wavetable_frag(
@@ -857,8 +862,9 @@ fragment float4 wavetable_frag(
     const float PAD_Y = 0.10;
 
     uint n = max(in.waves_in_set, 1u);
+    uint display_n = min(n, 16u);
     float plot_h = 1.0 - PAD_Y * 2.0;
-    float amp_half = plot_h / float(max(n, 2u)) * 0.85;
+    float amp_half = plot_h / float(max(display_n, 2u)) * 0.85;
     float plot_px_w = in.widget_px_w * (1.0 - PAD_X * 2.0);
 
     float u = (in.uv.x - PAD_X) / (1.0 - PAD_X * 2.0);
@@ -871,12 +877,13 @@ fragment float4 wavetable_frag(
     if (in_plot && in.frame_len >= 2u) {
         // ── inactive waves: wave 0 at the bottom, last at the top ──
         float inactive_acc = 0.0;
-        for (uint w = 0; w < min(n, 64u); w++) {
-            float t = n > 1u ? float(w) / float(n - 1u) : 0.5;
+        for (uint row = 0; row < display_n; row++) {
+            float t = display_n > 1u ? float(row) / float(display_n - 1u) : 0.5;
+            uint w = n > 1u ? uint(round(t * float(n - 1u))) : 0u;
             float rowc = PAD_Y + plot_h * t;
             uint base = (in.set_base + w) * in.frame_len;
-            float s0 = wt_sample(bank, base, in.frame_len, u, in.warp, in.fold);
-            float s1 = wt_sample(bank, base, in.frame_len, u + du, in.warp, in.fold);
+            float s0 = wt_sample(bank, base, in.frame_len, u, in.warp, in.fold, in.domain);
+            float s1 = wt_sample(bank, base, in.frame_len, u + du, in.warp, in.fold, in.domain);
             float y0_px = (rowc + s0 * amp_half) * in.widget_px_h;
             float dy_px = in.uv.y * in.widget_px_h - y0_px;
             float slope = (s1 - s0) * amp_half * in.widget_px_h / (du * plot_px_w);
@@ -895,10 +902,10 @@ fragment float4 wavetable_frag(
         float rowc = PAD_Y + plot_h * t;
         uint b0 = (in.set_base + w0) * in.frame_len;
         uint b1 = (in.set_base + w1) * in.frame_len;
-        float s0 = mix(wt_sample(bank, b0, in.frame_len, u, in.warp, in.fold),
-                       wt_sample(bank, b1, in.frame_len, u, in.warp, in.fold), ft);
-        float s1 = mix(wt_sample(bank, b0, in.frame_len, u + du, in.warp, in.fold),
-                       wt_sample(bank, b1, in.frame_len, u + du, in.warp, in.fold), ft);
+        float s0 = mix(wt_sample(bank, b0, in.frame_len, u, in.warp, in.fold, in.domain),
+                       wt_sample(bank, b1, in.frame_len, u, in.warp, in.fold, in.domain), ft);
+        float s1 = mix(wt_sample(bank, b0, in.frame_len, u + du, in.warp, in.fold, in.domain),
+                       wt_sample(bank, b1, in.frame_len, u + du, in.warp, in.fold, in.domain), ft);
         float y0_px = (rowc + s0 * amp_half) * in.widget_px_h;
         float dy_px = in.uv.y * in.widget_px_h - y0_px;
         float slope = (s1 - s0) * amp_half * in.widget_px_h / (du * plot_px_w);
@@ -1833,6 +1840,7 @@ fragment float4 live_spectrogram_frag(
         wave_pos: f32,
         warp: f32,
         fold: f32,
+        domain: u32,
         selected_color: [f32; 4],
         inactive_color: [f32; 4],
         bg_color: [f32; 4],
@@ -1887,6 +1895,11 @@ fragment float4 live_spectrogram_frag(
 
     struct WaveformGpuResource {
         bucket_count: u32,
+        buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    }
+
+    struct WavetableGpuResource {
+        revision: u64,
         buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     }
 
@@ -2337,7 +2350,7 @@ fragment float4 live_spectrogram_frag(
         image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         patch_cable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
-        wavetable_buffers: HashMap<String, Retained<ProtocolObject<dyn MTLBuffer>>>,
+        wavetable_buffers: HashMap<String, WavetableGpuResource>,
         live_spectrogram_buffers: HashMap<String, LiveSpectrogramGpuResource>,
         image_textures: HashMap<PathBuf, ImageTextureResource>,
         image_decode_tx: mpsc::Sender<ImageDecodeJob>,
@@ -4493,10 +4506,13 @@ fragment float4 live_spectrogram_frag(
         fn ensure_wavetable_buffer(
             &mut self,
             bank_key: &str,
+            revision: u64,
             data: &std::sync::Arc<Vec<f32>>,
         ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
-            if let Some(buffer) = self.wavetable_buffers.get(bank_key) {
-                return Some(buffer.clone());
+            if let Some(resource) = self.wavetable_buffers.get(bank_key) {
+                if resource.revision == revision {
+                    return Some(resource.buffer.clone());
+                }
             }
             let buffer = unsafe {
                 self.device.newBufferWithBytes_length_options(
@@ -4505,8 +4521,13 @@ fragment float4 live_spectrogram_frag(
                     MTLResourceOptions(0),
                 )
             }?;
-            self.wavetable_buffers
-                .insert(bank_key.to_string(), buffer.clone());
+            self.wavetable_buffers.insert(
+                bank_key.to_string(),
+                WavetableGpuResource {
+                    revision,
+                    buffer: buffer.clone(),
+                },
+            );
             Some(buffer)
         }
 
@@ -4530,7 +4551,11 @@ fragment float4 live_spectrogram_frag(
                     continue;
                 }
                 let Some(bank_buffer) =
-                    self.ensure_wavetable_buffer(&primitive.bank_key, &primitive.data)
+                    self.ensure_wavetable_buffer(
+                        &primitive.bank_key,
+                        primitive.data_revision,
+                        &primitive.data,
+                    )
                 else {
                     continue;
                 };
@@ -4553,6 +4578,7 @@ fragment float4 live_spectrogram_frag(
                     wave_pos: primitive.wave_pos,
                     warp: primitive.warp,
                     fold: primitive.fold,
+                    domain: primitive.domain,
                     selected_color: primitive.selected_color.to_rgba(),
                     inactive_color: primitive.inactive_color.to_rgba(),
                     bg_color: primitive.bg_color.to_rgba(),

@@ -872,6 +872,7 @@
             "ui/effects/process-panel.lisp",
             "ui/effects/builtin/compressor.lisp",
             "ui/effects/builtin/convolution-reverb.lisp",
+            "ui/effects/builtin/filter-table.lisp",
             "ui/effects/builtin/filterbank.lisp",
         ] {
             let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
@@ -35734,6 +35735,272 @@
             Value::Map(test_param_map("f2 res", 38, 20.0, 0.0, 110.0)),
             Value::Map(test_param_map("f2 mode", 39, 0.0, 0.0, 100.0)),
         ]
+    }
+
+    #[test]
+    fn metal_seq_filter_table_panel_has_visible_nonzero_content() {
+        fn mod_target(depth_idx: f64, depth_min: f64, depth_max: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_min))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_max))),
+                ),
+            ]))
+        }
+
+        fn mod_param(
+            name: &str,
+            idx: usize,
+            value: f64,
+            min: f64,
+            max: f64,
+            depth_idx: f64,
+        ) -> Value {
+            let mut param = test_param_map(name, idx, value, min, max);
+            param.insert(
+                "modulatable".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+            param.insert(
+                "value-field".to_string(),
+                Rc::new(RefCell::new(Value::String(format!(
+                    "filter-table-live-{idx}"
+                )))),
+            );
+            param.insert(
+                "mod-targets".to_string(),
+                Rc::new(RefCell::new(test_list(vec![mod_target(
+                    depth_idx,
+                    min - max,
+                    max - min,
+                )]))),
+            );
+            Value::Map(param)
+        }
+
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut fx = test_fx_map(
+            "Filter Table",
+            0,
+            vec![
+                mod_param("frame", 0, 0.0, 0.0, 1.0, 20.0),
+                mod_param("cutoff", 1, 1000.0, 40.0, 18000.0, 21.0),
+                mod_param("resonance", 2, 0.0, 0.0, 1.0, 22.0),
+                mod_param("mix", 3, 0.7, 0.0, 1.0, 23.0),
+                Value::Map(test_param_map("output", 4, 1.0, 0.25, 2.0)),
+            ],
+        );
+        fx.insert(
+            "table-name".to_string(),
+            Rc::new(RefCell::new(Value::String("Procedural Shapes".to_string()))),
+        );
+        let table_key = "filter-table-layout-test:magnitudes";
+        assert!(eseqlisp::widget_render::wavetable_viewer::publish_bank(
+            table_key,
+            sequencer::effects::filter_table::NBINS,
+            Arc::new(sequencer::effects::filter_table::default_table().data.as_ref().clone()),
+        ));
+        fx.insert(
+            "table-data-key".to_string(),
+            Rc::new(RefCell::new(Value::String(table_key.to_string()))),
+        );
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("filter-table-live-0", Value::Number(0.0)),
+                ("filter-table-live-1", Value::Number(1000.0)),
+                ("filter-table-live-2", Value::Number(0.0)),
+                ("filter-table-live-3", Value::Number(0.7)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter Table".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
+                ("effects", test_list(vec![Value::Map(fx)])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor.runtime_mut().eval_str(
+            r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-instrument-synth-ui (inst) false)
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+            "#,
+        ).expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Filter Table fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor.buffers.iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 28);
+        let layout = editor.widget_layout().expect("Filter Table fx layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Filter Table"),
+            "layout should contain the built-in Filter Table panel",
+        );
+        assert_eq!(count_widget_type(&layout, "wavetable-viewer"), 1);
+        assert_eq!(count_widget_type(&layout, "eq8-editor"), 1);
+        let table_viewer = find_layout_node_by_widget_type(&layout, "wavetable-viewer")
+            .expect("Filter Table magnitude-bank viewer");
+        assert!(table_viewer.rect.width > 0.0 && table_viewer.rect.height > 0.0);
+        let spectrum_viewer = find_layout_node_by_widget_type(&layout, "eq8-editor")
+            .expect("Filter Table response spectrum viewer");
+        assert!(spectrum_viewer.rect.width > 0.0 && spectrum_viewer.rect.height > 0.0);
+        assert!(
+            matches!(table_viewer.props.get("wave"), Some(Value::ReactiveRef { .. })),
+            "frame visualization must bind to the live base-value field",
+        );
+        assert!(
+            matches!(spectrum_viewer.props.get("response-cutoff"), Some(Value::ReactiveRef { .. })),
+            "response visualization must bind to the live cutoff field",
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "filter-table-live-0",
+            Value::Number(0.5),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "filter-table-live-1",
+            Value::Number(4000.0),
+        );
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&table_viewer.props, "wave", -1.0),
+            0.5,
+        );
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(
+                &spectrum_viewer.props,
+                "response-cutoff",
+                -1.0,
+            ),
+            4000.0,
+        );
+
+        for text in ["MAGNITUDE TABLE", "Procedural Shapes", "frame", "cutoff", "resonance"] {
+            let node = find_layout_text_containing(&layout, text)
+                .unwrap_or_else(|| panic!("missing Filter Table text {text:?}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "Filter Table text {text:?} has invalid geometry: {:?}",
+                node.rect,
+            );
+        }
+
+        editor.runtime_mut().eval_str(
+            r#"(do
+              (set! eseq.effects.state/effect-mods-open true)
+              (set! eseq.effects.state/effect-mods-chain "audio")
+              (set! eseq.effects.state/effect-mods-track 0)
+              (set! eseq.effects.state/effect-mods-slot 0)
+              (set! eseq.effects.state/effect-mods-rack-slot -1)
+              (set! eseq.effects.state/effect-mods-bus -1)
+              (set! eseq.effects.state/effect-selected-mod-slot 1))"#,
+        ).expect("open Filter Table effect mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Filter Table mods status after refresh: {status}");
+        }
+        let mod_layout = editor.widget_layout().expect("Filter Table mods layout");
+        assert_finite_layout_tree(&mod_layout);
+        for idx in 0..4 {
+            let key = format!("filter-table-param-{idx}-mod-wrapper");
+            let wrapper = find_layout_node_by_stable_key(&mod_layout, &key)
+                .unwrap_or_else(|| panic!("missing modulation wrapper {key}"));
+            assert!(
+                layout_has_double_click(wrapper),
+                "{key} should expose the modulation assignment gesture",
+            );
+            assert!(wrapper.rect.width > 0.0 && wrapper.rect.height > 0.0);
+        }
+        assert!(
+            find_layout_node_by_stable_key(&mod_layout, "filter-table-param-4-mod-wrapper")
+                .is_none(),
+            "output must remain non-modulatable",
+        );
+        let frame_knob = find_layout_node_by_stable_key(
+            &mod_layout,
+            "filter-table-param-0-mod-depth",
+        )
+        .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+        .expect("frame should render as a modulation-depth knob");
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(
+                &frame_knob.props,
+                "selected-mod-slot",
+                f32::NAN,
+            ),
+            1.0,
+        );
+        let on_change = frame_knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("frame modulation-depth knob should be editable");
+        editor.runtime_mut()
+            .invoke(on_change, vec![Value::Number(0.25)])
+            .expect("edit frame modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected set-effect-param command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, "set-effect-param");
+        let Value::Map(payload) = payload else {
+            panic!("set-effect-param payload should be a dict: {payload:?}");
+        };
+        assert_eq!(
+            payload.get("param-idx").map(|value| value.borrow().clone()),
+            Some(Value::Number(20.0)),
+        );
+        assert_eq!(
+            payload.get("value").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.25)),
+        );
     }
 
     #[test]

@@ -12105,6 +12105,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     block_size: 128,
                     frames: 4096,
                     param_overrides: Vec::new(),
+                    tensor_overrides: Vec::new(),
                     input_overrides: Vec::new(),
                 },
             )
@@ -12224,6 +12225,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         ("__dgen_mod_active__xyz".to_string(), 1.0),
                         ("mod xyz slot 1 amt".to_string(), 0.5),
                     ],
+                    tensor_overrides: Vec::new(),
                     input_overrides: vec![(2, mod_value)],
                 },
             )
@@ -12285,6 +12287,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         ("mix".to_string(), 1.0),
                         ("output".to_string(), 1.0),
                     ],
+                    tensor_overrides: Vec::new(),
                     input_overrides: vec![],
                 },
             )
@@ -12377,6 +12380,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                         ("mix".to_string(), 1.0),
                         ("output".to_string(), 1.0),
                     ],
+                    tensor_overrides: Vec::new(),
                     input_overrides: vec![],
                 },
             )
