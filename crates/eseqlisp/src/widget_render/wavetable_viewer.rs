@@ -68,7 +68,9 @@ pub fn remove_published_bank(key: &str) {
     }
 }
 
-pub(crate) fn published_bank(key: &str) -> Option<Arc<WavetableBank>> {
+/// Pub so hosts can assert that what a widget displays is exactly what they
+/// published (the Filter Table editor's displayed-vs-runtime checks).
+pub fn published_bank(key: &str) -> Option<Arc<WavetableBank>> {
     live_banks().lock().ok()?.get(key).cloned()
 }
 

@@ -92,14 +92,18 @@ impl GraphController<'_> {
             )
         };
 
+        let pdc_id = super::latency::add_pdc_node(self.app.graph.lg.0, &format!("{}_pdc", name));
+
         unsafe {
             crate::audiograph::graph_connect(self.app.graph.lg.0, voice_sum_id, 0, pan_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, voice_sum_r_id, 0, pan_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 0, fx_out_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 1, fx_out_id, 1);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, fx_out_id, 0, pdc_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, fx_out_id, 1, pdc_id, 1);
         }
         let output = self.app.state.pattern.track_params[idx].output();
-        self.connect_delay_output_to(fx_out_id, &output);
+        self.connect_delay_output_to(pdc_id, &output);
 
         Ok(TrackShell {
             voice_sum_id,
@@ -107,6 +111,7 @@ impl GraphController<'_> {
             pan_id,
             filter_id: 0,
             delay_id: fx_out_id,
+            pdc_id,
             send_id,
             mod_out_id,
             mod_in_clip_ids,
@@ -323,6 +328,7 @@ impl GraphController<'_> {
             pan_id: shell.pan_id,
             filter_id: shell.filter_id,
             delay_id: shell.delay_id,
+            pdc_id: shell.pdc_id,
             send_id: shell.send_id,
             mod_out_id: shell.mod_out_id,
             mod_in_clip_ids: shell.mod_in_clip_ids,

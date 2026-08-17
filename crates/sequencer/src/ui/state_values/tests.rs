@@ -36003,6 +36003,200 @@
         );
     }
 
+    // eseq-dtx.8: the response-editor section renders from session props on
+    // the fx map — parametric node surface, editor frame overview, toolbars —
+    // with finite nonzero geometry, and its controls emit editor commands.
+    #[test]
+    fn metal_seq_filter_table_editor_section_renders_with_live_session_props() {
+        fn editor_map() -> Value {
+            let mut band: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+            for (key, value) in [
+                ("kind", Value::String("peak".to_string())),
+                ("freq", Value::Number(48.0)),
+                ("gain", Value::Number(6.0)),
+                ("q", Value::Number(2.0)),
+            ] {
+                band.insert(key.to_string(), Rc::new(RefCell::new(value)));
+            }
+            let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+            for (key, value) in [
+                ("open", Value::Bool(true)),
+                ("frames", Value::Number(64.0)),
+                ("selected-frame", Value::Number(12.0)),
+                ("selected-frame-normalized", Value::Number(12.0 / 63.0)),
+                ("can-undo", Value::Bool(true)),
+                ("can-redo", Value::Bool(false)),
+                ("dirty", Value::Bool(true)),
+                ("op-count", Value::Number(3.0)),
+                ("band", Value::Map(band)),
+            ] {
+                map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+            }
+            Value::Map(map)
+        }
+
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut fx = test_fx_map(
+            "Filter Table",
+            0,
+            vec![
+                Value::Map(test_param_map("frame", 0, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("cutoff", 1, 1000.0, 40.0, 18000.0)),
+                Value::Map(test_param_map("resonance", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("mix", 3, 0.7, 0.0, 1.0)),
+                Value::Map(test_param_map("output", 4, 1.0, 0.25, 2.0)),
+            ],
+        );
+        fx.insert(
+            "table-name".to_string(),
+            Rc::new(RefCell::new(Value::String("Edited Shapes".to_string()))),
+        );
+        let table_key = "filter-table-editor-layout-test:magnitudes";
+        assert!(eseqlisp::widget_render::wavetable_viewer::publish_bank(
+            table_key,
+            sequencer::effects::filter_table::NBINS,
+            Arc::new(
+                sequencer::effects::filter_table::default_table()
+                    .data
+                    .as_ref()
+                    .clone()
+            ),
+        ));
+        fx.insert(
+            "table-data-key".to_string(),
+            Rc::new(RefCell::new(Value::String(table_key.to_string()))),
+        );
+        fx.insert("editor".to_string(), Rc::new(RefCell::new(editor_map())));
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter Table".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
+                ("effects", test_list(vec![Value::Map(fx)])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor.runtime_mut().eval_str(
+            r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-instrument-synth-ui (inst) false)
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+            "#,
+        ).expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Filter Table editor lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 40);
+        let layout = editor.widget_layout().expect("Filter Table editor layout");
+        assert_finite_layout_tree(&layout);
+
+        let curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+            .expect("editor parametric node surface");
+        assert!(curve.rect.width > 0.0 && curve.rect.height > 0.0);
+        let Some(Value::List(bands)) = curve.props.get("bands") else {
+            panic!("editor bands should be a list: {:?}", curve.props.get("bands"));
+        };
+        assert_eq!(
+            bands.len(),
+            2,
+            "cutoff-reference marker plus the active parametric node"
+        );
+        assert!(
+            curve.props.get("on-action").is_some(),
+            "node surface must emit band gestures"
+        );
+        let overview = find_layout_node_by_widget_type(&layout, "wavetable-viewer")
+            .expect("shared magnitude viewer doubles as the editor overview");
+        assert_eq!(
+            eseqlisp::widget_render::get_f32_prop(&overview.props, "wave", -1.0),
+            12.0 / 63.0,
+            "while editing, the viewer highlight tracks the editor's selected frame"
+        );
+        assert!(
+            find_layout_node_by_widget_type(&layout, "eq8-editor").is_none(),
+            "the editor section replaces the spectrum overlay"
+        );
+
+        for text in [
+            "RESPONSE EDITOR",
+            "frame 13/64",
+            "UNDO",
+            "REDO",
+            "SAVE",
+            "CLOSE",
+            "PEAK",
+            "NOTCH",
+            "SM-SPEC",
+            "NORM",
+            "DUP",
+            "KEYS",
+        ] {
+            let node = find_layout_text_containing(&layout, text)
+                .unwrap_or_else(|| panic!("missing editor text {text:?}"));
+            assert!(
+                node.rect.width > 0.0 && node.rect.height > 0.0,
+                "editor text {text:?} has invalid geometry: {:?}",
+                node.rect,
+            );
+        }
+
+        // The add-node button emits the editor command with its kind.
+        let peak = find_layout_text_containing(&layout, "PEAK").expect("peak button");
+        let on_click = peak
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("PEAK should be clickable");
+        editor
+            .runtime_mut()
+            .invoke(
+                on_click,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Number(0.0)],
+            )
+            .expect("click PEAK");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected editor command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, "filter-table-editor-add-node");
+        let Value::Map(payload) = payload else {
+            panic!("payload should be a dict: {payload:?}");
+        };
+        assert_eq!(
+            payload.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::String("peak".to_string())),
+        );
+
+        eseqlisp::widget_render::wavetable_viewer::remove_published_bank(table_key);
+    }
+
     #[test]
     fn metal_seq_fx_filterbank_layout_contains_dual_filters_and_harmonics() {
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");

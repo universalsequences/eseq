@@ -62,8 +62,16 @@ pub struct EffectRenderOptions {
     pub block_size: usize,
     pub frames: usize,
     pub param_overrides: Vec<(String, f32)>,
+    /// Mid-render parameter changes, applied at block granularity (the render
+    /// loop splits blocks at event frames, so an event lands exactly on its
+    /// frame). Uses the same name resolution as `param_overrides`.
+    pub param_events: Vec<InstrumentParamEvent>,
     pub tensor_overrides: Vec<(String, Vec<f32>)>,
     pub input_overrides: Vec<(usize, f32)>,
+    /// Sustained sine probes: (input channel, frequency Hz, amplitude). The
+    /// first tone on a channel replaces the default probe signal; further
+    /// tones on the same channel sum. Applied after `input_overrides`.
+    pub input_tones: Vec<(usize, f32, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +86,9 @@ pub struct EffectRenderReport {
     pub nonzero_frames: usize,
     pub first_nonzero_frame: Option<usize>,
     pub first_samples: Vec<f32>,
+    /// Full interleaved L/R output, for tests that need waveform-level
+    /// metrics (discontinuity energy, windowed RMS) rather than aggregates.
+    pub samples: Vec<f32>,
 }
 
 pub fn compile_and_load(source: &str, sample_rate: u32) -> Result<CompileResult, String> {
@@ -251,7 +262,7 @@ pub(crate) fn output_dir() -> PathBuf {
     crate::app_paths::app_paths().dgen_scratch_dir()
 }
 
-pub(crate) fn dgenlisp_tool_path() -> PathBuf {
+pub fn dgenlisp_tool_path() -> PathBuf {
     crate::app_paths::app_paths().dgenlisp_tool()
 }
 

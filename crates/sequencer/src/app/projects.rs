@@ -2655,7 +2655,7 @@ impl App {
         Ok(resolved)
     }
 
-    fn resolve_sample_path_by_name(&self, sample_name: &str) -> Option<PathBuf> {
+    pub fn resolve_sample_path_by_name(&self, sample_name: &str) -> Option<PathBuf> {
         fn walk(dir: &Path, sample_name: &str) -> Option<PathBuf> {
             let entries = std::fs::read_dir(dir).ok()?;
             for entry in entries {
@@ -2716,15 +2716,28 @@ impl App {
         table_ref: Option<&str>,
     ) {
         let Some(table_ref) = table_ref else { return };
-        if table_ref.is_empty() || table_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
+        // Saved references embed the analysis mode; the sample resolves by its
+        // decoded name while the full reference keeps the analysis deterministic.
+        // `fltab:` references resolve to baked asset files instead of samples.
+        let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
+        if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
             return;
         }
-        if let Some(path) = self.resolve_sample_path_by_name(table_ref) {
+        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
             if let Err(error) = self.set_filter_table_source(track, slot_idx, &path, table_ref) {
                 eprintln!("project-load: Filter Table '{table_ref}' not restored: {error}");
             }
         } else {
             eprintln!("project-load: Filter Table '{table_ref}' could not be resolved");
+        }
+    }
+
+    /// Resolve a decoded Filter Table reference to a file on disk: an asset
+    /// stem to a `.fltab` asset, anything else to a sample by name.
+    pub fn resolve_filter_table_source_path(&self, sample_name: &str) -> Option<PathBuf> {
+        match crate::effects::filter_table_asset::decode_asset_ref(sample_name) {
+            Some(stem) => crate::effects::filter_table_asset::resolve_asset_path(stem),
+            None => self.resolve_sample_path_by_name(sample_name),
         }
     }
 
@@ -2735,10 +2748,11 @@ impl App {
         table_ref: Option<&str>,
     ) {
         let Some(table_ref) = table_ref else { return };
-        if table_ref.is_empty() || table_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
+        let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
+        if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
             return;
         }
-        if let Some(path) = self.resolve_sample_path_by_name(table_ref) {
+        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
             if let Err(error) =
                 self.set_filter_table_source_bus(bus_idx, slot_idx, &path, table_ref)
             {

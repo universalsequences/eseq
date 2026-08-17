@@ -229,6 +229,7 @@ struct TrackShell {
     pan_id: i32,
     filter_id: i32,
     delay_id: i32,
+    pdc_id: i32,
     send_id: i32,
     mod_out_id: i32,
     mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
@@ -548,6 +549,7 @@ impl App {
 
 mod bus_routing;
 mod engine_connect;
+pub mod latency;
 mod engine_voice;
 mod mod_routes;
 mod node_build;

@@ -5907,17 +5907,45 @@ pub fn apply_recorded_track_filter_table_mutation(
         slot_idx: Some(slot_idx),
     };
     let before = capture_device_value_snapshot(app, target)?;
-    let prepared = std::sync::Arc::new(
-        crate::effects::filter_table::prepare_table(source_path)
-            .map_err(EditError::InvalidTarget)?,
-    );
+    // Baked assets load their payload directly; audio sources analyze under
+    // the reference's explicit mode or the recommendation. The stored
+    // reference always records what actually happened so undo/redo and
+    // reload reproduce the identical table.
+    let (sample_ref, stored, prepared) = if crate::effects::filter_table_asset::is_asset_path(
+        source_path,
+    ) || crate::effects::filter_table_asset::decode_asset_ref(reference).is_some()
+    {
+        let asset = crate::effects::filter_table_asset::read_asset(source_path)
+            .map_err(EditError::InvalidTarget)?;
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&asset.meta.name)
+            .to_string();
+        let stored = crate::effects::filter_table_asset::encode_asset_ref(&stem);
+        (stem, stored, std::sync::Arc::new(asset.table))
+    } else {
+        let (sample_ref, requested) = crate::effects::filter_table::decode_table_ref(reference);
+        let (table, mode) = match requested {
+            Some(mode) => (
+                crate::effects::filter_table::prepare_table_with_mode(source_path, mode)
+                    .map_err(EditError::InvalidTarget)?,
+                mode,
+            ),
+            None => crate::effects::filter_table::prepare_table(source_path)
+                .map_err(EditError::InvalidTarget)?,
+        };
+        let sample_ref = sample_ref.to_string();
+        let stored = crate::effects::filter_table::encode_table_ref(&sample_ref, mode);
+        (sample_ref, stored, std::sync::Arc::new(table))
+    };
     finish_active_gesture(app);
     let node_id = app.state.pattern.effect_chains
         .get(track)
         .and_then(|chain| chain.get(slot_idx))
         .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
         .ok_or_else(|| EditError::InvalidTarget("Track effect slot not found".to_string()))?;
-    app.apply_prepared_filter_table_to_node(node_id, prepared, reference, source_path)
+    app.apply_prepared_filter_table_to_node(node_id, prepared, &stored, source_path)
         .map_err(EditError::InvalidTarget)?;
     let after = capture_device_value_snapshot(app, target)?;
     if before.bit_exact_eq(&after) {
@@ -5933,7 +5961,7 @@ pub fn apply_recorded_track_filter_table_mutation(
     };
     let retained_bytes = patch.retained_bytes();
     let history_move = app.history.commit(
-        format!("Load Filter Table '{reference}'"),
+        format!("Load Filter Table '{sample_ref}'"),
         None,
         EditPatch::DeviceValues(patch),
         retained_bytes,

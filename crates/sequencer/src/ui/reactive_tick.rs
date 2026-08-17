@@ -138,6 +138,11 @@ pub(crate) fn reactive_tick_and_render(
         &ctx.shared.ui_epoch,
     );
 
+    // Keep plugin-delay-compensation pads in sync with whatever mutated the
+    // effect chains this frame (installs, undo/redo, project load, scenes).
+    // Change-detecting: writes to the graph only when the pad set differs.
+    app.refresh_latency_compensation();
+
     // 2. Sync reactive state AFTER events
     let ct = current_track_for_app(&mut app, &ctx.shared.current_track).unwrap_or(0);
     sync_watched_sampler_voices(

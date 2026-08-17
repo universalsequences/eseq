@@ -1,5 +1,56 @@
 use super::*;
 
+/// Editor-session props for a Filter Table device (eseq-dtx.8): present on
+/// the fx map as `:editor` only when the single active response-editor
+/// session is bound to this node. Band geometry is translated to the
+/// response-curve-editor's axes here (freq = harmonic-bin position
+/// `2^center_oct * 24`, q = `2 / width_oct`) so the lisp stays arithmetic-
+/// free.
+fn filter_table_editor_value(node_id: i32) -> Option<Value> {
+    use std::collections::HashMap;
+    let ui = sequencer::effects::filter_table_editor::session_ui_state()?;
+    if ui.node_id != node_id {
+        return None;
+    }
+    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    let mut put = |key: &str, value: Value| {
+        map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+    };
+    put("open", Value::Bool(true));
+    put("frames", Value::Number(ui.frames as f64));
+    put("selected-frame", Value::Number(ui.selected_frame as f64));
+    // wavetable-viewer highlights via a normalized 0..1 wave position.
+    let normalized = if ui.frames > 1 {
+        ui.selected_frame as f64 / (ui.frames - 1) as f64
+    } else {
+        0.0
+    };
+    put("selected-frame-normalized", Value::Number(normalized));
+    put("can-undo", Value::Bool(ui.can_undo));
+    put("can-redo", Value::Bool(ui.can_redo));
+    put("dirty", Value::Bool(ui.dirty));
+    put("op-count", Value::Number(ui.op_count as f64));
+    if let Some(node) = ui.band {
+        let mut band: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        let mut put_band = |key: &str, value: Value| {
+            band.insert(key.to_string(), Rc::new(RefCell::new(value)));
+        };
+        let reference = sequencer::effects::filter_table::REFERENCE_HARMONIC as f64;
+        put_band("kind", Value::String(node.kind.tag().to_string()));
+        put_band(
+            "freq",
+            Value::Number((f64::from(node.center_oct).exp2() * reference).clamp(1.0, 1024.0)),
+        );
+        put_band("gain", Value::Number(f64::from(node.gain_db)));
+        put_band(
+            "q",
+            Value::Number((2.0 / f64::from(node.width_oct)).clamp(0.25, 16.0)),
+        );
+        put("band", Value::Map(band));
+    }
+    Some(Value::Map(map))
+}
+
 /// Build a Lisp Value::List of effect slot maps for a track.
 /// Each slot is a map: {:name "Filter" :params ({:name "cutoff" :value 1000 :min 20 :max 20000} ...)}
 pub(crate) fn build_effects_value(
@@ -157,6 +208,18 @@ pub(crate) fn build_effects_value(
                     "table-name".to_string(),
                     Rc::new(RefCell::new(Value::String(name))),
                 );
+                if let Some(mode_label) =
+                    sequencer::effects::filter_table::table_ref_for(node_id)
+                        .and_then(|reference| {
+                            sequencer::effects::filter_table::decode_table_ref(&reference).1
+                        })
+                        .map(|mode| mode.label().to_string())
+                {
+                    slot_map.insert(
+                        "table-mode".to_string(),
+                        Rc::new(RefCell::new(Value::String(mode_label))),
+                    );
+                }
                 if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
                     slot_map.insert(
                         "table-data-key".to_string(),
@@ -164,6 +227,9 @@ pub(crate) fn build_effects_value(
                             sequencer::effects::filter_table::visualization_key(node_id),
                         ))),
                     );
+                }
+                if let Some(editor) = filter_table_editor_value(node_id) {
+                    slot_map.insert("editor".to_string(), Rc::new(RefCell::new(editor)));
                 }
             }
             let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
@@ -778,6 +844,18 @@ pub(crate) fn build_bus_effects_value_for_selection(
                             "table-name".to_string(),
                             Rc::new(RefCell::new(Value::String(name))),
                         );
+                        if let Some(mode_label) =
+                            sequencer::effects::filter_table::table_ref_for(node_id)
+                                .and_then(|reference| {
+                                    sequencer::effects::filter_table::decode_table_ref(&reference).1
+                                })
+                                .map(|mode| mode.label().to_string())
+                        {
+                            slot_map.insert(
+                                "table-mode".to_string(),
+                                Rc::new(RefCell::new(Value::String(mode_label))),
+                            );
+                        }
                         if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
                             slot_map.insert(
                                 "table-data-key".to_string(),
@@ -785,6 +863,10 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     sequencer::effects::filter_table::visualization_key(node_id),
                                 ))),
                             );
+                        }
+                        if let Some(editor) = filter_table_editor_value(node_id) {
+                            slot_map
+                                .insert("editor".to_string(), Rc::new(RefCell::new(editor)));
                         }
                     }
 

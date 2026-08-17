@@ -144,6 +144,9 @@ struct CaptureTrackSpec {
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
     rack_slot_audio_fx: Vec<String>,
+    /// Open the Filter Table response editor on this track's Filter Table
+    /// slot after effects install (eseq-dtx.8 visual review).
+    filter_table_editor: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +305,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
     let mut rack_slot_audio_fx = Vec::new();
+    let mut filter_table_editor = false;
     while cursor < items.len() {
         let option = expression_name(items.get(cursor))
             .ok_or_else(|| format!("expected a track option at item {}", cursor + 1))?;
@@ -337,6 +341,10 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
             "rack-slot-audio-fx" => {
                 rack_slot_audio_fx = expression_string_list(value, ":rack-slot-audio-fx")?
             }
+            "filter-table-editor" => {
+                filter_table_editor = expression_bool(value)
+                    .ok_or_else(|| ":filter-table-editor expects true or false".to_string())?;
+            }
             other => return Err(format!("unsupported track option :{other}")),
         }
         cursor += 2;
@@ -367,6 +375,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         midi_fx,
         audio_fx,
         rack_slot_audio_fx,
+        filter_table_editor,
     })
 }
 
@@ -544,6 +553,50 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                         track + 1
                     )
                 })?;
+        }
+        if spec.filter_table_editor {
+            use sequencer::effects::filter_table_editor::{
+                EditOp, EditorTarget, ParametricKind,
+            };
+            let slot = app
+                .graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descs| {
+                    descs
+                        .iter()
+                        .position(|desc| desc.name == sequencer::effects::filter_table::NAME)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        ":filter-table-editor on track {} needs \"Filter Table\" in :audio-fx",
+                        track + 1
+                    )
+                })?;
+            app.open_filter_table_editor(EditorTarget::Track { track, slot })
+                .map_err(|error| format!("failed to open Filter Table editor: {error}"))?;
+            // A visible session for review: one parametric node (renders as
+            // the draggable band) over a gently tilted table, on frame 12.
+            app.filter_table_editor_apply_op(
+                EditOp::Tilt {
+                    frame_start: 0,
+                    frame_end: 63,
+                    db_per_octave: -3.0,
+                },
+                false,
+            )
+            .map_err(|error| format!("failed to seed Filter Table editor op: {error}"))?;
+            app.filter_table_editor_apply_op(
+                EditOp::Parametric {
+                    frame_start: 0,
+                    frame_end: 63,
+                    node: ParametricKind::Peak.default_node(),
+                },
+                false,
+            )
+            .map_err(|error| format!("failed to seed Filter Table editor node: {error}"))?;
+            app.filter_table_editor_select_frame(12)
+                .map_err(|error| format!("failed to select Filter Table editor frame: {error}"))?;
         }
     }
     // :steps write the live pattern; persist them into the scene's pattern
@@ -1032,6 +1085,7 @@ mod tests {
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],
                 rack_slot_audio_fx: vec![],
+                filter_table_editor: false,
             }
         );
         assert_eq!(

@@ -200,6 +200,7 @@ impl GraphController<'_> {
                 }
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.mod_out_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
+                crate::audiograph::delete_node(self.app.graph.lg.0, track.pdc_id);
                 if track.filter_id != 0 {
                     crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
                 }

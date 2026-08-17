@@ -1907,14 +1907,46 @@ impl App {
         self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
     }
 
+    /// Analyze and install a table source. `reference` may carry an explicit
+    /// analysis mode (`encode_table_ref`); otherwise the recommended mode is
+    /// used. Either way the stored reference records the mode actually used so
+    /// save/reload reproduces the identical analysis.
     fn apply_filter_table_to_node(
         &self,
         node_id: i32,
         source_path: &std::path::Path,
         reference: &str,
     ) -> Result<(), String> {
-        let table = Arc::new(crate::effects::filter_table::prepare_table(source_path)?);
-        self.apply_prepared_filter_table_to_node(node_id, table, reference, source_path)
+        use crate::effects::{filter_table, filter_table_asset};
+        // A baked .fltab asset skips analysis entirely: the file already
+        // carries the validated magnitude bank, and the stored reference
+        // (`fltab:<stem>`) resolves back to the asset on reload.
+        if filter_table_asset::is_asset_path(source_path)
+            || filter_table_asset::decode_asset_ref(reference).is_some()
+        {
+            let asset = filter_table_asset::read_asset(source_path)?;
+            let stem = source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| "asset path has no file stem".to_string())?;
+            let stored = filter_table_asset::encode_asset_ref(stem);
+            return self.apply_prepared_filter_table_to_node(
+                node_id,
+                Arc::new(asset.table),
+                &stored,
+                source_path,
+            );
+        }
+        let (sample_ref, requested) = filter_table::decode_table_ref(reference);
+        let (table, mode) = match requested {
+            Some(mode) => (
+                filter_table::prepare_table_with_mode(source_path, mode)?,
+                mode,
+            ),
+            None => filter_table::prepare_table(source_path)?,
+        };
+        let stored = filter_table::encode_table_ref(sample_ref, mode);
+        self.apply_prepared_filter_table_to_node(node_id, Arc::new(table), &stored, source_path)
     }
 
     pub(crate) fn apply_prepared_filter_table_to_node(
@@ -1934,11 +1966,15 @@ impl App {
                 table.as_ref(),
             )?;
         }
-        let display = if reference == crate::effects::filter_table::DEFAULT_TABLE_REF {
+        let (sample_ref, _mode) = crate::effects::filter_table::decode_table_ref(reference);
+        let display = if sample_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
             "Procedural Shapes".to_string()
+        } else if let Some(stem) = crate::effects::filter_table_asset::decode_asset_ref(sample_ref)
+        {
+            stem.to_string()
         } else {
             crate::sample_db::display_title_for_sample_path(source_path)
-                .unwrap_or_else(|| reference.to_string())
+                .unwrap_or_else(|| sample_ref.to_string())
         };
         crate::effects::filter_table::record_prepared_table(
             node_id,
@@ -1965,7 +2001,7 @@ impl App {
             node_id,
             table,
             reference,
-            std::path::Path::new(reference),
+            std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
         )
     }
 
@@ -1985,7 +2021,7 @@ impl App {
             node_id,
             table,
             reference,
-            std::path::Path::new(reference),
+            std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
         )
     }
 
@@ -2006,8 +2042,36 @@ impl App {
             node_id,
             table,
             reference,
-            std::path::Path::new(reference),
+            std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
         )
+    }
+
+    /// Current Filter Table source for a track or bus effect slot: the decoded
+    /// sample name and the analysis mode recorded at import. `None` when the
+    /// slot has no user-loaded table (the procedural default included).
+    pub fn filter_table_source_info(
+        &self,
+        track: Option<usize>,
+        bus: Option<usize>,
+        slot_idx: usize,
+    ) -> Option<(String, Option<crate::effects::filter_table::AnalysisMode>)> {
+        let node_id = if let Some(bus_idx) = bus {
+            self.buses.get(bus_idx)?.effect_slots.get(slot_idx)?.node_id as i32
+        } else {
+            self.state
+                .pattern
+                .effect_chains
+                .get(track?)?
+                .get(slot_idx)?
+                .node_id
+                .load(Ordering::Relaxed) as i32
+        };
+        let reference = crate::effects::filter_table::table_ref_for(node_id)?;
+        let (sample_ref, mode) = crate::effects::filter_table::decode_table_ref(&reference);
+        if sample_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
+            return None;
+        }
+        Some((sample_ref.to_string(), mode))
     }
 
     pub fn set_filter_table_source(
@@ -2042,6 +2106,267 @@ impl App {
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| format!("Bus {} effect slot {} not found", bus_idx + 1, slot_idx + 1))?;
         self.apply_filter_table_to_node(node_id, source_path, reference)
+    }
+
+    // ---- Filter Table response editor sessions (eseq-dtx.8) ----------
+    //
+    // The document/command model lives in effects::filter_table_editor;
+    // these methods bind the single active session to a live device node.
+    // Previews write the baked table straight to the node tensor and the
+    // published visualization bank WITHOUT touching the prepared-table
+    // registries, so app-level undo/persistence keep seeing the table the
+    // device actually owns until the user saves (recorded mutation) or the
+    // session closes (original re-applied).
+
+    fn filter_table_editor_target_node(
+        &self,
+        target: crate::effects::filter_table_editor::EditorTarget,
+    ) -> Result<i32, String> {
+        use crate::effects::filter_table_editor::EditorTarget;
+        let node_id = match target {
+            EditorTarget::Track { track, slot } => self
+                .state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot))
+                .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32),
+            EditorTarget::Bus { bus, slot } => self
+                .buses
+                .get(bus)
+                .and_then(|bus| bus.effect_slots.get(slot))
+                .map(|slot| slot.node_id as i32),
+        }
+        .ok_or_else(|| "Filter Table effect slot not found".to_string())?;
+        if node_id == 0 {
+            return Err("Filter Table node not live".to_string());
+        }
+        Ok(node_id)
+    }
+
+    /// Open an editor session on a track/bus Filter Table slot. When the
+    /// device's current table is a saved editor asset, its nondestructive
+    /// document (base + ops) is restored; otherwise the loaded table
+    /// becomes the base of a fresh document.
+    pub fn open_filter_table_editor(
+        &mut self,
+        target: crate::effects::filter_table_editor::EditorTarget,
+    ) -> Result<(), String> {
+        use crate::effects::{filter_table, filter_table_asset, filter_table_editor};
+        let node_id = self.filter_table_editor_target_node(target)?;
+        let original_table = filter_table::prepared_table_for(node_id)
+            .ok_or_else(|| "Filter Table has no prepared table yet".to_string())?;
+        let original_ref = filter_table::table_ref_for(node_id)
+            .unwrap_or_else(|| filter_table::DEFAULT_TABLE_REF.to_string());
+        let original_name =
+            filter_table::table_name_for(node_id).unwrap_or_else(|| "table".to_string());
+        let doc = filter_table_asset::decode_asset_ref(&original_ref)
+            .and_then(filter_table_asset::resolve_asset_path)
+            .and_then(|path| filter_table_asset::read_asset(&path).ok())
+            .and_then(|asset| asset.meta.recipe)
+            .and_then(|recipe| filter_table_editor::EditorDoc::from_snapshot(&recipe).ok())
+            .unwrap_or_else(|| filter_table_editor::EditorDoc::from_table(&original_table));
+        filter_table_editor::set_session(Some(filter_table_editor::EditorSession {
+            target,
+            node_id,
+            doc,
+            selected_frame: 0,
+            original_table,
+            original_ref,
+            original_name,
+            dirty: false,
+        }));
+        Ok(())
+    }
+
+    /// Write a baked editor table to the session's node for live audition:
+    /// tensor + published bank only, never the prepared-table registries.
+    fn preview_filter_table_editor_table(
+        &self,
+        node_id: i32,
+        table: &crate::effects::filter_table::MagnitudeTable,
+    ) -> Result<(), String> {
+        unsafe {
+            crate::effects::filter_table::apply_table_to_node(self.graph.lg.0, node_id, table)?;
+        }
+        eseqlisp::widget_render::wavetable_viewer::publish_bank(
+            crate::effects::filter_table::visualization_key(node_id),
+            crate::effects::filter_table::NBINS,
+            table.data.clone(),
+        );
+        Ok(())
+    }
+
+    /// Apply an op to the active session (optionally coalescing with the
+    /// newest history entry, for drag gestures) and audition the result.
+    pub fn filter_table_editor_apply_op(
+        &mut self,
+        op: crate::effects::filter_table_editor::EditOp,
+        coalesce: bool,
+    ) -> Result<(), String> {
+        use crate::effects::filter_table_editor::with_session;
+        let (node_id, baked) = with_session(|session| {
+            let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
+            if coalesce {
+                session.doc.replace_last(op)?;
+            } else {
+                session.doc.apply(op)?;
+            }
+            session.dirty = true;
+            session.selected_frame = session.selected_frame.min(session.doc.frame_count() - 1);
+            Ok::<_, String>((session.node_id, session.doc.bake()?))
+        })?;
+        self.preview_filter_table_editor_table(node_id, &baked)
+    }
+
+    /// Audition an uncommitted op (mid-drag preview): nothing enters the
+    /// document history.
+    pub fn filter_table_editor_preview_op(
+        &mut self,
+        op: crate::effects::filter_table_editor::EditOp,
+    ) -> Result<(), String> {
+        use crate::effects::filter_table_editor::with_session;
+        let (node_id, baked) = with_session(|session| {
+            let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
+            Ok::<_, String>((session.node_id, session.doc.bake_with_preview(&op)?))
+        })?;
+        self.preview_filter_table_editor_table(node_id, &baked)
+    }
+
+    /// Editor-document undo/redo (independent of app history). Returns
+    /// whether anything changed.
+    pub fn filter_table_editor_history(&mut self, redo: bool) -> Result<bool, String> {
+        use crate::effects::filter_table_editor::with_session;
+        let stepped = with_session(|session| {
+            let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
+            let stepped = if redo {
+                session.doc.redo()
+            } else {
+                session.doc.undo()
+            };
+            if stepped {
+                session.dirty = true;
+                session.selected_frame =
+                    session.selected_frame.min(session.doc.frame_count() - 1);
+                Ok(Some((session.node_id, session.doc.bake()?)))
+            } else {
+                Ok::<_, String>(None)
+            }
+        })?;
+        match stepped {
+            Some((node_id, baked)) => {
+                self.preview_filter_table_editor_table(node_id, &baked)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub fn filter_table_editor_select_frame(&mut self, frame: usize) -> Result<(), String> {
+        crate::effects::filter_table_editor::with_session(|session| {
+            let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
+            if frame >= session.doc.frame_count() {
+                return Err(format!(
+                    "frame {frame} is out of range for a {}-frame document",
+                    session.doc.frame_count()
+                ));
+            }
+            session.selected_frame = frame;
+            Ok(())
+        })
+    }
+
+    /// Save the session document as a user `.fltab` asset (baked payload +
+    /// full nondestructive document in the recipe) and load it into the
+    /// device through the recorded-mutation path so app-level undo/redo
+    /// and persistence treat it like any other table load. Returns the
+    /// asset stem.
+    pub fn filter_table_editor_save(&mut self, name: Option<&str>) -> Result<String, String> {
+        self.filter_table_editor_save_in(
+            name,
+            &crate::effects::filter_table_asset::user_asset_dir(),
+        )
+    }
+
+    /// [`filter_table_editor_save`] with an explicit destination directory
+    /// (tests save into scratch space instead of the user library).
+    pub fn filter_table_editor_save_in(
+        &mut self,
+        name: Option<&str>,
+        dir: &std::path::Path,
+    ) -> Result<String, String> {
+        use crate::effects::filter_table_editor::{with_session, EditorTarget};
+        let (target, doc, baked, fallback_name) = with_session(|session| {
+            let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
+            Ok::<_, String>((
+                session.target,
+                session.doc.clone(),
+                session.doc.bake()?,
+                session.original_name.clone(),
+            ))
+        })?;
+        let stem = sanitize_asset_stem(name.unwrap_or(&fallback_name));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("failed to create '{}': {error}", dir.display()))?;
+        let path = dir.join(format!(
+            "{stem}.{}",
+            crate::effects::filter_table_asset::EXTENSION
+        ));
+        let meta = crate::effects::filter_table_editor::save_meta(&stem, &doc);
+        crate::effects::filter_table_asset::write_asset(&path, &meta, &baked)?;
+        match target {
+            EditorTarget::Track { track, slot } => {
+                crate::app::edit::apply_recorded_track_filter_table_mutation(
+                    self, track, slot, &path, &stem,
+                )
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))?;
+            }
+            EditorTarget::Bus { bus, slot } => {
+                self.apply_recorded_bus_effect_value_mutation(
+                    bus,
+                    slot,
+                    "Save Filter Table edit",
+                    "filter-table-source",
+                    |app| app.set_filter_table_source_bus(bus, slot, &path, &stem),
+                )?;
+            }
+        }
+        with_session(|session| {
+            if let Some(session) = session {
+                session.dirty = false;
+                // The saved asset is now the device's table; closing must
+                // not roll back to the pre-edit original.
+                session.original_ref =
+                    crate::effects::filter_table_asset::encode_asset_ref(&stem);
+                session.original_name = stem.clone();
+                if let Some(table) =
+                    crate::effects::filter_table::prepared_table_for(session.node_id)
+                {
+                    session.original_table = table;
+                }
+            }
+        });
+        Ok(stem)
+    }
+
+    /// Close the session. Unsaved edits are rolled back by re-applying the
+    /// table the device had when the editor opened.
+    pub fn close_filter_table_editor(&mut self) -> Result<(), String> {
+        let Some(session) = crate::effects::filter_table_editor::set_session(None) else {
+            return Ok(());
+        };
+        if session.dirty {
+            self.apply_prepared_filter_table_to_node(
+                session.node_id,
+                session.original_table,
+                &session.original_ref,
+                std::path::Path::new(
+                    crate::effects::filter_table::decode_table_ref(&session.original_ref).0,
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
@@ -4203,6 +4528,31 @@ impl App {
     }
 }
 
+/// Filter Table editor saves name their asset after the edited table; keep
+/// stems filesystem- and reference-safe (`fltab:<stem>` must round-trip).
+fn sanitize_asset_stem(name: &str) -> String {
+    let mut stem: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while stem.contains("--") {
+        stem = stem.replace("--", "-");
+    }
+    let stem = stem.trim_matches('-').to_string();
+    if stem.is_empty() {
+        "edited-table".to_string()
+    } else {
+        stem
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4632,6 +4982,7 @@ mod tests {
         app.graph.bus_node_ids = vec![
             crate::app::BusNodeIds {
                 id: first_id,
+                pdc_id: 0,
                 left_id: 101,
                 right_id: 102,
                 merge_id: 103,
@@ -4641,6 +4992,7 @@ mod tests {
             },
             crate::app::BusNodeIds {
                 id: target_id,
+                pdc_id: 0,
                 left_id: 201,
                 right_id: 202,
                 merge_id: 203,
@@ -4692,6 +5044,7 @@ mod tests {
         app.graph.bus_node_ids = vec![
             crate::app::BusNodeIds {
                 id: first_id,
+                pdc_id: 0,
                 left_id: 101,
                 right_id: 102,
                 merge_id: 103,
@@ -4701,6 +5054,7 @@ mod tests {
             },
             crate::app::BusNodeIds {
                 id: target_id,
+                pdc_id: 0,
                 left_id: 201,
                 right_id: 202,
                 merge_id: 203,
@@ -4832,6 +5186,7 @@ mod tests {
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
             sampler_ids: Vec::new(),
+            pdc_id: 0,
             sampler_gatepitch_ids: Vec::new(),
             sampler_modulator_ids: Vec::new(),
             voice_sum_id: 0,
@@ -4862,6 +5217,275 @@ mod tests {
             snapshot.tracks[0].effect_slots[slot_idx].node_id != 0,
             "scheduler snapshot should publish the loaded effect slot state"
         );
+    }
+
+    // End-to-end eseq-dtx.6: a baked .fltab asset used as a Filter Table
+    // source on a live graph — no analysis runs, the recorded reference is the
+    // deterministic `fltab:<stem>` form, and the undo memento retains the
+    // prepared bank for fileless redo.
+    #[test]
+    fn filter_table_asset_loads_as_source_with_deterministic_reference() {
+        use crate::effects::{filter_table, filter_table_asset};
+
+        let _registry = filter_table::tests::registry_lock();
+        let graph = TestLiveGraph::new("filter-table-asset-e2e", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 1);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            pdc_id: 0,
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id: 0,
+            filter_id: 0,
+            delay_id: 0,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
+        let slot_idx = app
+            .add_builtin_effect_sync(0, filter_table::NAME)
+            .expect("add Filter Table");
+        let node_id = app.state.pattern.effect_chains[0][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        assert!(node_id > 0, "Filter Table node should be live");
+
+        let data = (0..filter_table::TABLE_LEN)
+            .map(|index| (index % 7) as f32 / 7.0)
+            .collect::<Vec<_>>();
+        let table = filter_table::MagnitudeTable::new(data.clone()).expect("valid magnitudes");
+        let dir = std::env::temp_dir().join(format!("fltab-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("asset dir");
+        let asset_path = dir.join("morph-pack.fltab");
+        let mut meta = filter_table_asset::FilterTableAssetMeta::new("Morph Pack");
+        meta.source_name = Some("synthetic".to_string());
+        filter_table_asset::write_asset(&asset_path, &meta, &table).expect("write asset");
+
+        app.set_filter_table_source(0, slot_idx, &asset_path, "morph-pack")
+            .expect("asset loads as table source");
+
+        assert_eq!(
+            filter_table::table_ref_for(node_id).as_deref(),
+            Some("fltab:morph-pack"),
+            "asset loads persist the deterministic fltab reference"
+        );
+        assert_eq!(
+            filter_table::table_name_for(node_id).as_deref(),
+            Some("morph-pack")
+        );
+        let prepared = filter_table::prepared_table_for(node_id).expect("prepared bank");
+        assert_eq!(
+            prepared.data.as_slice(),
+            data.as_slice(),
+            "the baked payload must reach the device without re-analysis"
+        );
+        assert_eq!(
+            app.filter_table_source_info(Some(0), None, slot_idx),
+            Some(("fltab:morph-pack".to_string(), None)),
+            "asset sources report no analysis mode"
+        );
+
+        let snapshot = crate::effects::EffectSlotSnapshot::capture_authoring_values(
+            &app.state.pattern.effect_chains[0][slot_idx],
+        );
+        assert_eq!(snapshot.table.as_deref(), Some("fltab:morph-pack"));
+        assert!(Arc::ptr_eq(
+            snapshot.prepared_table.as_ref().expect("prepared memento"),
+            &prepared,
+        ));
+
+        filter_table::clear_instance(node_id);
+    }
+
+    // End-to-end eseq-dtx.8: a live editor session on a real graph node —
+    // create, edit with live audition, undo/redo, save as an asset that
+    // round-trips the nondestructive document, and close-with-rollback.
+    #[test]
+    fn filter_table_editor_session_edits_audition_save_and_restore() {
+        use crate::effects::filter_table_editor::{EditOp, EditorTarget};
+        use crate::effects::{filter_table, filter_table_asset, filter_table_editor};
+
+        let _registry = filter_table::tests::registry_lock();
+        let graph = TestLiveGraph::new("filter-table-editor-e2e", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 1);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            pdc_id: 0,
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id: 0,
+            filter_id: 0,
+            delay_id: 0,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
+        let slot_idx = app
+            .add_builtin_effect_sync(0, filter_table::NAME)
+            .expect("add Filter Table");
+        let node_id = app.state.pattern.effect_chains[0][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        assert!(node_id > 0, "Filter Table node should be live");
+        let original = filter_table::prepared_table_for(node_id).expect("default table");
+        let original_ref = filter_table::table_ref_for(node_id).expect("default ref");
+
+        let target = EditorTarget::Track {
+            track: 0,
+            slot: slot_idx,
+        };
+        app.open_filter_table_editor(target).expect("open editor");
+        let ui = filter_table_editor::session_ui_state().expect("session state");
+        assert_eq!(ui.frames, filter_table::FRAMES);
+        assert!(!ui.can_undo && !ui.can_redo && !ui.dirty);
+
+        // Edit + live audition: the published visualization bank must be
+        // bit-identical to the document's baked runtime table (displayed
+        // response == runtime response, zero tolerance).
+        app.filter_table_editor_apply_op(
+            EditOp::Tilt {
+                frame_start: 0,
+                frame_end: 63,
+                db_per_octave: -6.0,
+            },
+            false,
+        )
+        .expect("apply tilt");
+        let baked = filter_table_editor::with_session(|session| {
+            session.expect("session").doc.bake().expect("bake")
+        });
+        let bank = eseqlisp::widget_render::wavetable_viewer::published_bank(
+            &filter_table::visualization_key(node_id),
+        )
+        .expect("published editor bank");
+        assert_eq!(
+            bank.data.as_slice(),
+            baked.data.as_slice(),
+            "displayed bank must match the baked runtime table bit-exactly"
+        );
+        assert_ne!(
+            bank.data.as_slice(),
+            original.data.as_slice(),
+            "the tilt must actually change the table"
+        );
+        // Previews must not touch the prepared-table registry (app undo and
+        // persistence keep seeing the device's real table until save).
+        assert!(Arc::ptr_eq(
+            &filter_table::prepared_table_for(node_id).expect("prepared"),
+            &original,
+        ));
+
+        // Editor-document undo restores the pre-edit audition; redo re-applies.
+        assert!(app.filter_table_editor_history(false).expect("undo"));
+        let bank = eseqlisp::widget_render::wavetable_viewer::published_bank(
+            &filter_table::visualization_key(node_id),
+        )
+        .expect("bank after undo");
+        let unedited_bake = filter_table_editor::with_session(|session| {
+            session.expect("session").doc.bake().expect("bake")
+        });
+        assert_eq!(bank.data.as_slice(), unedited_bake.data.as_slice());
+        assert!(app.filter_table_editor_history(true).expect("redo"));
+
+        // Save: writes a .fltab whose recipe restores the document, and
+        // loads it into the device through the recorded-mutation path.
+        let dir = std::env::temp_dir().join(format!("fltab-editor-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("save dir");
+        let stem = app
+            .filter_table_editor_save_in(Some("My Edited Table"), &dir)
+            .expect("save");
+        assert_eq!(stem, "my-edited-table", "names sanitize to safe stems");
+        assert_eq!(
+            filter_table::table_ref_for(node_id).as_deref(),
+            Some("fltab:my-edited-table"),
+            "save rebinds the device to the asset reference"
+        );
+        let prepared = filter_table::prepared_table_for(node_id).expect("prepared after save");
+        assert_eq!(
+            prepared.data.as_slice(),
+            baked.data.as_slice(),
+            "the device now owns the baked edit"
+        );
+        let asset =
+            filter_table_asset::read_asset(&dir.join("my-edited-table.fltab")).expect("read back");
+        let restored_doc = crate::effects::filter_table_editor::EditorDoc::from_snapshot(
+            asset.meta.recipe.as_ref().expect("editor recipe"),
+        )
+        .expect("document restores from the asset recipe");
+        assert_eq!(restored_doc.op_count(), 1, "the tilt survives the save");
+        assert_eq!(
+            restored_doc.bake().expect("restored bake").data.as_slice(),
+            baked.data.as_slice(),
+            "restored document bakes bit-exactly"
+        );
+
+        // Closing after save keeps the saved table (session is clean).
+        app.close_filter_table_editor().expect("close clean");
+        assert!(filter_table_editor::session_ui_state().is_none());
+        assert_eq!(
+            filter_table::table_ref_for(node_id).as_deref(),
+            Some("fltab:my-edited-table"),
+        );
+
+        // Reopen, dirty the session, close without saving: the device rolls
+        // back to what it had when the editor opened.
+        app.open_filter_table_editor(target).expect("reopen");
+        app.filter_table_editor_apply_op(
+            EditOp::Normalize {
+                frame_start: 0,
+                frame_end: 63,
+            },
+            false,
+        )
+        .expect("dirty edit");
+        app.close_filter_table_editor().expect("close dirty");
+        assert_eq!(
+            filter_table::table_ref_for(node_id).as_deref(),
+            Some("fltab:my-edited-table"),
+            "rollback restores the table the session opened with"
+        );
+        assert_eq!(
+            filter_table::prepared_table_for(node_id)
+                .expect("prepared after rollback")
+                .data
+                .as_slice(),
+            prepared.data.as_slice(),
+        );
+
+        // App-level undo of the save returns the pre-save table (the save
+        // rode the recorded-mutation path).
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            filter_table::table_ref_for(node_id).as_deref(),
+            Some(original_ref.as_str()),
+            "app undo rolls the device back to the pre-save reference"
+        );
+
+        filter_table::clear_instance(node_id);
+        filter_table_editor::set_session(None);
     }
 
     #[test]
@@ -5240,6 +5864,7 @@ mod tests {
         assert!(delay_id > 0);
         app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
             sampler_ids: Vec::new(),
+            pdc_id: 0,
             sampler_gatepitch_ids: Vec::new(),
             sampler_modulator_ids: Vec::new(),
             voice_sum_id: 0,
@@ -5309,6 +5934,7 @@ mod tests {
         };
         app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
             sampler_ids: Vec::new(),
+            pdc_id: 0,
             sampler_gatepitch_ids: Vec::new(),
             sampler_modulator_ids: Vec::new(),
             voice_sum_id: 0,

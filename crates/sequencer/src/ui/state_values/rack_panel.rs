@@ -849,6 +849,14 @@ pub(super) fn build_rack_slot_effect_value(
             sequencer::effects::filter_table::table_name_for(node_id)
                 .unwrap_or_else(|| "No table".to_string()),
         );
+        if let Some(mode_label) = sequencer::effects::filter_table::table_ref_for(node_id)
+            .and_then(|reference| {
+                sequencer::effects::filter_table::decode_table_ref(&reference).1
+            })
+            .map(|mode| mode.label().to_string())
+        {
+            insert_string_prop(&mut effect, "table-mode", mode_label);
+        }
         if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
             insert_string_prop(
                 &mut effect,

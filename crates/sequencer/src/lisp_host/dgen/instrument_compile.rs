@@ -670,8 +670,8 @@ pub fn render_loaded_effect_for_test(
         }
     }
 
-    for (name, value) in &options.param_overrides {
-        if let Some(param) = manifest.params.iter().find(|param| param.name == *name) {
+    let apply_param = |memory: &mut [f32], name: &str, value: f32| -> Result<(), String> {
+        if let Some(param) = manifest.params.iter().find(|param| param.name == name) {
             if param.cell_id >= total_slots {
                 return Err(format!(
                     "parameter '{}' cell {} is outside memory size {}",
@@ -681,10 +681,10 @@ pub fn render_loaded_effect_for_test(
             for lane in 0..param.cell_span {
                 let idx = param.cell_id + lane;
                 if idx < total_slots {
-                    memory[idx] = *value;
+                    memory[idx] = value;
                 }
             }
-            continue;
+            return Ok(());
         }
 
         let Some(cell_id) = host_mod_descriptor_param_cell(manifest, name) else {
@@ -695,8 +695,17 @@ pub fn render_loaded_effect_for_test(
                 "parameter '{name}' cell {cell_id} is outside memory size {total_slots}"
             ));
         }
-        memory[cell_id] = *value;
+        memory[cell_id] = value;
+        Ok(())
+    };
+
+    for (name, value) in &options.param_overrides {
+        apply_param(&mut memory, name, *value)?;
     }
+
+    let mut param_events = options.param_events.clone();
+    param_events.sort_by_key(|event| event.frame);
+    let mut next_param_event = 0usize;
 
     for (name, values) in &options.tensor_overrides {
         let tensor = manifest
@@ -737,7 +746,20 @@ pub fn render_loaded_effect_for_test(
     let mut frames_done = 0usize;
 
     while frames_done < options.frames {
-        let block = options.block_size.min(options.frames - frames_done);
+        while next_param_event < param_events.len()
+            && param_events[next_param_event].frame <= frames_done
+        {
+            let event = &param_events[next_param_event];
+            apply_param(&mut memory, &event.name, event.value)?;
+            next_param_event += 1;
+        }
+        let next_event_frame = param_events
+            .get(next_param_event)
+            .map(|event| event.frame)
+            .unwrap_or(options.frames)
+            .max(frames_done);
+        let block_limit = options.block_size.min(options.frames - frames_done);
+        let block = block_limit.min((next_event_frame - frames_done).max(1));
         let mut input_buffers = vec![vec![0.0f32; block]; n_inputs];
         for frame in 0..block {
             let t = (frames_done + frame) as f32 / options.sample_rate.max(1) as f32;
@@ -754,13 +776,32 @@ pub fn render_loaded_effect_for_test(
                     + 0.5 * (2.0 * std::f32::consts::PI * 1409.0 * t).sin());
             input_buffers[0][frame] = left;
             input_buffers[1][frame] = right;
-            input_reference.push(left);
-            input_reference.push(right);
         }
         for &(channel, value) in &options.input_overrides {
             if let Some(buffer) = input_buffers.get_mut(channel) {
                 buffer.fill(value);
             }
+        }
+        let mut tone_filled: Vec<usize> = Vec::new();
+        for &(channel, freq, amp) in &options.input_tones {
+            let Some(buffer) = input_buffers.get_mut(channel) else {
+                continue;
+            };
+            let replace = !tone_filled.contains(&channel);
+            for (frame, sample) in buffer.iter_mut().enumerate() {
+                let t = (frames_done + frame) as f32 / options.sample_rate.max(1) as f32;
+                let tone = amp * (2.0 * std::f32::consts::PI * freq * t).sin();
+                if replace {
+                    *sample = tone;
+                } else {
+                    *sample += tone;
+                }
+            }
+            tone_filled.push(channel);
+        }
+        for frame in 0..block {
+            input_reference.push(input_buffers[0][frame]);
+            input_reference.push(input_buffers[1][frame]);
         }
         let input_ptrs: Vec<*const f32> = input_buffers
             .iter()
@@ -838,7 +879,8 @@ pub fn render_loaded_effect_for_test(
         diff_rms,
         nonzero_frames,
         first_nonzero_frame,
-        first_samples: rendered.into_iter().take(32).collect(),
+        first_samples: rendered.iter().copied().take(32).collect(),
+        samples: rendered,
     })
 }
 

@@ -19,18 +19,49 @@
 (def IRHALF 384)
 (def PI 3.141592653589793)
 
-(defmacro peek-vec (table pos cols col)
-  (def i0 (floor pos))
-  (def frac (- pos i0))
+; `last` is the highest valid row index. The interpolation base row is clamped
+; to last-1 so the second gather never reads past the tensor: at pos=last the
+; pair collapses to rows last-1/last with frac=1, which selects exactly the
+; final row instead of gathering out of range.
+(defmacro peek-vec (table pos last cols col)
+  (def clamped (max (min pos last) 0))
+  (def i0 (min (floor clamped) (- last 1)))
+  (def frac (- clamped i0))
   (def base (+ (* i0 cols) col))
   (def a (gather table base))
   (def b (gather table (+ base cols)))
   (+ (* a (- 1 frac)) (* b frac)))
 
 (def fold-index (min (iota 2048) (- 2048 (iota 2048))))
+(def bin-index (iota 1025))
 
 (defmacro mirror-spectrum (half-spectrum)
   (gather half-spectrum fold-index))
+
+; Response controls are smoothed with a ~30 ms scalar one-pole *before* the
+; hop-hold, so hop-quantized automation cannot staircase the rebuilt response:
+; successive hop responses differ by near-continuous parameter increments and
+; the 4x-overlap synthesis crossfades between them. The smoother is seeded to
+; the incoming value on the very first sample so static parameters have no
+; startup glide. SMOOTH-MS 0 collapses alpha to 1 (legacy instant behavior).
+(def SMOOTH-MS 30)
+(defmacro smooth-control (h hseed sig)
+  (make-history h)
+  (make-history hseed)
+  (def alpha (min 1 (/ 1.0 (max 1 (* samplerate (* SMOOTH-MS 0.001))))))
+  (def seeded (read-history hseed))
+  (write-history hseed 1)
+  (def prev (read-history h))
+  (write-history h (+ (* (- 1 seeded) sig)
+                      (* seeded (+ prev (* alpha (- sig prev)))))))
+
+; Dilated 3-tap smoothing pass used to build progressively band-limited
+; variants of the table row for the anti-aliased cutoff resample below.
+(defmacro aa-box (c d)
+  (def il (max (- bin-index d) 0))
+  (def ir (min (+ bin-index d) LASTBIN))
+  (+ (* 0.5 (gather c bin-index))
+     (* 0.25 (+ (gather c il) (gather c ir)))))
 
 (defmacro ir-window ()
   (def distance fold-index)
@@ -42,11 +73,32 @@
 ; character along the frequency axis rather than imposing a low-pass slope.
 (defmacro filter-response (table frame cutoff resonance)
   (def columns (iota 1025))
-  (def curve (peek-vec table (* (ones 1025) (* frame LASTFRAME)) NBINS columns))
+  (def curve (peek-vec table (* (ones 1025) (* frame LASTFRAME)) LASTFRAME NBINS columns))
+
+  ; Closing cutoff below the reference frequency resamples the row with a
+  ; uniform stride > 1 in bin space, which silently drops (aliases) features
+  ; narrower than the stride. Pre-smooth the row with an a-trous cascade whose
+  ; effective width doubles per level and blend the two levels bracketing
+  ; log2(stride); stride <= 1 selects the untouched row. AA-MAX-LEVEL 0
+  ; restores the naive resample.
+  (def AA-MAX-LEVEL 4)
+  (def m1 (aa-box curve 1))
+  (def m2 (aa-box m1 2))
+  (def m3 (aa-box m2 4))
+  (def m4 (aa-box m3 8))
+  (def stride (/ (* 24 (/ samplerate N)) cutoff))
+  (def lvl (clip (/ (log (max stride 1)) 0.6931471805599453) 0 AA-MAX-LEVEL))
+  (def w0 (max 0 (- 1 (abs lvl))))
+  (def w1 (max 0 (- 1 (abs (- lvl 1)))))
+  (def w2 (max 0 (- 1 (abs (- lvl 2)))))
+  (def w3 (max 0 (- 1 (abs (- lvl 3)))))
+  (def w4 (max 0 (- 1 (abs (- lvl 4)))))
+  (def banded (+ (+ (* w0 curve) (* w1 m1))
+                 (+ (* w2 m2) (+ (* w3 m3) (* w4 m4)))))
 
   (def bin-hz (* fold-index (/ samplerate N)))
   (def harmonic-pos (min LASTBIN (* 24 (/ bin-hz cutoff))))
-  (def shifted (peek-vec curve harmonic-pos 1 0))
+  (def shifted (peek-vec banded harmonic-pos LASTBIN 1 0))
 
   ; Resonance increases spectral contrast without becoming an output-gain
   ; control. Raising normalized magnitudes directly keeps peaks bounded before
@@ -82,9 +134,9 @@
 ; declares the routing metadata and hidden depth lanes; `(mod ...)` is the DSP
 ; accessor that actually applies those lanes. Clamping keeps additive
 ; modulation inside each control's valid signal domain.
-(def frame-h (hop-hold (clip (mod frame) 0 1) HOP))
-(def cutoff-h (hop-hold (clip (mod cutoff) 40 18000) HOP))
-(def resonance-h (hop-hold (clip (mod resonance) 0 1) HOP))
+(def frame-h (hop-hold (smooth-control sm-frame sm-frame-seed (clip (mod frame) 0 1)) HOP))
+(def cutoff-h (hop-hold (smooth-control sm-cutoff sm-cutoff-seed (clip (mod cutoff) 40 18000)) HOP))
+(def resonance-h (hop-hold (smooth-control sm-res sm-res-seed (clip (mod resonance) 0 1)) HOP))
 (def (h-re h-im) (filter-response table frame-h cutoff-h resonance-h))
 
 ; sqrt-Hann analysis/synthesis with the established 0.707 normalization gives

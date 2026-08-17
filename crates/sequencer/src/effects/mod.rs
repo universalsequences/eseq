@@ -19,6 +19,9 @@ pub(crate) mod filter;
 #[allow(dead_code)]
 pub mod filterbank;
 pub mod filter_table;
+pub mod filter_table_asset;
+pub mod filter_table_editor;
+pub mod filter_table_presets;
 #[allow(dead_code)]
 pub(crate) mod gatepitch;
 #[allow(dead_code)]
@@ -26,6 +29,7 @@ pub(crate) mod limiter;
 pub mod multiverb;
 #[allow(dead_code)]
 pub mod ott;
+pub mod pdc_delay;
 pub(crate) mod phaser_flanger;
 #[allow(dead_code)]
 pub mod reverb;
@@ -2359,6 +2363,18 @@ impl EffectDescriptor {
             Some(crate::effects::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32)
         } else {
             None
+        }
+    }
+
+    /// Fixed processing latency this effect imposes on its signal path, in
+    /// samples. Latency is a property of the effect's algorithm, so it is
+    /// keyed by name like `transport_phase_param_idx`. Reported regardless of
+    /// the enabled param: an effect's internal bypass is expected to keep its
+    /// delay line so toggling never shifts the compensated path.
+    pub fn latency_samples(&self) -> u32 {
+        match self.name.as_str() {
+            crate::effects::filter_table::NAME => crate::effects::filter_table::N as u32,
+            _ => 0,
         }
     }
 
