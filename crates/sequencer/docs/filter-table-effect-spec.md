@@ -204,30 +204,107 @@ cargo run -p sequencer --bin generate_filter_tables -- \
 `--probes`, each preset also emits a PPM magnitude heatmap (frames top to
 bottom, bins left to right, dB grayscale) and two audio probes rendered
 through the real bundled DSP with a full 0→1 frame sweep at the identity
-cutoff: the harness's default probe signal and a 24-harmonic sawtooth stack.
-Listening sign-off of the probes is a manual step.
+cutoff, one event per table frame: a 24-harmonic sawtooth stack (`-saw`) and
+a 30-partial broadband spread (`-spread`). Both probe signals are sustained
+on purpose — the render harness's built-in probe signal decays inside 250 ms
+and cannot show frame motion — and the sweep events are snapped to the 512
+render block, because the harness splits a block at an event frame and the
+STFT effect stops emitting after a partial (non-hop-aligned) block. Review
+is programmatic (windowed RMS + spectral-centroid trace per probe) plus
+manual listening sign-off.
 
 Authoring model: a preset is a recipe of additive dB-domain elements
 (low/high-pass slopes, Gaussian peaks/notches, combs with optional
-inharmonic stretch, notch banks, tilt, integer-harmonic masks, seeded value
-noise) evaluated on an octave coordinate relative to the reference harmonic,
-so the runtime `cutoff` control transposes every preset by construction.
-Element parameters sweep linearly from frame 0 to frame 63 — one coherent
-trajectory per preset. Policies are explicit: sum in dB, per-frame peak
-normalization to 0 dB in the dB domain, clamp at the recipe's `db_floor`,
-convert to linear only when baking. Generation is fully deterministic (the
-one noise element is seeded, and the seed lives in the recipe); the complete
-recipe is embedded in the asset's `recipe` field, and
+inharmonic stretch, notch banks, peak banks, scattered peak clusters, tilt,
+integer-harmonic masks, seeded value noise) evaluated on an octave
+coordinate relative to the reference harmonic, so the runtime `cutoff`
+control transposes every preset by construction. Policies are explicit: sum
+in dB, per-frame peak normalization to 0 dB in the dB domain, clamp at the
+recipe's `db_floor`, convert to linear only when baking. Generation is fully
+deterministic (every stochastic element is seeded, and the seeds live in the
+recipe); the complete recipe is embedded in the asset's `recipe` field, and
 `bundled_factory_assets_match_their_recipes` fails if the baked files drift
 from the in-code definitions — regenerate with the bin after editing them.
 
-The eleven factory presets (all original curves; no third-party preset data
-was used or transformed): `glide-low`/`glide-high` (pass-filter sweeps),
-`band-flight` (climbing resonant bandpass), `notch-drift` (traveling notch),
-`vowel-drift` (three-formant morph), `comb-bloom` (harmonic comb fading in),
-`glass-comb` (inharmonic stretch comb), `phase-flower` (six-notch phaser
-bank sweep), `tilt-horizon` (dark↔bright tilt), `odd-even` (harmonic-parity
-mask morph), `dust-veil` (seeded scrolling spectral texture).
+### Trajectory vocabulary
+
+Every element parameter is a `Traj`, not a constant: the trajectory is what
+gives a preset its character, and a purely linear library morphs politely
+and says nothing. `frame` is normalized 0..1.
+
+| trajectory | shape | used for |
+| --- | --- | --- |
+| `linear` | straight ramp | one-way glides, depth fades |
+| `wobble` | ramp + sine of `cycles` periods, `± depth`, `phase` turns, amplitude `exp(-damp·frame)` | gulps, wubs, overshoot/bounce; `from == to` with integer `cycles` is a seamless loop |
+| `swoop` | exponentially eased ramp (`bend > 0` loiters then rushes, `< 0` leaps then settles) | swallowing edges, leaps that settle |
+| `logistic` | normalized S-curve with `steepness`/`center` | a response that snaps open at one point in the morph |
+| `steps` | `count` seeded LCG values held per segment, `glide` = fraction spent moving | stepped combs, teleporting bands |
+| `segments` | piecewise-linear breakpoints | vowel paths, harmonic staircases |
+
+`NotchBank`/`PeakBank` additionally take a `stagger`: member *i* runs the
+bank trajectory at time `frame + stagger·i` wrapped into 0..1, turning a
+bank sweep into a barber-pole. `ScatterPeaks` gives each peak its own LCG
+stream and its own step clock — the "sprlonk" primitive: clusters that
+scatter rather than travel.
+
+### Motion classes
+
+Wild trajectories break the original "smooth intentional frame motion"
+regression, which was correct only for glides. Each recipe therefore carries
+a `motion` class and is validated against class-appropriate bounds
+(`factory_presets_are_valid_and_move_within_their_motion_class`). All
+classes assert the same sanity floor: finite magnitudes inside
+`[db_floor, 1]`, every frame peak-normalized, deterministic re-bake, and a
+minimum excursion from frame 0 (max over frames, not endpoint distance, so
+looping presets still count as moving).
+
+- **glide** — the original envelope: worst adjacent-frame step < 0.25 rms, no
+  dB step above 4× the mean, and at most 2 direction changes of the
+  per-frame spectral centroid.
+- **wobble** — continuous but non-monotonic: steps < 0.6 rms, dB steps within
+  12× the mean, centroid range > 0.5 octaves, **at least 3 centroid
+  reversals**, and it must *fail* the glide bounds (a wobble preset that
+  passes them is just a glide preset).
+- **jump** — discontinuous on purpose: steps bounded < 1.0 rms, must show
+  real discontinuities (a dB step ≥ 4× the mean, or ≥ 4 centroid
+  reversals), centroid range > 0.5 octaves, and it must fail the glide
+  bounds.
+
+`gulp_and_sprlonk_presets_would_fail_the_glide_bounds` pins the point of the
+class system: `gulp-throat` and `sprlonk` are asserted to violate the glide
+envelope while `comb-bloom` satisfies it.
+
+### The library
+
+Twenty-one factory presets, all original curves (no third-party preset data
+was used or transformed):
+
+*Glide* — `comb-bloom` (harmonic comb fading in), `glass-comb` (inharmonic
+stretch comb), `phase-flower` (six-notch phaser bank sweep), `tilt-horizon`
+(dark↔bright tilt), `odd-even` (harmonic-parity mask morph).
+
+*Wobble* — `swoop-low` (resonant lowpass climbing four octaves on a
+three-cycle wobble), `cavity-high` (highpass edge dropping fast with a
+resonance overshooting below it), `band-flight` (resonant bandpass climbing
+in loping arcs), `notch-drift` (notch plus the resonance above it lurching
+up in 2.5 wobbles), `vowel-drift` (three formants, each on its own curve),
+`talkbox-cycle` (closed five-vowel loop; frame 63 meets frame 0),
+`gulp-throat` (the archetype gulp: high-Q formant pair swooping three
+octaves with settling wobble), `gulp-choir` (three staggered voices, a
+seamless barber-pole gulp), `wub-gate` (four wubs of a resonant edge with a
+counter-phase notch), `rubber-neck` (resonance flung four octaves,
+overshooting and bouncing), `dust-veil` (seeded scrolling spectral texture).
+
+*Jump* — `sprlonk` (five needle resonances scattering eleven times on
+independent clocks), `droplet` (three hair-thin peaks jumping fourteen times
+through a rising window), `stutter-band` (a band teleporting between seven
+positions while a comb re-spaces), `arp-harmonic` (a needle stepping the
+harmonic series 1-8 over a tonic band), `comb-lurch` (comb spacing and
+inharmonic stretch both re-thrown eight times).
+
+The retired `glide-low`/`glide-high` pass-filter sweeps were replaced by
+`swoop-low`/`cavity-high`: a linear slope fade reads as a slightly odd
+static filter, not as motion.
 
 The presets resolve through the normal `fltab:<stem>` lookup. There is no
 dedicated browser listing for bundled filter tables yet (the same is true of

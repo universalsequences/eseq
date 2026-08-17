@@ -30,7 +30,7 @@
         :plock-color-r (pc/param-plock-color-r)
         :plock-color-g (pc/param-plock-color-g)
         :plock-color-b (pc/param-plock-color-b)
-        :width 6.8 :height 2.2 :knob-size 1.25
+        :width 6.8 :height 2.5 :knob-size 1.85
         :track-color '(rgba 0.4, 0.4, 0.4, 1)
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
@@ -207,7 +207,7 @@
         (table-name (get fx :table-name))
         (table-mode (get fx :table-mode))
         (table-key (get fx :table-data-key)))
-      (v-stack :gap 0.25
+      (v-stack :gap 0.025
         (box :width 36.4 :height (if (get fx :editor) 3.3 4.15) :padding 0.25
           :background-color :instrument-control-bg :corner-radius 8
           :drop-types (list "sample")
@@ -219,7 +219,6 @@
           :on-drop (lambda (event) (%drop-table event))
           (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
             (h-stack :width :fill :height 0.85 :gap 0.35 :align :baseline
-              (label "MAGNITUDE TABLE" :font-size 7.5 :color :dim :bg :transparent)
               ;; The table name doubles as the preset picker: the dropdown
               ;; lists every loadable .fltab (user filter-tables/ + bundled
               ;; factory presets) and loads the selection as a baked asset.
@@ -228,6 +227,8 @@
                 (subtree :key (str "filter-table-preset-" (get fx :slot-idx))
                   (dropdown
                     :value (if table-name table-name "Drop a sample / pick a preset")
+                    :bg-color :mixer-strip-bg
+                    :border-color :mixer-strip-selected-bg
                     :key (str "filter-table-preset-dd-" (get fx :slot-idx))
                     :options (get fx :table-options)
                     :on-change (lambda (v)
@@ -246,7 +247,9 @@
               (if (and table-mode (not (get fx :rack-fx)))
                 (button table-mode
                   :width 5.6 :height 0.8 :padding 0 :font-size 7.5
-                  :background-color :mixer-control-bg :color :dim
+                  :background-color :mixer-strip-bg :color :dim
+                  :corner-radius 0
+                  :border-color :transparent
                   :on-click |x y r|
                   (host-command "set-filter-table-mode"
                     (dict :track (get fx :track-idx)

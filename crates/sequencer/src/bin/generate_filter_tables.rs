@@ -88,28 +88,45 @@ fn write_heatmap(path: &std::path::Path, data: &[f32]) {
 
 fn write_audio_probes(dir: &std::path::Path, stem: &str, table: &[f32]) {
     const SAMPLE_RATE: u32 = 44_100;
+    const BLOCK: usize = 512;
     const PROBE_FRAMES: usize = 6 * SAMPLE_RATE as usize;
-    // Sweep the whole table over the probe: 32 frame steps (the DSP
-    // smooths/crossfades between hop responses).
-    let sweep_events = (0..32)
+    // Sweep the whole table over the probe: one event per table frame.
+    //
+    // Event frames are snapped to the render block size on purpose. The test
+    // renderer splits a block at an event frame, and the STFT effect's
+    // hop bookkeeping does not survive a partial (non-hop-aligned) block: it
+    // stops emitting entirely. Snapping keeps every block a full 512 frames,
+    // which is also what a real host delivers.
+    let sweep_events = (0..FRAMES)
         .map(|step| InstrumentParamEvent {
-            frame: step * PROBE_FRAMES / 32,
+            frame: (step * PROBE_FRAMES / FRAMES) / BLOCK * BLOCK,
             name: "frame".to_string(),
-            value: step as f32 / 31.0,
+            value: step as f32 / (FRAMES - 1) as f32,
         })
         .collect::<Vec<_>>();
     // Sawtooth-like stack: harmonics of 110 Hz at 1/n amplitude.
     let saw_tones = (1..=24)
         .map(|harmonic| (0usize, 110.0 * harmonic as f32, 0.35 / harmonic as f32))
         .collect::<Vec<_>>();
+    // Broadband probe: 30 inharmonically spaced sustained partials from 55 Hz
+    // to ~14 kHz at equal amplitude, so the rendered spectrum reads the
+    // filter response directly (the renderer's built-in probe signal decays
+    // within 250 ms and cannot show frame motion).
+    let spread_tones = (0..30)
+        .map(|index| {
+            let ratio = index as f32 / 29.0;
+            let hz = 55.0 * (14_000.0f32 / 55.0).powf(ratio) * (1.0 + 0.013 * index as f32 % 0.07);
+            (0usize, hz, 0.06)
+        })
+        .collect::<Vec<_>>();
 
     let identity_cutoff = 24.0 * SAMPLE_RATE as f32 / N as f32;
-    for (label, tones) in [("probe", Vec::new()), ("saw", saw_tones)] {
+    for (label, tones) in [("spread", spread_tones), ("saw", saw_tones)] {
         let report = render_effect_source_for_test(
             dsp_source(),
             &EffectRenderOptions {
                 sample_rate: SAMPLE_RATE,
-                block_size: 512,
+                block_size: BLOCK,
                 frames: PROBE_FRAMES,
                 param_overrides: vec![
                     ("frame".to_string(), 0.0),
