@@ -9,10 +9,12 @@
 ;
 ; Two dgen scheduling constraints shape this code (probed in
 ; filter_table_causal.rs):
-;   1. The kernel chain runs hop-gated. It must cross to frame rate through
-;      `latch` (frame-rate cond) BEFORE any gather — a per-frame gather of a
-;      hop-gated tensor reads clobbered scratch between hops, and a multiply
-;      against the un-latched kernel silently gates the conv to hop frames.
+;   1. The kernel chain runs hop-gated and must cross to frame rate through
+;      `latch` — multiplying an un-latched hop-gated tensor into the signal
+;      silently gates the conv to hop frames. Constant-index ops (the gather
+;      + fade below) may sit upstream of the latch because they stay
+;      hop-gated and evaluate on exactly the capture frames; only a
+;      *per-frame* read of hop-gated scratch sees mid-hop clobber.
 ;   2. ifft returns the real part only; every IDFT in this chain has a real
 ;      result (log spectrum is even, folded cepstrum is causal-real).
 
@@ -43,16 +45,23 @@
 (make-history hop-frame-ctr)
 (def hop-phase-next
   (write-history hop-frame-ctr (% (+ (read-history hop-frame-ctr) 1) HOP)))
-(def ir-held (latch ir-mp (eq hop-phase-next 1)))
 
 ; Kernel is stored time-reversed: the sliding window puts the newest sample
 ; at index TAPS-1, so kernel[i] multiplies x[n-(TAPS-1-i)] and must hold
 ; ir[TAPS-1-i]. The fade windows impulse-response time (rev-idx), not kernel
 ; index, so truncation ripple stays bounded for steep responses.
+;
+; The gather + fade run UPSTREAM of the latch, in the hop-gated domain: the
+; gather's index is constant, so gathering the hop-gated ir-mp stays hop-gated
+; and executes on exactly the frames the latch captures (fresh scratch, no
+; mid-hop clobber — the clobber hazard only applies to per-frame gathers).
+; The latch then holds just the [256] taps instead of the full [2048] IR,
+; which removes a 2048-wide per-frame copy loop (~24% of the engine's CPU;
+; output is bit-identical, see cost_probes::small_latch_matches_shipped_output).
 (def rev-idx (- (- TAPS 1) (iota 256)))
 (def tap-fade-ramp (clip (/ (- rev-idx 192) 64) 0 1))
 (def tap-fade (* 0.5 (+ 1 (cos (* PI tap-fade-ramp)))))
-(def kernel-target (* (gather ir-held rev-idx) tap-fade))
+(def kernel-target (latch (* (gather ir-mp rev-idx) tap-fade) (eq hop-phase-next 1)))
 
 ; Per-tap one-pole slew at frame rate. The kernel is rebuilt once per hop and
 ; would otherwise switch instantly at hop boundaries — a step change in a

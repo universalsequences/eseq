@@ -737,3 +737,146 @@ mod click_tests {
         );
     }
 }
+
+/// Temporary cost-attribution probes for the causal-engine CPU regression
+/// investigation. Each variant strips or restructures one stage of the causal
+/// tail so timing deltas attribute cycles to that stage.
+#[cfg(test)]
+mod cost_probes {
+    use crate::effects::filter_table::{
+        causal_dsp_source, dsp_source, tests::render_lock, TABLE_LEN,
+    };
+    use crate::lisp_host::{render_effect_source_for_test, EffectRenderOptions};
+
+    const KTARGET_LINE: &str =
+        "(def kernel-target (latch (* (gather ir-mp rev-idx) tap-fade) (eq hop-phase-next 1)))";
+    const SLEW_KERNEL_DEF: &str = "(def kernel
+  (write-history kern-slew
+    (+ (* (- 1 kern-seeded) kernel-target)
+       (* kern-seeded (+ kern-prev (* slew-alpha (- kernel-target kern-prev)))))))";
+    const CONV_L: &str = "(def wet-l (sum (* win-l kernel)))";
+    const CONV_R: &str = "(def wet-r (sum (* win-r kernel)))";
+
+    /// The pre-optimization structure: latch the full [2048] IR at frame rate,
+    /// gather+fade downstream (per frame). Kept as the equivalence reference
+    /// and to keep the ~24% win measurable.
+    fn big_latch_source() -> String {
+        let src = causal_dsp_source();
+        assert!(src.contains(KTARGET_LINE), "shipped tail changed; update cost_probes");
+        src.replace(
+            KTARGET_LINE,
+            "(def ir-held (latch ir-mp (eq hop-phase-next 1)))\n(def kernel-target (* (gather ir-held rev-idx) tap-fade))",
+        )
+    }
+
+    fn variants() -> Vec<(&'static str, String)> {
+        let full = causal_dsp_source().to_string();
+        vec![
+            ("spectral", dsp_source().to_string()),
+            ("causal", full.clone()),
+            // Pre-optimization structure: [2048] frame-rate latch.
+            ("big-latch", big_latch_source()),
+            // One conv removed: delta = cost of a single 256-tap conv path.
+            ("one-conv", full.replace(CONV_R, "(def wet-r wet-l)")),
+            // No convs at all (kernel reduced instead): keeps ring buffers out.
+            (
+                "no-conv",
+                full.replace(CONV_L, "(def wet-l (sum kernel))")
+                    .replace(CONV_R, "(def wet-r wet-l)"),
+            ),
+            // Slew bypassed: kernel switches instantly at hop boundaries.
+            ("no-slew", full.replace(SLEW_KERNEL_DEF, "(def kernel kernel-target)")),
+            // Kernel is a constant: no latch; note the cepstral hop chain is
+            // NOT dead-code eliminated, so this still includes head + FFTs.
+            (
+                "const-kernel",
+                full.replace(KTARGET_LINE, "(def kernel-target (* (iota 256) 0.001))"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn causal_cost_attribution() {
+        let _render = render_lock();
+        if !crate::lisp_host::dgenlisp_tool_path().exists() {
+            eprintln!("skipping: DGenLisp tool not found");
+            return;
+        }
+        let options = EffectRenderOptions {
+            sample_rate: 44_100,
+            block_size: 512,
+            frames: 44_100,
+            param_overrides: vec![("mix".to_string(), 1.0)],
+            param_events: Vec::new(),
+            input_tones: vec![(0, 441.0, 0.3), (1, 441.0, 0.3)],
+            tensor_overrides: vec![("table_magnitudes".to_string(), vec![1.0; TABLE_LEN])],
+            input_overrides: Vec::new(),
+        };
+        let mut rows = Vec::new();
+        for (label, source) in variants() {
+            let _ = render_effect_source_for_test(
+                &source,
+                &EffectRenderOptions { frames: 512, ..options.clone() },
+            )
+            .expect("warm dylib");
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                let _ = render_effect_source_for_test(&source, &options).expect("render variant");
+                best = best.min(start.elapsed());
+            }
+            rows.push((label, best));
+        }
+        eprintln!("cost attribution (1s stereo, best of 3):");
+        for (label, time) in rows {
+            eprintln!("  {label:<12} {time:?}");
+        }
+    }
+
+    /// The shipped small-latch structure must be output-equivalent to the
+    /// original big-latch tail (same capture frames, same taps), including
+    /// under hop-misaligned frame modulation.
+    #[test]
+    fn small_latch_matches_shipped_output() {
+        let _render = render_lock();
+        if !crate::lisp_host::dgenlisp_tool_path().exists() {
+            eprintln!("skipping: DGenLisp tool not found");
+            return;
+        }
+        let options = EffectRenderOptions {
+            sample_rate: 44_100,
+            block_size: 512,
+            frames: 8_192,
+            param_overrides: vec![
+                ("mix".to_string(), 1.0),
+                ("cutoff".to_string(), 24.0 * 44_100.0 / 2048.0),
+            ],
+            param_events: (0..40)
+                .map(|step| crate::lisp_host::InstrumentParamEvent {
+                    frame: 500 + step * 180,
+                    name: "frame".to_string(),
+                    value: (step as f32 / 39.0).min(1.0),
+                })
+                .collect(),
+            input_tones: vec![(0, 441.0, 0.3), (1, 441.0, 0.3)],
+            tensor_overrides: vec![(
+                "table_magnitudes".to_string(),
+                (0..TABLE_LEN)
+                    .map(|i| 1.0 / (1.0 + (((i % 1025) as f32 - 200.0) / 24.0).exp()))
+                    .collect(),
+            )],
+            input_overrides: Vec::new(),
+        };
+        let a = render_effect_source_for_test(causal_dsp_source(), &options)
+            .expect("render shipped");
+        let b = render_effect_source_for_test(&big_latch_source(), &options)
+            .expect("render big-latch");
+        let worst = a
+            .samples
+            .iter()
+            .zip(&b.samples)
+            .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        eprintln!("small-latch vs shipped worst sample delta: {worst}");
+        assert!(worst < 1.0e-4, "small-latch variant diverged: {worst}");
+    }
+}
