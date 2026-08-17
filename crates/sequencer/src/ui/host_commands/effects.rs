@@ -4,6 +4,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-convolution-reverb-ir",
     "set-filter-table-source",
     "set-filter-table-mode",
+    "set-filter-table-engine",
     "filter-table-editor-open",
     "filter-table-editor-close",
     "filter-table-editor-op",
@@ -53,6 +54,7 @@ pub(super) fn handle(
     let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
+    let ui_invalidations = ctx.shared.ui_invalidations.clone();
     let bus_state = ctx.shared.bus_state.clone();
     match name {
         "set-convolution-reverb-ir" => {
@@ -201,28 +203,11 @@ pub(super) fn handle(
                     };
                     match result {
                         Ok(()) => {
-                            let runtime = editor.runtime_mut();
-                            if bus.is_some() {
-                                runtime.set_reactive(
-                                    "SEQ",
-                                    "bus-effects",
-                                    build_bus_effects_value_for_selection(
-                                        &app,
-                                        Some(&selected_steps),
-                                    ),
-                                );
-                            } else if let Some(track) = track {
-                                runtime.set_reactive(
-                                    "SEQ",
-                                    "effects",
-                                    build_effects_value(
-                                        &state,
-                                        track,
-                                        &app.graph.effect_descriptors,
-                                        &selected_steps,
-                                    ),
-                                );
-                            }
+                            queue_effect_panel_tree_invalidation(
+                                &ui_invalidations,
+                                track,
+                                bus,
+                            );
                             let (sample_ref, mode) =
                                 sequencer::effects::filter_table::decode_table_ref(&reference);
                             let mode_label = mode
@@ -300,29 +285,73 @@ pub(super) fn handle(
             })();
             match result {
                 Ok(message) => {
-                    let runtime = editor.runtime_mut();
-                    if bus.is_some() {
-                        runtime.set_reactive(
-                            "SEQ",
-                            "bus-effects",
-                            build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
-                        );
-                    } else if let Some(track) = track {
-                        runtime.set_reactive(
-                            "SEQ",
-                            "effects",
-                            build_effects_value(
-                                &state,
-                                track,
-                                &app.graph.effect_descriptors,
-                                &selected_steps,
-                            ),
-                        );
-                    }
+                    queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
                     editor.handle_host_event(HostEvent::Status(message));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
                     "Error switching Filter Table mode: {error}"
+                ))),
+            }
+        }
+        "set-filter-table-engine" => {
+            // Swap the DSP engine (spectral STFT vs causal min-phase FIR) for
+            // a live Filter Table slot. "toggle" flips; an engine tag selects
+            // directly. Recorded as a chain mutation so undo/redo rebuild the
+            // node from the retained per-engine source; PDC follows via the
+            // per-frame latency refresh.
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let track = extract_usize_from_payload(&payload, "track");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            let engine_str = extract_string_from_payload(&payload, "engine");
+            let result = (|| -> Result<String, String> {
+                let slot = slot.ok_or_else(|| "need a slot".to_string())?;
+                let node_id = if let Some(bus_idx) = bus {
+                    app.buses
+                        .get(bus_idx)
+                        .and_then(|bus| bus.effect_slots.get(slot))
+                        .map(|state| state.node_id as i32)
+                } else if let Some(track) = track {
+                    app.state
+                        .pattern
+                        .effect_chains
+                        .get(track)
+                        .and_then(|chain| chain.get(slot))
+                        .map(|state| state.node_id.load(std::sync::atomic::Ordering::Relaxed) as i32)
+                } else {
+                    None
+                }
+                .ok_or_else(|| "need a track or bus".to_string())?;
+                let current = sequencer::effects::filter_table::engine_for(node_id);
+                let engine = match engine_str.as_deref() {
+                    Some("toggle") | None => current.toggled(),
+                    Some(tag) => sequencer::effects::filter_table::TableEngine::from_tag(tag)
+                        .ok_or_else(|| format!("unknown engine '{tag}'"))?,
+                };
+                if engine == current {
+                    return Ok(format!("Filter Table engine: {}", engine.display_name()));
+                }
+                if let Some(bus_idx) = bus {
+                    app.apply_recorded_bus_effect_chain_mutation(
+                        bus_idx,
+                        "Set bus Filter Table engine",
+                        |app| app.set_bus_filter_table_engine(bus_idx, slot, engine),
+                    )?;
+                } else if let Some(track) = track {
+                    app.apply_recorded_track_effect_chain_mutation(
+                        track,
+                        "Set Filter Table engine",
+                        |app| app.set_track_filter_table_engine(track, slot, engine),
+                    )?;
+                }
+                Ok(format!("Filter Table engine: {}", engine.display_name()))
+            })();
+            match result {
+                Ok(message) => {
+                    queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
+                    editor.handle_host_event(HostEvent::Status(message));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Error switching Filter Table engine: {error}"
                 ))),
             }
         }
@@ -2136,6 +2165,28 @@ pub(super) fn handle(
             }
         }
         _ => {}
+    }
+}
+
+/// Queue the panel-tree rebuild through the normal post-event invalidation
+/// pass. Directly writing `SEQ.effects` here leaves its Lisp subscribers
+/// pending; while transport is stopped there may be no other reactive delta
+/// to run that cycle, so controlled widgets retain their previous props.
+fn queue_effect_panel_tree_invalidation(
+    invalidations: &UiInvalidationQueue,
+    track: Option<usize>,
+    bus: Option<usize>,
+) {
+    if let Some(bus) = bus {
+        invalidations.push(UiInvalidation::BusFx {
+            bus,
+            change: BusFxInvalidation::PanelTree,
+        });
+    } else if let Some(track) = track {
+        invalidations.push(UiInvalidation::TrackFx {
+            track,
+            change: TrackFxInvalidation::PanelTree,
+        });
     }
 }
 

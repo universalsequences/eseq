@@ -178,11 +178,11 @@ pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
 }
 
 fn chain_latency<'a>(
-    occupied: impl Iterator<Item = (bool, &'a EffectDescriptor)>,
+    occupied: impl Iterator<Item = (bool, &'a EffectDescriptor, i32)>,
 ) -> u32 {
     occupied
-        .filter(|(present, _)| *present)
-        .map(|(_, desc)| desc.latency_samples())
+        .filter(|(present, _, _)| *present)
+        .map(|(_, desc, node_id)| desc.latency_samples(node_id))
         .sum()
 }
 
@@ -204,7 +204,9 @@ impl App {
                         bus.effect_slots
                             .iter()
                             .zip(&bus.effect_descriptors)
-                            .map(|(slot, desc)| (slot.node_id > 0, desc)),
+                            .map(|(slot, desc)| {
+                                (slot.node_id > 0, desc, slot.node_id as i32)
+                            }),
                     ),
                 ))
             })
@@ -221,7 +223,8 @@ impl App {
                     .zip(self.graph.effect_descriptors.get(track))
                     .map(|(slots, descriptors)| {
                         chain_latency(slots.iter().zip(descriptors).map(|(slot, desc)| {
-                            (slot.node_id.load(Ordering::Relaxed) > 0, desc)
+                            let node_id = slot.node_id.load(Ordering::Relaxed) as i32;
+                            (node_id > 0, desc, node_id)
                         }))
                     })
                     .unwrap_or(0);
@@ -236,7 +239,9 @@ impl App {
                                     slot.effect_slots
                                         .iter()
                                         .zip(&slot.effect_descriptors)
-                                        .map(|(effect, desc)| (effect.node_id > 0, desc)),
+                                        .map(|(effect, desc)| {
+                                            (effect.node_id > 0, desc, effect.node_id as i32)
+                                        }),
                                 )
                             })
                             .collect()
@@ -605,15 +610,23 @@ mod tests {
     #[test]
     fn filter_table_descriptor_reports_stft_latency() {
         // Latency is keyed by descriptor name (dgen builtins take their
-        // descriptor name from the compile manifest, which uses NAME).
+        // descriptor name from the compile manifest, which uses NAME), with
+        // the per-node engine deciding between STFT latency and zero.
+        let node_id = i32::MAX - 7; // unlikely to collide with live test graphs
         let mut desc = EffectDescriptor::empty_custom_slot();
         desc.name = crate::effects::filter_table::NAME.to_string();
         assert_eq!(
-            desc.latency_samples(),
+            desc.latency_samples(node_id),
             crate::effects::filter_table::N as u32
         );
+        crate::effects::filter_table::record_engine(
+            node_id,
+            crate::effects::filter_table::TableEngine::Causal,
+        );
+        assert_eq!(desc.latency_samples(node_id), 0);
+        crate::effects::filter_table::clear_instance(node_id);
         desc.name = "Delay".to_string();
-        assert_eq!(desc.latency_samples(), 0);
+        assert_eq!(desc.latency_samples(node_id), 0);
     }
 
     #[test]

@@ -35833,6 +35833,15 @@
             "table-data-key".to_string(),
             Rc::new(RefCell::new(Value::String(table_key.to_string()))),
         );
+        fx.insert(
+            "table-engine".to_string(),
+            Rc::new(RefCell::new(Value::String("Spectral".to_string()))),
+        );
+        let mut updated_fx = fx.clone();
+        updated_fx.insert(
+            "table-name".to_string(),
+            Rc::new(RefCell::new(Value::String("vowel-drift".to_string()))),
+        );
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -35934,7 +35943,29 @@
             preset_dd.props.get("value"),
             Some(&Value::String("Procedural Shapes".to_string())),
         );
-        for text in ["MAGNITUDE TABLE", "frame", "cutoff", "resonance"] {
+
+        // Host-owned preset metadata is structural rather than binding-backed.
+        // The post-event invalidation path must therefore run a reactive cycle
+        // after replacing SEQ.effects, even while transport is stopped.
+        let outcome = editor.runtime_mut().set_reactive(
+            "SEQ",
+            "effects",
+            test_list(vec![Value::Map(updated_fx)]),
+        );
+        assert!(outcome.effects_dirty);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let updated_layout = editor.widget_layout().expect("updated Filter Table layout");
+        let updated_preset_dd = find_layout_node_by_widget_type(&updated_layout, "dropdown")
+            .expect("updated Filter Table preset dropdown");
+        assert_eq!(
+            updated_preset_dd.props.get("value"),
+            Some(&Value::String("vowel-drift".to_string())),
+        );
+
+        // Param labels only — header text is cosmetic and deliberately not
+        // asserted (the "MAGNITUDE TABLE" title was removed on purpose).
+        for text in ["frame", "cutoff", "resonance"] {
             let node = find_layout_text_containing(&layout, text)
                 .unwrap_or_else(|| panic!("missing Filter Table text {text:?}"));
             assert!(
@@ -36110,6 +36141,10 @@
         fx.insert(
             "table-data-key".to_string(),
             Rc::new(RefCell::new(Value::String(table_key.to_string()))),
+        );
+        fx.insert(
+            "table-engine".to_string(),
+            Rc::new(RefCell::new(Value::String("Spectral".to_string()))),
         );
         fx.insert("editor".to_string(), Rc::new(RefCell::new(editor_map())));
         editor.runtime_mut().register_reactive(

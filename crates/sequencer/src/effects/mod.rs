@@ -20,6 +20,7 @@ pub(crate) mod filter;
 pub mod filterbank;
 pub mod filter_table;
 pub mod filter_table_asset;
+pub mod filter_table_causal;
 pub mod filter_table_editor;
 pub mod filter_table_presets;
 #[allow(dead_code)]
@@ -2368,12 +2369,16 @@ impl EffectDescriptor {
 
     /// Fixed processing latency this effect imposes on its signal path, in
     /// samples. Latency is a property of the effect's algorithm, so it is
-    /// keyed by name like `transport_phase_param_idx`. Reported regardless of
+    /// keyed by name like `transport_phase_param_idx` — except the Filter
+    /// Table, whose per-node engine (spectral STFT vs causal min-phase FIR)
+    /// decides between one-window latency and zero. Reported regardless of
     /// the enabled param: an effect's internal bypass is expected to keep its
     /// delay line so toggling never shifts the compensated path.
-    pub fn latency_samples(&self) -> u32 {
+    pub fn latency_samples(&self, node_id: i32) -> u32 {
         match self.name.as_str() {
-            crate::effects::filter_table::NAME => crate::effects::filter_table::N as u32,
+            crate::effects::filter_table::NAME => {
+                crate::effects::filter_table::engine_for(node_id).latency_samples() as u32
+            }
             _ => 0,
         }
     }
@@ -9212,7 +9217,10 @@ impl EffectSlotSnapshot {
             param_node_spans,
             transport_phase_param_idx: slot.transport_phase_param_idx.load(Ordering::Relaxed),
             ir: crate::effects::conv_reverb::ir_ref_for(node_id as i32),
-            table: crate::effects::filter_table::table_ref_for(node_id as i32),
+            // Persisted form: bare table ref plus `#ft-engine=` when the node
+            // runs the non-default engine, so snapshots and the project file
+            // both carry the engine choice.
+            table: crate::effects::filter_table::persisted_table_ref_for(node_id as i32),
         }
     }
 

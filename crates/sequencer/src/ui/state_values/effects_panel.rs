@@ -229,6 +229,14 @@ pub(crate) fn build_effects_value(
                         Rc::new(RefCell::new(Value::String(mode_label))),
                     );
                 }
+                slot_map.insert(
+                    "table-engine".to_string(),
+                    Rc::new(RefCell::new(Value::String(
+                        sequencer::effects::filter_table::engine_for(node_id)
+                            .display_name()
+                            .to_string(),
+                    ))),
+                );
                 if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
                     slot_map.insert(
                         "table-data-key".to_string(),

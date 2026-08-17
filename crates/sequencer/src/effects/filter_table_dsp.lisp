@@ -1,16 +1,20 @@
-; Filter Table — stereo, magnitude-table-driven spectral filter.
+; Filter Table — stereo, magnitude-table-driven filter. Shared derivation head.
+;
+; This file is the SHARED HEAD of the Filter Table DSP: everything through the
+; hop-rate magnitude response (frame morph, anti-aliased cutoff resample,
+; resonance contrast). It is concatenated with exactly one engine tail at
+; build time (filter_table.rs::dsp_source / causal_dsp_source):
+;
+;   filter_table_dsp_spectral.lisp  N=2048/HOP=512 zero-phase STFT engine —
+;                                   linear-ish phase, one-window latency (PDC).
+;   filter_table_dsp_causal.lisp    minimum-phase 256-tap FIR engine —
+;                                   causal, zero latency, kernel rebuilt per hop.
 ;
 ; Contract with filter_table.rs:
 ;   table_magnitudes is a mutable [64, 1025] tensor containing normalized
 ;   half-spectrum magnitudes. User audio is transformed into this representation
 ;   offline; phase is deliberately discarded so frame interpolation cannot
 ;   cancel harmonics.
-;
-; N=2048 and hop=512 use the same 4x-overlap STFT convention as the existing
-; shipping spectral effects. The wrapped Hann around sample zero bounds the
-; synthesized zero-phase IR to roughly 768 taps and prevents circular
-; convolution from wrapping a long response into time-aliased output.
-
 (def N 2048)
 (def HOP 512)
 (def NBINS 1025)
@@ -63,14 +67,11 @@
   (+ (* 0.5 (gather c bin-index))
      (* 0.25 (+ (gather c il) (gather c ir)))))
 
-(defmacro ir-window ()
-  (def distance fold-index)
-  (* (* 0.5 (+ 1 (cos (* PI (/ distance IRHALF)))))
-     (lte distance IRHALF)))
-
 ; frame is normalized 0..1. Cutoff is the frequency assigned to table harmonic
 ; 24, matching the musical control model: moving cutoff translates the table's
 ; character along the frequency axis rather than imposing a low-pass slope.
+; Returns the full mirrored magnitude spectrum [2048]; each engine tail
+; converts it into its own filtering structure.
 (defmacro filter-response (table frame cutoff resonance)
   (def columns (iota 1025))
   (def curve (peek-vec table (* (ones 1025) (* frame LASTFRAME)) LASTFRAME NBINS columns))
@@ -113,10 +114,7 @@
   (def makeup (min 8 (/ 1 response-rms)))
   (def shaped (* contrasted makeup))
 
-  (def full (mirror-spectrum shaped))
-  (def ir (ifft full (* full 0) @N 2048 @backend accelerated))
-  (def bounded (* ir (ir-window)))
-  (fft bounded @N 2048 @backend accelerated))
+  (mirror-spectrum shaped))
 
 (def in-l (in 1 @name left))
 (def in-r (in 2 @name right))
@@ -140,29 +138,4 @@
 (def frame-h (hop-hold (smooth-control sm-frame sm-frame-seed (clip (mod frame) 0 1)) HOP))
 (def cutoff-h (hop-hold (smooth-control sm-cutoff sm-cutoff-seed (clip (mod cutoff) 40 18000)) HOP))
 (def resonance-h (hop-hold (smooth-control sm-res sm-res-seed (clip (mod resonance) 0 1)) HOP))
-(def (h-re h-im) (filter-response table frame-h cutoff-h resonance-h))
-
-; sqrt-Hann analysis/synthesis with the established 0.707 normalization gives
-; unity overlap-add at N/4. The bypass traverses the same STFT and therefore has
-; exactly the wet path's one-window latency.
-(def win (* 0.70710678 (sqrt (hann 2048))))
-
-(def frame-l (* (reshape (buffer in-l 2048 512) @shape [2048]) win))
-(def frame-r (* (reshape (buffer in-r 2048 512) @shape [2048]) win))
-(def (x-l-re x-l-im) (fft frame-l @N 2048 @backend accelerated))
-(def (x-r-re x-r-im) (fft frame-r @N 2048 @backend accelerated))
-(def (y-l-re y-l-im) (complex-mul x-l-re x-l-im h-re h-im))
-(def (y-r-re y-r-im) (complex-mul x-r-re x-r-im h-re h-im))
-
-(def dry-l (overlap-add (* (ifft x-l-re x-l-im @N 2048 @backend accelerated) win) HOP))
-(def dry-r (overlap-add (* (ifft x-r-re x-r-im @N 2048 @backend accelerated) win) HOP))
-(def wet-l (overlap-add (* (ifft y-l-re y-l-im @N 2048 @backend accelerated) win) HOP))
-(def wet-r (overlap-add (* (ifft y-r-re y-r-im @N 2048 @backend accelerated) win) HOP))
-
-; Equal-power dry/wet law. Both branches are latency-aligned above. Mix remains
-; sample-rate modulatable because it does not rebuild the spectral response.
-(def mix-mod (clip (mod mix) 0 1))
-(def dry-gain (sqrt (- 1 mix-mod)))
-(def wet-gain (sqrt mix-mod))
-(out (* output (+ (* dry-l dry-gain) (* wet-l wet-gain))) 1 @name left)
-(out (* output (+ (* dry-r dry-gain) (* wet-r wet-gain))) 2 @name right)
+(def response-mag (filter-response table frame-h cutoff-h resonance-h))

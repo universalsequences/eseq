@@ -415,15 +415,19 @@ impl App {
                             asset_base.as_deref(),
                         )?;
                         let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+                        let manifest = result.manifest.clone();
                         self.apply_compiled_rack_slot_effect_to_slot_sync(
                             track, rack_slot, slot, name, result,
                         )?;
                         self.retain_effect_source(locator, slot, desired.source.clone())?;
+                        let node_id = self.rack_slot_effect_snapshot(track, rack_slot)?
+                            .effect_slots[slot].node_id as i32;
                         if let Some(ir_slots) = ir_slots {
-                            let node_id = self.rack_slot_effect_snapshot(track, rack_slot)?
-                                .effect_slots[slot].node_id as i32;
                             crate::effects::conv_reverb::record_ir_slots(node_id, ir_slots);
                         }
+                        crate::effects::filter_table::record_compiled_instance(
+                            node_id, &manifest, source,
+                        );
                     }
                 }
             }
@@ -818,12 +822,16 @@ impl App {
                             asset_base.as_deref(),
                         )?;
                         let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+                        let manifest = result.manifest.clone();
                         self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot, name, result)?;
                         self.retain_effect_source(locator, slot, desired.source.clone())?;
+                        let node_id = self.buses[bus_idx].effect_slots[slot].node_id as i32;
                         if let Some(ir_slots) = ir_slots {
-                            let node_id = self.buses[bus_idx].effect_slots[slot].node_id as i32;
                             crate::effects::conv_reverb::record_ir_slots(node_id, ir_slots);
                         }
+                        crate::effects::filter_table::record_compiled_instance(
+                            node_id, &manifest, source,
+                        );
                     }
                 }
             }
@@ -1381,14 +1389,18 @@ impl App {
                         let ir_slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(
                             &result.manifest,
                         );
+                        let manifest = result.manifest.clone();
                         self.apply_compiled_effect_to_slot_sync(result, name, slot, track)?;
                         self.retain_effect_source(locator, slot, desired.source.clone())?;
+                        let node_id = self.state.pattern.effect_chains[track][slot]
+                            .node_id
+                            .load(Ordering::Relaxed) as i32;
                         if let Some(ir_slots) = ir_slots {
-                            let node_id = self.state.pattern.effect_chains[track][slot]
-                                .node_id
-                                .load(Ordering::Relaxed) as i32;
                             crate::effects::conv_reverb::record_ir_slots(node_id, ir_slots);
                         }
+                        crate::effects::filter_table::record_compiled_instance(
+                            node_id, &manifest, source,
+                        );
                     }
                 }
             }

@@ -1966,6 +1966,10 @@ impl App {
                 table.as_ref(),
             )?;
         }
+        // Snapshot/persisted references may carry an `#ft-engine=` suffix;
+        // registries always hold the bare form (engine reconciliation is the
+        // chain/compile layer's job, not the table upload's).
+        let (reference, _engine) = crate::effects::filter_table::split_engine_ref(reference);
         let (sample_ref, _mode) = crate::effects::filter_table::decode_table_ref(reference);
         let display = if sample_ref == crate::effects::filter_table::DEFAULT_TABLE_REF {
             "Procedural Shapes".to_string()
@@ -2044,6 +2048,149 @@ impl App {
             reference,
             std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
         )
+    }
+
+    /// Recompile a live track Filter Table slot for a different engine,
+    /// preserving authoring values (params, p-locks, key locks) and the loaded
+    /// table. Returns `false` without touching the graph when the node already
+    /// runs the requested engine. Callers wrap this in a recorded chain
+    /// mutation so undo/redo rebuild from the retained per-engine source.
+    pub fn set_track_filter_table_engine(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        engine: crate::effects::filter_table::TableEngine,
+    ) -> Result<bool, String> {
+        use crate::effects::filter_table;
+        let slot_state = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+            .ok_or_else(|| "Track effect slot not found".to_string())?;
+        let node_id = slot_state.node_id.load(Ordering::Relaxed) as i32;
+        if node_id == 0 {
+            return Err("Filter Table node not live".to_string());
+        }
+        if filter_table::engine_for(node_id) == engine {
+            return Ok(false);
+        }
+        let values = EffectSlotSnapshot::capture_authoring_values(slot_state);
+        let source = filter_table::dsp_source_for(engine);
+        let result = self.editor.dylib_cache.acquire(
+            lisp_host::DGenCompileKind::Effect,
+            lisp_host::DGenSourceOrigin::BuiltinFilterTable,
+            source,
+            self.graph.sample_rate,
+            None,
+        )?;
+        let manifest = result.manifest.clone();
+        self.apply_compiled_effect_to_slot_sync(result, filter_table::NAME, slot_idx, track)?;
+        self.retain_effect_source(
+            FxChainLocator::Track(track),
+            slot_idx,
+            RetainedEffectSource::Compiled {
+                name: filter_table::NAME.to_string(),
+                source: source.to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinFilterTable,
+            },
+        )?;
+        let node_id = self.state.pattern.effect_chains[track][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        filter_table::record_compiled_instance(node_id, &manifest, source);
+        let slot_state = &self.state.pattern.effect_chains[track][slot_idx];
+        EffectSlotSnapshot::restore_authoring_values(slot_state, &values)?;
+        self.push_track_effect_slot_defaults(track, slot_idx);
+        self.reapply_filter_table_after_engine_change(node_id, &values)?;
+        Ok(true)
+    }
+
+    /// Bus twin of [`Self::set_track_filter_table_engine`].
+    pub fn set_bus_filter_table_engine(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        engine: crate::effects::filter_table::TableEngine,
+    ) -> Result<bool, String> {
+        use crate::effects::filter_table;
+        let node_id = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Bus effect slot not found".to_string())?;
+        if node_id == 0 {
+            return Err("Filter Table node not live".to_string());
+        }
+        if filter_table::engine_for(node_id) == engine {
+            return Ok(false);
+        }
+        let values = self.buses[bus_idx].effect_slots[slot_idx].authoring_values();
+        let locator = self.bus_fx_locator(bus_idx)?;
+        let source = filter_table::dsp_source_for(engine);
+        let result = self.editor.dylib_cache.acquire(
+            lisp_host::DGenCompileKind::Effect,
+            lisp_host::DGenSourceOrigin::BuiltinFilterTable,
+            source,
+            self.graph.sample_rate,
+            None,
+        )?;
+        let manifest = result.manifest.clone();
+        self.apply_compiled_bus_effect_to_slot_sync(
+            bus_idx,
+            slot_idx,
+            filter_table::NAME,
+            result,
+        )?;
+        self.retain_effect_source(
+            locator,
+            slot_idx,
+            RetainedEffectSource::Compiled {
+                name: filter_table::NAME.to_string(),
+                source: source.to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinFilterTable,
+            },
+        )?;
+        let node_id = self.buses[bus_idx].effect_slots[slot_idx].node_id as i32;
+        filter_table::record_compiled_instance(node_id, &manifest, source);
+        self.buses[bus_idx].effect_slots[slot_idx]
+            .apply_authoring_values(&values)
+            .map_err(|error| format!("reapplying bus effect values: {error}"))?;
+        self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+        self.reapply_filter_table_after_engine_change(node_id, &values)?;
+        Ok(true)
+    }
+
+    /// After an engine swap replaced the node, re-upload the table the slot
+    /// was using (or re-seed the procedural default for untouched slots).
+    fn reapply_filter_table_after_engine_change(
+        &mut self,
+        node_id: i32,
+        values: &crate::effects::EffectSlotValuesSnapshot,
+    ) -> Result<(), String> {
+        if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
+            let (bare, _engine) = crate::effects::filter_table::split_engine_ref(reference);
+            let bare = bare.to_string();
+            self.apply_prepared_filter_table_to_node(
+                node_id,
+                table.clone(),
+                &bare,
+                std::path::Path::new(
+                    crate::effects::filter_table::decode_table_ref(&bare).0,
+                ),
+            )
+        } else {
+            self.apply_prepared_filter_table_to_node(
+                node_id,
+                Arc::new(crate::effects::filter_table::default_table()),
+                crate::effects::filter_table::DEFAULT_TABLE_REF,
+                std::path::Path::new("Procedural Shapes"),
+            )
+        }
     }
 
     /// Current Filter Table source for a track or bus effect slot: the decoded
@@ -5217,6 +5364,127 @@ mod tests {
             snapshot.tracks[0].effect_slots[slot_idx].node_id != 0,
             "scheduler snapshot should publish the loaded effect slot state"
         );
+    }
+
+    // End-to-end eseq-dtx.2: swapping a live Filter Table to the causal
+    // min-phase engine recompiles the node, preserves the loaded table and
+    // authoring values, flips the reported latency for PDC, and persists the
+    // engine as an `#ft-engine=` suffix on the snapshot table reference.
+    #[test]
+    fn filter_table_engine_toggle_recompiles_and_preserves_state() {
+        use crate::effects::filter_table::{self, TableEngine};
+
+        let _render = filter_table::tests::render_lock();
+        let _registry = filter_table::tests::registry_lock();
+        let graph = TestLiveGraph::new("filter-table-engine-e2e", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 1);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            pdc_id: 0,
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id: 0,
+            filter_id: 0,
+            delay_id: 0,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
+        let slot_idx = app
+            .add_builtin_effect_sync(0, filter_table::NAME)
+            .expect("add Filter Table");
+        let node_id = app.state.pattern.effect_chains[0][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        assert!(node_id > 0, "Filter Table node should be live");
+        assert_eq!(filter_table::engine_for(node_id), TableEngine::Spectral);
+
+        // Load a distinctive table and set a distinctive param default so the
+        // toggle has real state to preserve.
+        let data = (0..filter_table::TABLE_LEN)
+            .map(|index| ((index % 11) as f32 / 11.0).max(0.05))
+            .collect::<Vec<_>>();
+        let table =
+            std::sync::Arc::new(filter_table::MagnitudeTable::new(data.clone()).expect("valid"));
+        app.apply_prepared_filter_table_to_node(
+            node_id,
+            table,
+            "engine-e2e-table",
+            std::path::Path::new("engine-e2e-table"),
+        )
+        .expect("table applies");
+        let cutoff_idx = app.graph.effect_descriptors[0][slot_idx]
+            .params
+            .iter()
+            .position(|param| param.name == filter_table::PARAM_CUTOFF)
+            .expect("cutoff param");
+        app.state.pattern.effect_chains[0][slot_idx]
+            .defaults
+            .set(cutoff_idx, 4321.0);
+
+        let changed = app
+            .set_track_filter_table_engine(0, slot_idx, TableEngine::Causal)
+            .expect("engine swap");
+        assert!(changed, "swap to a different engine must recompile");
+        let causal_node = app.state.pattern.effect_chains[0][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        assert!(causal_node > 0, "recompiled node should be live");
+        assert_eq!(filter_table::engine_for(causal_node), TableEngine::Causal);
+        assert_eq!(
+            app.graph.effect_descriptors[0][slot_idx].latency_samples(causal_node),
+            0,
+            "causal engine reports zero latency for PDC"
+        );
+        assert_eq!(
+            filter_table::persisted_table_ref_for(causal_node).as_deref(),
+            Some("engine-e2e-table#ft-engine=causal"),
+            "persisted reference carries the engine suffix"
+        );
+        let preserved = filter_table::prepared_table_for(causal_node).expect("table survives");
+        assert_eq!(preserved.data.as_slice(), data.as_slice());
+        let restored_cutoff =
+            app.state.pattern.effect_chains[0][slot_idx].defaults.get(cutoff_idx);
+        assert_eq!(restored_cutoff, 4321.0, "authoring values survive the swap");
+
+        // Same engine again is a no-op; toggling back restores the spectral
+        // latency and drops the persisted suffix.
+        assert!(!app
+            .set_track_filter_table_engine(0, slot_idx, TableEngine::Causal)
+            .expect("no-op swap"));
+        assert!(app
+            .set_track_filter_table_engine(0, slot_idx, TableEngine::Spectral)
+            .expect("swap back"));
+        let spectral_node = app.state.pattern.effect_chains[0][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        assert_eq!(filter_table::engine_for(spectral_node), TableEngine::Spectral);
+        assert_eq!(
+            app.graph.effect_descriptors[0][slot_idx].latency_samples(spectral_node),
+            filter_table::N as u32
+        );
+        assert_eq!(
+            filter_table::persisted_table_ref_for(spectral_node).as_deref(),
+            Some("engine-e2e-table"),
+            "default engine persists without a suffix"
+        );
+
+        // The per-node registries are global and keyed by graph node id;
+        // TestLiveGraphs reuse ids across tests, so leaving entries behind
+        // makes later tests' snapshot captures see this test's table.
+        filter_table::clear_instance(spectral_node);
+        filter_table::clear_instance(causal_node);
+        filter_table::clear_instance(node_id);
     }
 
     // End-to-end eseq-dtx.6: a baked .fltab asset used as a Filter Table

@@ -29,8 +29,77 @@ pub fn visualization_key(node_id: i32) -> String {
     format!("filter-table:{node_id}:magnitudes")
 }
 
+/// Filtering engine behind the shared magnitude derivation. `Spectral` is the
+/// original zero-phase STFT (one-window latency, PDC-compensated); `Causal`
+/// rebuilds a minimum-phase 256-tap FIR per hop and reports zero latency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TableEngine {
+    #[default]
+    Spectral,
+    Causal,
+}
+
+impl TableEngine {
+    pub const fn tag(self) -> &'static str {
+        match self {
+            TableEngine::Spectral => "spectral",
+            TableEngine::Causal => "causal",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "spectral" => Some(TableEngine::Spectral),
+            "causal" => Some(TableEngine::Causal),
+            _ => None,
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            TableEngine::Spectral => "Spectral",
+            TableEngine::Causal => "Min Phase",
+        }
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            TableEngine::Spectral => TableEngine::Causal,
+            TableEngine::Causal => TableEngine::Spectral,
+        }
+    }
+
+    /// Latency the effect reports for PDC in this engine.
+    pub const fn latency_samples(self) -> usize {
+        match self {
+            TableEngine::Spectral => N,
+            TableEngine::Causal => 0,
+        }
+    }
+}
+
+fn assembled_source(tail: &'static str) -> String {
+    let mut source = String::from(include_str!("filter_table_dsp.lisp"));
+    source.push('\n');
+    source.push_str(tail);
+    source
+}
+
 pub fn dsp_source() -> &'static str {
-    include_str!("filter_table_dsp.lisp")
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| assembled_source(include_str!("filter_table_dsp_spectral.lisp")))
+}
+
+pub fn causal_dsp_source() -> &'static str {
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| assembled_source(include_str!("filter_table_dsp_causal.lisp")))
+}
+
+pub fn dsp_source_for(engine: TableEngine) -> &'static str {
+    match engine {
+        TableEngine::Spectral => dsp_source(),
+        TableEngine::Causal => causal_dsp_source(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -530,11 +599,87 @@ static TABLE_SLOTS: NodeMap<TableSlot> = Mutex::new(BTreeMap::new());
 static TABLE_REFS: NodeMap<String> = Mutex::new(BTreeMap::new());
 static TABLE_NAMES: NodeMap<String> = Mutex::new(BTreeMap::new());
 static TABLE_DATA: NodeMap<Arc<MagnitudeTable>> = Mutex::new(BTreeMap::new());
+static ENGINES: NodeMap<TableEngine> = Mutex::new(BTreeMap::new());
+
+/// Suffix appended to the *persisted* table reference when the node runs the
+/// non-default engine, mirroring the `#ft-mode=` convention. In-memory
+/// registries always hold the bare reference; only snapshots and the project
+/// file carry the composed form.
+pub const ENGINE_REF_SEPARATOR: &str = "#ft-engine=";
+
+/// Strip an `#ft-engine=` suffix, returning the bare reference and the engine
+/// it named (default engine when absent or unknown).
+pub fn split_engine_ref(reference: &str) -> (&str, TableEngine) {
+    if let Some((bare, tag)) = reference.rsplit_once(ENGINE_REF_SEPARATOR) {
+        if let Some(engine) = TableEngine::from_tag(tag) {
+            return (bare, engine);
+        }
+    }
+    (reference, TableEngine::default())
+}
+
+/// Compose the persisted form of a table reference. The default engine stays
+/// unsuffixed so existing projects and snapshots remain byte-identical.
+pub fn compose_engine_ref(reference: &str, engine: TableEngine) -> String {
+    match engine {
+        TableEngine::Spectral => reference.to_string(),
+        other => format!("{reference}{ENGINE_REF_SEPARATOR}{}", other.tag()),
+    }
+}
+
+pub fn record_engine(node_id: i32, engine: TableEngine) {
+    if let Ok(mut engines) = ENGINES.lock() {
+        engines.insert(node_id, engine);
+    }
+}
+
+pub fn engine_for(node_id: i32) -> TableEngine {
+    ENGINES
+        .lock()
+        .ok()
+        .and_then(|engines| engines.get(&node_id).copied())
+        .unwrap_or_default()
+}
+
+/// Identify which engine a retained DSP source belongs to, for re-recording
+/// the registry when a chain restore recompiles from retained source text.
+pub fn engine_for_source(source: &str) -> Option<TableEngine> {
+    if source == causal_dsp_source() {
+        Some(TableEngine::Causal)
+    } else if source == dsp_source() {
+        Some(TableEngine::Spectral)
+    } else {
+        None
+    }
+}
+
+/// The table reference as persisted into snapshots and the project file:
+/// the bare registry reference plus the engine suffix when non-default.
+pub fn persisted_table_ref_for(node_id: i32) -> Option<String> {
+    let bare = table_ref_for(node_id)?;
+    Some(compose_engine_ref(&bare, engine_for(node_id)))
+}
 
 pub fn record_slot(node_id: i32, slot: TableSlot) {
     if let Ok(mut slots) = TABLE_SLOTS.lock() {
         slots.insert(node_id, slot);
     }
+}
+
+/// Register a freshly compiled Filter Table node from its manifest and
+/// retained source: table tensor slot plus the engine the source implements.
+/// No-op for manifests without the table tensor (non-Filter-Table effects),
+/// so chain-restore paths can call it unconditionally.
+pub fn record_compiled_instance(
+    node_id: i32,
+    manifest: &crate::lisp_host::DGenManifest,
+    source: &str,
+) {
+    let Some(slot) = TableSlot::from_manifest(manifest) else {
+        return;
+    };
+    record_slot(node_id, slot);
+    record_engine(node_id, engine_for_source(source).unwrap_or_default());
 }
 
 pub fn table_name_for(node_id: i32) -> Option<String> {
@@ -584,6 +729,9 @@ pub fn clear_instance(node_id: i32) {
     }
     if let Ok(mut data) = TABLE_DATA.lock() {
         data.remove(&node_id);
+    }
+    if let Ok(mut engines) = ENGINES.lock() {
+        engines.remove(&node_id);
     }
 }
 

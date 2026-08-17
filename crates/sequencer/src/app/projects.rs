@@ -2716,9 +2716,20 @@ impl App {
         table_ref: Option<&str>,
     ) {
         let Some(table_ref) = table_ref else { return };
-        // Saved references embed the analysis mode; the sample resolves by its
-        // decoded name while the full reference keeps the analysis deterministic.
-        // `fltab:` references resolve to baked asset files instead of samples.
+        // Saved references embed the analysis mode and optionally the engine;
+        // the sample resolves by its decoded name while the bare reference
+        // keeps the analysis deterministic. `fltab:` references resolve to
+        // baked asset files instead of samples. The engine restores first so
+        // the table lands on the node that will keep it.
+        let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
+        if engine != crate::effects::filter_table::TableEngine::default() {
+            if let Err(error) = self.set_track_filter_table_engine(track, slot_idx, engine) {
+                eprintln!(
+                    "project-load: Filter Table engine '{}' not restored: {error}",
+                    engine.tag()
+                );
+            }
+        }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
             return;
@@ -2748,6 +2759,15 @@ impl App {
         table_ref: Option<&str>,
     ) {
         let Some(table_ref) = table_ref else { return };
+        let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
+        if engine != crate::effects::filter_table::TableEngine::default() {
+            if let Err(error) = self.set_bus_filter_table_engine(bus_idx, slot_idx, engine) {
+                eprintln!(
+                    "project-load: bus Filter Table engine '{}' not restored: {error}",
+                    engine.tag()
+                );
+            }
+        }
         let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
         if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
             return;
