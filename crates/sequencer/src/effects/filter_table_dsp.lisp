@@ -102,12 +102,15 @@
 
   ; Resonance increases spectral contrast without becoming an output-gain
   ; control. Raising normalized magnitudes directly keeps peaks bounded before
-  ; makeup; RMS makeup restores quieter broad responses but is capped at +6 dB
-  ; so sparse/high-resonance curves cannot produce runaway narrow-bin boosts.
+  ; makeup; RMS makeup restores quieter sparse responses but is capped at +18 dB
+  ; so high-resonance curves cannot produce runaway narrow-bin boosts. Table
+  ; rows are peak-normalized at import, so shaped/sparse curves routinely need
+  ; 5-20x makeup to sit near the dry level; the old +6 dB cap left the wet path
+  ; 10-20 dB under dry for most presets.
   (def exponent (+ 1 (* 3 resonance)))
   (def contrasted (pow (max shifted 0.0001) exponent))
   (def response-rms (sqrt (+ (mean (* contrasted contrasted)) 0.000001)))
-  (def makeup (min 2 (/ 1 response-rms)))
+  (def makeup (min 8 (/ 1 response-rms)))
   (def shaped (* contrasted makeup))
 
   (def full (mirror-spectrum shaped))

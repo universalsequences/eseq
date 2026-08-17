@@ -15,7 +15,7 @@ response. It is not a resonant low-pass:
 - `cutoff` assigns table harmonic 24 to the selected frequency, translating the
   table's character along the frequency axis.
 - `resonance` applies bounded power-law contrast. The resulting response uses
-  capped RMS makeup (at most +6 dB), so resonance changes spectral selectivity
+  capped RMS makeup (at most +18 dB), so resonance changes spectral selectivity
   rather than acting as an unbounded output-gain control.
 - `mix` is an equal-power crossfade between latency-aligned STFT dry and wet
   paths.
@@ -214,17 +214,72 @@ is programmatic (windowed RMS + spectral-centroid trace per probe) plus
 manual listening sign-off.
 
 Authoring model: a preset is a recipe of additive dB-domain elements
-(low/high-pass slopes, Gaussian peaks/notches, combs with optional
-inharmonic stretch, notch banks, peak banks, scattered peak clusters, tilt,
-integer-harmonic masks, seeded value noise) evaluated on an octave
-coordinate relative to the reference harmonic, so the runtime `cutoff`
-control transposes every preset by construction. Policies are explicit: sum
-in dB, per-frame peak normalization to 0 dB in the dB domain, clamp at the
-recipe's `db_floor`, convert to linear only when baking. Generation is fully
-deterministic (every stochastic element is seeded, and the seeds live in the
-recipe); the complete recipe is embedded in the asset's `recipe` field, and
-`bundled_factory_assets_match_their_recipes` fails if the baked files drift
-from the in-code definitions — regenerate with the bin after editing them.
+evaluated on an octave coordinate relative to the reference harmonic, so the
+runtime `cutoff` control transposes every preset by construction. Policies
+are explicit: sum in dB, per-frame peak normalization to 0 dB in the dB
+domain, clamp at the recipe's `db_floor`, convert to linear only when
+baking. Generation is fully deterministic (every stochastic element is
+seeded, and the seeds live in the recipe); the complete recipe is embedded in
+the asset's `recipe` field, and `bundled_factory_assets_match_their_recipes`
+fails if the baked files drift from the in-code definitions — regenerate with
+the bin after editing them.
+
+### Element vocabulary
+
+Shape elements: `lowpass`/`highpass` slopes, Gaussian `peak` (negative gain =
+notch), `comb` with optional inharmonic stretch, `notch-bank`/`peak-bank`
+(evenly spread members with an optional `stagger` that offsets member *i*'s
+trajectory time, giving a barber-pole), `scatter-peaks` (per-member LCG
+stream + per-member step clock — the "sprlonk" primitive), `tilt`,
+`harmonic-mask`, seeded `texture` value noise, and `band` — a flat-top
+plateau with smoothstep skirts, which is the macro shape a detailed response
+is actually built from (steep-sided zones, not Gaussians).
+
+Structure elements wrap another element:
+
+- `braid` — `count` filaments crossing `[low, high]`, each with its own
+  seeded phase, rate (`rate` ± `rate_spread`), `wander` and depth. Reflected
+  into range, so filaments are continuous, non-monotonic and cross each
+  other. This is the *detail* layer: 10-20 irregular narrow notches whose
+  arrangement is different in every frame.
+- `windowed` — restricts an element to a `[low, high]` octave window (moving
+  windows allowed). Zoning is what makes a frame read as a structure — a
+  smooth hump here, a densely carved plateau there — instead of one global
+  curve.
+- `staged` — restricts an element to a *frame* region with a crossfade. The
+  frame-axis counterpart of `windowed`: different frame zones run different
+  regimes, so turning the frame knob can cross from a vowel world into a
+  carved mesa into a comb, rather than nudging one shape along.
+
+### Layering doctrine
+
+Every factory preset is layered the same way, and this is load-bearing for
+how they sound:
+
+1. **body** — `band` plateaus / tilt / pass-filter edges holding most of the
+   spectrum near 0 dB;
+2. **macro features** — a few resonances or formants with their own
+   trajectories, at musical gains (10-22 dB, *not* 50);
+3. **detail** — a windowed `braid` grating or fine `texture` carving 10-20
+   narrow irregular notches inside a zone, each filament on its own path;
+4. **acts** — `staged` layers that appear, disappear or take over across
+   frame regions.
+
+Deep single peaks are avoided on purpose: per-frame peak normalization turns
+a 50 dB peak into a floor everywhere else, which sounds thin however it
+moves. `db_floor` values are correspondingly shallow (-28 to -36 dB for most
+presets, deeper only for genuine pass filters), so carving colours the sound
+instead of removing it. Sweeping `texture.grain_octaves` is a trap — the
+lattice position is the octave coordinate divided by the grain, so sweeping a
+fine grain re-rolls the pattern every frame instead of morphing it; hold the
+grain and sweep depth/drift.
+
+Two measurements back this up (`detail_report` in the tests, printed by the
+ignored `dump_motion_metrics` tool): **features per frame** (local dB minima
+6 dB below both flanks) and **adjacent-frame decorrelation** (1 − correlation
+of neighbouring dB rows). Dense presets are regression-tested at ≥ 12
+features/frame with decorrelation between 0.02 and 0.7 — the pattern must
+change every frame without dissolving into noise.
 
 ### Trajectory vocabulary
 
@@ -240,12 +295,6 @@ and says nothing. `frame` is normalized 0..1.
 | `logistic` | normalized S-curve with `steepness`/`center` | a response that snaps open at one point in the morph |
 | `steps` | `count` seeded LCG values held per segment, `glide` = fraction spent moving | stepped combs, teleporting bands |
 | `segments` | piecewise-linear breakpoints | vowel paths, harmonic staircases |
-
-`NotchBank`/`PeakBank` additionally take a `stagger`: member *i* runs the
-bank trajectory at time `frame + stagger·i` wrapped into 0..1, turning a
-bank sweep into a barber-pole. `ScatterPeaks` gives each peak its own LCG
-stream and its own step clock — the "sprlonk" primitive: clusters that
-scatter rather than travel.
 
 ### Motion classes
 
@@ -276,35 +325,45 @@ envelope while `comb-bloom` satisfies it.
 
 ### The library
 
-Twenty-one factory presets, all original curves (no third-party preset data
-was used or transformed):
+Twenty-five factory presets, all original curves (no third-party preset data
+was used, measured or transformed):
 
 *Glide* — `comb-bloom` (harmonic comb fading in), `glass-comb` (inharmonic
-stretch comb), `phase-flower` (six-notch phaser bank sweep), `tilt-horizon`
+stretch comb), `phase-flower` (ten-notch phaser bank sweep), `tilt-horizon`
 (dark↔bright tilt), `odd-even` (harmonic-parity mask morph).
 
 *Wobble* — `swoop-low` (resonant lowpass climbing four octaves on a
-three-cycle wobble), `cavity-high` (highpass edge dropping fast with a
-resonance overshooting below it), `band-flight` (resonant bandpass climbing
-in loping arcs), `notch-drift` (notch plus the resonance above it lurching
-up in 2.5 wobbles), `vowel-drift` (three formants, each on its own curve),
-`talkbox-cycle` (closed five-vowel loop; frame 63 meets frame 0),
-`gulp-throat` (the archetype gulp: high-Q formant pair swooping three
-octaves with settling wobble), `gulp-choir` (three staggered voices, a
-seamless barber-pole gulp), `wub-gate` (four wubs of a resonant edge with a
-counter-phase notch), `rubber-neck` (resonance flung four octaves,
-overshooting and bouncing), `dust-veil` (seeded scrolling spectral texture).
+three-cycle wobble, passband combed by a drifting grating), `cavity-high`
+(highpass edge dropping fast with a resonance overshooting below it, grating
+above), `band-flight` (flat-top band climbing in loping arcs, interior
+carved), `notch-drift` (six notches plus the resonance between them lurching
+upward), `vowel-drift` (three flat-top formant zones on three different
+curves), `vowel-grit` (bright vowel pair over a dense jagged band; grit and
+comb arrive as later acts), `talkbox-cycle` (closed five-vowel loop; frame 63
+meets frame 0), `gulp-throat` (the archetype gulp: formant pair swooping
+three octaves, grating swooping with it, metallic comb act late),
+`gulp-choir` (three staggered voices, a seamless barber-pole gulp),
+`wub-gate` (four wubs with a counter-phase notch and grating in the
+passband), `rubber-neck` (band flung four octaves, overshooting and
+bouncing, dragging notches), `notch-mesa` (three zones: wide hump, twin
+resonances that exist only mid-axis, and a plateau raked by eighteen notches
+that tears into a comb at the end), `growl` (low formant pair snarling in a
+five-cycle wobble through three stages: clean, gritty, shredded),
+`dust-veil` (fine filigree of notches scrolling upward).
 
-*Jump* — `sprlonk` (five needle resonances scattering eleven times on
-independent clocks), `droplet` (three hair-thin peaks jumping fourteen times
-through a rising window), `stutter-band` (a band teleporting between seven
-positions while a comb re-spaces), `arp-harmonic` (a needle stepping the
-harmonic series 1-8 over a tonic band), `comb-lurch` (comb spacing and
-inharmonic stretch both re-thrown eight times).
+*Jump* — `sprlonk` (five resonances and a notch field scattering on
+independent clocks, with a stretched-comb regime in the middle third),
+`droplet` (three hair-thin peaks jumping fourteen times through a rising
+window), `stutter-band` (a plateau teleporting between seven positions while
+a comb re-spaces), `arp-harmonic` (a resonance stepping the harmonic series
+1-8 over a tonic band and comb), `comb-lurch` (comb spacing and inharmonic
+stretch re-thrown eight times), `mosaic` (four worlds on one knob — formant
+pair, carved mesa, inharmonic comb, scattered needles, one per quarter of
+the frame axis).
 
 The retired `glide-low`/`glide-high` pass-filter sweeps were replaced by
-`swoop-low`/`cavity-high`: a linear slope fade reads as a slightly odd
-static filter, not as motion.
+`swoop-low`/`cavity-high`: a linear slope fade reads as a slightly odd static
+filter, not as motion.
 
 The presets resolve through the normal `fltab:<stem>` lookup. There is no
 dedicated browser listing for bundled filter tables yet (the same is true of

@@ -2356,6 +2356,12 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
+    /// Update one reactive field.
+    ///
+    /// `#[track_caller]` makes filtered UI traces identify the host write site,
+    /// rather than only the field and value. This is especially useful for
+    /// shared status/error fields that have many independent producers.
+    #[track_caller]
     pub fn set_reactive(
         &mut self,
         namespace: &str,
@@ -2399,6 +2405,7 @@ impl Runtime {
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
         if trace {
+            let caller = std::panic::Location::caller();
             let preview_widgets = widget_ids
                 .iter()
                 .take(12)
@@ -2407,7 +2414,10 @@ impl Runtime {
                 .join(",");
             let widget_suffix = if widget_ids.len() > 12 { ",..." } else { "" };
             eprintln!(
-                "[ui-trace][set-reactive] {namespace}.{field} prev={} next={} subscribers={} effect_dirty={} widgets_dirty={} widget_ids=[{}{}] widget_count={}",
+                "[ui-trace][set-reactive] {namespace}.{field} caller={}:{}:{} prev={} next={} subscribers={} effect_dirty={} widgets_dirty={} widget_ids=[{}{}] widget_count={}",
+                caller.file(),
+                caller.line(),
+                caller.column(),
                 summarize_reactive_value(previous.as_ref()),
                 summarize_reactive_value(next_for_trace.as_ref()),
                 enqueue_effect_dirty,
@@ -2446,6 +2456,7 @@ impl Runtime {
     /// alongside. Any shape/string/variant difference (device added, slot
     /// count, rename, track switch) falls back to the full set_reactive
     /// pipeline, so this is safe wherever set_reactive is.
+    #[track_caller]
     pub fn set_reactive_value_patch(
         &mut self,
         namespace: &str,

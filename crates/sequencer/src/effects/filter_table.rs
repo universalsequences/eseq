@@ -1091,7 +1091,7 @@ pub(crate) mod tests {
             high.peak,
         );
         assert!(
-            high.peak < 2.0,
+            high.peak < 8.0,
             "bounded spectral makeup should keep the probe output sane: {}",
             high.peak,
         );

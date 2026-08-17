@@ -488,7 +488,8 @@ fn table_response(props: &HashMap<String, Value>) -> Option<TableResponse> {
         })
         .sum::<f32>()
         / bins as f32;
-    response.makeup = (1.0 / (mean_square + 0.000001).sqrt()).min(2.0);
+    // Dual-maintained with the +18 dB makeup cap in filter_table_dsp.lisp.
+    response.makeup = (1.0 / (mean_square + 0.000001).sqrt()).min(8.0);
     Some(response)
 }
 
