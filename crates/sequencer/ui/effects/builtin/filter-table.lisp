@@ -8,10 +8,11 @@
 ;; need the complete modulation contract: in the mods tab the same knob edits
 ;; the selected source's depth, draws all assigned modulation ranges, and is
 ;; wrapped by the blue modulation target affordance.
-(def %knob (fx label-text p decimals value-scale)
+(def %knob (fx label-text p decimals value-scale taper)
   (pc/param-mod-wrapper fx p (str "filter-table-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "filter-table-param-" (get p :idx) (pc/param-control-key-mode fx p))
       (knob-number :label label-text
+        :taper taper
         :value (pc/fx-param-value-for fx p)
         :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
         :value-scale value-scale :decimals decimals
@@ -34,10 +35,16 @@
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
 (def %percent-knob (fx label-text p)
-  (%knob fx label-text p 0 100))
+  (%knob fx label-text p 0 100 "linear"))
 
 (def %number-knob (fx label-text p decimals)
-  (%knob fx label-text p decimals 1))
+  (%knob fx label-text p decimals 1 "linear"))
+
+;; Cutoff spans 40–18000 Hz; a linear knob leaves the musical 40–1000 Hz
+;; region on ~5% of the travel. The log taper gives every octave equal arc
+;; (typed Hz values and the displayed number are unaffected).
+(def %freq-knob (fx label-text p)
+  (%knob fx label-text p 0 1 "log"))
 
 (def %spectrum-source (fx)
   (if (get fx :rack-fx)
@@ -193,28 +200,45 @@
 (def filter-table-ui (fx)
   (let ((params (get fx :params)))
     (let ((frame-p (eseq.effects.builtin.filter-core/builtin-fx-param params "frame"))
-          (cutoff-p (eseq.effects.builtin.filter-core/builtin-fx-param params "cutoff"))
-          (res-p (eseq.effects.builtin.filter-core/builtin-fx-param params "resonance"))
-          (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
-          (output-p (eseq.effects.builtin.filter-core/builtin-fx-param params "output"))
-          (table-name (get fx :table-name))
-          (table-mode (get fx :table-mode))
-          (table-key (get fx :table-data-key)))
+        (cutoff-p (eseq.effects.builtin.filter-core/builtin-fx-param params "cutoff"))
+        (res-p (eseq.effects.builtin.filter-core/builtin-fx-param params "resonance"))
+        (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
+        (output-p (eseq.effects.builtin.filter-core/builtin-fx-param params "output"))
+        (table-name (get fx :table-name))
+        (table-mode (get fx :table-mode))
+        (table-key (get fx :table-data-key)))
       (v-stack :gap 0.25
         (box :width 36.4 :height (if (get fx :editor) 3.3 4.15) :padding 0.25
           :background-color :instrument-control-bg :corner-radius 8
           :drop-types (list "sample")
           :drop-meta (dict :kind "filter-table-source"
-                           :track SEQ.current-track
-                           :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-                           :slot (get fx :slot-idx))
+            :track SEQ.current-track
+            :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
+            :slot (get fx :slot-idx))
           :drop-hover-border-color :blue
           :on-drop (lambda (event) (%drop-table event))
           (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
-            (h-stack :width :fill :height 0.85 :gap 0.35 :align :center
+            (h-stack :width :fill :height 0.85 :gap 0.35 :align :baseline
               (label "MAGNITUDE TABLE" :font-size 7.5 :color :dim :bg :transparent)
-              (label (if table-name table-name "Drop an audio sample")
-                :font-size 9.0 :color :fg :bg :transparent)
+              ;; The table name doubles as the preset picker: the dropdown
+              ;; lists every loadable .fltab (user filter-tables/ + bundled
+              ;; factory presets) and loads the selection as a baked asset.
+              ;; Rack slots have no load command target, so they keep a label.
+              (if (and (get fx :table-options) (not (get fx :rack-fx)))
+                (subtree :key (str "filter-table-preset-" (get fx :slot-idx))
+                  (dropdown
+                    :value (if table-name table-name "Drop a sample / pick a preset")
+                    :key (str "filter-table-preset-dd-" (get fx :slot-idx))
+                    :options (get fx :table-options)
+                    :on-change (lambda (v)
+                      (host-command "set-filter-table-source"
+                        (dict :track (get fx :track-idx)
+                          :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
+                          :slot (get fx :slot-idx)
+                          :path (str "fltab:" v))))
+                    :width 10.5 :height 0.85 :font-size 9))
+                (label (if table-name table-name "Drop an audio sample")
+                  :font-size 9.0 :color :fg :bg :transparent))
               ;; Analysis mode of the loaded source; click cycles wavetable →
               ;; single cycle → audio → impulse and re-analyzes the sample.
               ;; Rack slots have no re-analysis command target yet (drops
@@ -224,11 +248,11 @@
                   :width 5.6 :height 0.8 :padding 0 :font-size 7.5
                   :background-color :mixer-control-bg :color :dim
                   :on-click |x y r|
-                    (host-command "set-filter-table-mode"
-                      (dict :track (get fx :track-idx)
-                            :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-                            :slot (get fx :slot-idx)
-                            :mode "next")))
+                  (host-command "set-filter-table-mode"
+                    (dict :track (get fx :track-idx)
+                      :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
+                      :slot (get fx :slot-idx)
+                      :mode "next")))
                 (if table-mode
                   (label table-mode :font-size 7.5 :color :dim :bg :transparent)
                   (box :width 0 :height 0)))
@@ -237,21 +261,21 @@
               (if (and table-key (not (get fx :rack-fx)) (not (get fx :editor)))
                 (button "EDIT"
                   :width 3.0 :height 0.8 :padding 0 :font-size 7.5
-                  :background-color :mixer-control-bg :color :blue
-                  :on-click |x y r|
-                    (host-command "filter-table-editor-open" (%ed-target fx)))
+                  :border-color :transparent
+                  :background-color :accent :color :fg :on-click |x y r|
+                  (host-command "filter-table-editor-open" (%ed-target fx)))
                 (box :width 0 :height 0)))
             (if table-key
               (wavetable-viewer
                 :data-key table-key :domain :magnitude
                 :waves-per-set 64 :set 0
                 :wave (if (get fx :editor)
-                        (get (get fx :editor) :selected-frame-normalized)
-                        (pc/instrument-param-base-value frame-p))
+                  (get (get fx :editor) :selected-frame-normalized)
+                  (pc/instrument-param-base-value frame-p))
                 :wave-normalized true
                 :wave-color (if (get fx :editor)
-                              (rgba 1.0 0.62 0.25 1.0)
-                              (rgba 0.35 0.68 1.0 1.0))
+                  (rgba 1.0 0.62 0.25 1.0)
+                  (rgba 0.35 0.68 1.0 1.0))
                 :inactive-color (rgba 0.20 0.43 0.72 0.34)
                 :background-color (rgba 0.035 0.045 0.060 1.0)
                 :width 35.9 :height (if (get fx :editor) 1.9 2.75))
@@ -278,7 +302,7 @@
           (%editor-section fx (get fx :editor) table-key)
           (h-stack :gap 0.6 :align :center
             (if frame-p (%percent-knob fx "frame" frame-p) (box :width 0 :height 0))
-            (if cutoff-p (%number-knob fx "cutoff" cutoff-p 0) (box :width 0 :height 0))
+            (if cutoff-p (%freq-knob fx "cutoff" cutoff-p) (box :width 0 :height 0))
             (if res-p (%percent-knob fx "resonance" res-p) (box :width 0 :height 0))
             (if mix-p (%percent-knob fx "mix" mix-p) (box :width 0 :height 0))
             (if output-p (%number-knob fx "output" output-p 2) (box :width 0 :height 0))))))))

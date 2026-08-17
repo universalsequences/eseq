@@ -16,6 +16,9 @@ use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 
 pub const NAME: &str = "Filter Table";
+/// DSP param whose descriptor is marked `ParamScaling::Exponential` (and whose
+/// panel knob uses the log taper): 40–18000 Hz wants equal arc per octave.
+pub const PARAM_CUTOFF: &str = "cutoff";
 pub const N: usize = 2048;
 pub const NBINS: usize = N / 2 + 1;
 pub const FRAMES: usize = 64;

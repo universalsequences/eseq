@@ -7199,6 +7199,18 @@ impl EffectDescriptor {
                 ),
             })
             .collect();
+        // Name-keyed builtin overrides (the `latency_samples` pattern): DGen
+        // manifests carry no scaling metadata, so frequency-like params of
+        // known builtins are marked here. Metadata only — stored values,
+        // p-locks, and the DSP domain are untouched.
+        if name == crate::effects::filter_table::NAME {
+            if let Some(param) = descriptors
+                .iter_mut()
+                .find(|param| param.name == crate::effects::filter_table::PARAM_CUTOFF)
+            {
+                param.scaling = ParamScaling::Exponential;
+            }
+        }
         descriptors.push(Self::enabled_param(
             crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
             1.0,

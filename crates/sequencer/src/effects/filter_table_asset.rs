@@ -264,6 +264,33 @@ pub fn resolve_asset_path(stem: &str) -> Option<PathBuf> {
     find_asset_in(&user_asset_dir(), stem).or_else(|| find_asset_in(&bundled_asset_dir(), stem))
 }
 
+fn collect_asset_stems(dir: &Path, stems: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_asset_stems(&path, stems);
+        } else if is_asset_path(&path) {
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                stems.push(stem.to_string());
+            }
+        }
+    }
+}
+
+/// Every loadable asset stem: user `filter-tables/` plus the bundled factory
+/// directory, deduplicated (user wins the name) and sorted for stable UI.
+pub fn list_asset_stems() -> Vec<String> {
+    let mut stems = Vec::new();
+    collect_asset_stems(&user_asset_dir(), &mut stems);
+    collect_asset_stems(&bundled_asset_dir(), &mut stems);
+    stems.sort();
+    stems.dedup();
+    stems
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

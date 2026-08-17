@@ -137,6 +137,111 @@ mod tests {
         assert_eq!(normalized_value_with_origin(&props), (0.75, 0.5));
     }
 
+    #[test]
+    fn log_taper_normalizes_endpoints_and_geometric_midpoint() {
+        let taper = KnobTaper::Log;
+        assert_eq!(taper_normalize(taper, 40.0, 18_000.0, 40.0), 0.0);
+        assert_eq!(taper_normalize(taper, 40.0, 18_000.0, 18_000.0), 1.0);
+        // The geometric mean sits at half travel: sqrt(40 * 18000) ≈ 848.5 Hz.
+        let mid = (40.0f32 * 18_000.0).sqrt();
+        assert!((taper_normalize(taper, 40.0, 18_000.0, mid) - 0.5).abs() < 0.000_01);
+        // Round-trip through denormalize.
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let value = taper_denormalize(taper, 40.0, 18_000.0, t);
+            assert!((taper_normalize(taper, 40.0, 18_000.0, value) - t).abs() < 0.000_01);
+        }
+    }
+
+    #[test]
+    fn log_taper_falls_back_to_linear_for_nonpositive_domains() {
+        let taper = KnobTaper::Log;
+        assert_eq!(taper_normalize(taper, -1.0, 1.0, 0.5), 0.75);
+        assert_eq!(taper_denormalize(taper, -1.0, 1.0, 0.75), 0.5);
+        assert_eq!(taper_normalize(taper, 0.0, 1.0, 0.25), 0.25);
+    }
+
+    #[test]
+    fn missing_taper_prop_keeps_the_linear_mapping() {
+        let mut props = numeric_props(40.0, 18_000.0, 0.0);
+        props.insert("value".to_string(), Value::Number(9_020.0));
+        let (value_t, _) = normalized_value_with_origin(&props);
+        assert!((value_t - 0.5).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn log_taper_prop_moves_low_frequencies_onto_most_of_the_arc() {
+        let mut props = numeric_props(40.0, 18_000.0, 0.0);
+        props.insert("taper".to_string(), Value::String("log".to_string()));
+        props.insert("value".to_string(), Value::Number(1_000.0));
+        let (value_t, origin_t) = normalized_value_with_origin(&props);
+        // 40–1000 Hz occupies ~53% of travel under log (vs ~5% linear).
+        assert!((value_t - 0.527_15).abs() < 0.001, "value_t = {value_t}");
+        assert_eq!(origin_t, 0.0);
+    }
+
+    #[test]
+    fn log_taper_drag_moves_in_normalized_space() {
+        let mut props = numeric_props(40.0, 18_000.0, 0.0);
+        props.insert("taper".to_string(), Value::String("log".to_string()));
+        props.insert("value".to_string(), Value::Number(40.0));
+        let node = test_knob_node(props);
+        // Full travel is drag-cells (8) rows; half travel lands on the
+        // geometric mean, not the arithmetic one.
+        let gesture = Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(40.0))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(4.0))),
+        ]);
+        let outcome = KNOB_NUMBER_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Drag(MouseButton::Left),
+            0.0,
+            0.0,
+            None,
+            Some(&gesture),
+            KeyModifiers::empty(),
+            10.0,
+            10.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(new_value))) = outcome
+        else {
+            panic!("drag should dispatch a value");
+        };
+        let mid = (40.0f64 * 18_000.0).sqrt();
+        assert!(
+            (new_value - mid).abs() / mid < 0.001,
+            "expected ~{mid}, got {new_value}"
+        );
+    }
+
+    #[test]
+    fn linear_drag_behavior_is_unchanged() {
+        let mut props = numeric_props(0.0, 100.0, 0.0);
+        props.insert("value".to_string(), Value::Number(0.0));
+        let node = test_knob_node(props);
+        let gesture = Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(4.0))),
+        ]);
+        let outcome = KNOB_NUMBER_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Drag(MouseButton::Left),
+            0.0,
+            0.0,
+            None,
+            Some(&gesture),
+            KeyModifiers::empty(),
+            10.0,
+            10.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(new_value))) = outcome
+        else {
+            panic!("drag should dispatch a value");
+        };
+        assert_eq!(new_value, 50.0);
+    }
+
     #[cfg(target_os = "macos")]
     fn value_cell(value: Value) -> Rc<RefCell<Value>> {
         Rc::new(RefCell::new(value))
@@ -626,6 +731,57 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn log_taper_places_mod_range_arcs_at_log_positions() {
+        let node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("cutoff".to_string())),
+            ("taper".to_string(), Value::String("log".to_string())),
+            ("value".to_string(), Value::Number(849.0)),
+            ("min".to_string(), Value::Number(40.0)),
+            ("max".to_string(), Value::Number(18_000.0)),
+            ("base-value".to_string(), Value::Number(849.0)),
+            ("base-min".to_string(), Value::Number(40.0)),
+            ("base-max".to_string(), Value::Number(18_000.0)),
+            ("selected-mod-slot".to_string(), Value::Number(1.0)),
+            (
+                "mod-ranges".to_string(),
+                // Depth reaching max: end lands at t=1.0; base sits at the
+                // geometric-mean half-travel point, not the linear ~4.5%.
+                Value::List(vec![value_cell(mod_range(1.0, 17_151.0))]),
+            ),
+        ]));
+
+        let primitives =
+            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+        let base = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "knob-number" => Some(instance),
+                _ => None,
+            })
+            .expect("base knob instance");
+        let range = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "knob-number-mod-range" => Some(instance),
+                _ => None,
+            })
+            .expect("mod range arc");
+
+        assert!((base.value_t - 0.5).abs() < 0.001, "value_t = {}", base.value_t);
+        assert!((range.uniform_b[1] - 0.5).abs() < 0.001);
+        assert!((range.uniform_b[2] - 1.0).abs() < 0.001);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn outer_mod_range_radius_keeps_stroke_inside_primitive_bounds() {
         let selected_radius = mod_range_ring_radius(0, true);
         let unselected_radius = mod_range_ring_radius(0, false);
@@ -649,6 +805,53 @@ fn quantized_value(props: &HashMap<String, Value>, value: f32) -> f32 {
     }
 }
 
+/// Knob travel taper: how value-space maps to normalized arc position.
+/// `:taper "log"` distributes travel logarithmically (equal arc per octave) —
+/// for frequency-like params whose musical action lives in the low decades.
+/// Only positional mapping (arc, drag, mod-range rings) tapers; the numeric
+/// text and typed entry stay in real value units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum KnobTaper {
+    Linear,
+    Log,
+}
+
+fn knob_taper(props: &HashMap<String, Value>) -> KnobTaper {
+    match props.get("taper") {
+        Some(Value::String(taper)) if taper == "log" => KnobTaper::Log,
+        _ => KnobTaper::Linear,
+    }
+}
+
+/// Value → normalized [0,1] position under the taper. Log requires a strictly
+/// positive domain; degenerate domains fall back to the linear mapping.
+fn taper_normalize(taper: KnobTaper, min: f32, max: f32, value: f32) -> f32 {
+    match taper {
+        KnobTaper::Log if min > 0.0 && max > min => {
+            let ratio = max / min;
+            ((value.clamp(min, max) / min).ln() / ratio.ln()).clamp(0.0, 1.0)
+        }
+        _ => {
+            let range = max - min;
+            if range == 0.0 {
+                0.0
+            } else {
+                ((value - min) / range).clamp(0.0, 1.0)
+            }
+        }
+    }
+}
+
+/// Normalized [0,1] position → value under the taper (inverse of
+/// `taper_normalize`).
+fn taper_denormalize(taper: KnobTaper, min: f32, max: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match taper {
+        KnobTaper::Log if min > 0.0 && max > min => min * (max / min).powf(t),
+        _ => min + (max - min) * t,
+    }
+}
+
 fn value_scale(props: &HashMap<String, Value>) -> f32 {
     get_f32_prop(props, "value-scale", 1.0).max(0.000001)
 }
@@ -665,11 +868,11 @@ fn normalized_value_with_origin(props: &HashMap<String, Value>) -> (f32, f32) {
     let value = quantized_value(props, get_f32_prop(props, "value", 0.0));
     let min = get_f32_prop(props, "min", 0.0);
     let max = get_f32_prop(props, "max", 1.0);
-    let range = max - min;
-    if range > 0.0 {
-        let value_t = ((value - min) / range).clamp(0.0, 1.0);
+    if max - min > 0.0 {
+        let taper = knob_taper(props);
+        let value_t = taper_normalize(taper, min, max, value);
         let origin = get_f32_prop(props, "origin", min);
-        let origin_t = ((origin - min) / range).clamp(0.0, 1.0);
+        let origin_t = taper_normalize(taper, min, max, origin);
         (value_t, origin_t)
     } else {
         (0.0, 0.0)
@@ -1324,12 +1527,24 @@ impl WidgetDefinition for KnobNumberWidget {
 
                 let min = get_f32_prop(&node.props, "min", 0.0);
                 let max = get_f32_prop(&node.props, "max", 1.0);
-                let range = (max - min).max(0.0001);
                 let dx = local_col - start_col;
                 let dy = start_row - local_row;
                 let drag_cells = get_f32_prop(&node.props, "drag-cells", 8.0).max(1.0);
-                let delta = ((dy * 1.0) + (dx * 0.15)) / drag_cells * range;
-                let new_value = quantized_value(&node.props, start_value + delta);
+                let normalized_delta = ((dy * 1.0) + (dx * 0.15)) / drag_cells;
+                let new_value = match knob_taper(&node.props) {
+                    // Preserve the historical unclamped-linear drag exactly:
+                    // the intermediate value may overshoot the range and is
+                    // clamped by quantized_value.
+                    KnobTaper::Linear => {
+                        let range = (max - min).max(0.0001);
+                        start_value + normalized_delta * range
+                    }
+                    taper => {
+                        let start_t = taper_normalize(taper, min, max, start_value);
+                        taper_denormalize(taper, min, max, start_t + normalized_delta)
+                    }
+                };
+                let new_value = quantized_value(&node.props, new_value);
                 MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(new_value as f64)))
             }
             _ => MouseEventOutcome::Consume,
@@ -1418,7 +1633,7 @@ impl WidgetDefinition for KnobNumberWidget {
             WidgetEvent::SetNormalized(t) => {
                 let min = get_f32_prop(&node.props, "min", 0.0);
                 let max = get_f32_prop(&node.props, "max", 1.0);
-                min + (max - min) * t.clamp(0.0, 1.0)
+                taper_denormalize(knob_taper(&node.props), min, max, t)
             }
             WidgetEvent::Custom(Value::Number(n)) => n as f32,
             WidgetEvent::Custom(Value::Nil) => return None,
@@ -1589,10 +1804,15 @@ impl WidgetDefinition for KnobNumberWidget {
         let px_h = knob_rect.height * viewport.cell_h;
         let min = get_f32_prop(&node.props, "min", 0.0);
         let max = get_f32_prop(&node.props, "max", 1.0);
+        let taper = knob_taper(&node.props);
         let (value_t, origin_t) = normalized_value_with_origin(&node.props);
         let default_t = if (max - min).abs() > 0.000_001 {
-            ((get_f32_prop(&node.props, "plock-default", value) - min) / (max - min))
-                .clamp(0.0, 1.0)
+            taper_normalize(
+                taper,
+                min,
+                max,
+                get_f32_prop(&node.props, "plock-default", value),
+            )
         } else {
             0.0
         };
@@ -1646,7 +1866,7 @@ impl WidgetDefinition for KnobNumberWidget {
             .unwrap_or(0.0)
             .round() as i32;
         if base_range.abs() > 0.000_001 {
-            let base_t = ((base_value - base_min) / base_range).clamp(0.0, 1.0);
+            let base_t = taper_normalize(taper, base_min, base_max, base_value);
             let mut ranges = Vec::new();
 
             if let Some(Value::List(mod_ranges)) = node.props.get("mod-ranges") {
@@ -1675,7 +1895,7 @@ impl WidgetDefinition for KnobNumberWidget {
                 if slot <= 0 {
                     continue;
                 }
-                let end_t = ((base_value + depth - base_min) / base_range).clamp(0.0, 1.0);
+                let end_t = taper_normalize(taper, base_min, base_max, base_value + depth);
                 let selected = slot == selected_slot;
                 let color = mod_slot_color(slot, selected);
                 prims.push(MetalPrimitive::WidgetInstance {

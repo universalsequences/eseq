@@ -35816,6 +35816,13 @@
             "table-name".to_string(),
             Rc::new(RefCell::new(Value::String("Procedural Shapes".to_string()))),
         );
+        fx.insert(
+            "table-options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("glide-low".to_string()),
+                Value::String("vowel-drift".to_string()),
+            ]))),
+        );
         let table_key = "filter-table-layout-test:magnitudes";
         assert!(eseqlisp::widget_render::wavetable_viewer::publish_bank(
             table_key,
@@ -35918,7 +35925,16 @@
             4000.0,
         );
 
-        for text in ["MAGNITUDE TABLE", "Procedural Shapes", "frame", "cutoff", "resonance"] {
+        // With preset options provided the table name renders as the preset
+        // dropdown instead of a plain label; the current name is its value.
+        let preset_dd = find_layout_node_by_widget_type(&layout, "dropdown")
+            .expect("Filter Table preset dropdown");
+        assert!(preset_dd.rect.width > 0.0 && preset_dd.rect.height > 0.0);
+        assert_eq!(
+            preset_dd.props.get("value"),
+            Some(&Value::String("Procedural Shapes".to_string())),
+        );
+        for text in ["MAGNITUDE TABLE", "frame", "cutoff", "resonance"] {
             let node = find_layout_text_containing(&layout, text)
                 .unwrap_or_else(|| panic!("missing Filter Table text {text:?}"));
             assert!(
@@ -35930,6 +35946,34 @@
                 node.rect,
             );
         }
+
+        // Cutoff spans 40–18000 Hz: its knob must use the log taper so the
+        // musical low decades get real arc travel; the neighbours stay linear.
+        fn find_knob_by_label<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            label: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "knob-number"
+                && node.props.get("label") == Some(&Value::String(label.to_string()))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_knob_by_label(child, label))
+        }
+        let cutoff_knob = find_knob_by_label(&layout, "cutoff").expect("cutoff knob-number");
+        assert_eq!(
+            cutoff_knob.props.get("taper"),
+            Some(&Value::String("log".to_string())),
+            "cutoff knob must carry the log taper",
+        );
+        let frame_knob = find_knob_by_label(&layout, "frame").expect("frame knob-number");
+        assert_eq!(
+            frame_knob.props.get("taper"),
+            Some(&Value::String("linear".to_string())),
+            "frame knob must stay linear",
+        );
 
         editor.runtime_mut().eval_str(
             r#"(do

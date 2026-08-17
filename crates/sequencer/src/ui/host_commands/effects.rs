@@ -135,7 +135,26 @@ pub(super) fn handle(
             }
         }
         "set-filter-table-source" => {
+            // Preset dropdown sends a bare `fltab:<stem>` reference; resolve
+            // it to the asset file before the shared path-based flow below.
             let path_str = extract_path_from_payload(&payload);
+            let asset_stem = path_str.as_deref().and_then(|path_str| {
+                sequencer::effects::filter_table_asset::decode_asset_ref(path_str)
+                    .map(str::to_string)
+            });
+            let path_str = match asset_stem {
+                Some(stem) => {
+                    let resolved =
+                        sequencer::effects::filter_table_asset::resolve_asset_path(&stem);
+                    if resolved.is_none() {
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Filter Table preset not found: {stem}"
+                        )));
+                    }
+                    resolved.map(|path| path.to_string_lossy().into_owned())
+                }
+                None => path_str,
+            };
             let bus = extract_usize_from_payload(&payload, "bus");
             let track = extract_usize_from_payload(&payload, "track");
             let slot = extract_usize_from_payload(&payload, "slot");

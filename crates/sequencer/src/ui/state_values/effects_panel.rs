@@ -208,6 +208,15 @@ pub(crate) fn build_effects_value(
                     "table-name".to_string(),
                     Rc::new(RefCell::new(Value::String(name))),
                 );
+                slot_map.insert(
+                    "table-options".to_string(),
+                    Rc::new(RefCell::new(Value::List(
+                        sequencer::effects::filter_table_asset::list_asset_stems()
+                            .into_iter()
+                            .map(|stem| Rc::new(RefCell::new(Value::String(stem))))
+                            .collect(),
+                    ))),
+                );
                 if let Some(mode_label) =
                     sequencer::effects::filter_table::table_ref_for(node_id)
                         .and_then(|reference| {
@@ -843,6 +852,15 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         slot_map.insert(
                             "table-name".to_string(),
                             Rc::new(RefCell::new(Value::String(name))),
+                        );
+                        slot_map.insert(
+                            "table-options".to_string(),
+                            Rc::new(RefCell::new(Value::List(
+                                sequencer::effects::filter_table_asset::list_asset_stems()
+                                    .into_iter()
+                                    .map(|stem| Rc::new(RefCell::new(Value::String(stem))))
+                                    .collect(),
+                            ))),
                         );
                         if let Some(mode_label) =
                             sequencer::effects::filter_table::table_ref_for(node_id)

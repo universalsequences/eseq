@@ -5227,6 +5227,10 @@ mod tests {
     fn filter_table_asset_loads_as_source_with_deterministic_reference() {
         use crate::effects::{filter_table, filter_table_asset};
 
+        // The live graph runs the same cached effect dylib as the offline
+        // render tests; the compiled code is not reentrant (eseq-dtx.9), so
+        // hold the shared render lock for the whole live-graph session.
+        let _render = filter_table::tests::render_lock();
         let _registry = filter_table::tests::registry_lock();
         let graph = TestLiveGraph::new("filter-table-asset-e2e", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 1);
@@ -5315,6 +5319,10 @@ mod tests {
         use crate::effects::filter_table_editor::{EditOp, EditorTarget};
         use crate::effects::{filter_table, filter_table_asset, filter_table_editor};
 
+        // Hold the shared render lock too: the live graph executes the same
+        // non-reentrant cached effect dylib as the offline render tests
+        // (eseq-dtx.9).
+        let _render = filter_table::tests::render_lock();
         let _registry = filter_table::tests::registry_lock();
         let graph = TestLiveGraph::new("filter-table-editor-e2e", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 1);
