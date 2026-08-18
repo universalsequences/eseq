@@ -253,12 +253,23 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
             instrument_fingerprint: 0,
         },
     };
+    // Play swung, record straight (eseq-767.10): the audible enqueue gets the
+    // track's swing offset — re-read from the snapshot each hit, so turning
+    // the knob mid-hold moves subsequent hits — while the record feedback
+    // below stays keyed to the straight boundary geometry.
+    let swung_sample_time = clock.roll_swung_sample_time(
+        snapshot,
+        track,
+        boundary_beats,
+        sample_time,
+        samples_per_quarter,
+    );
     if !enqueue_step_event(
         queue,
         snapshot,
         track_output_events,
         pattern_epoch,
-        sample_time,
+        swung_sample_time,
         boundary_beats,
         samples_per_quarter as f32,
         global_transpose,

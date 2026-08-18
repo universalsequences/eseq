@@ -5,7 +5,8 @@
         reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
         resolve_sampler_params, resolve_track_send_params, resolved_slot_param_value,
         run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
-        swung_network_sample_time, track_active_note_spans_at_beat,
+        swing_delay_samples_from_quarter, swung_network_sample_time,
+        track_active_note_spans_at_beat,
         track_note_spans_for_trigger, EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent,
         MidiFxQuantizerState, SchedulerLookaheadState, SnapshotSequencerClock,
     };
@@ -8221,6 +8222,87 @@
             assert_eq!(
                 hits.iter().map(|hit| (hit.step, hit.beat)).collect::<Vec<_>>(),
                 vec![(1, 0.25)],
+            );
+        });
+    }
+
+    #[test]
+    fn roll_hits_on_a_swung_track_match_sequenced_swing_offsets() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            state.pattern.track_params[0].set_swing(75.0);
+            state.pattern.track_params[0].set_swing_resolution(SwingResolution::Sixteenth);
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let triggers = drain_roll_triggers(&queue);
+            // The exact delay the step scheduler applies to odd swing buckets.
+            let swing = swing_delay_samples_from_quarter(
+                ROLL_TEST_SPQ,
+                75.0,
+                SwingResolution::Sixteenth,
+            )
+            .round() as u64;
+            assert_eq!(swing, 3_000);
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![0, 6_000 + swing, 12_000, 18_000 + swing],
+                "off-beat roll hits are delayed exactly like sequenced steps",
+            );
+        });
+    }
+
+    #[test]
+    fn roll_records_the_straight_grid_even_while_playing_swung() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            state.pattern.track_params[0].set_swing(75.0);
+            state.pattern.track_params[0].set_swing_resolution(SwingResolution::Sixteenth);
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            // Record straight (eseq-767.10): no swing-derived micro-timing in
+            // the feedback — the swing re-applies at playback, so nothing is
+            // printed and later swing changes re-swing the recorded hits.
+            let hits = state.drain_roll_recorded_hits();
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.step, hit.delay, hit.beat))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (0, 0.0, 0.0),
+                    (1, 0.0, 0.25),
+                    (2, 0.0, 0.5),
+                    (3, 0.0, 0.75),
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn roll_swing_knob_mid_hold_moves_subsequent_hits() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            let queue = ScheduledEventQueue::<64>::new();
+            let scheduled_until = drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            assert_eq!(
+                drain_roll_triggers(&queue)
+                    .iter()
+                    .map(|(sample, ..)| *sample)
+                    .collect::<Vec<_>>(),
+                vec![0, 6_000, 12_000, 18_000],
+                "default swing (50) leaves the grid straight",
+            );
+
+            // The snapshot is re-read every chunk, so a mid-hold swing change
+            // swings every not-yet-scheduled hit.
+            state.pattern.track_params[0].set_swing(75.0);
+            state.pattern.track_params[0].set_swing_resolution(SwingResolution::Sixteenth);
+            drive_roll_chunks(&state, &mut scheduler, &queue, 24_000, scheduled_until);
+            assert_eq!(
+                drain_roll_triggers(&queue)
+                    .iter()
+                    .map(|(sample, ..)| *sample)
+                    .collect::<Vec<_>>(),
+                vec![24_000, 33_000, 36_000, 45_000],
             );
         });
     }

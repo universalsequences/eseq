@@ -161,6 +161,43 @@ impl SnapshotSequencerClock {
         (step, delay, step_dur)
     }
 
+    /// Swung sample time for a live roll hit (eseq-767.10): delay the audible
+    /// event exactly as the step scheduler delays a sequenced step at this
+    /// position — the swing bucket is keyed to the track-local beat, the same
+    /// frame as the `cycle_start_beats` the lookahead feeds
+    /// `swing_bucket_index`. Track-level swing only: roll hits are live
+    /// events with no per-step overrides. The caller records the STRAIGHT
+    /// boundary, so playback through the track swing reproduces this feel and
+    /// nothing is printed.
+    pub(super) fn roll_swung_sample_time(
+        &self,
+        snapshot: &SequencerSnapshot,
+        track: usize,
+        boundary_beats: f64,
+        sample_time: u64,
+        samples_per_quarter: f64,
+    ) -> u64 {
+        let Some(params) = snapshot.tracks.get(track).map(|t| &t.params) else {
+            return sample_time;
+        };
+        if params.swing <= 50.0 {
+            return sample_time;
+        }
+        let tc = &self.track_clocks[track];
+        let local_beats = Self::anchored_local_beats(tc, boundary_beats, params.num_steps)
+            .rem_euclid(tc.cycle_beats.max(1.0e-6));
+        if swing_bucket_index(local_beats, params.swing_resolution) % 2 == 0 {
+            return sample_time;
+        }
+        let swing_delay = swing_delay_samples_from_quarter(
+            samples_per_quarter,
+            params.swing,
+            params.swing_resolution,
+        )
+        .round();
+        sample_time.saturating_add(swing_delay.max(0.0) as u64)
+    }
+
     fn offset_beats(tc: &SnapshotTrackClockState, num_steps: usize) -> f64 {
         if tc.offset_steps == 0.0 || num_steps == 0 {
             return 0.0;
