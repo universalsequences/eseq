@@ -288,6 +288,13 @@ pub fn spawn_scheduler_thread(
                     rendered,
                     &mut live_midi_fx_tracks,
                 );
+                // Roll commands are applied before the lookahead pass extends
+                // the schedule, so a NoteOff cancels every roll hit not yet
+                // inside the horizon (docs/rolling-core-spec.md 4.2, F3).
+                let roll_commands = state.drain_roll_commands();
+                if !roll_commands.is_empty() {
+                    lookahead_state.roll.apply_commands(&roll_commands);
+                }
                 let live_midi_fx_active = any_live_midi_fx_notes(&live_midi_fx_tracks);
                 if live_midi_fx_active != last_live_midi_fx_active {
                     let previous_scheduled_until = scheduled_until_sample;
@@ -369,6 +376,10 @@ pub fn spawn_scheduler_thread(
                     last_topology_epoch = topology_epoch;
                     lookahead_state.pending_accum_reset = [false; MAX_TRACKS];
                     lookahead_state.accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
+                    // Transport stop clears any held rolls
+                    // (docs/rolling-core-spec.md 7); the roll clock only runs
+                    // with the transport (4.3).
+                    lookahead_state.roll.clear_all();
                     lookahead_state.midi_fx_quantizer_state.reset();
                     lookahead_state.neural_runtime.reset_state(0.0);
                     lookahead_state.generator_runtime.reset(0.0);

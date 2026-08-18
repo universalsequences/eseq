@@ -83,6 +83,8 @@ pub(crate) fn run_event_loop(
         prev_peak_r_level: -1.0f64,
         recording_history_open: false,
         prev_master_recording: false,
+        prev_roll_mode: false,
+        prev_roll_rate: u32::MAX,
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
         prev_track_peak_levels: Vec::new(),

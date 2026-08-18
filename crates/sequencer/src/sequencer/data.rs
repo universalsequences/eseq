@@ -255,6 +255,25 @@ impl Timebase {
         let samples_per_quarter = sample_rate * 60.0 / bpm;
         samples_per_quarter * self.step_beats(num_steps)
     }
+
+    /// Roll-rate vocabulary for the 1–8 rate keys (docs/rolling-core-spec.md 3):
+    /// 1/4, 1/4t, 1/8, 1/8t, 1/16, 1/16t, 1/32, 1/32t.
+    pub const ROLL_RATES: [Timebase; 8] = [
+        Timebase::Quarter,
+        Timebase::QuarterTriplet,
+        Timebase::Eighth,
+        Timebase::EighthTriplet,
+        Timebase::Sixteenth,
+        Timebase::SixteenthTriplet,
+        Timebase::ThirtySecond,
+        Timebase::ThirtySecondTriplet,
+    ];
+
+    pub fn roll_rate_from_key(c: char) -> Option<Timebase> {
+        c.to_digit(10)
+            .and_then(|digit| digit.checked_sub(1))
+            .and_then(|index| Self::ROLL_RATES.get(index as usize).copied())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1351,6 +1370,20 @@ impl ChordSnapshot {
             delays: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
         }
     }
+}
+
+/// Control-thread → scheduler roll commands (docs/rolling-core-spec.md 3).
+/// The `TransportState` roll atomics answer "what is the state right now";
+/// this channel answers "when did it change" so the scheduler can act on
+/// note-offs and rate switches in order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RollCommand {
+    NoteOn { track: usize, transpose: f32 },
+    NoteOff { track: usize, transpose: f32 },
+    SetRate { rate: Timebase },
+    SequenceRoll { on: bool },
+    /// Roll mode toggled off, transport stop, panic: clear all held rolls.
+    ClearAll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

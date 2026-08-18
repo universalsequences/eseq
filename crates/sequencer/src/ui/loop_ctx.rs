@@ -96,6 +96,8 @@ pub(crate) struct FrameDiffState {
     /// recording is forced off outside that seam.
     pub(crate) recording_history_open: bool,
     pub(crate) prev_master_recording: bool,
+    pub(crate) prev_roll_mode: bool,
+    pub(crate) prev_roll_rate: u32,
     pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,
     pub(crate) prev_track_peak_levels: Vec<f64>,

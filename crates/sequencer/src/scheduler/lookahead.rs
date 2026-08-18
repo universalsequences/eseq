@@ -23,6 +23,9 @@ pub(super) struct SchedulerLookaheadState {
     /// While `Some`, the lookahead pass clamps every chunk to the next song
     /// row boundary and schedules from the row's prebuilt snapshot.
     pub(super) song: Option<crate::sequencer::SongPlaybackRuntime>,
+    /// Track-roll held notes (docs/rolling-core-spec.md 3), fed by the
+    /// `RollCommand` channel drained in the worker loop.
+    pub(super) roll: RollState,
 }
 
 impl SchedulerLookaheadState {
@@ -42,6 +45,7 @@ impl SchedulerLookaheadState {
             debug_accum_invocations: 0,
             quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
             song: None,
+            roll: RollState::new(),
         }
     }
 }
@@ -1691,6 +1695,34 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         }
         if !chunk_enqueued {
             break;
+        }
+
+        // Track rolling (docs/rolling-core-spec.md 4.2): emit held-note roll
+        // hits on every roll-grid boundary inside this chunk, layered on top
+        // of pattern playback. The rate is re-read from the transport atomics
+        // every chunk (F2) so mid-hold rate switches take effect at the next
+        // boundary; note-offs drained before this pass cancel every hit not
+        // yet inside the lookahead horizon (F3).
+        if state.transport.roll_mode.load(Ordering::Relaxed) && scheduler.roll.any_held() {
+            let roll_grid = crate::sequencer::Timebase::from_index(
+                state.transport.roll_rate.load(Ordering::Relaxed),
+            )
+            .step_beats(MAX_STEPS);
+            if !schedule_roll_hits(
+                queue,
+                snapshot,
+                &mut track_output_events,
+                &scheduler.roll,
+                roll_grid,
+                chunk_start_beats,
+                chunk_end_beats,
+                scheduled_until_sample,
+                samples_per_quarter,
+                pattern_epoch,
+                process_runtime.global_transpose(),
+            ) {
+                break;
+            }
         }
 
         scheduled_until_sample = scheduled_until_sample.saturating_add(chunk_frames as u64);

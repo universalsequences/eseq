@@ -98,6 +98,15 @@ pub struct TransportState {
     pub record_clock: RecordClockAnchor,
     pub metronome_enabled: AtomicBool,
     pub record_quantize_thresh: AtomicU32,
+    /// Roll mode toggle (docs/rolling-core-spec.md 3): while on, held live
+    /// keys retrigger on the roll grid instead of firing immediately.
+    pub roll_mode: AtomicBool,
+    /// Current roll rate as a `Timebase` discriminant. Read fresh by the
+    /// scheduler every chunk (feel invariant F2), never cached.
+    pub roll_rate: AtomicU32,
+    /// Momentary: the sequence-roll key is held (sequencer rolling is phase 2;
+    /// the state is published now so UI and commands stay in lockstep).
+    pub sequence_rolling: AtomicBool,
 }
 
 /// Lock-free snapshot of the render clock for wall-clock interpolation on the
@@ -267,6 +276,9 @@ pub struct SequencerState {
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     pub(super) graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     pub(super) graph_control_commands: Mutex<Vec<crate::graph::GraphControlCommand>>,
+    /// Control-thread roll commands, drained at the top of every scheduler
+    /// worker iteration (docs/rolling-core-spec.md 3).
+    pub(super) roll_commands: Mutex<Vec<crate::sequencer::RollCommand>>,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,

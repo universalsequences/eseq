@@ -7666,3 +7666,259 @@
             .session_snapshot(&base_snapshot)
             .is_none());
     }
+    // ── Track rolling (docs/rolling-core-spec.md, phase 1) ──────────────────
+
+    use super::{schedule_roll_hits, RollState};
+    use crate::sequencer::RollCommand;
+
+    /// 48kHz at the default 120bpm: 24_000 samples per quarter.
+    const ROLL_TEST_SPQ: f64 = 24_000.0;
+
+    fn roll_test_state(held: &[(usize, f32)]) -> (Arc<SequencerState>, SchedulerLookaheadState) {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.toggle_play();
+        state.transport.roll_mode.store(true, Ordering::Release);
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        for (track, transpose) in held {
+            scheduler.roll.apply_commands(&[RollCommand::NoteOn {
+                track: *track,
+                transpose: *transpose,
+            }]);
+        }
+        (state, scheduler)
+    }
+
+    fn drive_roll_chunks(
+        state: &Arc<SequencerState>,
+        scheduler: &mut SchedulerLookaheadState,
+        queue: &ScheduledEventQueue<64>,
+        rendered: u64,
+        scheduled_until: u64,
+    ) -> u64 {
+        let snapshot = state.publish_scheduler_snapshot();
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+        schedule_playing_lookahead(
+            scheduler,
+            state,
+            &snapshot,
+            queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            rendered,
+            24_000,
+            48_000,
+            12_000,
+            ROLL_TEST_SPQ,
+            scheduled_until,
+            false,
+            false,
+        )
+        .scheduled_until_sample
+    }
+
+    /// Pop every enqueued ResolvedTrigger as (sample_time, chord notes, velocity).
+    fn drain_roll_triggers(queue: &ScheduledEventQueue<64>) -> Vec<(u64, Vec<f32>, f32)> {
+        let mut triggers = Vec::new();
+        while let Some(event) = queue.pop() {
+            if let ScheduledEventKind::ResolvedTrigger {
+                chord, resolved, ..
+            } = event.kind
+            {
+                triggers.push((
+                    event.sample_time,
+                    chord.notes[..chord.count].to_vec(),
+                    resolved.velocity,
+                ));
+            }
+        }
+        triggers
+    }
+
+    #[test]
+    fn roll_emits_boundary_exact_hits_on_the_straight_grid() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            // Default rate: 1/16 → 0.25 beats → 6_000 samples at 120bpm/48kHz.
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let triggers = drain_roll_triggers(&queue);
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![0, 6_000, 12_000, 18_000],
+            );
+            for (_, notes, velocity) in &triggers {
+                // F4: track default velocity, held transpose as the single note.
+                assert_eq!(notes.as_slice(), &[3.0]);
+                assert_eq!(*velocity, StepParam::Velocity.default_value());
+            }
+        });
+    }
+
+    #[test]
+    fn roll_emits_boundary_exact_hits_on_the_triplet_grid() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            state
+                .transport
+                .roll_rate
+                .store(Timebase::SixteenthTriplet as u32, Ordering::Release);
+            // 1/16t → 1/6 beat → 4_000 samples.
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let triggers = drain_roll_triggers(&queue);
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![0, 4_000, 8_000, 12_000, 16_000, 20_000],
+            );
+        });
+    }
+
+    #[test]
+    fn roll_rate_switch_mid_hold_reschedules_future_boundaries_only() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            let queue = ScheduledEventQueue::<64>::new();
+            let scheduled_until = drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            assert_eq!(scheduled_until, 24_000);
+            drain_roll_triggers(&queue);
+
+            // F2: the rate is re-read each pass — no scheduler-side state to
+            // reshape. Boundaries already enqueued stay; new ones use the new grid.
+            state
+                .transport
+                .roll_rate
+                .store(Timebase::ThirtySecond as u32, Ordering::Release);
+            scheduler
+                .roll
+                .apply_commands(&[RollCommand::SetRate {
+                    rate: Timebase::ThirtySecond,
+                }]);
+            drive_roll_chunks(&state, &mut scheduler, &queue, 24_000, scheduled_until);
+            let triggers = drain_roll_triggers(&queue);
+            // 1/32 → 0.125 beats → 3_000 samples, starting at beat 1.0.
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![24_000, 27_000, 30_000, 33_000, 36_000, 39_000, 42_000, 45_000],
+            );
+        });
+    }
+
+    #[test]
+    fn roll_note_off_cancels_every_hit_not_yet_scheduled() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            let queue = ScheduledEventQueue::<64>::new();
+            let scheduled_until = drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            assert_eq!(drain_roll_triggers(&queue).len(), 4);
+
+            // F3: the note-off is drained before the lookahead extends, so no
+            // further boundary is enqueued.
+            let generation_before = scheduler.roll.generation;
+            scheduler.roll.apply_commands(&[RollCommand::NoteOff {
+                track: 0,
+                transpose: 3.0,
+            }]);
+            assert!(scheduler.roll.generation > generation_before);
+            drive_roll_chunks(&state, &mut scheduler, &queue, 24_000, scheduled_until);
+            assert!(drain_roll_triggers(&queue).is_empty());
+        });
+    }
+
+    #[test]
+    fn roll_mode_off_emits_nothing_even_with_held_notes() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            state.transport.roll_mode.store(false, Ordering::Release);
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            assert!(drain_roll_triggers(&queue).is_empty());
+        });
+    }
+
+    #[test]
+    fn held_transposes_emit_as_a_chord_and_duplicate_presses_collapse() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0), (0, 7.0)]);
+            // Duplicate press of an already-held transpose is a no-op (set
+            // semantics — spec 3).
+            scheduler.roll.apply_commands(&[RollCommand::NoteOn {
+                track: 0,
+                transpose: 3.0,
+            }]);
+            assert_eq!(scheduler.roll.held[0].as_slice(), &[3.0, 7.0]);
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let triggers = drain_roll_triggers(&queue);
+            assert_eq!(triggers.len(), 4);
+            for (_, notes, _) in &triggers {
+                assert_eq!(notes.as_slice(), &[3.0, 7.0]);
+            }
+        });
+    }
+
+    #[test]
+    fn clear_all_empties_held_state_and_bumps_the_generation() {
+        let mut roll = RollState::new();
+        roll.apply_commands(&[
+            RollCommand::NoteOn {
+                track: 0,
+                transpose: 3.0,
+            },
+            RollCommand::NoteOn {
+                track: 2,
+                transpose: -5.0,
+            },
+        ]);
+        assert!(roll.any_held());
+        let generation_before = roll.generation;
+        roll.apply_commands(&[RollCommand::ClearAll]);
+        assert!(!roll.any_held());
+        assert!(roll.generation > generation_before);
+        // ClearAll on an already-empty state does not churn the generation.
+        let settled = roll.generation;
+        roll.clear_all();
+        assert_eq!(roll.generation, settled);
+    }
+
+    #[test]
+    fn schedule_roll_hits_scans_half_open_chunk_ranges() {
+        run_with_scheduler_stack(|| {
+            // A boundary exactly at chunk_end belongs to the NEXT chunk; one
+            // exactly at chunk_start belongs to this chunk — no double fire, no
+            // gap, across an f64-accumulated chunk seam.
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut roll = RollState::new();
+            roll.apply_commands(&[RollCommand::NoteOn {
+                track: 0,
+                transpose: 0.0,
+            }]);
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut track_output_events = Vec::new();
+            for (chunk_start, chunk_end, chunk_start_sample) in
+                [(0.0, 0.5, 0), (0.5, 1.0, 12_000)]
+            {
+                assert!(schedule_roll_hits(
+                    &queue,
+                    &snapshot,
+                    &mut track_output_events,
+                    &roll,
+                    0.25,
+                    chunk_start,
+                    chunk_end,
+                    chunk_start_sample,
+                    ROLL_TEST_SPQ,
+                    0,
+                    0.0,
+                ));
+            }
+            let triggers = drain_roll_triggers(&queue);
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![0, 6_000, 12_000, 18_000],
+            );
+        });
+    }

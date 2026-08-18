@@ -179,6 +179,9 @@ impl SequencerState {
                 record_clock: RecordClockAnchor::new(),
                 metronome_enabled: AtomicBool::new(false),
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),
+                roll_mode: AtomicBool::new(false),
+                roll_rate: AtomicU32::new(Timebase::Sixteenth as u32),
+                sequence_rolling: AtomicBool::new(false),
             },
             runtime: RuntimeBindingState {
                 sampler_lids: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU64::new(0)).collect(),
@@ -261,6 +264,7 @@ impl SequencerState {
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             graph_visualizations: Mutex::new(Vec::new()),
             graph_control_commands: Mutex::new(Vec::new()),
+            roll_commands: Mutex::new(Vec::new()),
             track_output_events: Mutex::new(Vec::new()),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             active_note_until_samples: (0..MAX_TRACKS)

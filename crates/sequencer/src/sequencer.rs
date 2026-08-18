@@ -14,6 +14,7 @@ pub use data::{
     ceil_to_grid, rack_slot_pool_index, sync_beats, BusId, ChordData, ChordSnapshot,
     CustomInstrumentRunMode, PatternStepGeometry,
     InstrumentType, KeyboardTrigger, MidiFxPosition, ModConnection, ModDestination, RackRouting,
+    RollCommand,
     StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
     TrackParamsSnapshot, TrackPattern, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,
     DEFAULT_BUS_A_ID, DEFAULT_BUS_B_ID, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START,

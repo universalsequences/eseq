@@ -1513,6 +1513,73 @@ pub(crate) fn handle_recording_key(
         _ => return RecordingKeyOutcome::Ignored,
     };
 
+    // Roll mode (docs/rolling-core-spec.md 4.1): intercept at the
+    // live-keyboard seam, before the editor ever sees the key (the editor
+    // drops Release events). Rate keys 1-8 and the sequence-roll backquote
+    // are consumed here while roll mode is on; note keys route to the
+    // scheduler as RollCommands instead of firing immediately (F1).
+    let roll_mode = state.transport.roll_mode.load(Ordering::Relaxed);
+    if roll_mode && key.modifiers.is_empty() {
+        if let Some(rate) = sequencer::sequencer::Timebase::roll_rate_from_key(c) {
+            if key.kind == KeyEventKind::Press {
+                state
+                    .transport
+                    .roll_rate
+                    .store(rate as u32, Ordering::Release);
+                state.push_roll_command(sequencer::sequencer::RollCommand::SetRate { rate });
+            }
+            return RecordingKeyOutcome::Consumed;
+        }
+    }
+    if c == '`' {
+        // Sequence-roll key (momentary; the roll itself lands in phase 2).
+        // Press is key-repeat-deduped through held_notes; Release is
+        // intercepted whenever an entry exists — even if roll mode was
+        // toggled off mid-hold — so the held entry never leaks.
+        match key.kind {
+            KeyEventKind::Press if roll_mode => {
+                let mut held = held_notes.lock().unwrap();
+                if !held.iter().any(|note| note.key == c) {
+                    held.push(HeldKeyboardNote {
+                        key: c,
+                        transpose: 0.0,
+                        positions: Vec::new(),
+                        press_time: Instant::now(),
+                        tracks: Vec::new(),
+                    });
+                    state
+                        .transport
+                        .sequence_rolling
+                        .store(true, Ordering::Release);
+                    state.push_roll_command(sequencer::sequencer::RollCommand::SequenceRoll {
+                        on: true,
+                    });
+                }
+                return RecordingKeyOutcome::Consumed;
+            }
+            KeyEventKind::Release => {
+                let removed = {
+                    let mut held = held_notes.lock().unwrap();
+                    let pos = held.iter().position(|note| note.key == c);
+                    pos.map(|idx| held.remove(idx)).is_some()
+                };
+                if removed {
+                    state
+                        .transport
+                        .sequence_rolling
+                        .store(false, Ordering::Release);
+                    state.push_roll_command(sequencer::sequencer::RollCommand::SequenceRoll {
+                        on: false,
+                    });
+                    return RecordingKeyOutcome::Consumed;
+                }
+                return RecordingKeyOutcome::Ignored;
+            }
+            KeyEventKind::Press => return RecordingKeyOutcome::Ignored,
+            _ => return RecordingKeyOutcome::Consumed,
+        }
+    }
+
     // Octave shift keys (only on press)
     if c == 'z' || c == 'x' {
         if key.kind == KeyEventKind::Press {
@@ -1542,6 +1609,10 @@ pub(crate) fn handle_recording_key(
             let press_time = Instant::now();
             let mut positions = Vec::new();
 
+            // Roll only runs with the transport playing (rolling-core-spec
+            // 4.3); with the transport stopped, roll mode behaves as normal
+            // live keys.
+            let rolling = roll_mode && state.is_playing();
             // Send note-on to audio thread for all armed tracks
             for (track, a) in armed.iter().enumerate() {
                 if *a {
@@ -1558,12 +1629,21 @@ pub(crate) fn handle_recording_key(
                             .clamp(0.0, 1.0),
                         });
                     positions.push((track, position));
-                    let _ = keyboard_tx.send(KeyboardTrigger {
-                        track,
-                        transpose,
-                        velocity: 1.0,
-                        note_off: false,
-                    });
+                    if rolling {
+                        // No hit on keydown (F1): the scheduler fires the
+                        // first hit at the next roll-grid boundary.
+                        state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
+                            track,
+                            transpose,
+                        });
+                    } else {
+                        let _ = keyboard_tx.send(KeyboardTrigger {
+                            track,
+                            transpose,
+                            velocity: 1.0,
+                            note_off: false,
+                        });
+                    }
                 }
             }
 
@@ -1587,12 +1667,28 @@ pub(crate) fn handle_recording_key(
             // Record into pattern if recording + playing
             if let Some(note) = held_entry {
                 for track in &note.tracks {
+                    if roll_mode {
+                        // Cancels every roll hit not yet inside the lookahead
+                        // horizon (F3).
+                        state.push_roll_command(sequencer::sequencer::RollCommand::NoteOff {
+                            track: *track,
+                            transpose: note.transpose,
+                        });
+                    }
+                    // The audio note-off always goes out so a sounding voice
+                    // (rolled or normal) releases its envelope.
                     let _ = keyboard_tx.send(KeyboardTrigger {
                         track: *track,
                         transpose: note.transpose,
                         velocity: 0.0,
                         note_off: true,
                     });
+                }
+                if roll_mode {
+                    // Rolled hits record in phase 3 (write-on-release); the
+                    // press-position write below would stamp a note where no
+                    // hit sounded (F1).
+                    return RecordingKeyOutcome::Consumed;
                 }
 
                 if recording.load(Ordering::Relaxed) && state.is_playing() {

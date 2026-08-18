@@ -823,6 +823,23 @@
                     :font-size 9
                     :color (if SEQ.metronome :white :gray)
                     :hover-color :white
+                    :bg :transparent))))
+            ;; Roll mode (docs/rolling-core-spec.md 8): toggle + live rate
+            ;; display. Rate keys 1-8 switch the rate while roll mode is on.
+            (subtree :key "transport-roll-toggle"
+              (box :debug-name "transport-roll-toggle"
+                :width 5.0 :height 1.1
+                :background "pattern-pill-bg"
+                :on-click |x y r| (host-command "toggle-roll-mode")
+                (h-stack :align :center :gap 0.3
+                  (label "ROLL"
+                    :font-size 9
+                    :color (if SEQ.roll-mode :white :gray)
+                    :hover-color :white
+                    :bg :transparent)
+                  (label (if SEQ.roll-mode SEQ.roll-rate "")
+                    :font-size 9
+                    :color '(rgba 0.63 0.88 0.41 1)
                     :bg :transparent))))))
         (v-stack :gap 0.08 :padding 0.05
           (label "L"

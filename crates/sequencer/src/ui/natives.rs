@@ -2179,6 +2179,9 @@ pub(crate) fn init_runtime(
                 ("scene-launch-quantize", Value::String("off".to_string())),
                 ("record-quantize", Value::String("1/16".to_string())),
                 ("metronome", Value::Bool(false)),
+                // Roll mode (docs/rolling-core-spec.md 8): toggle + rate label.
+                ("roll-mode", Value::Bool(false)),
+                ("roll-rate", Value::String("16".to_string())),
                 ("queued-scene", Value::Number(-1.0)),
                 // Per-track pattern id (-1 = none) with a pending quantized
                 // clip launch — drives the mixer grid's queued-cell blink.

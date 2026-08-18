@@ -505,6 +505,40 @@ pub(crate) fn reactive_tick_and_render(
         if !transport_visible && master_rec_on != ctx.frame.prev_master_recording {
             ctx.frame.prev_master_recording = master_rec_on;
         }
+        // Roll mode + rate (docs/rolling-core-spec.md 8): the atomics are the
+        // source of truth (rate keys write them without touching the runtime),
+        // so the transport display diffs them per frame like master-recording.
+        let roll_mode_on = ctx
+            .shared
+            .state
+            .transport
+            .roll_mode
+            .load(Ordering::Relaxed);
+        if roll_mode_on != ctx.frame.prev_roll_mode {
+            if transport_visible {
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "roll-mode", Value::Bool(roll_mode_on))
+                    .effects_dirty;
+            }
+            ctx.frame.prev_roll_mode = roll_mode_on;
+        }
+        let roll_rate_raw = ctx
+            .shared
+            .state
+            .transport
+            .roll_rate
+            .load(Ordering::Relaxed);
+        if roll_rate_raw != ctx.frame.prev_roll_rate {
+            if transport_visible {
+                let label = sequencer::sequencer::Timebase::from_index(roll_rate_raw).label();
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "roll-rate", Value::String(label.to_string()))
+                    .effects_dirty;
+            }
+            ctx.frame.prev_roll_rate = roll_rate_raw;
+        }
         // Song-mode bindings (docs/song-mode-spec.md 12): diff-published each
         // frame; the arrangement is re-read only on committed-song revision
         // change, and the lane surfaces derived from it diff by value.

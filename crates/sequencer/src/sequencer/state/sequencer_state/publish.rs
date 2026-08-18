@@ -37,6 +37,14 @@ impl SequencerState {
         std::mem::take(&mut *self.graph_control_commands.lock().unwrap())
     }
 
+    pub fn push_roll_command(&self, command: crate::sequencer::RollCommand) {
+        self.roll_commands.lock().unwrap().push(command);
+    }
+
+    pub fn drain_roll_commands(&self) -> Vec<crate::sequencer::RollCommand> {
+        std::mem::take(&mut *self.roll_commands.lock().unwrap())
+    }
+
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
         history.extend(events);

@@ -16,12 +16,13 @@ mod lookahead;
 mod midi_fx;
 mod params;
 mod process;
+mod roll;
 mod runtime;
 mod worker;
 
 #[allow(unused_imports)]
 use {
-    clock::*, enqueue::*, geometry::*, lookahead::*, midi_fx::*, params::*, process::*,
+    clock::*, enqueue::*, geometry::*, lookahead::*, midi_fx::*, params::*, process::*, roll::*,
     runtime::*,
 };
 
