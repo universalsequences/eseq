@@ -4,49 +4,43 @@ Rolled-hit recording (docs/rolling-core-spec.md 6, phase 3).
 The scheduler stamps every audible roll hit with its exact track-local
 (step, delay) and absolute beat, and pushes it on a feedback channel
 (`SequencerState::push_roll_recorded_hit`). This module is the control-thread
-half: hits are batched per held key while the roll sounds, and written back
-on note release (the v1 double-trigger rule — while the key is held the
-audible roll stays authoritative; on release the written pattern takes over
-on the same grid the roll was emitting on). Record-as-heard (F5): one pattern
-hit per audible retrigger, no `record_quantize` pass — the roll grid already
-quantized them, and mid-roll rate switches land as steps with differing
-sub-step delays.
+half: hits are written into the live pattern state the moment they arrive —
+the step grid reads live state, so triggers appear as they roll in — but the
+SCHEDULER SNAPSHOT is only republished on note release (plus a grace window).
+That deferral is what implements the spec's double-trigger rule: the audio
+engine schedules from the snapshot, so the written steps stay inaudible and
+the roll remains the sole voice while the key is held; on release the
+publish hands playback over to a pattern sitting on the exact grid the roll
+was emitting on. Record-as-heard (F5): one pattern hit per audible
+retrigger, no `record_quantize` pass — the roll grid already quantized them,
+and mid-roll rate switches land as steps with differing sub-step delays.
 */
 
 use super::*;
 use sequencer::sequencer::RollHitRecorded;
 
-/// Batches drained until the scheduler's final feedback for a released key
-/// has certainly arrived: the worker applies the NoteOff within ~1ms, so a
-/// couple of UI frames is plenty for the (at most one) trailing hit.
-const FLUSH_GRACE: Duration = Duration::from_millis(40);
-
-struct PendingRollFlush {
-    track: usize,
-    transpose: f32,
-    requested_at: Instant,
-}
+/// The publish waits until the scheduler's final feedback for a released key
+/// has certainly arrived and been written: the worker applies the NoteOff
+/// within ~1ms, so a couple of UI frames is plenty for the (at most one)
+/// trailing hit.
+const PUBLISH_GRACE: Duration = Duration::from_millis(40);
 
 #[derive(Default)]
 pub(crate) struct RollRecordBuffer {
-    hits: Vec<RollHitRecorded>,
-    flushes: Vec<PendingRollFlush>,
+    /// Pattern writes have landed in live state but not yet in the scheduler
+    /// snapshot — the publish is owed on the next due release (or on the
+    /// roll/record/transport turning off).
+    dirty_unpublished: bool,
+    /// Release instants awaiting their publish grace window.
+    pending_publishes: Vec<Instant>,
 }
 
 impl RollRecordBuffer {
-    /// A rolled key was released while recording: schedule its batch for
-    /// write-back once the grace window has passed.
-    pub(crate) fn note_released(&mut self, track: usize, transpose: f32) {
-        self.flushes.push(PendingRollFlush {
-            track,
-            transpose,
-            requested_at: Instant::now(),
-        });
-    }
-
-    fn clear(&mut self) {
-        self.hits.clear();
-        self.flushes.clear();
+    /// A rolled key was released while recording: republish the scheduler
+    /// snapshot once the grace window has passed, handing playback of the
+    /// written steps over to the pattern.
+    pub(crate) fn note_released(&mut self) {
+        self.pending_publishes.push(Instant::now());
     }
 }
 
@@ -71,9 +65,11 @@ pub(crate) fn write_rolled_hit_to_pattern(state: &SequencerState, hit: &RollHitR
         .set(hit.step, StepParam::Duration, hit.duration_steps);
 }
 
-/// Per-frame drain + write-on-release flush, called from the reactive tick.
-/// Returns (live pattern changed, pending take changed) so the caller can
-/// republish the step grid / refresh the timeline preview.
+/// Per-frame drain: write arriving hits into live pattern state immediately
+/// (the step grid shows them as they roll in) and republish the scheduler
+/// snapshot once a release's grace window passes. Returns (live pattern
+/// changed, pending take changed) so the caller can republish the step grid /
+/// refresh the timeline preview.
 pub(crate) fn tick_roll_record(app: &mut app::App, shared: &SharedHandles) -> (bool, bool) {
     let state = &shared.state;
     let drained = state.drain_roll_recorded_hits();
@@ -81,53 +77,31 @@ pub(crate) fn tick_roll_record(app: &mut app::App, shared: &SharedHandles) -> (b
     let roll_active = state.transport.roll_mode.load(Ordering::Relaxed) && state.is_playing();
     let recording = shared.recording.load(Ordering::Relaxed);
     if !roll_active || !recording {
-        // Roll mode off / transport stop clears performance state (spec 7);
-        // with recording off the feedback is pure telemetry — discard it.
-        buffer.clear();
-        return (false, false);
-    }
-    buffer.hits.extend(drained);
-    // Unbounded-hold backstop; a flush drains its key's hits well before this.
-    if buffer.hits.len() > 8192 {
-        let excess = buffer.hits.len() - 8192;
-        buffer.hits.drain(..excess);
-    }
-
-    let now = Instant::now();
-    let mut due = Vec::new();
-    buffer.flushes.retain(|flush| {
-        if now.duration_since(flush.requested_at) >= FLUSH_GRACE {
-            due.push((flush.track, flush.transpose));
-            false
-        } else {
-            true
+        // Roll mode off / transport stop / recording off ends the take
+        // (spec 7): drop undrained feedback, but never strand written steps —
+        // anything already visible in the grid gets published now.
+        buffer.pending_publishes.clear();
+        let owed_publish = std::mem::take(&mut buffer.dirty_unpublished);
+        drop(buffer);
+        if owed_publish {
+            state.publish_scheduler_snapshot();
+            shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
         }
-    });
-    if due.is_empty() {
-        return (false, false);
+        return (owed_publish, false);
     }
 
     let mut pattern_changed = false;
     let mut take_changed = false;
-    // Same recording-kind fork as the live-key release path
-    // (`handle_recording_key`): arrangement capture retargets into the
-    // pending take; loop overdub claims the lane; song authority without
-    // overdub drops rather than folding into the looping pattern.
-    app.stamp_recording_kind_for_note();
-    let song_authority = app.song_playback_authority_active();
-    let overdub =
-        app.recording_kind == Some(sequencer::app::song_transport::RecordingKind::Overdub);
-    for (track, transpose) in due {
-        let mut hits = Vec::new();
-        buffer.hits.retain(|hit| {
-            if hit.track == track && hit.transpose == transpose {
-                hits.push(*hit);
-                false
-            } else {
-                true
-            }
-        });
-        for hit in hits {
+    if !drained.is_empty() {
+        // Same recording-kind fork as the live-key release path
+        // (`handle_recording_key`): arrangement capture retargets into the
+        // pending take; loop overdub claims the lane; song authority without
+        // overdub drops rather than folding into the looping pattern.
+        app.stamp_recording_kind_for_note();
+        let song_authority = app.song_playback_authority_active();
+        let overdub =
+            app.recording_kind == Some(sequencer::app::song_transport::RecordingKind::Overdub);
+        for hit in &drained {
             if !overdub
                 && app.take_record_note_at_beats(
                     hit.track,
@@ -148,14 +122,27 @@ pub(crate) fn tick_roll_record(app: &mut app::App, shared: &SharedHandles) -> (b
                     continue;
                 }
             }
-            write_rolled_hit_to_pattern(state, &hit);
+            write_rolled_hit_to_pattern(state, hit);
             pattern_changed = true;
+            buffer.dirty_unpublished = true;
         }
     }
+
+    // Publish on release (+grace): the audio engine schedules from the
+    // snapshot, so this is the moment the written steps become audible —
+    // after the roll for that key has stopped emitting.
+    let now = Instant::now();
+    let before = buffer.pending_publishes.len();
+    buffer
+        .pending_publishes
+        .retain(|requested_at| now.duration_since(*requested_at) < PUBLISH_GRACE);
+    let publish_due = buffer.pending_publishes.len() < before;
+    let owed_publish = publish_due && std::mem::take(&mut buffer.dirty_unpublished);
     drop(buffer);
-    if pattern_changed {
+    if owed_publish {
         state.publish_scheduler_snapshot();
         shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+        pattern_changed = true;
     }
     (pattern_changed, take_changed)
 }

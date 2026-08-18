@@ -1686,15 +1686,13 @@ pub(crate) fn handle_recording_key(
                     });
                 }
                 if roll_mode {
-                    // Write-on-release (rolling-core-spec 6): the batched
-                    // rolled hits for this key flush from the reactive tick
-                    // after a short grace window. The press-position write
-                    // below would stamp a note where no hit sounded (F1).
+                    // Rolled hits were already written into live pattern
+                    // state as they sounded (rolling-core-spec 6); the
+                    // release schedules the deferred snapshot publish that
+                    // makes them audible. The press-position write below
+                    // would stamp a note where no hit sounded (F1).
                     if recording.load(Ordering::Relaxed) && state.is_playing() {
-                        let mut batches = roll_record.lock().unwrap();
-                        for track in &note.tracks {
-                            batches.note_released(*track, note.transpose);
-                        }
+                        roll_record.lock().unwrap().note_released();
                     }
                     return RecordingKeyOutcome::Consumed;
                 }
