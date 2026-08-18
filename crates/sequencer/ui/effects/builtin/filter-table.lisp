@@ -261,21 +261,22 @@
                   (label table-mode :font-size 7.5 :color :dim :bg :transparent)
                   (box :width 0 :height 0)))
               ;; DSP engine: Spectral (STFT, PDC-compensated latency) vs
-              ;; Min Phase (causal FIR, zero latency). Click toggles and
-              ;; recompiles the node; rack slots show it as text, matching
-              ;; the mode/editor command-target limitation above.
+              ;; Min Phase (causal FIR, zero latency). Rack slots have no
+              ;; engine command target, so they keep a label.
               (if (and table-engine (not (get fx :rack-fx)))
-                (button table-engine
-                  :width 4.6 :height 0.8 :padding 0 :font-size 7.5
-                  :background-color :mixer-strip-bg :color :dim
-                  :corner-radius 0
-                  :border-color :transparent
-                  :on-click |x y r|
-                  (host-command "set-filter-table-engine"
-                    (dict :track (get fx :track-idx)
-                      :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-                      :slot (get fx :slot-idx)
-                      :engine "toggle")))
+                (subtree :key (str "filter-table-engine-dd-" (get fx :slot-idx))
+                  (dropdown
+                    :value table-engine
+                    :options '("Spectral" "Min Phase")
+                    :bg-color :mixer-strip-bg
+                    :border-color :transparent
+                    :on-change (lambda (v)
+                      (host-command "set-filter-table-engine"
+                        (dict :track (get fx :track-idx)
+                          :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
+                          :slot (get fx :slot-idx)
+                          :engine (if (= v "Min Phase") "causal" "spectral"))))
+                    :width 6.4 :height 0.8 :font-size 7.5))
                 (if table-engine
                   (label table-engine :font-size 7.5 :color :dim :bg :transparent)
                   (box :width 0 :height 0)))

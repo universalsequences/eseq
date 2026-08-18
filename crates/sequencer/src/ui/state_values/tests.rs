@@ -35943,6 +35943,21 @@
             preset_dd.props.get("value"),
             Some(&Value::String("Procedural Shapes".to_string())),
         );
+        let engine_dd = find_layout_node_by_stable_key(&layout, "filter-table-engine-dd-0")
+            .and_then(|node| find_layout_node_by_widget_type(node, "dropdown"))
+            .expect("Filter Table engine dropdown");
+        assert_eq!(
+            engine_dd.props.get("value"),
+            Some(&Value::String("Spectral".to_string())),
+        );
+        assert_eq!(
+            engine_dd.props.get("options"),
+            Some(&test_list(vec![
+                Value::String("Spectral".to_string()),
+                Value::String("Min Phase".to_string()),
+            ])),
+        );
+        assert!(engine_dd.rect.width > 0.0 && engine_dd.rect.height > 0.0);
 
         // Host-owned preset metadata is structural rather than binding-backed.
         // The post-event invalidation path must therefore run a reactive cycle
