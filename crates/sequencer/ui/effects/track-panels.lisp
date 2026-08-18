@@ -306,16 +306,26 @@
       0)))
 
 (def %step-set-param (mode value)
-  (do
-    (eseq.seq-core-state/cool-off-follow)
-    (if (seq-has-selection?)
-      (seq-set-step-param-plock
-        (eseq.seqv-track-params/seqv-param-keyword mode)
-        (eseq.seqv-track-params/seqv-step-param-value mode value))
-      (seq-set-step-param
-        (eseq.seq-core-state/current-step)
-        (eseq.seqv-track-params/seqv-param-keyword mode)
-        (eseq.seqv-track-params/seqv-step-param-value mode value)))))
+  ;; Playing with record on: the touch arms live PRINT mode — the value lands
+  ;; on the trigger steps the playhead passes, not the cursor step (bead
+  ;; eseq-jc9). No cool-off-follow in that branch: the performer is watching
+  ;; the playhead, so auto-follow must stay alive. The cursor step rides
+  ;; along as the fallback target if the gate races off before dispatch.
+  (if (and SEQ.playing SEQ.recording)
+    (seq-print-step-param
+      (eseq.seq-core-state/current-step)
+      (eseq.seqv-track-params/seqv-param-keyword mode)
+      (eseq.seqv-track-params/seqv-step-param-value mode value))
+    (do
+      (eseq.seq-core-state/cool-off-follow)
+      (if (seq-has-selection?)
+        (seq-set-step-param-plock
+          (eseq.seqv-track-params/seqv-param-keyword mode)
+          (eseq.seqv-track-params/seqv-step-param-value mode value))
+        (seq-set-step-param
+          (eseq.seq-core-state/current-step)
+          (eseq.seqv-track-params/seqv-param-keyword mode)
+          (eseq.seqv-track-params/seqv-step-param-value mode value))))))
 
 (def %step-set-sound (label)
   (%step-set-param 3 (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label SEQ.current-track label)))

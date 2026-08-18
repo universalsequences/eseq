@@ -164,6 +164,16 @@ pub(crate) fn reactive_tick_and_render(
         editor.mark_needs_redraw();
     }
 
+    // Live step-param printing (bead eseq-jc9): while playing+recording, an
+    // armed *step*-buffer param latch writes onto each trigger step the
+    // playhead passes. The tick pushes targeted Step invalidations (drained
+    // below in this same frame) instead of bumping ui_epoch; the writes ride
+    // the open "Record take" undo transaction like live note recording.
+    if tick_step_print(ctx.shared) {
+        app.mark_recording_take_changed();
+        editor.mark_needs_redraw();
+    }
+
     // 2. Sync reactive state AFTER events
     let ct = current_track_for_app(&mut app, &ctx.shared.current_track).unwrap_or(0);
     sync_watched_sampler_voices(

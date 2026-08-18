@@ -19498,6 +19498,96 @@
         );
     }
 
+    /// Bead eseq-jc9: while the transport plays with record on, a *step*
+    /// panel param touch routes to the live-print native — even with a step
+    /// selection — instead of the cursor/p-lock edit paths.
+    #[test]
+    fn metal_seq_step_panel_edits_route_to_print_while_playing_and_recording() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.step-grid-interactions/set-track-cursor-step 2)")
+            .expect("move cursor to third step");
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        for native in ["seq-set-step-param-plock", "seq-set-step-param"] {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native(native, move |_args, _ctx| {
+                    calls.lock().unwrap().push(format!("{native}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-print-step-param", move |args, _ctx| {
+                    let step = match args.first() {
+                        Some(Value::Number(step)) => *step,
+                        other => panic!("expected cursor fallback step, got {other:?}"),
+                    };
+                    let param = match args.get(1) {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    let value = match args.get(2) {
+                        Some(Value::Number(value)) => *value,
+                        other => panic!("expected numeric print value, got {other:?}"),
+                    };
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("print:{step}:{param}:{value}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "recording", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let step_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*step*")
+            .expect("step buffer should exist")
+            .id;
+        editor.set_active_buffer(step_id);
+        editor.set_layout_viewport(80, 16);
+
+        let layout = editor.widget_layout().expect("step panel layout");
+        let duration = find_layout_node_by_stable_key_suffix(&layout, "/step-param-duration")
+            .expect("duration picker");
+        editor
+            .runtime_mut()
+            .invoke(
+                duration
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("duration picker on-change"),
+                vec![Value::Number(2.5)],
+            )
+            .expect("change duration while playing+recording");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["print:2:duration:2.5"],
+            "playing+recording touches must route to the print native (with \
+             the cursor step as the fallback target), bypassing the cursor \
+             and p-lock edit paths"
+        );
+    }
+
     #[test]
     fn metal_seq_collapsed_cursor_is_gated_to_current_track() {
         let mut editor = full_grid_editor_for_scroll_tests();

@@ -10,6 +10,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-selected-steps",
     "paste-steps",
     "set-step-param-history",
+    "print-step-param",
     "move-step-history",
     "slice2-history-action",
     "slice3-history-action",
@@ -503,6 +504,55 @@ pub(super) fn handle(
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
+        }
+        "print-step-param" => {
+            // Live step-param printing (bead eseq-jc9): while playing with
+            // record on, a *step*-buffer param touch latches into print mode;
+            // the reactive tick writes the latched value onto passing trigger
+            // steps. No cool-off / auto-follow override here — the performer
+            // is watching the playhead, so follow must stay alive.
+            if !state.is_playing() || !ctx.shared.recording.load(Ordering::Relaxed) {
+                // The lisp-side gate raced off between the touch and this
+                // dispatch: the payload is shaped exactly like a normal
+                // cursor-step edit, so apply it as one.
+                handle("set-step-param-history", payload, app, editor, ctx);
+                return;
+            }
+            let Value::Map(ref map) = payload else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Step print failed: invalid payload".to_string(),
+                ));
+                return;
+            };
+            let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
+            let track = field("track").and_then(|value| match value {
+                Value::Number(track) => Some(track as usize),
+                _ => None,
+            });
+            let param = field("param").and_then(|value| match value {
+                Value::Keyword(name) => match name.as_str() {
+                    "velocity" | "vel" => Some(StepParam::Velocity),
+                    "duration" | "dur" => Some(StepParam::Duration),
+                    "transpose" => Some(StepParam::Transpose),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let value = field("value").and_then(|value| match value {
+                Value::Number(value) => Some(value as f32),
+                _ => None,
+            });
+            let (Some(track), Some(param), Some(value)) = (track, param, value) else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Step print failed: invalid payload".to_string(),
+                ));
+                return;
+            };
+            ctx.shared
+                .step_print
+                .lock()
+                .unwrap()
+                .latch(track, param, value.clamp(param.min(), param.max()));
         }
         "set-step-param-history" => {
             match apply_step_param_history_host_command(&mut app, &payload) {
@@ -1707,6 +1757,7 @@ mod tests {
                 master_recording: Arc::new(AtomicBool::new(false)),
                 held_notes: Arc::new(Mutex::new(Vec::new())),
                 roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
                 keyboard_octave: Arc::new(AtomicI32::new(0)),
                 sample_browser: Rc::new(RefCell::new(DebouncedSampleBrowser::new(
                     sample_db,
@@ -2196,6 +2247,97 @@ mod tests {
             harness.ui_epoch.load(Ordering::Relaxed),
             epoch_before,
             "the tick must be reached by the targeted path, not an epoch resync"
+        );
+    }
+
+    /// Bead eseq-jc9: `print-step-param` latches into print mode only while
+    /// the transport plays with record on; if that gate raced off before
+    /// dispatch, the touch degrades to the normal cursor-step edit.
+    #[test]
+    fn print_step_param_gates_on_play_and_record_with_cursor_edit_fallback() {
+        let mut harness = Harness::new();
+        let payload = |value: f64| {
+            Value::Map(
+                [
+                    (
+                        "track".to_string(),
+                        Rc::new(RefCell::new(Value::Number(TRACK as f64))),
+                    ),
+                    (
+                        "param".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword("velocity".to_string()))),
+                    ),
+                    (
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(value))),
+                    ),
+                    (
+                        "steps".to_string(),
+                        Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(
+                            Value::Number(STEP as f64),
+                        ))]))),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let dispatch = |harness: &mut Harness, value: f64| {
+            let mut ctx = LoopCtx {
+                sessions: &mut harness.sessions,
+                meters: &mut harness.meters,
+                frame: &mut harness.frame,
+                gesture: &mut harness.gesture,
+                track_names: &mut harness.track_names,
+                shared: &harness.shared,
+            };
+            dispatch_custom_host_command(
+                "print-step-param",
+                payload(value),
+                &mut harness.app,
+                &mut harness.editor,
+                &mut ctx,
+            );
+        };
+
+        // Transport stopped: the touch is a plain cursor-step edit and never
+        // arms the latch.
+        dispatch(&mut harness, 0.25);
+        assert_eq!(
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
+            0.25,
+            "stopped-transport fallback must edit the cursor step"
+        );
+        assert!(
+            !harness.shared.step_print.lock().unwrap().armed(),
+            "stopped-transport touches must not arm print mode"
+        );
+        assert!(
+            !harness.ui_invalidations.drain().is_empty(),
+            "the fallback edit must queue the targeted step invalidations"
+        );
+
+        // Playing + recording: the touch latches instead of editing the
+        // cursor step.
+        harness
+            .state
+            .transport
+            .playing
+            .store(true, Ordering::Relaxed);
+        harness.shared.recording.store(true, Ordering::Relaxed);
+        dispatch(&mut harness, 0.75);
+        assert_eq!(
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
+            0.25,
+            "an armed touch prints via the tick, not onto the cursor step"
+        );
+        assert!(
+            harness.shared.step_print.lock().unwrap().armed(),
+            "playing+recording touches must arm print mode"
+        );
+        assert!(
+            harness.ui_invalidations.drain().is_empty(),
+            "arming alone queues no invalidations; the tick's writes do"
         );
     }
 }

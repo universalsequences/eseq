@@ -3622,6 +3622,48 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(val as f64))
     });
 
+    // seq-print-step-param — live step-param printing (bead eseq-jc9): same
+    // signature as seq-set-step-param, but while playing+recording the value
+    // latches into print mode and lands on the playhead's passing trigger
+    // steps instead of the cursor step. The step argument is the cursor
+    // fallback if the play/record gate raced off before dispatch. Never
+    // clears the selection — printing targets the playhead, not the cursor.
+    let ct = current_track.clone();
+    runtime.register_native("seq-print-step-param", move |args, ctx| {
+        let (Some(Value::Number(step)), Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-print-step-param: expected (step :param value)".into());
+        };
+        let step = *step as usize;
+        if step >= MAX_STEPS {
+            return Err(format!("seq-print-step-param: step {step} out of range").into());
+        }
+        let param = match param_name.as_str() {
+            "velocity" | "vel" => StepParam::Velocity,
+            "duration" | "dur" => StepParam::Duration,
+            "transpose" => StepParam::Transpose,
+            other => {
+                return Err(format!("seq-print-step-param: unknown param :{other}").into())
+            }
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let val = (*val as f32).clamp(param.min(), param.max());
+        let mut payload = HashMap::new();
+        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
+        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
+        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
+        payload.insert(
+            "steps".to_string(),
+            Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(Value::Number(step as f64)))]))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "print-step-param".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Number(val as f64))
+    });
+
     runtime.register_native("seq-set-process-lane-step", move |args, ctx| {
         let (
             Some(Value::Number(track)),

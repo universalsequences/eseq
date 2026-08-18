@@ -202,6 +202,10 @@ pub(crate) struct SharedHandles {
     /// Rolled-hit record batches (docs/rolling-core-spec.md 6): filled from
     /// the scheduler feedback in the reactive tick, flushed on note release.
     pub(crate) roll_record: Arc<Mutex<RollRecordBuffer>>,
+    /// Live step-param printing latch (bead eseq-jc9): *step* buffer param
+    /// touches while playing+recording arm it; the reactive tick prints the
+    /// latched values onto passing trigger steps.
+    pub(crate) step_print: Arc<Mutex<StepPrintState>>,
     pub(crate) keyboard_octave: Arc<std::sync::atomic::AtomicI32>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
     pub(crate) keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
