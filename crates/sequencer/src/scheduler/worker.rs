@@ -5,6 +5,13 @@ Scheduler worker lifecycle and synchronization with live sequencer state.
 #[allow(unused_imports)]
 use super::*;
 
+/// With roll mode on, the first lookahead extension after Play is held this
+/// long so a roll key pressed "together with" Play — which reaches this
+/// thread a UI frame or two later — still lands before beat zero is
+/// scheduled and rolls from the first grid line, sample-exact. The whole
+/// transport simply starts this much later; nothing is skipped or doubled.
+const ROLL_PLAY_START_HOLD: Duration = Duration::from_millis(50);
+
 pub fn spawn_scheduler_thread(
     state: Arc<SequencerState>,
     sample_rate: u32,
@@ -23,6 +30,7 @@ pub fn spawn_scheduler_thread(
             let mut last_pattern_epoch = u64::MAX;
             let mut last_topology_epoch = u64::MAX;
             let mut last_playing = false;
+            let mut roll_play_hold: Option<std::time::Instant> = None;
             let lookahead_target_samples = (scheduler_block_size.max(1) * 4) as u64;
             let mut live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
@@ -370,16 +378,20 @@ pub fn spawn_scheduler_thread(
                         song.reset();
                     }
                     scheduled_until_sample = rendered;
+                    // Transport STOP clears held rolls (rolling-core-spec 7)
+                    // — on the playing→stopped transition only. While parked,
+                    // roll keys pressed with roll mode on stay armed, so a
+                    // press-then-play starts rolling exactly on beat one.
+                    if last_playing {
+                        lookahead_state.roll.clear_all();
+                    }
+                    roll_play_hold = None;
                     last_playing = false;
                     last_pattern = pattern;
                     last_pattern_epoch = pattern_epoch;
                     last_topology_epoch = topology_epoch;
                     lookahead_state.pending_accum_reset = [false; MAX_TRACKS];
                     lookahead_state.accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
-                    // Transport stop clears any held rolls
-                    // (docs/rolling-core-spec.md 7); the roll clock only runs
-                    // with the transport (4.3).
-                    lookahead_state.roll.clear_all();
                     lookahead_state.midi_fx_quantizer_state.reset();
                     lookahead_state.neural_runtime.reset_state(0.0);
                     lookahead_state.generator_runtime.reset(0.0);
@@ -395,6 +407,26 @@ pub fn spawn_scheduler_thread(
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                     thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
+                }
+
+                // Roll-armed play start: pin the scheduling frontier to the
+                // render head for ROLL_PLAY_START_HOLD so roll commands racing
+                // the Play toggle are drained before the first chunk maps out
+                // beat zero. Commands, song-playback handover and launch
+                // deadlines above keep running every held iteration.
+                if !last_playing
+                    && roll_play_hold.is_none()
+                    && state.transport.roll_mode.load(Ordering::Relaxed)
+                {
+                    roll_play_hold = Some(std::time::Instant::now() + ROLL_PLAY_START_HOLD);
+                }
+                if let Some(hold_until) = roll_play_hold {
+                    if std::time::Instant::now() < hold_until {
+                        scheduled_until_sample = rendered;
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    roll_play_hold = None;
                 }
 
                 if topology_edit_in_flight {

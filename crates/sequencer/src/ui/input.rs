@@ -1610,9 +1610,12 @@ pub(crate) fn handle_recording_key(
             let press_time = Instant::now();
             let mut positions = Vec::new();
 
-            // Roll only runs with the transport playing (rolling-core-spec
-            // 4.3); with the transport stopped, roll mode behaves as normal
-            // live keys.
+            // Roll only suppresses the immediate trigger while the transport
+            // runs (rolling-core-spec 4.3): stopped, the key sounds live as
+            // before — but with roll mode on the press ALSO arms the
+            // scheduler, so press-then-Play (either order, however racy)
+            // rolls from the first grid line instead of losing the press to
+            // whichever event the transport toggle beat.
             let rolling = roll_mode && state.is_playing();
             // Send note-on to audio thread for all armed tracks
             for (track, a) in armed.iter().enumerate() {
@@ -1630,14 +1633,15 @@ pub(crate) fn handle_recording_key(
                             .clamp(0.0, 1.0),
                         });
                     positions.push((track, position));
-                    if rolling {
-                        // No hit on keydown (F1): the scheduler fires the
-                        // first hit at the next roll-grid boundary.
+                    if roll_mode {
+                        // No hit on keydown while playing (F1): the scheduler
+                        // fires the first hit at the next roll-grid boundary.
                         state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
                             track,
                             transpose,
                         });
-                    } else {
+                    }
+                    if !rolling {
                         let _ = keyboard_tx.send(KeyboardTrigger {
                             track,
                             transpose,
