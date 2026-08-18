@@ -88,9 +88,19 @@ impl SequencerState {
                 .load(Ordering::Relaxed),
         )
         .max(0.0);
-        let pdc =
-            f32::from_bits(self.transport.pdc_latency_seconds.load(Ordering::Relaxed)).max(0.0);
-        (device + pdc) as f64
+        (device + self.pdc_latency_seconds()) as f64
+    }
+
+    /// The graph-wide output latency introduced by compensated DSP paths.
+    /// This is the latency every source acquires after the PDC planner aligns
+    /// the mix, not merely the delay on the track that contains a latent FX.
+    pub fn pdc_latency_seconds(&self) -> f32 {
+        f32::from_bits(
+            self.transport
+                .pdc_latency_seconds
+                .load(Ordering::Acquire),
+        )
+        .max(0.0)
     }
 
     /// Publish the graph's compensated output latency, in seconds. Called by

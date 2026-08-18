@@ -14245,6 +14245,7 @@
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
                 ("cpu-load-pct", Value::Number(0.0)),
+                ("output-latency-ms", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
                 ("bus-peak-1", Value::Number(0.0)),
@@ -22204,6 +22205,42 @@
                 .is_empty(),
             "bound session and song clock updates must not enqueue transport tree rebuilds"
         );
+    }
+
+    #[test]
+    fn metal_seq_transport_output_latency_is_visible_and_render_bound() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "output-latency-ms", Value::Number(46.44));
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "output latency changes must update the bound value without rebuilding the transport"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("transport layout");
+        let latency = find_layout_node_by_stable_key_suffix(
+            &layout,
+            "/transport-output-latency-value",
+        )
+        .expect("output latency value");
+        assert_finite_nonzero_rect(latency, "output latency value");
+        assert_eq!(layout_prop_number(latency, "value"), Some(46.44));
+        assert!(matches!(
+            latency.props.get("suffix"),
+            Some(Value::String(suffix)) if suffix == "ms"
+        ));
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_song_row_mirror_epoch: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
+    pub(crate) prev_output_latency_bits: u32,
     pub(crate) prev_peak_l_level: f64,
     pub(crate) prev_peak_r_level: f64,
     /// Whether the recording-take undo transaction is open. Mirrors

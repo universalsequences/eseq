@@ -260,8 +260,9 @@
                 (if table-mode
                   (label table-mode :font-size 7.5 :color :dim :bg :transparent)
                   (box :width 0 :height 0)))
-              ;; DSP engine: Spectral (STFT, PDC-compensated latency) vs
-              ;; Min Phase (causal FIR, zero latency). Rack slots have no
+              ;; DSP engine: Spectral (STFT; adds compensated latency to the
+              ;; entire project's output) vs Min Phase (causal FIR; adds no
+              ;; output latency). Rack slots have no
               ;; engine command target, so they keep a label.
               (if (and table-engine (not (get fx :rack-fx)))
                 (subtree :key (str "filter-table-engine-dd-" (get fx :slot-idx))

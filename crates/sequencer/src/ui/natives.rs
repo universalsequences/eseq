@@ -2744,6 +2744,10 @@ pub(crate) fn init_runtime(
                 ("recording", Value::Bool(false)),
                 ("master-recording", Value::Bool(false)),
                 ("cpu-load-pct", Value::Number(0.0)),
+                (
+                    "output-latency-ms",
+                    Value::Number((state.pdc_latency_seconds() * 1000.0) as f64),
+                ),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
                 (

@@ -160,6 +160,8 @@ pub(crate) fn reactive_tick_and_render(
             ctx.meters.last_cpu_ui_poll_at = Instant::now();
         }
         let cpu_load_bits = ctx.meters.cached_cpu_load_bits;
+        let output_latency_seconds = ctx.shared.state.pdc_latency_seconds();
+        let output_latency_bits = output_latency_seconds.to_bits();
         let transport_playhead = ctx.shared.state.transport.playhead.load(Ordering::Relaxed);
         let playhead = ctx.shared.state.transport.track_playheads[ct].load(Ordering::Relaxed);
         let bus_playheads = bus_playhead_snapshot(&app);
@@ -465,6 +467,17 @@ pub(crate) fn reactive_tick_and_render(
                 .set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
             ctx.frame.prev_bpm = bpm;
             needs_reactive_cycle = true;
+        }
+        if output_latency_bits != ctx.frame.prev_output_latency_bits {
+            needs_reactive_cycle |= editor
+                .runtime_mut()
+                .set_reactive(
+                    "SEQ",
+                    "output-latency-ms",
+                    Value::Number((output_latency_seconds * 1000.0) as f64),
+                )
+                .effects_dirty;
+            ctx.frame.prev_output_latency_bits = output_latency_bits;
         }
         if transport_visible && cpu_load_bits != ctx.frame.prev_cpu_load_bits {
             needs_reactive_cycle |= editor
