@@ -802,4 +802,117 @@ mod tests {
         let nonzero = ir.left.re.iter().filter(|&&x| x != 0.0).count();
         assert!(nonzero > PART_LEN / 2, "left.re mostly zero: {nonzero}");
     }
+
+    /// Measured latency of the buffer → FFT → OLA wet arm: the hop buffer's
+    /// completed block is visible on the sample that fills it, so the round
+    /// trip is one sample short of a hop. Must match the dry-arm `delay` in
+    /// `conv_reverb_dsp.lisp`.
+    const WET_LATENCY: usize = HOP - 1;
+
+    // The wet arm is ~one hop late, so the dry arm must be delayed by the
+    // same amount or the crossfade comb-filters. With a delta IR (all-ones
+    // spectrum in partition 0) every mix setting must reconstruct a scaled,
+    // latency-delayed copy of the input — including 50%, where a misaligned
+    // dry arm combs hardest.
+    #[test]
+    fn bundled_dsp_dry_arm_matches_wet_hop_latency() {
+        if !tool_path().exists() {
+            eprintln!("skipping: DGenLisp tool not found at {:?}", tool_path());
+            return;
+        }
+
+        let sample_rate = 44_100u32;
+        let frames = 8192usize;
+        // One hop ≡ ~¼ period (mod one period): an undelayed dry arm is near
+        // quadrature with the wet arm, so it cannot pass as a scaled copy.
+        let freq = sample_rate as f32 * 5.25 / HOP as f32;
+        let amp = 0.25f32;
+
+        // Delta IR: FFT of a time-domain unit impulse in partition 0 is an
+        // all-ones spectrum there; every other partition stays zero.
+        let mut delta_re = vec![0.0f32; PART_LEN];
+        delta_re[..N].fill(1.0);
+        let zeros = vec![0.0f32; PART_LEN];
+
+        let render = |mix: f32| {
+            crate::lisp_host::render_effect_source_for_test(
+                dsp_source(),
+                &crate::lisp_host::EffectRenderOptions {
+                    sample_rate,
+                    block_size: 512,
+                    frames,
+                    param_overrides: vec![("mix".to_string(), mix)],
+                    param_events: Vec::new(),
+                    tensor_overrides: vec![
+                        ("irL_re".to_string(), delta_re.clone()),
+                        ("irL_im".to_string(), zeros.clone()),
+                        ("irR_re".to_string(), zeros.clone()),
+                        ("irR_im".to_string(), zeros.clone()),
+                    ],
+                    input_overrides: vec![(1, 0.0)],
+                    input_tones: vec![(0, freq, amp)],
+                },
+            )
+            .expect("render bundled conv reverb DSP")
+        };
+
+        let tone = |frame: usize| {
+            amp * (2.0 * std::f32::consts::PI * freq * frame as f32 / sample_rate as f32).sin()
+        };
+        // Left channel, past the first hop plus a settling block.
+        let start = 2048usize;
+        let left = |report: &crate::lisp_host::EffectRenderReport| {
+            report.samples[start * 2..]
+                .iter()
+                .step_by(2)
+                .copied()
+                .collect::<Vec<f32>>()
+        };
+        // Relative residual of `out` against the best scalar multiple of the
+        // latency-delayed probe. Aligned arms fit almost exactly; an
+        // undelayed dry arm leaves its quadrature component as residual.
+        let delayed_fit_residual = |out: &[f32]| {
+            let mut dot = 0.0f64;
+            let mut ref_sq = 0.0f64;
+            let mut out_sq = 0.0f64;
+            for (idx, sample) in out.iter().enumerate() {
+                let reference = tone(start + idx - WET_LATENCY) as f64;
+                dot += *sample as f64 * reference;
+                ref_sq += reference * reference;
+                out_sq += (*sample as f64) * (*sample as f64);
+            }
+            let scale = dot / ref_sq.max(1.0e-12);
+            let mut residual_sq = 0.0f64;
+            for (idx, sample) in out.iter().enumerate() {
+                let reference = tone(start + idx - WET_LATENCY) as f64;
+                let diff = *sample as f64 - scale * reference;
+                residual_sq += diff * diff;
+            }
+            (residual_sq / out_sq.max(1.0e-12)).sqrt()
+        };
+
+        // Pure dry: the dry arm must be exactly the latency-delayed input.
+        let dry = left(&render(0.0));
+        let dry_residual = delayed_fit_residual(&dry);
+        assert!(
+            dry_residual < 1.0e-3,
+            "dry arm is not a clean latency-delayed copy of the input: residual {dry_residual}"
+        );
+
+        // Pure wet through the delta IR: same delayed copy, up to gain.
+        let wet = left(&render(1.0));
+        let wet_residual = delayed_fit_residual(&wet);
+        assert!(
+            wet_residual < 0.05,
+            "delta-IR wet arm is not a scaled latency-delayed copy: residual {wet_residual}"
+        );
+
+        // 50% mix: worst comb point pre-fix. Aligned arms reconstruct.
+        let half = left(&render(0.5));
+        let half_residual = delayed_fit_residual(&half);
+        assert!(
+            half_residual < 0.05,
+            "50% mix does not reconstruct the delayed input (dry/wet comb): residual {half_residual}"
+        );
+    }
 }

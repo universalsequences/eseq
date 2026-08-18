@@ -39,5 +39,15 @@
 (def tdR (ifft yRre yRim @N 1024))
 (def wetR (overlap-add (* tdR out-gain 0.25) 512))
 
-(out (mix inL wetL wet-amt) 1 @name left)
-(out (mix inR wetR wet-amt) 2 @name right)
+; The wet arm is one hop late: `buffer` fills a hop before the FFT/OLA path
+; emits anything. Its measured latency is hop-1 = 511 samples (the completed
+; block is visible on the same sample that fills it — verified against a
+; delta IR in conv_reverb.rs tests). Delay the dry arm by the same amount so
+; the two mix arms stay sample-aligned — mixing raw input against the late
+; wet comb-filters the output (worst at 50% mix). The shared 511-sample
+; latency is then a plain delay for PDC to compensate.
+(def dryL (delay inL 511))
+(def dryR (delay inR 511))
+
+(out (mix dryL wetL wet-amt) 1 @name left)
+(out (mix dryR wetR wet-amt) 2 @name right)
