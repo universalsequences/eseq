@@ -35980,6 +35980,26 @@
             preset_dd.props.get("value"),
             Some(&Value::String("Procedural Shapes".to_string())),
         );
+        let preset_on_change = preset_dd
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("Filter Table preset dropdown should be editable");
+        editor.runtime_mut()
+            .invoke(preset_on_change, vec![Value::String("vowel-drift".to_string())])
+            .expect("select Filter Table preset");
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("expected one Filter Table preset command, got {commands:?}");
+        };
+        assert_eq!(name, "set-filter-table-source");
+        assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+        assert_eq!(extract_usize_from_payload(payload, "slot"), Some(0));
+        assert_eq!(extract_usize_from_payload(payload, "bus"), None);
+        assert_eq!(
+            extract_string_from_payload(payload, "path").as_deref(),
+            Some("fltab:vowel-drift"),
+        );
         let engine_dd = find_layout_node_by_stable_key(&layout, "filter-table-engine-dd-0")
             .and_then(|node| find_layout_node_by_widget_type(node, "dropdown"))
             .expect("Filter Table engine dropdown");
@@ -35995,6 +36015,26 @@
             ])),
         );
         assert!(engine_dd.rect.width > 0.0 && engine_dd.rect.height > 0.0);
+        let engine_on_change = engine_dd
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("Filter Table engine dropdown should be editable");
+        editor.runtime_mut()
+            .invoke(engine_on_change, vec![Value::String("Min Phase".to_string())])
+            .expect("select Filter Table engine");
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("expected one Filter Table engine command, got {commands:?}");
+        };
+        assert_eq!(name, "set-filter-table-engine");
+        assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+        assert_eq!(extract_usize_from_payload(payload, "slot"), Some(0));
+        assert_eq!(extract_usize_from_payload(payload, "bus"), None);
+        assert_eq!(
+            extract_string_from_payload(payload, "engine").as_deref(),
+            Some("causal"),
+        );
 
         // Host-owned preset metadata is structural rather than binding-backed.
         // The post-event invalidation path must therefore run a reactive cycle
