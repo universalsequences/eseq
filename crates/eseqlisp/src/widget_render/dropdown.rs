@@ -39,8 +39,19 @@ const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DropdownOwnerIdentity {
+    stable_widget_id: Option<u64>,
+    subtree_root_id: Option<u64>,
+    parent_subtree_root_id: Option<u64>,
+    stable_key: Option<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct DropdownState {
+    /// Stable layout identity of the dropdown currently owning this numeric
+    /// widget ID. Conditional subtree replacement can reuse numeric IDs.
+    owner: Option<DropdownOwnerIdentity>,
     open: bool,
     hovered_idx: Option<usize>,
     /// True between the trigger mouse-down that opens the menu and that same
@@ -69,6 +80,45 @@ fn get_state(widget_id: u64) -> DropdownState {
 fn set_state(widget_id: u64, state: DropdownState) {
     STATES.with(|s| s.borrow_mut().insert(widget_id, state));
     super::bump_widget_state_generation();
+}
+
+fn owner_identity(node: &LayoutNode) -> Option<DropdownOwnerIdentity> {
+    let identity = DropdownOwnerIdentity {
+        stable_widget_id: node.stable_widget_id,
+        subtree_root_id: node.subtree_root_id,
+        parent_subtree_root_id: node.parent_subtree_root_id,
+        stable_key: node.stable_key.clone(),
+    };
+    (identity.stable_widget_id.is_some()
+        || identity.subtree_root_id.is_some()
+        || identity.parent_subtree_root_id.is_some()
+        || identity.stable_key.is_some())
+    .then_some(identity)
+}
+
+/// Resolve state through the node's stable ownership identity. Numeric widget
+/// IDs are layout-local and may be reused when one conditional subtree replaces
+/// another; carrying open state across that replacement makes the first click
+/// close a stale menu instead of opening the new dropdown.
+fn get_state_for_node(node: &LayoutNode) -> DropdownState {
+    let owner = owner_identity(node);
+    let mut replaced_owner = false;
+    let state = STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let state = states.entry(node.widget_id).or_default();
+        if owner.is_some() && state.owner != owner {
+            *state = DropdownState {
+                owner,
+                ..DropdownState::default()
+            };
+            replaced_owner = true;
+        }
+        state.clone()
+    });
+    if replaced_owner {
+        super::remove_overlay(node.widget_id);
+    }
+    state
 }
 
 fn close_other_dropdowns(active_widget_id: u64) {
@@ -538,7 +588,7 @@ impl WidgetDefinition for DropdownWidget {
             return MouseEventOutcome::Consume;
         }
 
-        let mut state = get_state(node.widget_id);
+        let mut state = get_state_for_node(node);
         let options = get_options(&node.props);
 
         if state.open {
@@ -607,7 +657,7 @@ impl WidgetDefinition for DropdownWidget {
     }
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
-        let mut state = get_state(node.widget_id);
+        let mut state = get_state_for_node(node);
         let options = get_options(&node.props);
         if options.is_empty() {
             return None;
@@ -735,7 +785,7 @@ impl WidgetDefinition for DropdownWidget {
         let selected = get_selected(&node.props);
         let options = get_options(&node.props);
         let action_menu = is_action_menu(&node.props);
-        let mut state = get_state(node.widget_id);
+        let mut state = get_state_for_node(node);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);

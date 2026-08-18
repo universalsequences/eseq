@@ -1618,6 +1618,93 @@ fn clicking_inactive_tile_uses_target_tile_viewport_for_hit_testing() {
 }
 
 #[test]
+fn first_click_opens_an_unfocused_conditionally_replaced_dropdown() {
+    fn find_dropdown(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {
+        if node.widget_type == "dropdown" {
+            return Some(node);
+        }
+        node.children.iter().find_map(find_dropdown)
+    }
+
+    fn click(editor: &mut Editor, dropdown: &crate::layout::LayoutNode) {
+        let col = dropdown.rect.col + dropdown.rect.width * 0.5;
+        let row = dropdown.rect.row + dropdown.rect.height * 0.5;
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                mouse_event(kind, col.floor() as u16, row.floor() as u16),
+                0,
+                0,
+                30,
+                10,
+                col,
+                row,
+            );
+        }
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def dropdown-page (state 0))
+            (effect
+              (v-stack
+                (if (= dropdown-page 0)
+                  (subtree :key "synth-dropdown"
+                    (dropdown :value "main" :options '("main" "alt")))
+                  (subtree :key "mods-dropdown"
+                    (dropdown :value "off" :options '("off" "lfo" "env"))))))
+            "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(30, 10);
+
+    let old_dropdown = editor
+        .runtime
+        .current_layout
+        .as_ref()
+        .and_then(|layout| find_dropdown(layout))
+        .expect("initial dropdown")
+        .clone();
+    click(&mut editor, &old_dropdown);
+    assert!(crate::widget_render::dropdown::is_dropdown_open(
+        old_dropdown.widget_id
+    ));
+
+    editor.runtime_mut().eval_str("(set! dropdown-page 1)").unwrap();
+    crate::widget_render::clear_overlay();
+    editor.clear_focused_widget();
+    let mods_dropdown = editor
+        .runtime
+        .current_layout
+        .as_ref()
+        .and_then(|layout| find_dropdown(layout))
+        .expect("conditionally shown mods dropdown")
+        .clone();
+    assert_eq!(
+        mods_dropdown.widget_id, old_dropdown.widget_id,
+        "the regression requires conditional subtrees to reuse a layout-local widget ID"
+    );
+    assert_ne!(
+        mods_dropdown.subtree_root_id, old_dropdown.subtree_root_id,
+        "the replacement dropdowns must retain distinct stable subtree identities"
+    );
+
+    click(&mut editor, &mods_dropdown);
+
+    assert_eq!(editor.focused_widget_id(), Some(mods_dropdown.widget_id));
+    assert!(
+        crate::widget_render::dropdown::is_dropdown_open(mods_dropdown.widget_id),
+        "one click must both focus and open a newly shown dropdown instead of closing stale state"
+    );
+}
+
+#[test]
 fn ctrl_a_moves_to_start_of_line() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
