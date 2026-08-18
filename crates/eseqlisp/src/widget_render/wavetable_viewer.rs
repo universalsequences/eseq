@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -39,6 +39,11 @@ pub fn publish_bank(key: impl Into<String>, frame_len: usize, data: Arc<Vec<f32>
         return false;
     }
     let key = key.into();
+    if let Ok(mut retired) = retired_bank_keys().lock() {
+        // Republished before the renderer drained the retirement: keep the
+        // GPU buffer instead of evicting one that is live again.
+        retired.remove(&key);
+    }
     let Ok(mut banks) = live_banks().lock() else {
         return false;
     };
@@ -62,10 +67,33 @@ pub fn publish_bank(key: impl Into<String>, frame_len: usize, data: Arc<Vec<f32>
     true
 }
 
+/// Keys unpublished since the renderer last drained this set. GPU backends
+/// cache one buffer per bank key; without this they would never learn that a
+/// key is gone, and per-node keys (`filter-table:{node_id}:…`) never repeat,
+/// so every device rebuild would strand a buffer.
+fn retired_bank_keys() -> &'static Mutex<HashSet<String>> {
+    static RETIRED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    RETIRED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 pub fn remove_published_bank(key: &str) {
     if let Ok(mut banks) = live_banks().lock() {
         banks.remove(key);
     }
+    if let Ok(mut retired) = retired_bank_keys().lock() {
+        retired.insert(key.to_string());
+    }
+}
+
+/// Drain the keys unpublished since the last call, for a renderer to evict
+/// from its GPU cache. Single-consumer: whoever drains owns the notification.
+/// Evicting is always safe — a key that came back is simply re-uploaded on
+/// its next draw.
+pub fn take_retired_bank_keys() -> Vec<String> {
+    retired_bank_keys()
+        .lock()
+        .map(|mut retired| retired.drain().collect())
+        .unwrap_or_default()
 }
 
 /// Pub so hosts can assert that what a widget displays is exactly what they
@@ -311,6 +339,28 @@ mod tests {
         assert!(published_bank(key).unwrap().revision > initial.revision);
         remove_published_bank(key);
         assert!(published_bank(key).is_none());
+    }
+
+    #[test]
+    fn unpublishing_a_bank_retires_its_key_for_the_renderer() {
+        // Per-node keys never repeat, so a renderer that is never told a key
+        // is gone keeps its GPU buffer alive for the life of the process.
+        let key = "wavetable-viewer-retired-key-test";
+        let data = Arc::new(vec![0.0, 1.0, 0.0, -1.0]);
+        assert!(publish_bank(key, 4, data.clone()));
+        remove_published_bank(key);
+        assert!(take_retired_bank_keys().contains(&key.to_string()));
+        assert!(
+            !take_retired_bank_keys().contains(&key.to_string()),
+            "draining hands each retirement out once"
+        );
+        // Republishing before the drain keeps the live buffer.
+        assert!(publish_bank(key, 4, data.clone()));
+        remove_published_bank(key);
+        assert!(publish_bank(key, 4, data));
+        assert!(!take_retired_bank_keys().contains(&key.to_string()));
+        remove_published_bank(key);
+        take_retired_bank_keys();
     }
 
     #[test]

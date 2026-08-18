@@ -177,13 +177,25 @@ pub fn compute_latency_plan(topology: &LatencyTopology) -> LatencyPlan {
     }
 }
 
+/// Sum the latency of every slot that is both occupied and running. `active`
+/// must already account for the slot's bypass — see [`slot_is_active`].
 fn chain_latency<'a>(
-    occupied: impl Iterator<Item = (bool, &'a EffectDescriptor, i32)>,
+    slots: impl Iterator<Item = (bool, &'a EffectDescriptor, i32)>,
 ) -> u32 {
-    occupied
-        .filter(|(present, _, _)| *present)
+    slots
+        .filter(|(active, _, _)| *active)
         .map(|(_, desc, node_id)| desc.latency_samples(node_id))
         .sum()
+}
+
+/// Whether a slot contributes latency: it must hold a live node and not be
+/// bypassed. `enabled_at` reads the slot's stored value for a param index.
+fn slot_is_active(
+    node_id: i32,
+    desc: &EffectDescriptor,
+    enabled_at: impl Fn(usize) -> f32,
+) -> bool {
+    node_id > 0 && desc.enabled_param_idx().is_none_or(|idx| enabled_at(idx) > 0.5)
 }
 
 impl App {
@@ -205,7 +217,11 @@ impl App {
                             .iter()
                             .zip(&bus.effect_descriptors)
                             .map(|(slot, desc)| {
-                                (slot.node_id > 0, desc, slot.node_id as i32)
+                                let node_id = slot.node_id as i32;
+                                let active = slot_is_active(node_id, desc, |idx| {
+                                    slot.defaults.get(idx).copied().unwrap_or(1.0)
+                                });
+                                (active, desc, node_id)
                             }),
                     ),
                 ))
@@ -224,7 +240,9 @@ impl App {
                     .map(|(slots, descriptors)| {
                         chain_latency(slots.iter().zip(descriptors).map(|(slot, desc)| {
                             let node_id = slot.node_id.load(Ordering::Relaxed) as i32;
-                            (node_id > 0, desc, node_id)
+                            let active =
+                                slot_is_active(node_id, desc, |idx| slot.defaults.get(idx));
+                            (active, desc, node_id)
                         }))
                     })
                     .unwrap_or(0);
@@ -240,14 +258,33 @@ impl App {
                                         .iter()
                                         .zip(&slot.effect_descriptors)
                                         .map(|(effect, desc)| {
-                                            (effect.node_id > 0, desc, effect.node_id as i32)
+                                            let node_id = effect.node_id as i32;
+                                            let active =
+                                                slot_is_active(node_id, desc, |idx| {
+                                                    effect
+                                                        .defaults
+                                                        .get(idx)
+                                                        .copied()
+                                                        .unwrap_or(1.0)
+                                                });
+                                            (active, desc, node_id)
                                         }),
                                 )
                             })
                             .collect()
                     })
                     .unwrap_or_default();
-                let params = &self.state.pattern.track_params[track];
+                // This runs from the per-frame reactive tick, so it must
+                // tolerate the transient windows during project load and
+                // add-track where `track_params` trails `tracks`.
+                let Some(params) = self.state.pattern.track_params.get(track) else {
+                    return TrackLatencyInput {
+                        chain_latency: chain,
+                        rack_slot_latencies,
+                        output: TrackOutput::None,
+                        sends: Vec::new(),
+                    };
+                };
                 let output = match params.output() {
                     TrackOutput::Bus(id) if !live_buses.iter().any(|(bus, _)| *bus == id) => {
                         // Mirror connect_delay_output_to's missing-bus fallback.
@@ -329,6 +366,7 @@ impl App {
 
         let max = crate::effects::pdc_delay::PDC_MAX_DELAY_SAMPLES as u32 - 1;
         let _batch = GraphEditBatchGuard::new(lg);
+        let mut all_written = true;
         for (node_id, pad) in &targets {
             if *pad > max {
                 eprintln!(
@@ -336,17 +374,33 @@ impl App {
                 );
             }
             let value = (*pad).min(max) as f32;
-            unsafe {
+            let written = unsafe {
                 crate::audiograph::write_node_state(
                     lg,
                     *node_id,
                     crate::effects::pdc_delay::PDC_PARAM_DELAY,
                     &value,
                     1,
-                );
-            }
+                )
+            };
+            all_written &= written;
         }
-        self.graph.applied_latency_pads = targets;
+        // Only cache a pad set the graph actually accepted. A dropped write
+        // (full edit queue during project load) must stay uncached, or the
+        // change detector above would early-return forever and leave that
+        // branch uncompensated.
+        if all_written {
+            self.graph.applied_latency_pads = targets;
+        } else {
+            self.graph.applied_latency_pads.clear();
+        }
+    }
+
+    /// Forget the applied-pad cache. Graph teardown deletes the PDC nodes, so
+    /// a rebuild that reuses their ids would otherwise match the stale cache
+    /// and skip the write, leaving fresh nodes at delay 0.
+    pub(in crate::app) fn invalidate_latency_pad_cache(&mut self) {
+        self.graph.applied_latency_pads.clear();
     }
 }
 
@@ -627,6 +681,40 @@ mod tests {
         crate::effects::filter_table::clear_instance(node_id);
         desc.name = "Delay".to_string();
         assert_eq!(desc.latency_samples(node_id), 0);
+    }
+
+    #[test]
+    fn bypassed_slot_contributes_no_latency() {
+        // The DGen wrapper's bypass is a bit-exact passthrough with no delay
+        // line, so a disabled Filter Table must drop out of the plan — leaving
+        // it in would keep padding parallel branches against latency the
+        // signal no longer accrues.
+        let _registry = crate::effects::filter_table::tests::registry_lock();
+        let node_id = i32::MAX - 11;
+        let mut desc = EffectDescriptor::empty_custom_slot();
+        desc.name = crate::effects::filter_table::NAME.to_string();
+        desc.params = vec![EffectDescriptor::enabled_param(0, 1.0)];
+        assert_eq!(desc.enabled_param_idx(), Some(0));
+
+        let latency_when = |enabled: f32| {
+            let active = slot_is_active(node_id, &desc, |_| enabled);
+            chain_latency(std::iter::once((active, &desc, node_id)))
+        };
+        assert_eq!(latency_when(1.0), crate::effects::filter_table::N as u32);
+        assert_eq!(latency_when(0.0), 0);
+        // An empty slot is inactive whatever the stored value says.
+        assert!(!slot_is_active(0, &desc, |_| 1.0));
+        crate::effects::filter_table::clear_instance(node_id);
+    }
+
+    #[test]
+    fn slot_without_an_enabled_param_stays_active() {
+        let node_id = i32::MAX - 13;
+        let mut desc = EffectDescriptor::empty_custom_slot();
+        desc.params.clear();
+        desc.name = "Delay".to_string();
+        assert_eq!(desc.enabled_param_idx(), None);
+        assert!(slot_is_active(node_id, &desc, |_| 0.0));
     }
 
     #[test]

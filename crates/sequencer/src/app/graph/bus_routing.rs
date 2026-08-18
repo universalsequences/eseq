@@ -273,6 +273,7 @@ impl GraphController<'_> {
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.merge_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.gate_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.volume_id);
+            self.app.invalidate_latency_pad_cache();
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.pdc_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.left_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.right_id);
@@ -484,6 +485,10 @@ impl GraphController<'_> {
             });
         }
 
+        if !old_sends.is_empty() {
+            // Send PDC nodes die below and their ids may be reused.
+            self.app.invalidate_latency_pad_cache();
+        }
         for send in old_sends {
             if let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) {
                 unsafe {

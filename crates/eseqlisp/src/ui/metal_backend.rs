@@ -2904,6 +2904,12 @@ fragment float4 live_spectrogram_frag(
                     self.stats.note_widget_run_cache_clear();
                 }
             }
+            // Bank keys are per-publisher and never reused (the Filter Table
+            // keys its bank by node id), so an unpublished key's GPU buffer
+            // would otherwise live until the process exits.
+            for key in widget_render::wavetable_viewer::take_retired_bank_keys() {
+                self.wavetable_buffers.remove(&key);
+            }
         }
 
         fn new_static_buffer<T>(

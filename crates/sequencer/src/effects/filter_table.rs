@@ -717,6 +717,11 @@ pub fn record_prepared_table(
 }
 
 pub fn clear_instance(node_id: i32) {
+    // The node is going away, so an editor session bound to it must go too:
+    // its rollback and every subsequent apply would target a dead node, and
+    // the panel would keep offering an editor no command could reach. A swap
+    // that intends to keep the session detaches it first.
+    super::filter_table_editor::take_session_for_node(node_id);
     eseqlisp::widget_render::wavetable_viewer::remove_published_bank(&visualization_key(node_id));
     if let Ok(mut slots) = TABLE_SLOTS.lock() {
         slots.remove(&node_id);

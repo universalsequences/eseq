@@ -366,6 +366,8 @@ impl GraphController<'_> {
     }
 
     pub(super) fn delete_track_shell(&mut self, track: &TrackNodeIds) {
+        // The track's PDC node dies below; a rebuild may reuse its id.
+        self.app.invalidate_latency_pad_cache();
         for rack_slot in &track.rack_slots {
             self.delete_rack_slot_nodes(rack_slot);
         }

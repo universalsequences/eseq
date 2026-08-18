@@ -173,6 +173,9 @@ impl GraphController<'_> {
             }
         }
 
+        // Every PDC node in the graph dies below; a reload may reuse their
+        // ids, so the applied-pad cache must not survive.
+        self.app.invalidate_latency_pad_cache();
         for track in self.app.graph.track_node_ids.iter().rev() {
             for rack_slot in &track.rack_slots {
                 self.delete_rack_slot_nodes(rack_slot);

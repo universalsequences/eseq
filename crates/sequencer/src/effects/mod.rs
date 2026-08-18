@@ -2367,13 +2367,24 @@ impl EffectDescriptor {
         }
     }
 
+    /// Index of this effect's bypass param, if it has one. A slot whose
+    /// `enabled` reads false contributes no latency: the DGen wrapper's
+    /// bypass is a bit-exact passthrough with no delay line, so the
+    /// compensation planner must drop the slot rather than keep padding
+    /// parallel branches against latency that is no longer there.
+    pub fn enabled_param_idx(&self) -> Option<usize> {
+        self.params
+            .iter()
+            .position(|param| param.name.eq_ignore_ascii_case("enabled"))
+    }
+
     /// Fixed processing latency this effect imposes on its signal path, in
     /// samples. Latency is a property of the effect's algorithm, so it is
     /// keyed by name like `transport_phase_param_idx` — except the Filter
     /// Table, whose per-node engine (spectral STFT vs causal min-phase FIR)
-    /// decides between one-window latency and zero. Reported regardless of
-    /// the enabled param: an effect's internal bypass is expected to keep its
-    /// delay line so toggling never shifts the compensated path.
+    /// decides between one-window latency and zero. This is the latency of
+    /// the *running* algorithm; callers must consult `enabled_param_idx` and
+    /// report zero for a bypassed slot.
     pub fn latency_samples(&self, node_id: i32) -> u32 {
         match self.name.as_str() {
             crate::effects::filter_table::NAME => {

@@ -2069,14 +2069,15 @@ impl App {
             .get(track)
             .and_then(|chain| chain.get(slot_idx))
             .ok_or_else(|| "Track effect slot not found".to_string())?;
-        let node_id = slot_state.node_id.load(Ordering::Relaxed) as i32;
-        if node_id == 0 {
+        let old_node_id = slot_state.node_id.load(Ordering::Relaxed) as i32;
+        if old_node_id == 0 {
             return Err("Filter Table node not live".to_string());
         }
-        if filter_table::engine_for(node_id) == engine {
+        if filter_table::engine_for(old_node_id) == engine {
             return Ok(false);
         }
         let values = EffectSlotSnapshot::capture_authoring_values(slot_state);
+        let session = self.detach_filter_table_editor_session(old_node_id);
         let source = filter_table::dsp_source_for(engine);
         let result = self.editor.dylib_cache.acquire(
             lisp_host::DGenCompileKind::Effect,
@@ -2105,6 +2106,7 @@ impl App {
         EffectSlotSnapshot::restore_authoring_values(slot_state, &values)?;
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.reapply_filter_table_after_engine_change(node_id, &values)?;
+        self.reattach_filter_table_editor_session(session, node_id)?;
         Ok(true)
     }
 
@@ -2116,19 +2118,20 @@ impl App {
         engine: crate::effects::filter_table::TableEngine,
     ) -> Result<bool, String> {
         use crate::effects::filter_table;
-        let node_id = self
+        let old_node_id = self
             .buses
             .get(bus_idx)
             .and_then(|bus| bus.effect_slots.get(slot_idx))
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| "Bus effect slot not found".to_string())?;
-        if node_id == 0 {
+        if old_node_id == 0 {
             return Err("Filter Table node not live".to_string());
         }
-        if filter_table::engine_for(node_id) == engine {
+        if filter_table::engine_for(old_node_id) == engine {
             return Ok(false);
         }
         let values = self.buses[bus_idx].effect_slots[slot_idx].authoring_values();
+        let session = self.detach_filter_table_editor_session(old_node_id);
         let locator = self.bus_fx_locator(bus_idx)?;
         let source = filter_table::dsp_source_for(engine);
         let result = self.editor.dylib_cache.acquire(
@@ -2162,6 +2165,7 @@ impl App {
             .map_err(|error| format!("reapplying bus effect values: {error}"))?;
         self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
         self.reapply_filter_table_after_engine_change(node_id, &values)?;
+        self.reattach_filter_table_editor_session(session, node_id)?;
         Ok(true)
     }
 
@@ -2313,7 +2317,7 @@ impl App {
             .and_then(|asset| asset.meta.recipe)
             .and_then(|recipe| filter_table_editor::EditorDoc::from_snapshot(&recipe).ok())
             .unwrap_or_else(|| filter_table_editor::EditorDoc::from_table(&original_table));
-        filter_table_editor::set_session(Some(filter_table_editor::EditorSession {
+        let replaced = filter_table_editor::set_session(Some(filter_table_editor::EditorSession {
             target,
             node_id,
             doc,
@@ -2323,6 +2327,12 @@ impl App {
             original_name,
             dirty: false,
         }));
+        // Only one session can be live, so a session left open on another
+        // device must be rolled back — otherwise that device keeps auditioning
+        // edits forever while save/snapshot persist its original table.
+        if let Some(previous) = replaced.filter(|previous| previous.dirty) {
+            self.rollback_filter_table_editor_session(&previous)?;
+        }
         Ok(())
     }
 
@@ -2367,15 +2377,20 @@ impl App {
     }
 
     /// Audition an uncommitted op (mid-drag preview): nothing enters the
-    /// document history.
+    /// document history. `replacing_last` must match the `coalesce` flag the
+    /// gesture will commit with, so preview and commit bake the same result.
     pub fn filter_table_editor_preview_op(
         &mut self,
         op: crate::effects::filter_table_editor::EditOp,
+        replacing_last: bool,
     ) -> Result<(), String> {
         use crate::effects::filter_table_editor::with_session;
         let (node_id, baked) = with_session(|session| {
             let session = session.ok_or_else(|| "no Filter Table editor open".to_string())?;
-            Ok::<_, String>((session.node_id, session.doc.bake_with_preview(&op)?))
+            Ok::<_, String>((
+                session.node_id,
+                session.doc.bake_with_preview(&op, replacing_last)?,
+            ))
         })?;
         self.preview_filter_table_editor_table(node_id, &baked)
     }
@@ -2497,6 +2512,22 @@ impl App {
         Ok(stem)
     }
 
+    /// Re-apply the table a session's device had when the editor opened,
+    /// discarding whatever the live preview left on the node.
+    fn rollback_filter_table_editor_session(
+        &self,
+        session: &crate::effects::filter_table_editor::EditorSession,
+    ) -> Result<(), String> {
+        let (bare, _engine) =
+            crate::effects::filter_table::split_engine_ref(&session.original_ref);
+        self.apply_prepared_filter_table_to_node(
+            session.node_id,
+            session.original_table.clone(),
+            bare,
+            std::path::Path::new(crate::effects::filter_table::decode_table_ref(bare).0),
+        )
+    }
+
     /// Close the session. Unsaved edits are rolled back by re-applying the
     /// table the device had when the editor opened.
     pub fn close_filter_table_editor(&mut self) -> Result<(), String> {
@@ -2504,16 +2535,47 @@ impl App {
             return Ok(());
         };
         if session.dirty {
-            self.apply_prepared_filter_table_to_node(
-                session.node_id,
-                session.original_table,
-                &session.original_ref,
-                std::path::Path::new(
-                    crate::effects::filter_table::decode_table_ref(&session.original_ref).0,
-                ),
-            )?;
+            self.rollback_filter_table_editor_session(&session)?;
         }
         Ok(())
+    }
+
+    /// Lift an open editor session off a node that is about to be rebuilt.
+    /// Tearing the old node down runs `clear_instance`, which abandons any
+    /// session still bound to it, so a swap that means to keep the session
+    /// must detach it first and [`Self::reattach_filter_table_editor_session`]
+    /// it onto the replacement.
+    fn detach_filter_table_editor_session(
+        &self,
+        node_id: i32,
+    ) -> Option<crate::effects::filter_table_editor::EditorSession> {
+        crate::effects::filter_table_editor::take_session_for_node(node_id)
+    }
+
+    /// Re-bind a detached session to the rebuilt node and re-audition its
+    /// document, so an engine swap under the editor keeps unsaved edits and
+    /// keeps the panel's editor section pointed at a live node.
+    fn reattach_filter_table_editor_session(
+        &mut self,
+        session: Option<crate::effects::filter_table_editor::EditorSession>,
+        new_node_id: i32,
+    ) -> Result<(), String> {
+        let Some(mut session) = session else {
+            return Ok(());
+        };
+        session.node_id = new_node_id;
+        // The rebuild re-applied the committed table; unsaved edits have to be
+        // re-auditioned on top of it.
+        let baked = if session.dirty {
+            Some(session.doc.bake()?)
+        } else {
+            None
+        };
+        crate::effects::filter_table_editor::set_session(Some(session));
+        match baked {
+            Some(table) => self.preview_filter_table_editor_table(new_node_id, &table),
+            None => Ok(()),
+        }
     }
 
     pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {

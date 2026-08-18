@@ -662,9 +662,25 @@ impl EditorDoc {
     }
 
     /// Bake with one uncommitted op overlaid (live drag preview).
-    pub fn bake_with_preview(&self, op: &EditOp) -> Result<MagnitudeTable, String> {
-        op.validate(self.current.len())?;
+    ///
+    /// A gesture that will commit through [`Self::replace_last`] — the band
+    /// widget, whose handle position *is* the newest applied op — must set
+    /// `replacing_last` so each preview frame is baked against the same base
+    /// the commit will use. Without it the dragged node is applied twice.
+    pub fn bake_with_preview(
+        &self,
+        op: &EditOp,
+        replacing_last: bool,
+    ) -> Result<MagnitudeTable, String> {
         let mut preview = self.clone();
+        // Mirror `replace_last`'s fallback: it only drops an op when the
+        // cursor sits at the end of a non-empty history.
+        if replacing_last && preview.cursor > 0 && preview.cursor == preview.ops.len() {
+            preview.ops.pop();
+            preview.cursor -= 1;
+            preview.recompute();
+        }
+        op.validate(preview.current.len())?;
         op.apply(&mut preview.current);
         preview.bake()
     }
@@ -870,6 +886,19 @@ pub fn set_session(session: Option<EditorSession>) -> Option<EditorSession> {
     std::mem::replace(&mut *guard, session)
 }
 
+/// Take the session bound to `node_id` out of the registry, leaving no
+/// session behind. Used both to abandon a session whose device node is being
+/// destroyed (rolling back would write to a dead node) and to carry one
+/// across a node rebuild — see `App::set_track_filter_table_engine`.
+pub fn take_session_for_node(node_id: i32) -> Option<EditorSession> {
+    let mut guard = SESSION.lock().expect("editor session lock");
+    if guard.as_ref().is_some_and(|session| session.node_id == node_id) {
+        guard.take()
+    } else {
+        None
+    }
+}
+
 /// Session info for the effects-panel value builder: `(target, node_id,
 /// frame_count, selected_frame, can_undo, can_redo, dirty, last parametric
 /// node if that is the newest op)`.
@@ -965,6 +994,65 @@ mod tests {
         assert_eq!(doc.current_rows()[0][REFERENCE_HARMONIC], -20.0);
         assert!(doc.redo());
         assert!((doc.current_rows()[0][REFERENCE_HARMONIC] - -14.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn band_drag_preview_replaces_the_committed_node_instead_of_stacking_it() {
+        // The band handle renders from the newest applied op, so a drag that
+        // does not move must audition exactly what is already committed.
+        let mut doc = flat_doc(-20.0);
+        let node = ParametricNode {
+            kind: ParametricKind::Peak,
+            center_oct: 0.0,
+            width_oct: 1.0,
+            gain_db: 6.0,
+        };
+        let op = EditOp::Parametric {
+            frame_start: 0,
+            frame_end: 63,
+            node,
+        };
+        doc.apply(op.clone()).expect("commit the band");
+        let committed = doc.bake().expect("bake");
+
+        let preview = doc.bake_with_preview(&op, true).expect("preview");
+        assert_eq!(
+            preview.data, committed.data,
+            "a still drag must not change the sound"
+        );
+        // Committing the drag lands on the same table the preview auditioned.
+        doc.replace_last(op.clone()).expect("commit the drag");
+        assert_eq!(doc.bake().expect("bake").data, committed.data);
+        assert_eq!(doc.op_count(), 1, "the drag replaced rather than appended");
+
+        // Without the flag the node stacks — what previews must never do here.
+        let doubled = doc.bake_with_preview(&op, false).expect("preview");
+        assert_ne!(doubled.data, committed.data);
+    }
+
+    #[test]
+    fn clearing_a_node_abandons_the_editor_session_bound_to_it() {
+        // The node is gone, so rollback and every later apply would target a
+        // dead node and the panel would strand an unreachable editor.
+        let _registry = crate::effects::filter_table::tests::registry_lock();
+        let node_id = i32::MAX - 23;
+        set_session(Some(EditorSession {
+            target: EditorTarget::Track { track: 0, slot: 8 },
+            node_id,
+            doc: flat_doc(-12.0),
+            selected_frame: 0,
+            original_table: std::sync::Arc::new(default_table()),
+            original_ref: crate::effects::filter_table::DEFAULT_TABLE_REF.to_string(),
+            original_name: "table".to_string(),
+            dirty: true,
+        }));
+        crate::effects::filter_table::clear_instance(node_id + 1);
+        assert!(
+            session_ui_state().is_some(),
+            "another node's teardown must leave the session alone"
+        );
+        crate::effects::filter_table::clear_instance(node_id);
+        assert!(session_ui_state().is_none(), "session outlived its node");
     }
 
     #[test]

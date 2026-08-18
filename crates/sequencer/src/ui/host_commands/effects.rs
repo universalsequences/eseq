@@ -380,7 +380,7 @@ pub(super) fn handle(
             })();
             match result {
                 Ok(()) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed));
+                    refresh_filter_table_editor_panels(&ui_invalidations, None);
                     editor.handle_host_event(HostEvent::Status(
                         "Filter Table editor open".to_string(),
                     ));
@@ -391,9 +391,13 @@ pub(super) fn handle(
             }
         }
         "filter-table-editor-close" => {
+            // Closing drops the session, so the panel to rebuild has to be
+            // resolved while it is still there.
+            let target = sequencer::effects::filter_table_editor::session_ui_state()
+                .map(|ui| ui.target);
             match app.close_filter_table_editor() {
                 Ok(()) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed));
+                    refresh_filter_table_editor_panels(&ui_invalidations, target);
                     editor.handle_host_event(HostEvent::Status(
                         "Filter Table editor closed".to_string(),
                     ));
@@ -408,7 +412,7 @@ pub(super) fn handle(
                 .and_then(|op| app.filter_table_editor_apply_op(op, false));
             match result {
                 Ok(()) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed))
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
                     "Filter Table edit failed: {error}"
@@ -428,17 +432,22 @@ pub(super) fn handle(
                     frame_end: ui.frames - 1,
                     node,
                 };
+                // The band handle renders from the newest applied op, so a drag
+                // on it replaces that op rather than stacking a second copy.
+                // Preview and commit must agree, or the audition during the
+                // drag is not the table the release lands on.
+                let replacing = ui.band.is_some();
                 if phase == "commit" {
-                    app.filter_table_editor_apply_op(op, true)?;
+                    app.filter_table_editor_apply_op(op, replacing)?;
                     Ok(true)
                 } else {
-                    app.filter_table_editor_preview_op(op)?;
+                    app.filter_table_editor_preview_op(op, replacing)?;
                     Ok(false)
                 }
             })();
             match result {
                 Ok(true) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed))
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
                 }
                 Ok(false) => {}
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
@@ -465,7 +474,7 @@ pub(super) fn handle(
             })();
             match result {
                 Ok(()) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed))
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
                     "Filter Table node add failed: {error}"
@@ -476,13 +485,7 @@ pub(super) fn handle(
             match app.filter_table_editor_history(name == "filter-table-editor-redo") {
                 Ok(stepped) => {
                     if stepped {
-                        refresh_filter_table_editor_panels(
-                            &app,
-                            editor,
-                            &state,
-                            &selected_steps,
-                            current_track.load(Ordering::Relaxed),
-                        );
+                        refresh_filter_table_editor_panels(&ui_invalidations, None);
                     }
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
@@ -496,7 +499,7 @@ pub(super) fn handle(
                 .and_then(|frame| app.filter_table_editor_select_frame(frame));
             match result {
                 Ok(()) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed))
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
                     "Filter Table frame select failed: {error}"
@@ -507,7 +510,7 @@ pub(super) fn handle(
             let requested = extract_string_from_payload(&payload, "name");
             match app.filter_table_editor_save(requested.as_deref()) {
                 Ok(stem) => {
-                    refresh_filter_table_editor_panels(&app, editor, &state, &selected_steps, current_track.load(Ordering::Relaxed));
+                    refresh_filter_table_editor_panels(&ui_invalidations, None);
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Saved Filter Table '{stem}' to filter-tables/"
                     )));
@@ -2190,28 +2193,30 @@ fn queue_effect_panel_tree_invalidation(
     }
 }
 
-/// Rebuild whichever effects value the active Filter Table editor session
-/// (or the one just closed) is displayed in. Rebuilding both surfaces is
-/// cheap relative to any editor gesture and avoids threading the target
-/// through every arm.
+/// Rebuild the panel the active Filter Table editor session is displayed in,
+/// through the same queued invalidation every other fx mutation uses — a
+/// direct `SEQ.effects` write leaves the editor's controlled widgets (frame
+/// counter, undo/redo enablement, dirty marker, band handle) showing stale
+/// props whenever the gesture is the only reactive delta that cycle.
+///
+/// `target` is only needed by the close arm, which runs after the session is
+/// gone; every other arm can leave it `None` and be resolved from the live
+/// session.
 fn refresh_filter_table_editor_panels(
-    app: &app::App,
-    editor: &mut Editor,
-    state: &Arc<SequencerState>,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    track: usize,
+    invalidations: &UiInvalidationQueue,
+    target: Option<sequencer::effects::filter_table_editor::EditorTarget>,
 ) {
-    let runtime = editor.runtime_mut();
-    runtime.set_reactive(
-        "SEQ",
-        "effects",
-        build_effects_value(state, track, &app.graph.effect_descriptors, selected_steps),
-    );
-    runtime.set_reactive(
-        "SEQ",
-        "bus-effects",
-        build_bus_effects_value_for_selection(app, Some(selected_steps)),
-    );
+    use sequencer::effects::filter_table_editor::{session_ui_state, EditorTarget};
+    let target = target.or_else(|| session_ui_state().map(|ui| ui.target));
+    match target {
+        Some(EditorTarget::Track { track, .. }) => {
+            queue_effect_panel_tree_invalidation(invalidations, Some(track), None);
+        }
+        Some(EditorTarget::Bus { bus, .. }) => {
+            queue_effect_panel_tree_invalidation(invalidations, None, Some(bus));
+        }
+        None => {}
+    }
 }
 
 /// Translate a `filter-table-editor-band` payload (response-curve-editor
