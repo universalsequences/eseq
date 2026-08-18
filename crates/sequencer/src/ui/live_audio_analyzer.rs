@@ -760,6 +760,7 @@ fn resolve_source_node(app: &app::App, tap_key: &TapKey) -> Option<i32> {
                 .get(*index)
                 .map(|track| match tap_key.tap_point {
                     TapPoint::PreFx => track.pan_id,
+                    TapPoint::PostFx if track.pdc_id > 0 => track.pdc_id,
                     TapPoint::PostFx => track.delay_id,
                 })
         }
@@ -839,6 +840,7 @@ fn resolve_source_node(app: &app::App, tap_key: &TapKey) -> Option<i32> {
 fn node_for_bus(bus: &app::BusNodeIds, tap_point: TapPoint) -> i32 {
     match tap_point {
         TapPoint::PreFx => bus.gate_id,
+        TapPoint::PostFx if bus.pdc_id > 0 => bus.pdc_id,
         TapPoint::PostFx => bus.volume_id,
     }
 }
@@ -846,6 +848,26 @@ fn node_for_bus(bus: &app::BusNodeIds, tap_point: TapPoint) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bus_post_fx_tap_uses_the_compensated_output() {
+        let bus = app::BusNodeIds {
+            id: BusId(7),
+            left_id: 1,
+            right_id: 2,
+            merge_id: 3,
+            gate_id: 4,
+            volume_id: 5,
+            pdc_id: 6,
+            meter_id: 7,
+            mod_in_clip_ids: [0; sequencer::sequencer::EXT_MOD_INPUT_COUNT],
+        };
+        assert_eq!(node_for_bus(&bus, TapPoint::PreFx), bus.gate_id);
+        assert_eq!(node_for_bus(&bus, TapPoint::PostFx), bus.pdc_id);
+
+        let mix = app::BusNodeIds { pdc_id: 0, ..bus };
+        assert_eq!(node_for_bus(&mix, TapPoint::PostFx), mix.volume_id);
+    }
 
     #[test]
     fn project_load_suspension_clears_analyzer_publish_state() {

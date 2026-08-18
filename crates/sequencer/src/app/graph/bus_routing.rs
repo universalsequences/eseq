@@ -102,11 +102,6 @@ impl GraphController<'_> {
             )
         };
         unsafe {
-            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, merge_id);
-            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, gate_id);
-            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, volume_id);
-        }
-        unsafe {
             crate::audiograph::graph_connect(self.app.graph.lg.0, left_id, 0, merge_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, right_id, 0, merge_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 0, gate_id, 0);
@@ -115,9 +110,16 @@ impl GraphController<'_> {
             crate::audiograph::graph_connect(self.app.graph.lg.0, gate_id, 1, volume_id, 1);
         }
         let pdc_id = super::latency::add_pdc_node(self.app.graph.lg.0, &format!("{safe_name}_pdc"));
+        let meter_id = crate::effects::peak_meter::add_peak_meter_node(
+            self.app.graph.lg.0,
+            &format!("{safe_name}_meter"),
+        );
         unsafe {
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, meter_id);
             crate::audiograph::graph_connect(self.app.graph.lg.0, volume_id, 0, pdc_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, volume_id, 1, pdc_id, 1);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, pdc_id, 0, meter_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, pdc_id, 1, meter_id, 1);
             crate::audiograph::graph_connect(
                 self.app.graph.lg.0,
                 pdc_id,
@@ -141,6 +143,7 @@ impl GraphController<'_> {
             gate_id,
             volume_id,
             pdc_id,
+            meter_id,
             mod_in_clip_ids,
         });
         self.app.publish_bus_gate_runtime();
@@ -209,9 +212,21 @@ impl GraphController<'_> {
         };
         let bus = self.app.graph.bus_node_ids.remove(pos);
         unsafe {
-            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.merge_id);
-            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.gate_id);
-            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.volume_id);
+            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.meter_id);
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.pdc_id,
+                0,
+                bus.meter_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.pdc_id,
+                1,
+                bus.meter_id,
+                1,
+            );
             crate::audiograph::graph_disconnect(
                 self.app.graph.lg.0,
                 bus.pdc_id,
@@ -275,6 +290,7 @@ impl GraphController<'_> {
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.volume_id);
             self.app.invalidate_latency_pad_cache();
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.pdc_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.meter_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.left_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.right_id);
             for &mod_in_clip_id in &bus.mod_in_clip_ids {

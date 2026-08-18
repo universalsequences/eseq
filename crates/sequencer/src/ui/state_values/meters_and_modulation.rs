@@ -145,12 +145,31 @@ pub(crate) fn read_bus_peak_levels(
     lg: sequencer::audiograph::LiveGraphPtr,
     bus_nodes: &[app::BusNodeIds],
 ) -> Vec<f64> {
+    const STATE_LEN: usize = sequencer::effects::peak_meter::PEAK_METER_STATE_SIZE;
+    const STATE_BYTES: usize = STATE_LEN * std::mem::size_of::<f32>();
     bus_nodes
         .iter()
         .map(|bus| {
-            read_panner_peak_level(lg, bus.merge_id)
-                .max(read_panner_peak_level(lg, bus.gate_id))
-                .max(read_panner_peak_level(lg, bus.volume_id))
+            if bus.meter_id < 0 {
+                return 0.0;
+            }
+            let mut state_size = 0usize;
+            let mut state = [0.0_f32; STATE_LEN];
+            let copied = unsafe {
+                sequencer::audiograph::get_node_state_into(
+                    lg.0,
+                    bus.meter_id,
+                    state.as_mut_ptr().cast(),
+                    STATE_BYTES,
+                    &mut state_size as *mut usize,
+                )
+            };
+            if !copied || state_size < STATE_BYTES {
+                return 0.0;
+            }
+            let peak = state[sequencer::effects::peak_meter::STATE_PEAK_L]
+                .max(state[sequencer::effects::peak_meter::STATE_PEAK_R]);
+            meter_display_level(peak)
         })
         .collect()
 }

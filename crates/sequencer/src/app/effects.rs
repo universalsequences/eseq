@@ -2809,7 +2809,7 @@ impl App {
             let disconnected = unsafe {
                 crate::audiograph::graph_disconnect(
                     self.graph.lg.0,
-                    self.graph.track_node_ids[old_track].delay_id,
+                    self.graph.track_node_ids[old_track].pdc_id,
                     source_port,
                     node_id,
                     *input_channel as i32,
@@ -2829,7 +2829,7 @@ impl App {
             let connected = unsafe {
                 crate::audiograph::graph_connect(
                     self.graph.lg.0,
-                    self.graph.track_node_ids[new_track].delay_id,
+                    self.graph.track_node_ids[new_track].pdc_id,
                     source_port,
                     node_id,
                     *input_channel as i32,
@@ -2905,7 +2905,7 @@ impl App {
                 unsafe {
                     crate::audiograph::graph_disconnect(
                         self.graph.lg.0,
-                        nodes.delay_id,
+                        nodes.pdc_id,
                         source_port,
                         node_id,
                         *input_channel as i32,
@@ -2921,7 +2921,7 @@ impl App {
                 ext_connected = unsafe {
                     crate::audiograph::graph_connect(
                         self.graph.lg.0,
-                        nodes.delay_id,
+                        nodes.pdc_id,
                         source_port,
                         node_id,
                         *input_channel as i32,
@@ -5189,6 +5189,7 @@ mod tests {
             crate::app::BusNodeIds {
                 id: first_id,
                 pdc_id: 0,
+                meter_id: 0,
                 left_id: 101,
                 right_id: 102,
                 merge_id: 103,
@@ -5199,6 +5200,7 @@ mod tests {
             crate::app::BusNodeIds {
                 id: target_id,
                 pdc_id: 0,
+                meter_id: 0,
                 left_id: 201,
                 right_id: 202,
                 merge_id: 203,
@@ -5251,6 +5253,7 @@ mod tests {
             crate::app::BusNodeIds {
                 id: first_id,
                 pdc_id: 0,
+                meter_id: 0,
                 left_id: 101,
                 right_id: 102,
                 merge_id: 103,
@@ -5261,6 +5264,7 @@ mod tests {
             crate::app::BusNodeIds {
                 id: target_id,
                 pdc_id: 0,
+                meter_id: 0,
                 left_id: 201,
                 right_id: 202,
                 merge_id: 203,

@@ -2451,6 +2451,7 @@ mod tests {
         app.graph.bus_node_ids.push(crate::app::BusNodeIds {
             id: app.buses[0].id,
             pdc_id: 0,
+            meter_id: 0,
             left_id: 0,
             right_id: 0,
             merge_id: 0,

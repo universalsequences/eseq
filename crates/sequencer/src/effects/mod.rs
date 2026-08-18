@@ -31,6 +31,7 @@ pub mod multiverb;
 #[allow(dead_code)]
 pub mod ott;
 pub mod pdc_delay;
+pub mod peak_meter;
 pub(crate) mod phaser_flanger;
 #[allow(dead_code)]
 pub mod reverb;
