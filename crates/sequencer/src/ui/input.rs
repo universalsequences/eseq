@@ -1610,13 +1610,14 @@ pub(crate) fn handle_recording_key(
             let press_time = Instant::now();
             let mut positions = Vec::new();
 
-            // Roll only suppresses the immediate trigger while the transport
-            // runs (rolling-core-spec 4.3): stopped, the key sounds live as
-            // before — but with roll mode on the press ALSO arms the
-            // scheduler, so press-then-Play (either order, however racy)
-            // rolls from the first grid line instead of losing the press to
-            // whichever event the transport toggle beat.
-            let rolling = roll_mode && state.is_playing();
+            // With roll mode on the sequencer owns triggering outright:
+            // presses never take the immediate live path — playing OR
+            // stopped — they only arm the scheduler. A press while parked is
+            // silent until Play, at which point it rolls from the first grid
+            // line; this is also what makes press-then-Play (either order,
+            // however racy) clean, with no out-of-time live hit leaking in
+            // ahead of the quantized roll. (Amends rolling-core-spec 4.3's
+            // "stopped behaves as normal live keys".)
             // Send note-on to audio thread for all armed tracks
             for (track, a) in armed.iter().enumerate() {
                 if *a {
@@ -1634,14 +1635,13 @@ pub(crate) fn handle_recording_key(
                         });
                     positions.push((track, position));
                     if roll_mode {
-                        // No hit on keydown while playing (F1): the scheduler
-                        // fires the first hit at the next roll-grid boundary.
+                        // No hit on keydown (F1): the scheduler fires the
+                        // first hit at the next roll-grid boundary.
                         state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
                             track,
                             transpose,
                         });
-                    }
-                    if !rolling {
+                    } else {
                         let _ = keyboard_tx.send(KeyboardTrigger {
                             track,
                             transpose,
