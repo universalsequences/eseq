@@ -23,6 +23,7 @@ mod natives;
 mod piano_roll;
 mod patch_learn;
 mod profile;
+mod roll_record;
 mod sample_import_ui;
 mod sampler_monitor;
 mod state_values;
@@ -41,6 +42,7 @@ use natives::*;
 use piano_roll::*;
 use patch_learn::*;
 use profile::*;
+use roll_record::*;
 use sample_import_ui::*;
 use sampler_monitor::*;
 use state_values::*;
@@ -248,6 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recording: recording.clone(),
         master_recording: master_recording.clone(),
         held_notes: held_notes.clone(),
+        roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
         keyboard_octave: keyboard_octave.clone(),
         sample_browser: sample_browser.clone(),
         keyboard_tx: keyboard_tx.clone(),

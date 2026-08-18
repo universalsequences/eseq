@@ -7905,6 +7905,8 @@
                     &queue,
                     &snapshot,
                     &mut track_output_events,
+                    &state,
+                    &SnapshotSequencerClock::new(48_000),
                     &roll,
                     0.25,
                     chunk_start,
@@ -7920,5 +7922,84 @@
                 triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
                 vec![0, 6_000, 12_000, 18_000],
             );
+        });
+    }
+
+    #[test]
+    fn rolled_hits_feed_back_boundary_exact_record_positions() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            state
+                .transport
+                .roll_rate
+                .store(Timebase::ThirtySecond as u32, Ordering::Release);
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let hits = state.drain_roll_recorded_hits();
+            // One beat at 1/32 = 8 hits; the default 1/16 track timebase puts
+            // two hits per step, the off-grid one as a 0.5-step delay (F5:
+            // grids finer than the timebase land as sub-step delays).
+            let positions: Vec<(usize, f32)> =
+                hits.iter().map(|hit| (hit.step, hit.delay)).collect();
+            assert_eq!(
+                positions,
+                vec![
+                    (0, 0.0),
+                    (0, 0.5),
+                    (1, 0.0),
+                    (1, 0.5),
+                    (2, 0.0),
+                    (2, 0.5),
+                    (3, 0.0),
+                    (3, 0.5),
+                ],
+            );
+            for hit in &hits {
+                assert_eq!(hit.track, 0);
+                assert_eq!(hit.transpose, 3.0);
+                assert_eq!(hit.velocity, 1.0);
+                assert!((hit.duration_steps - 0.5).abs() < 1e-6);
+            }
+            assert!((hits[1].beat - 0.125).abs() < 1e-9);
+            // The drain is destructive: nothing left behind.
+            assert!(state.drain_roll_recorded_hits().is_empty());
+        });
+    }
+
+    #[test]
+    fn rolled_triplet_hits_record_fractional_step_delays() {
+        run_with_scheduler_stack(|| {
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0), (0, 7.0)]);
+            state
+                .transport
+                .roll_rate
+                .store(Timebase::SixteenthTriplet as u32, Ordering::Release);
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+            let hits = state.drain_roll_recorded_hits();
+            // 6 triplet boundaries per beat, two held transposes per boundary.
+            assert_eq!(hits.len(), 12);
+            let expected = [
+                (0, 0.0_f32),
+                (0, 2.0 / 3.0),
+                (1, 1.0 / 3.0),
+                (2, 0.0),
+                (2, 2.0 / 3.0),
+                (3, 1.0 / 3.0),
+            ];
+            for (boundary, (step, delay)) in expected.iter().enumerate() {
+                for note in 0..2 {
+                    let hit = &hits[boundary * 2 + note];
+                    assert_eq!(hit.step, *step, "boundary {boundary}");
+                    assert!(
+                        (hit.delay - delay).abs() < 1e-4,
+                        "boundary {boundary}: delay {} != {delay}",
+                        hit.delay,
+                    );
+                    assert!((hit.duration_steps - 2.0 / 3.0).abs() < 1e-4);
+                }
+                assert_eq!(hits[boundary * 2].transpose, 3.0);
+                assert_eq!(hits[boundary * 2 + 1].transpose, 7.0);
+            }
         });
     }

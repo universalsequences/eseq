@@ -45,6 +45,19 @@ impl SequencerState {
         std::mem::take(&mut *self.roll_commands.lock().unwrap())
     }
 
+    pub fn push_roll_recorded_hit(&self, hit: crate::sequencer::RollHitRecorded) {
+        let mut hits = self.roll_recorded_hits.lock().unwrap();
+        // Backstop for a control thread that never drains (headless
+        // schedulers): recording cannot be on there, so dropping is safe.
+        if hits.len() < 4096 {
+            hits.push(hit);
+        }
+    }
+
+    pub fn drain_roll_recorded_hits(&self) -> Vec<crate::sequencer::RollHitRecorded> {
+        std::mem::take(&mut *self.roll_recorded_hits.lock().unwrap())
+    }
+
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
         history.extend(events);

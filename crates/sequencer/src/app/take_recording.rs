@@ -1404,6 +1404,25 @@ impl App {
                 .record_quantize
                 .load(std::sync::atomic::Ordering::Relaxed) as u8,
         );
+        self.take_record_note_at_beats(track, raw_beats, transpose, duration_steps, quantize)
+    }
+
+    /// Beats-domain core of [`Self::take_record_note`]. Rolled hits record
+    /// through here directly (docs/rolling-core-spec.md 6): the scheduler
+    /// already knows the exact musical beat of every hit it emitted, so no
+    /// wall-clock stamp or latency compensation is involved, and the roll
+    /// grid IS the quantize (callers pass `RecordQuantize::Off`, F5).
+    pub fn take_record_note_at_beats(
+        &mut self,
+        track: usize,
+        raw_beats: f64,
+        transpose: f32,
+        duration_steps: f32,
+        quantize: RecordQuantize,
+    ) -> bool {
+        if !self.take_recording_active() {
+            return false;
+        }
         // Template for a lazily minted lane: the track's BOUND source
         // (takes spec 16.2 — punch-in performs whatever the panel shows and
         // the monitor sounds), else a default lane for bare tracks. Only the

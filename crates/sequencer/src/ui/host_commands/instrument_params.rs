@@ -992,6 +992,7 @@ mod tests {
             recording: Arc::new(AtomicBool::new(false)),
             master_recording: Arc::new(AtomicBool::new(false)),
             held_notes: Arc::new(Mutex::new(Vec::new())),
+            roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
             keyboard_octave: Arc::new(AtomicI32::new(0)),
             sample_browser: Rc::new(RefCell::new(DebouncedSampleBrowser::new(
                 sample_db,

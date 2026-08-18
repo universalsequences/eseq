@@ -1712,6 +1712,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 queue,
                 snapshot,
                 &mut track_output_events,
+                state,
+                &*clock,
                 &scheduler.roll,
                 roll_grid,
                 chunk_start_beats,

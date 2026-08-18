@@ -143,6 +143,27 @@ pub(crate) fn reactive_tick_and_render(
     // Change-detecting: writes to the graph only when the pad set differs.
     app.refresh_latency_compensation();
 
+    // Rolled-hit recording (docs/rolling-core-spec.md 6): drain the
+    // scheduler's per-hit feedback and flush released keys' batches into the
+    // pattern (or the pending take), then republish the step grid exactly
+    // like a live-key recording.
+    let (roll_recorded, roll_take_recorded) = tick_roll_record(&mut app, ctx.shared);
+    if roll_take_recorded {
+        app.mark_recording_take_changed();
+        editor.mark_needs_redraw();
+    }
+    if roll_recorded {
+        app.mark_recording_take_changed();
+        let ct = ctx.shared.current_track.load(Ordering::Relaxed);
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
+        sync_all_track_sequencer_state(rt, &ctx.shared.state, &app, ct, &ctx.shared.selected_steps);
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+        editor.mark_needs_redraw();
+    }
+
     // 2. Sync reactive state AFTER events
     let ct = current_track_for_app(&mut app, &ctx.shared.current_track).unwrap_or(0);
     sync_watched_sampler_voices(

@@ -1386,6 +1386,28 @@ pub enum RollCommand {
     ClearAll,
 }
 
+/// Scheduler → control-thread feedback for one audible rolled hit
+/// (docs/rolling-core-spec.md 6). The scheduler knows the exact beat of every
+/// hit it emits — no wall-clock latency compensation is involved — and derives
+/// the track-local step/delay from the same boundary geometry that scheduled
+/// it, so the recording is the roll, exactly as heard (F5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RollHitRecorded {
+    pub track: usize,
+    /// Track-local step index the hit landed on.
+    pub step: usize,
+    /// Sub-step delay in step units (0..1): roll grids finer than the track
+    /// timebase, and triplet offsets, land here instead of being rounded.
+    pub delay: f32,
+    pub transpose: f32,
+    pub velocity: f32,
+    /// Note length in track-step units (one roll-grid note, converted).
+    pub duration_steps: f32,
+    /// Absolute transport beat of the hit — the take-recording path positions
+    /// clip-relative notes from this directly.
+    pub beat: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyboardTrigger {
     pub track: usize,

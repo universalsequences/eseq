@@ -133,6 +133,34 @@ impl SnapshotSequencerClock {
         total_beats - tc.anchor_beat + Self::offset_beats(tc, num_steps)
     }
 
+    /// Track-local (step, sub-step delay, step length in beats) for an
+    /// absolute transport beat, from the same precomputed boundary geometry
+    /// that scheduled the chunk. Used to stamp rolled hits for recording
+    /// (docs/rolling-core-spec.md 6): the roll grid can be finer than the
+    /// track timebase, so the remainder lands as a 0..1 step-unit delay.
+    pub(super) fn roll_record_position(
+        &self,
+        track: usize,
+        total_beats: f64,
+        num_steps: usize,
+    ) -> (usize, f32, f64) {
+        const EPS: f64 = 1.0e-6;
+        let tc = &self.track_clocks[track];
+        let num_steps = num_steps.max(1);
+        let pos = Self::anchored_local_beats(tc, total_beats, num_steps)
+            .rem_euclid(tc.cycle_beats.max(EPS));
+        let idx = tc.boundaries[..num_steps + 1].partition_point(|&b| b <= pos + EPS);
+        let step = idx.saturating_sub(1).min(num_steps - 1);
+        let step_dur = (tc.step_ends[step] - tc.boundaries[step]).max(EPS);
+        let delay = ((pos - tc.boundaries[step]).max(0.0) / step_dur).clamp(0.0, 1.0) as f32;
+        // A hit an epsilon shy of the next boundary IS that boundary.
+        if delay >= 1.0 - 1.0e-4 {
+            let next = (step + 1) % num_steps;
+            return (next, 0.0, (tc.step_ends[next] - tc.boundaries[next]).max(EPS));
+        }
+        (step, delay, step_dur)
+    }
+
     fn offset_beats(tc: &SnapshotTrackClockState, num_steps: usize) -> f64 {
         if tc.offset_steps == 0.0 || num_steps == 0 {
             return 0.0;

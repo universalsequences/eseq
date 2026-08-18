@@ -279,6 +279,10 @@ pub struct SequencerState {
     /// Control-thread roll commands, drained at the top of every scheduler
     /// worker iteration (docs/rolling-core-spec.md 3).
     pub(super) roll_commands: Mutex<Vec<crate::sequencer::RollCommand>>,
+    /// Scheduler → control-thread rolled-hit feedback, drained in the UI
+    /// reactive tick and written back on note release
+    /// (docs/rolling-core-spec.md 6).
+    pub(super) roll_recorded_hits: Mutex<Vec<crate::sequencer::RollHitRecorded>>,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,

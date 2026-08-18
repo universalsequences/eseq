@@ -825,6 +825,7 @@ pub(crate) fn run_event_loop(
                             &shared.keyboard_tx,
                             &shared.keyboard_octave,
                             &shared.held_notes,
+                            &shared.roll_record,
                             &shared.ui_epoch,
                         )
                     } else {

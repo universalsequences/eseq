@@ -81,6 +81,8 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
+    state: &SequencerState,
+    clock: &SnapshotSequencerClock,
     roll: &RollState,
     grid_beats: f64,
     chunk_start_beats: f64,
@@ -155,6 +157,28 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
                 event,
             ) {
                 return false;
+            }
+            // Record-as-heard feedback (spec 6): stamp every emitted hit with
+            // its track-local (step, delay) from the boundary geometry that
+            // scheduled it. The control thread batches these per held key and
+            // writes them back on note release; when recording is off it
+            // simply discards the drain.
+            let (step, delay, step_dur_beats) = clock.roll_record_position(
+                track,
+                boundary_beats,
+                snapshot.tracks[track].params.num_steps,
+            );
+            let duration_steps = (grid_beats / step_dur_beats) as f32;
+            for transpose in held {
+                state.push_roll_recorded_hit(crate::sequencer::RollHitRecorded {
+                    track,
+                    step,
+                    delay,
+                    transpose: *transpose,
+                    velocity: resolved.velocity,
+                    duration_steps,
+                    beat: boundary_beats,
+                });
             }
         }
         index += 1;

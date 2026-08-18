@@ -1504,6 +1504,7 @@ pub(crate) fn handle_recording_key(
     keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    roll_record: &Arc<Mutex<RollRecordBuffer>>,
     ui_epoch: &Arc<AtomicUsize>,
 ) -> RecordingKeyOutcome {
     use crossterm::event::{KeyCode, KeyEventKind};
@@ -1685,9 +1686,16 @@ pub(crate) fn handle_recording_key(
                     });
                 }
                 if roll_mode {
-                    // Rolled hits record in phase 3 (write-on-release); the
-                    // press-position write below would stamp a note where no
-                    // hit sounded (F1).
+                    // Write-on-release (rolling-core-spec 6): the batched
+                    // rolled hits for this key flush from the reactive tick
+                    // after a short grace window. The press-position write
+                    // below would stamp a note where no hit sounded (F1).
+                    if recording.load(Ordering::Relaxed) && state.is_playing() {
+                        let mut batches = roll_record.lock().unwrap();
+                        for track in &note.tracks {
+                            batches.note_released(*track, note.transpose);
+                        }
+                    }
                     return RecordingKeyOutcome::Consumed;
                 }
 

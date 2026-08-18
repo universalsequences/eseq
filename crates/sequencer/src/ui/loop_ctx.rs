@@ -199,6 +199,9 @@ pub(crate) struct SharedHandles {
     pub(crate) recording: Arc<AtomicBool>,
     pub(crate) master_recording: Arc<AtomicBool>,
     pub(crate) held_notes: Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    /// Rolled-hit record batches (docs/rolling-core-spec.md 6): filled from
+    /// the scheduler feedback in the reactive tick, flushed on note release.
+    pub(crate) roll_record: Arc<Mutex<RollRecordBuffer>>,
     pub(crate) keyboard_octave: Arc<std::sync::atomic::AtomicI32>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
     pub(crate) keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
