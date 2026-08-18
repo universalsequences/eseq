@@ -314,8 +314,9 @@ impl App {
         }
     }
 
-    /// The full (pdc node, pad) target set for the current topology.
-    fn latency_pad_targets(&self) -> Vec<(i32, u32)> {
+    /// The full (pdc node, pad) target set for the current topology, plus the
+    /// plan's total mix latency.
+    fn latency_pad_targets(&self) -> (Vec<(i32, u32)>, u32) {
         let plan = compute_latency_plan(&self.latency_topology());
         let mut targets = Vec::new();
         for (track, nodes) in self.graph.track_node_ids.iter().enumerate() {
@@ -347,7 +348,7 @@ impl App {
             targets.push((nodes.pdc_id, pad));
         }
         targets.retain(|(node_id, _)| *node_id > 0);
-        targets
+        (targets, plan.mix_latency)
     }
 
     /// Recompute the latency plan and push pad updates to every PDC node.
@@ -359,7 +360,14 @@ impl App {
         if lg.is_null() {
             return;
         }
-        let targets = self.latency_pad_targets();
+        let (targets, mix_latency) = self.latency_pad_targets();
+        // Publish the total before the pad change-detection below: a plan can
+        // move the mix total while leaving every pad identical. Removing the
+        // only latent effect from a single-track project takes mix_latency
+        // 2048 -> 0 with the one pad at 0 throughout, and recording would
+        // otherwise keep compensating for latency that is gone.
+        self.state
+            .set_pdc_latency_seconds(mix_latency as f32 / self.graph.sample_rate.max(1) as f32);
         if targets == self.graph.applied_latency_pads {
             return;
         }
@@ -681,6 +689,26 @@ mod tests {
         crate::effects::filter_table::clear_instance(node_id);
         desc.name = "Delay".to_string();
         assert_eq!(desc.latency_samples(node_id), 0);
+    }
+
+    #[test]
+    fn a_lone_latent_track_moves_the_mix_total_without_moving_any_pad() {
+        // Why `refresh_latency_compensation` must publish the mix total
+        // BEFORE its pad change-detection: on a single-track project the pad
+        // is 0 whether or not the effect is there, so a publish gated on the
+        // pad set changing would never fire, and recording would keep
+        // compensating for latency that had been removed.
+        let latent = compute_latency_plan(&LatencyTopology {
+            tracks: vec![track(2048, TrackOutput::Mix, &[])],
+            buses: vec![],
+        });
+        let dry = compute_latency_plan(&LatencyTopology {
+            tracks: vec![track(0, TrackOutput::Mix, &[])],
+            buses: vec![],
+        });
+        assert_eq!(latent.track_primary_pads, dry.track_primary_pads);
+        assert_eq!(latent.mix_latency, 2048);
+        assert_eq!(dry.mix_latency, 0);
     }
 
     #[test]

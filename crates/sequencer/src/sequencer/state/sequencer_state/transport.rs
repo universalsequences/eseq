@@ -72,15 +72,39 @@ impl SequencerState {
     /// scheduler's rendered frontier (the gap is the audio output latency —
     /// about a 16th note at 120 BPM). `None` until the audio callback has
     /// published an anchor (transport not yet running).
-    pub fn record_beats_at_instant(&self, timestamp: Instant) -> Option<f64> {
-        let (anchor_beats, elapsed_secs) = self.transport.record_clock.sample(timestamp)?;
-        let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
-        let latency_seconds = f32::from_bits(
+    /// Seconds between the sequencer rendering an event and the performer
+    /// hearing it: the audio device buffer path plus whatever the latency
+    /// planner is delaying the whole mix by. Both terms are published
+    /// independently — the device term once at stream build, the graph term
+    /// on every plan change — so this is the sum, never either alone.
+    ///
+    /// The graph term is the reason this is not a constant: one spectral
+    /// Filter Table pads the entire mix by 2048 samples (~46 ms at 44.1k),
+    /// and a performer plays against what they hear.
+    pub fn total_record_latency_seconds(&self) -> f64 {
+        let device = f32::from_bits(
             self.transport
                 .record_latency_seconds
                 .load(Ordering::Relaxed),
         )
-        .max(0.0) as f64;
+        .max(0.0);
+        let pdc =
+            f32::from_bits(self.transport.pdc_latency_seconds.load(Ordering::Relaxed)).max(0.0);
+        (device + pdc) as f64
+    }
+
+    /// Publish the graph's compensated output latency, in seconds. Called by
+    /// the latency planner; see [`Self::total_record_latency_seconds`].
+    pub fn set_pdc_latency_seconds(&self, seconds: f32) {
+        self.transport
+            .pdc_latency_seconds
+            .store(seconds.max(0.0).to_bits(), Ordering::Release);
+    }
+
+    pub fn record_beats_at_instant(&self, timestamp: Instant) -> Option<f64> {
+        let (anchor_beats, elapsed_secs) = self.transport.record_clock.sample(timestamp)?;
+        let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
+        let latency_seconds = self.total_record_latency_seconds();
         // `elapsed_secs` is signed: a note-on instant resolved at key
         // release predates the newest anchor, and extrapolating backwards
         // along the same clock keeps the stamp at the PRESS beat.

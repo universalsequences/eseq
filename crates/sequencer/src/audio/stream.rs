@@ -24,9 +24,13 @@ pub fn build_output_stream(
     bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
     bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
 ) -> Result<Stream, String> {
-    // CPAL does not expose portable output latency. Use the configured output
-    // block as the sensible default; users can tune this transport value when
-    // their device/OS path has additional latency.
+    // The DEVICE half of the record latency only. CPAL does not expose
+    // portable output latency, so use the configured output block as the
+    // sensible default; users can tune this transport value when their
+    // device/OS path has additional latency. The graph's own compensation is
+    // published separately by the latency planner and summed at the read site
+    // (`SequencerState::total_record_latency_seconds`) — do not fold it in
+    // here, or the next plan change would clobber this term.
     state.transport.record_latency_seconds.store(
         (block_size as f32 / sample_rate.max(1) as f32).to_bits(),
         Ordering::Release,
