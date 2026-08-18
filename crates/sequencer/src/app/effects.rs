@@ -1989,6 +1989,30 @@ impl App {
         Ok(())
     }
 
+    /// Apply a persisted table reference to a node, stripping the
+    /// `#ft-engine=` tag first.
+    ///
+    /// The engine is a property of the compiled node, not of the table, so it
+    /// must not reach the table registries. Left on, it also corrupts the
+    /// decode: `decode_table_ref` looks for the analysis-mode suffix with
+    /// `rfind`, so on `kick#ft-mode=wavetable#ft-engine=causal` it matches the
+    /// engine tag, fails to parse it as a mode, and hands back the whole
+    /// string as the source path.
+    fn apply_restored_filter_table_to_node(
+        &self,
+        node_id: i32,
+        reference: &str,
+        table: Arc<crate::effects::filter_table::MagnitudeTable>,
+    ) -> Result<(), String> {
+        let (bare, _engine) = crate::effects::filter_table::split_engine_ref(reference);
+        self.apply_prepared_filter_table_to_node(
+            node_id,
+            table,
+            bare,
+            std::path::Path::new(crate::effects::filter_table::decode_table_ref(bare).0),
+        )
+    }
+
     pub(crate) fn restore_prepared_track_filter_table(
         &self,
         track: usize,
@@ -2001,12 +2025,7 @@ impl App {
             .and_then(|chain| chain.get(slot_idx))
             .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
             .ok_or_else(|| "Track effect slot not found".to_string())?;
-        self.apply_prepared_filter_table_to_node(
-            node_id,
-            table,
-            reference,
-            std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
-        )
+        self.apply_restored_filter_table_to_node(node_id, reference, table)
     }
 
     pub(crate) fn restore_prepared_bus_filter_table(
@@ -2021,12 +2040,7 @@ impl App {
             .and_then(|bus| bus.effect_slots.get(slot_idx))
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| "Bus effect slot not found".to_string())?;
-        self.apply_prepared_filter_table_to_node(
-            node_id,
-            table,
-            reference,
-            std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
-        )
+        self.apply_restored_filter_table_to_node(node_id, reference, table)
     }
 
     pub(crate) fn restore_prepared_rack_filter_table(
@@ -2042,12 +2056,7 @@ impl App {
             .get(effect_slot)
             .map(|slot| slot.node_id as i32)
             .ok_or_else(|| "Rack effect slot not found".to_string())?;
-        self.apply_prepared_filter_table_to_node(
-            node_id,
-            table,
-            reference,
-            std::path::Path::new(crate::effects::filter_table::decode_table_ref(reference).0),
-        )
+        self.apply_restored_filter_table_to_node(node_id, reference, table)
     }
 
     /// Recompile a live track Filter Table slot for a different engine,
@@ -2177,16 +2186,7 @@ impl App {
         values: &crate::effects::EffectSlotValuesSnapshot,
     ) -> Result<(), String> {
         if let (Some(reference), Some(table)) = (&values.table, &values.prepared_table) {
-            let (bare, _engine) = crate::effects::filter_table::split_engine_ref(reference);
-            let bare = bare.to_string();
-            self.apply_prepared_filter_table_to_node(
-                node_id,
-                table.clone(),
-                &bare,
-                std::path::Path::new(
-                    crate::effects::filter_table::decode_table_ref(&bare).0,
-                ),
-            )
+            self.apply_restored_filter_table_to_node(node_id, reference, table.clone())
         } else {
             self.apply_prepared_filter_table_to_node(
                 node_id,
@@ -2518,13 +2518,10 @@ impl App {
         &self,
         session: &crate::effects::filter_table_editor::EditorSession,
     ) -> Result<(), String> {
-        let (bare, _engine) =
-            crate::effects::filter_table::split_engine_ref(&session.original_ref);
-        self.apply_prepared_filter_table_to_node(
+        self.apply_restored_filter_table_to_node(
             session.node_id,
+            &session.original_ref,
             session.original_table.clone(),
-            bare,
-            std::path::Path::new(crate::effects::filter_table::decode_table_ref(bare).0),
         )
     }
 

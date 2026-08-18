@@ -30,6 +30,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -154,7 +155,11 @@ pub fn write_asset(
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     std::fs::write(path, bytes)
-        .map_err(|error| format!("failed to write asset '{}': {error}", path.display()))
+        .map_err(|error| format!("failed to write asset '{}': {error}", path.display()))?;
+    // Every asset this process creates lands here, so this is the one place
+    // the cached stem list has to be dropped.
+    invalidate_asset_stem_cache();
+    Ok(())
 }
 
 /// Read and fully validate an asset file. Every failure names what is
@@ -235,14 +240,35 @@ pub fn user_asset_dir() -> PathBuf {
     PathBuf::from("filter-tables")
 }
 
+/// How deep the asset walkers recurse. A library nested this far is already
+/// pathological, and the bound means no directory layout can exhaust the
+/// stack of the thread doing the walk (these run on the UI thread).
+const MAX_ASSET_WALK_DEPTH: usize = 8;
+
+/// Whether to recurse into a directory entry. Deliberately uses the entry's
+/// own file type rather than `Path::is_dir`, which follows symlinks: a link
+/// pointing at an ancestor would otherwise recurse forever.
+fn is_walkable_dir(entry: &std::fs::DirEntry) -> bool {
+    entry
+        .file_type()
+        .map(|file_type| file_type.is_dir())
+        .unwrap_or(false)
+}
+
 /// Find `<stem>.fltab` under `dir`, recursively.
 pub fn find_asset_in(dir: &Path, stem: &str) -> Option<PathBuf> {
+    find_asset_in_depth(dir, stem, 0)
+}
+
+fn find_asset_in_depth(dir: &Path, stem: &str, depth: usize) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_asset_in(&path, stem) {
-                return Some(found);
+        if is_walkable_dir(&entry) {
+            if depth < MAX_ASSET_WALK_DEPTH {
+                if let Some(found) = find_asset_in_depth(&path, stem, depth + 1) {
+                    return Some(found);
+                }
             }
             continue;
         }
@@ -264,14 +290,16 @@ pub fn resolve_asset_path(stem: &str) -> Option<PathBuf> {
     find_asset_in(&user_asset_dir(), stem).or_else(|| find_asset_in(&bundled_asset_dir(), stem))
 }
 
-fn collect_asset_stems(dir: &Path, stems: &mut Vec<String>) {
+fn collect_asset_stems(dir: &Path, stems: &mut Vec<String>, depth: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            collect_asset_stems(&path, stems);
+        if is_walkable_dir(&entry) {
+            if depth < MAX_ASSET_WALK_DEPTH {
+                collect_asset_stems(&path, stems, depth + 1);
+            }
         } else if is_asset_path(&path) {
             if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
                 stems.push(stem.to_string());
@@ -280,12 +308,63 @@ fn collect_asset_stems(dir: &Path, stems: &mut Vec<String>) {
     }
 }
 
+/// Cached result of [`list_asset_stems`], with the directory mtimes it was
+/// built from.
+///
+/// The effects-panel value builder calls `list_asset_stems` once per Filter
+/// Table slot on every `ui_epoch`/`fx_epoch` bump — including fx edits during
+/// playback — and the uncached call is a recursive `read_dir` of two
+/// directories, on the UI thread. Writes from this process invalidate
+/// explicitly; the mtime stamps additionally catch a `.fltab` dropped into
+/// either directory from outside, at the cost of two `stat` calls instead of
+/// a full walk. A file added to a nested subdirectory does not bump the root
+/// mtime and so is only picked up on the next explicit invalidation.
+struct AssetStemCache {
+    stems: Vec<String>,
+    stamps: [Option<std::time::SystemTime>; 2],
+}
+
+static ASSET_STEMS: Mutex<Option<AssetStemCache>> = Mutex::new(None);
+
+fn asset_dir_stamps() -> [Option<std::time::SystemTime>; 2] {
+    let stamp = |dir: PathBuf| std::fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+    [stamp(user_asset_dir()), stamp(bundled_asset_dir())]
+}
+
+/// Drop the cached stem list. Call after any write or delete under
+/// `filter-tables/`, so the next panel build picks the change up.
+pub fn invalidate_asset_stem_cache() {
+    if let Ok(mut cached) = ASSET_STEMS.lock() {
+        *cached = None;
+    }
+}
+
 /// Every loadable asset stem: user `filter-tables/` plus the bundled factory
 /// directory, deduplicated (user wins the name) and sorted for stable UI.
+///
+/// Served from a cache; see [`AssetStemCache`].
 pub fn list_asset_stems() -> Vec<String> {
+    let stamps = asset_dir_stamps();
+    let Ok(mut cached) = ASSET_STEMS.lock() else {
+        return scan_asset_stems();
+    };
+    if let Some(entry) = cached.as_ref() {
+        if entry.stamps == stamps {
+            return entry.stems.clone();
+        }
+    }
+    let stems = scan_asset_stems();
+    *cached = Some(AssetStemCache {
+        stems: stems.clone(),
+        stamps,
+    });
+    stems
+}
+
+fn scan_asset_stems() -> Vec<String> {
     let mut stems = Vec::new();
-    collect_asset_stems(&user_asset_dir(), &mut stems);
-    collect_asset_stems(&bundled_asset_dir(), &mut stems);
+    collect_asset_stems(&user_asset_dir(), &mut stems, 0);
+    collect_asset_stems(&bundled_asset_dir(), &mut stems, 0);
     stems.sort();
     stems.dedup();
     stems
@@ -424,6 +503,73 @@ mod tests {
         assert_eq!(encode_asset_ref("vowel-morph"), "fltab:vowel-morph");
         assert_eq!(decode_asset_ref("fltab:vowel-morph"), Some("vowel-morph"));
         assert_eq!(decode_asset_ref("vowel-morph"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn asset_walk_survives_a_self_referential_symlink() {
+        // `Path::is_dir` follows symlinks, so a link pointing at an ancestor
+        // used to recurse until the walking thread's stack was gone — and
+        // these walks run on the UI thread.
+        let dir = scratch_path("symlink-loop");
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        write_asset(
+            &nested.join("reachable.fltab"),
+            &FilterTableAssetMeta::new("Reachable"),
+            &default_table(),
+        )
+        .expect("write");
+        let loop_link = nested.join("loop");
+        let _ = std::fs::remove_file(&loop_link);
+        std::os::unix::fs::symlink(&dir, &loop_link).expect("symlink");
+
+        let mut stems = Vec::new();
+        collect_asset_stems(&dir, &mut stems, 0);
+        assert_eq!(stems, vec!["reachable".to_string()]);
+        assert_eq!(
+            find_asset_in(&dir, "reachable"),
+            Some(nested.join("reachable.fltab"))
+        );
+        assert_eq!(find_asset_in(&dir, "missing"), None);
+    }
+
+    #[test]
+    fn writing_an_asset_invalidates_the_cached_stem_list() {
+        // The panel builder calls list_asset_stems on every epoch bump, so it
+        // is cached; a save must still show up in the dropdown immediately.
+        let stem = format!("cache-probe-{}", std::process::id());
+        let path = user_asset_dir().join(format!("{stem}.{EXTENSION}"));
+        let _ = std::fs::create_dir_all(user_asset_dir());
+        assert!(!list_asset_stems().contains(&stem));
+        write_asset(&path, &FilterTableAssetMeta::new("Cache Probe"), &default_table())
+            .expect("write");
+        assert!(
+            list_asset_stems().contains(&stem),
+            "a written asset must appear without waiting for anything"
+        );
+        let _ = std::fs::remove_file(&path);
+        invalidate_asset_stem_cache();
+        assert!(!list_asset_stems().contains(&stem));
+    }
+
+    #[test]
+    fn asset_walk_stops_at_the_depth_bound() {
+        let dir = scratch_path("deep-walk");
+        let mut deep = dir.clone();
+        for level in 0..(MAX_ASSET_WALK_DEPTH + 2) {
+            deep = deep.join(format!("l{level}"));
+        }
+        std::fs::create_dir_all(&deep).expect("deep dirs");
+        write_asset(
+            &deep.join("too-deep.fltab"),
+            &FilterTableAssetMeta::new("Too Deep"),
+            &default_table(),
+        )
+        .expect("write");
+        let mut stems = Vec::new();
+        collect_asset_stems(&dir, &mut stems, 0);
+        assert!(stems.is_empty(), "walk must stop before {deep:?}");
     }
 
     #[test]
