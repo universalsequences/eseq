@@ -68,6 +68,17 @@ pub const MAX_MIDI_NOTES: usize = 128;
 pub const BUILTIN_SLOT_COUNT: usize = 0;
 pub const NO_TRANSPORT_PHASE_PARAM: u32 = u32::MAX;
 
+/// Names of every effect presented through the built-in effect path.
+///
+/// This combines native and DGenLisp-backed effects and sorts the result for
+/// direct use by user-facing effect lists.
+pub fn builtin_effect_names() -> Vec<&'static str> {
+    let mut names = EffectDescriptor::builtin_insert_names().to_vec();
+    names.extend_from_slice(dgen_builtin::NAMES);
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    names
+}
+
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
 
@@ -354,8 +365,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
-        EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        builtin_effect_names, tensor_param_descriptors_from_manifest, EffectDescriptor,
+        EffectSlotSnapshot, EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
         TensorParamDescriptor,
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
@@ -1492,24 +1503,49 @@ mod tests {
         assert_eq!(
             EffectDescriptor::builtin_insert_names(),
             &[
-                "Filter",
-                "EQ8",
-                "Delay",
-                "Str8 Delay",
-                "Space Echo",
-                "Dimension",
-                "Phaser-Flanger",
-                "Roar",
-                "DJ Mixer",
-                "Reverb",
-                "Multiverb",
                 "444 Compressor",
-                "Glue Compressor",
                 "Compressor",
-                "OTT",
+                "Delay",
+                "Dimension",
+                "DJ Mixer",
+                "EQ8",
+                "Filter",
+                "Filterbank",
+                "Glue Compressor",
                 "Limiter",
-                "Tape",
-                "Filterbank"
+                "Multiverb",
+                "OTT",
+                "Phaser-Flanger",
+                "Reverb",
+                "Roar",
+                "Space Echo",
+                "Str8 Delay",
+                "Tape"
+            ]
+        );
+        assert_eq!(
+            builtin_effect_names(),
+            vec![
+                "444 Compressor",
+                "Compressor",
+                "Convolution Reverb",
+                "Delay",
+                "Dimension",
+                "DJ Mixer",
+                "EQ8",
+                "Filter",
+                "Filter Table",
+                "Filterbank",
+                "Glue Compressor",
+                "Limiter",
+                "Multiverb",
+                "OTT",
+                "Phaser-Flanger",
+                "Reverb",
+                "Roar",
+                "Space Echo",
+                "Str8 Delay",
+                "Tape"
             ]
         );
         assert_eq!(
@@ -2412,24 +2448,24 @@ impl EffectDescriptor {
 
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
-            "Filter",
-            "EQ8",
-            "Delay",
-            "Str8 Delay",
-            "Space Echo",
-            "Dimension",
-            "Phaser-Flanger",
-            "Roar",
-            "DJ Mixer",
-            "Reverb",
-            "Multiverb",
             "444 Compressor",
-            "Glue Compressor",
             "Compressor",
-            "OTT",
-            "Limiter",
-            "Tape",
+            "Delay",
+            "Dimension",
+            "DJ Mixer",
+            "EQ8",
+            "Filter",
             "Filterbank",
+            "Glue Compressor",
+            "Limiter",
+            "Multiverb",
+            "OTT",
+            "Phaser-Flanger",
+            "Reverb",
+            "Roar",
+            "Space Echo",
+            "Str8 Delay",
+            "Tape",
         ]
     }
 

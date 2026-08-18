@@ -25,17 +25,10 @@ pub(crate) fn build_available_effects() -> Value {
 }
 
 pub(crate) fn build_available_builtin_effects() -> Value {
-    let mut items: Vec<Rc<RefCell<Value>>> =
-        sequencer::effects::EffectDescriptor::builtin_insert_names()
-            .iter()
-            .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string()))))
-            .collect();
-    // dgenlisp-backed builtins (added through the builtin path, DSP is dgenlisp)
-    items.extend(
-        sequencer::effects::dgen_builtin::NAMES
-            .iter()
-            .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string())))),
-    );
+    let items = sequencer::effects::builtin_effect_names()
+        .into_iter()
+        .map(|name| Rc::new(RefCell::new(Value::String(name.to_string()))))
+        .collect();
     Value::List(items)
 }
 

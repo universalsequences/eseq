@@ -1014,9 +1014,10 @@ fn filter_effect_names(names: Vec<String>, query_lower: &str) -> Vec<String> {
 
 fn build_audio_effect_tree_from_names(
     query: &str,
-    builtin_names: Vec<String>,
+    mut builtin_names: Vec<String>,
     custom_names: Vec<String>,
 ) -> Value {
+    builtin_names.sort_by_key(|name| name.to_ascii_lowercase());
     let query_lower = query.trim().to_lowercase();
     let builtin: Vec<Value> = filter_effect_names(builtin_names, &query_lower)
         .into_iter()
@@ -1040,17 +1041,10 @@ fn build_audio_effect_tree_from_names(
 }
 
 pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
-    let mut builtin_names: Vec<String> =
-        sequencer::effects::EffectDescriptor::builtin_insert_names()
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
-    // DGenLisp-backed builtins are still presented through the builtin path.
-    builtin_names.extend(
-        sequencer::effects::dgen_builtin::NAMES
-            .iter()
-            .map(|name| (*name).to_string()),
-    );
+    let builtin_names = sequencer::effects::builtin_effect_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     build_audio_effect_tree_from_names(
         query,
         builtin_names,
@@ -1292,6 +1286,24 @@ mod tests {
     fn audio_effect_tree_omits_empty_custom_header() {
         let tree = build_audio_effect_tree_from_names("", vec!["EQ8".to_string()], Vec::new());
         assert_eq!(top_level_tree_labels(&tree), vec!["Built-in", "EQ8"]);
+    }
+
+    #[test]
+    fn audio_effect_tree_sorts_builtins_case_insensitively() {
+        let tree = build_audio_effect_tree_from_names(
+            "",
+            vec![
+                "Tape".to_string(),
+                "filterbank".to_string(),
+                "Filter Table".to_string(),
+                "Filter".to_string(),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            top_level_tree_labels(&tree),
+            vec!["Built-in", "Filter", "Filter Table", "filterbank", "Tape"]
+        );
     }
 
     #[test]
