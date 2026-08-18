@@ -6,14 +6,32 @@ Compiling through the external dgenlisp tool is slow, so `DylibCacheManager`
 effective source, referenced assets, compile kind (`DGenCompileKind`), sample
 rate, the dgenlisp tool binary itself, and the staged toolchain identity
 (`VERSION.json` hash, vendored ABI header hash, target triple, minimum
-macOS). A cache hit hands out a `DylibLease` (refcounted: repeat hits on a
-live artifact share it, so an artifact directory is never evicted or
-duplicated while a loaded dylib still points into it); a miss compiles into a
-fresh artifact directory and records `CacheMetadata`. Concurrent misses on
-the same key are serialized by a per-key in-flight latch so exactly one
-compilation runs; different keys still compile concurrently. Includes a small
-lisp tokenizer used to discover `(asset ...)` references that must
-participate in the fingerprint.
+macOS). A cache hit hands out a `DylibLease`; a miss compiles into a fresh
+artifact directory and records `CacheMetadata`. Concurrent misses on the same
+key are serialized by a per-key in-flight latch so exactly one compilation
+runs; different keys still compile concurrently. Includes a small lisp
+tokenizer used to discover `(asset ...)` references that must participate in
+the fingerprint.
+
+Leases are exclusive (eseq-599): an artifact directory is held by at most one
+live lease, because every lease dlopens the artifact's dylib and dyld returns
+one image per path — the generated code's file-scope scratch statics
+(`static float tN_g[...]`, indexed by a hard-coded voice 0 for effects) would
+be shared mutable state between instances, a data race under the audiograph's
+worker threads. When every matching artifact is already leased, the manager
+*clones* the artifact directory (a file copy, no recompilation) under a fresh
+artifact id and dlopens the clone; the distinct path (and inode) forces dyld
+to map an independent image with private statics. Released artifacts become
+free and are reused by later acquires, so the on-disk artifact count per key
+is bounded by the high-water mark of simultaneous instances. This design was
+chosen over compiling effects with fixed polyphony (wastes memory for
+instances that never exist, imposes an arbitrary instance cap, and still
+collides across engines) and over toolchain-level runtime contexts (requires
+a dgen codegen ABI change for state the host already passes per node).
+
+An artifact directory is never evicted or mutated while a lease points into
+it, and loaded images are never dlclosed, so sequential reuse of a freed
+artifact re-observes the same image (never concurrently with another lease).
 
 On-disk layout (impl spec, slice E6 / decision 7):
 
@@ -32,7 +50,7 @@ Everything here runs on control threads only (edit sessions, agent tasks,
 effect setup); nothing is reachable from the audio process callback.
 */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,7 +125,8 @@ pub struct DylibCacheManager {
 #[derive(Debug)]
 struct DylibCacheInner {
     root: PathBuf,
-    live_leases: HashMap<PathBuf, usize>,
+    /// Artifact directories currently held by a live (exclusive) lease.
+    live_leases: HashSet<PathBuf>,
     /// Per-key compile latches: present while a compilation for that cache
     /// key is running. Guarded by the manager mutex, but the mutex is never
     /// held across compilation — waiters block on the latch, not on this map.
@@ -244,15 +263,21 @@ impl DylibCacheManager {
         Self {
             inner: Arc::new(Mutex::new(DylibCacheInner {
                 root,
-                live_leases: HashMap::new(),
+                live_leases: HashSet::new(),
                 in_flight: HashMap::new(),
                 next_artifact_seq: 0,
             })),
         }
     }
 
+    /// The process-wide manager for the workspace cache root. Lease
+    /// exclusivity (eseq-599) only holds if every acquirer of one cache root
+    /// shares one lease table, so this returns a clone of the global
+    /// singleton rather than a fresh manager. (Other *processes* on the same
+    /// root need no coordination: dlopen'd images are per-process, so their
+    /// leases can never alias mutable state with ours.)
     pub fn workspace_default() -> Self {
-        Self::new(crate::app_paths::app_paths().dgen_cache_root())
+        global_cache_manager().clone()
     }
 
     pub fn acquire(
@@ -266,7 +291,7 @@ impl DylibCacheManager {
         let request = build_request(kind, origin, source, sample_rate, asset_base)?;
 
         loop {
-            if let Some(result) = self.try_load_free_artifact(&request)? {
+            if let Some(result) = self.try_satisfy_from_cache(&request)? {
                 return Ok(result);
             }
             match self.begin_compile_turn(&request.key)? {
@@ -275,7 +300,7 @@ impl DylibCacheManager {
                     // have published between this thread's cache miss and it
                     // winning the compile turn (publication happens-before
                     // its guard drop, which happens-before this turn).
-                    if let Some(result) = self.try_load_free_artifact(&request)? {
+                    if let Some(result) = self.try_satisfy_from_cache(&request)? {
                         return Ok(result);
                     }
                     // `_guard` wakes waiters + clears the in-flight entry on
@@ -309,11 +334,19 @@ impl DylibCacheManager {
         }))
     }
 
-    fn try_load_free_artifact(
+    /// Try to satisfy a request from already-compiled artifacts: lease a
+    /// free matching artifact if one exists; otherwise, if every matching
+    /// artifact is live-leased by another instance, clone one into a fresh
+    /// artifact directory so this instance gets its own dyld image
+    /// (eseq-599). Returns `Ok(None)` only when compilation is required —
+    /// clone failures also fall back to compilation rather than poisoning
+    /// the usable cache entries they were copied from.
+    fn try_satisfy_from_cache(
         &self,
         request: &CacheRequest,
     ) -> Result<Option<CompileResult>, String> {
         let artifact_dirs = self.artifact_dirs(&request.key)?;
+        let mut clone_template: Option<PathBuf> = None;
         for artifact_dir in artifact_dirs {
             match metadata_matches(&artifact_dir, request) {
                 Ok(true) => {}
@@ -326,13 +359,30 @@ impl DylibCacheManager {
                     continue;
                 }
             }
-            let lease = self.lease_artifact(&artifact_dir)?;
+            let Some(lease) = self.try_lease_artifact(&artifact_dir)? else {
+                // Live-leased elsewhere: usable as a clone template, never as
+                // a shared image.
+                clone_template.get_or_insert(artifact_dir);
+                continue;
+            };
             match self.load_leased_artifact(&artifact_dir, lease) {
                 Ok(result) => return Ok(Some(result)),
                 Err(error) => {
                     eprintln!(
                         "[dgenlisp cache] ignoring cached artifact {}: {error}",
                         artifact_dir.display()
+                    );
+                }
+            }
+        }
+        if let Some(template_dir) = clone_template {
+            match self.clone_artifact(request, &template_dir) {
+                Ok(result) => return Ok(Some(result)),
+                Err(error) => {
+                    eprintln!(
+                        "[dgenlisp cache] cloning live artifact {} failed ({error}); \
+                         falling back to compilation",
+                        template_dir.display()
                     );
                 }
             }
@@ -363,11 +413,10 @@ impl DylibCacheManager {
         Ok(dirs)
     }
 
-    fn compile_new_artifact(
-        &self,
-        request: &CacheRequest,
-        asset_base: Option<&Path>,
-    ) -> Result<CompileResult, String> {
+    /// Allocate a fresh artifact id and create its (empty) staging dir plus
+    /// the key dir it will be committed into. Returns
+    /// `(artifact_id, staging_dir, artifact_dir)`.
+    fn allocate_artifact_dirs(&self, key: &str) -> Result<(String, PathBuf, PathBuf), String> {
         let (cache_root, artifact_id) = {
             let mut inner = self
                 .inner
@@ -383,7 +432,7 @@ impl DylibCacheManager {
             (inner.root.clone(), artifact_id)
         };
 
-        let key_dir = dylibs_root(&cache_root).join(&request.key);
+        let key_dir = dylibs_root(&cache_root).join(key);
         let staging_parent = staging_root(&cache_root);
         std::fs::create_dir_all(&key_dir)
             .map_err(|e| format!("create dylib cache key dir: {e}"))?;
@@ -398,6 +447,38 @@ impl DylibCacheManager {
         }
         std::fs::create_dir_all(&staging_dir)
             .map_err(|e| format!("create dylib cache staging artifact: {e}"))?;
+        Ok((artifact_id, staging_dir, artifact_dir))
+    }
+
+    /// eseq-599: materialize an independent copy of a live-leased artifact.
+    /// A byte-identical dylib at a *different path* (and inode — the copy is
+    /// a new file, even when APFS clones the blocks) makes dyld map a second,
+    /// independent image, so the generated code's file-scope scratch statics
+    /// are private to this instance. No recompilation happens, keeping the
+    /// slice-E6 "one compilation per key" property.
+    fn clone_artifact(
+        &self,
+        request: &CacheRequest,
+        template_dir: &Path,
+    ) -> Result<CompileResult, String> {
+        let (_artifact_id, staging_dir, artifact_dir) =
+            self.allocate_artifact_dirs(&request.key)?;
+        if let Err(error) = copy_artifact_files(template_dir, &staging_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(error);
+        }
+        std::fs::rename(&staging_dir, &artifact_dir)
+            .map_err(|e| format!("commit cloned dylib cache artifact: {e}"))?;
+        self.load_artifact(&artifact_dir)
+    }
+
+    fn compile_new_artifact(
+        &self,
+        request: &CacheRequest,
+        asset_base: Option<&Path>,
+    ) -> Result<CompileResult, String> {
+        let (artifact_id, staging_dir, artifact_dir) =
+            self.allocate_artifact_dirs(&request.key)?;
 
         let dylib_name = format!(
             "dgen_{}_{}",
@@ -458,7 +539,12 @@ impl DylibCacheManager {
     }
 
     fn load_artifact(&self, artifact_dir: &Path) -> Result<CompileResult, String> {
-        let lease = self.lease_artifact(artifact_dir)?;
+        let lease = self.try_lease_artifact(artifact_dir)?.ok_or_else(|| {
+            format!(
+                "freshly created dylib cache artifact {} is unexpectedly leased",
+                artifact_dir.display()
+            )
+        })?;
         self.load_leased_artifact(artifact_dir, lease)
     }
 
@@ -484,25 +570,25 @@ impl DylibCacheManager {
         })
     }
 
-    /// Refcounted: leasing an already-live artifact shares it (increments
-    /// the count) instead of failing, so repeat requesters reuse one artifact
-    /// directory rather than compiling duplicates. `DylibLease` drop/release
-    /// decrements; the directory is only considered free when the count
-    /// reaches zero.
-    fn lease_artifact(&self, artifact_dir: &Path) -> Result<DylibLease, String> {
+    /// Exclusive (eseq-599): at most one live lease per artifact directory,
+    /// because a lease dlopens the artifact's dylib and shared images alias
+    /// the generated code's mutable file-scope scratch statics across
+    /// instances. Returns `Ok(None)` when the directory is already leased;
+    /// the caller then clones the artifact instead of sharing it.
+    /// `DylibLease` drop/release frees the directory for reuse.
+    fn try_lease_artifact(&self, artifact_dir: &Path) -> Result<Option<DylibLease>, String> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| "DGenLisp cache lock poisoned".to_string())?;
-        *inner
-            .live_leases
-            .entry(artifact_dir.to_path_buf())
-            .or_insert(0) += 1;
-        Ok(DylibLease {
+        if !inner.live_leases.insert(artifact_dir.to_path_buf()) {
+            return Ok(None);
+        }
+        Ok(Some(DylibLease {
             manager: Arc::downgrade(&self.inner),
             artifact_dir: artifact_dir.to_path_buf(),
             released: false,
-        })
+        }))
     }
 
     fn release_artifact(&self, artifact_dir: &Path) {
@@ -513,8 +599,9 @@ impl DylibCacheManager {
 
     #[cfg(test)]
     pub(crate) fn test_lease(&self, artifact_dir: &Path) -> DylibLease {
-        self.lease_artifact(artifact_dir)
-            .expect("test artifact should be available for leasing")
+        self.try_lease_artifact(artifact_dir)
+            .expect("test lease should not hit a poisoned lock")
+            .expect("test artifact should be free for leasing")
     }
 
     #[cfg(test)]
@@ -522,7 +609,7 @@ impl DylibCacheManager {
         self.inner
             .lock()
             .ok()
-            .and_then(|inner| inner.live_leases.get(artifact_dir).copied())
+            .map(|inner| usize::from(inner.live_leases.contains(artifact_dir)))
             .unwrap_or(0)
     }
 }
@@ -564,20 +651,13 @@ impl Drop for DylibLease {
 
 impl DylibCacheInner {
     fn release(&mut self, artifact_dir: &Path) {
-        let Some(count) = self.live_leases.get_mut(artifact_dir) else {
-            return;
-        };
-        if *count <= 1 {
-            self.live_leases.remove(artifact_dir);
-        } else {
-            *count -= 1;
-        }
+        self.live_leases.remove(artifact_dir);
     }
 }
 
 pub fn global_cache_manager() -> &'static DylibCacheManager {
     static GLOBAL: OnceLock<DylibCacheManager> = OnceLock::new();
-    GLOBAL.get_or_init(DylibCacheManager::workspace_default)
+    GLOBAL.get_or_init(|| DylibCacheManager::new(crate::app_paths::app_paths().dgen_cache_root()))
 }
 
 /// Path tier for the current schema:
@@ -1037,6 +1117,29 @@ fn sanitize_name(value: &str) -> String {
         .collect()
 }
 
+/// Copy the regular files of a committed artifact directory (dylib, .c,
+/// manifest.json, metadata.json, source.lisp) into a staging dir. Artifact
+/// dirs are flat; anything else is skipped. `std::fs::copy` creates new
+/// files (new inodes even when APFS clones the blocks), which is what makes
+/// the clone a distinct dyld image once loaded.
+fn copy_artifact_files(from: &Path, to: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(from)
+        .map_err(|e| format!("read artifact dir {}: {e}", from.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read artifact dir {}: {e}", from.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        std::fs::copy(&path, to.join(name))
+            .map_err(|e| format!("copy artifact file {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn write_text_file(path: &Path, contents: &str) -> Result<(), String> {
     std::fs::write(path, contents).map_err(|e| format!("write {}: {e}", path.display()))
 }
@@ -1069,11 +1172,40 @@ mod tests {
         let manager = DylibCacheManager::new(root);
         let artifact = PathBuf::from("/tmp/lease-drop-test");
         {
-            let lease = manager.lease_artifact(&artifact).expect("lease");
+            let lease = manager
+                .try_lease_artifact(&artifact)
+                .expect("lease")
+                .expect("artifact free");
             assert_eq!(manager.live_lease_count(&artifact), 1);
             drop(lease);
         }
         assert_eq!(manager.live_lease_count(&artifact), 0);
+    }
+
+    /// eseq-599: leases are exclusive — a live artifact refuses a second
+    /// lease (the acquirer clones instead), and release frees it for reuse.
+    #[test]
+    fn second_lease_on_live_artifact_is_refused() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-exclusive-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let manager = DylibCacheManager::new(root);
+        let artifact = PathBuf::from("/tmp/exclusive-lease-test");
+        let first = manager
+            .try_lease_artifact(&artifact)
+            .expect("lease")
+            .expect("artifact free");
+        assert!(manager
+            .try_lease_artifact(&artifact)
+            .expect("lease")
+            .is_none());
+        drop(first);
+        assert!(manager
+            .try_lease_artifact(&artifact)
+            .expect("lease")
+            .is_some());
     }
 
     #[test]
@@ -1116,10 +1248,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Slice E6 exit criterion: repeat acquires of a live artifact share it
-    /// (refcounted lease) instead of compiling a duplicate directory.
+    /// eseq-599 regression: two simultaneous acquires of identical source
+    /// must yield *independent dyld images* (distinct artifact dirs, distinct
+    /// dylib paths, distinct `dgen_process_v1` addresses), because a shared
+    /// image aliases the generated code's mutable file-scope scratch statics
+    /// across instances. Repeated `dlopen` of one path silently returns one
+    /// image — this test is the explicit loader-identity validation that the
+    /// clone path produces a genuinely separate mapping. Releasing both
+    /// leases then lets a third acquire reuse a free artifact instead of
+    /// growing the cache.
     #[test]
-    fn acquire_shares_live_artifact_via_refcounted_lease() {
+    fn simultaneous_acquires_get_independent_dylib_images() {
         if !dgenlisp_tool_path().exists() {
             eprintln!(
                 "skipping: DGenLisp tool not found at {:?}",
@@ -1148,6 +1287,13 @@ mod tests {
                 )
                 .unwrap_or_else(|e| panic!("{label} acquire: {e}"))
         };
+        let artifact_count = |key_dir: &Path| {
+            std::fs::read_dir(key_dir)
+                .expect("read key dir")
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .count()
+        };
 
         let first = acquire("first");
         let first_dir = first
@@ -1165,26 +1311,50 @@ mod tests {
             .expect("second lease")
             .artifact_dir()
             .to_path_buf();
-        assert_eq!(second_dir, first_dir, "live artifact must be shared");
-        assert_eq!(manager.live_lease_count(&first_dir), 2);
-
-        let key_dir = first_dir.parent().expect("key dir");
-        let artifact_count = std::fs::read_dir(key_dir)
-            .expect("read key dir")
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .count();
-        assert_eq!(artifact_count, 1, "no duplicate artifact dirs");
-
-        drop(first);
+        assert_ne!(
+            second_dir, first_dir,
+            "a live artifact must never be shared"
+        );
         assert_eq!(manager.live_lease_count(&first_dir), 1);
+        assert_eq!(manager.live_lease_count(&second_dir), 1);
+        assert_ne!(
+            first.manifest.dylib_path, second.manifest.dylib_path,
+            "instances must load distinct dylib files"
+        );
+        assert_ne!(
+            first.lib.process_fn as usize, second.lib.process_fn as usize,
+            "instances must resolve process symbols in distinct dyld images"
+        );
+
+        let key_dir = first_dir.parent().expect("key dir").to_path_buf();
+        assert_eq!(second_dir.parent().expect("key dir"), key_dir);
+        assert_eq!(artifact_count(&key_dir), 2, "compile + one clone");
+
+        // Release both, then recreate: a free artifact is reused, so the
+        // cache does not grow past the simultaneous-instance high-water mark.
+        drop(first);
         drop(second);
         assert_eq!(manager.live_lease_count(&first_dir), 0);
+        assert_eq!(manager.live_lease_count(&second_dir), 0);
+        let third = acquire("third");
+        let third_dir = third
+            .lease
+            .as_ref()
+            .expect("third lease")
+            .artifact_dir()
+            .to_path_buf();
+        assert!(
+            third_dir == first_dir || third_dir == second_dir,
+            "released artifacts must be reused"
+        );
+        assert_eq!(artifact_count(&key_dir), 2, "no growth on reuse");
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Slice E6 exit criterion: two threads racing one cache key produce
-    /// exactly one artifact directory and two working leases.
+    /// Slice E6 exit criterion, updated for eseq-599: two threads racing one
+    /// cache key still run exactly one *compilation* (the loser clones the
+    /// winner's artifact instead of compiling), but each ends up with its own
+    /// artifact directory and lease.
     #[test]
     fn racing_threads_on_one_key_share_one_compilation() {
         if !dgenlisp_tool_path().exists() {
@@ -1234,19 +1404,120 @@ mod tests {
                     .to_path_buf()
             })
             .collect::<Vec<_>>();
-        assert_eq!(dirs[0], dirs[1], "both racers must share one artifact");
-        assert_eq!(manager.live_lease_count(&dirs[0]), 2);
+        assert_ne!(dirs[0], dirs[1], "racers must get independent artifacts");
+        assert_eq!(manager.live_lease_count(&dirs[0]), 1);
+        assert_eq!(manager.live_lease_count(&dirs[1]), 1);
 
         let key_dir = dirs[0].parent().expect("key dir");
+        assert_eq!(dirs[1].parent().expect("key dir"), key_dir);
         let artifact_count = std::fs::read_dir(key_dir)
             .expect("read key dir")
             .flatten()
             .filter(|entry| entry.path().is_dir())
             .count();
-        assert_eq!(artifact_count, 1, "exactly one artifact dir for the key");
+        assert_eq!(
+            artifact_count, 2,
+            "one compiled artifact plus one clone, no duplicate compile"
+        );
 
         drop(results);
         assert_eq!(manager.live_lease_count(&dirs[0]), 0);
+        assert_eq!(manager.live_lease_count(&dirs[1]), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// eseq-599 acceptance: two live instances built from identical source
+    /// process with fully independent state. Each thread renders the same
+    /// deterministic probe through its own instance *concurrently*; with a
+    /// shared dyld image the generated code's file-scope scratch arrays are
+    /// written by both threads at once and the outputs diverge from the
+    /// sequential golden render. With independent images the outputs must
+    /// match it exactly.
+    #[test]
+    fn concurrent_instances_render_independently() {
+        if !dgenlisp_tool_path().exists() {
+            eprintln!(
+                "skipping: DGenLisp tool not found at {:?}",
+                dgenlisp_tool_path()
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-isolation-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let manager = DylibCacheManager::new(root.clone());
+        // Several chained ops so the generated C uses multiple scratch
+        // arrays; memoryless, so the render is a pure function of the probe.
+        let source = r#"
+            (def input_l (in 1 @name Left))
+            (def input_r (in 2 @name Right))
+            (def blend (+ (* input_l 0.9) (* input_r 0.1)))
+            (def shaped (* blend blend))
+            (out (+ blend (* shaped 0.05)) 1 @name Left)
+            (out (* blend 0.8) 2 @name Right)
+        "#;
+        let acquire = || {
+            manager
+                .acquire(
+                    DGenCompileKind::Effect,
+                    DGenSourceOrigin::Custom,
+                    source,
+                    48_000,
+                    None,
+                )
+                .expect("acquire isolation-test effect")
+        };
+        let options = crate::lisp_host::EffectRenderOptions {
+            sample_rate: 48_000,
+            block_size: 256,
+            frames: 48_000,
+            param_overrides: Vec::new(),
+            param_events: Vec::new(),
+            tensor_overrides: Vec::new(),
+            input_overrides: Vec::new(),
+            input_tones: Vec::new(),
+        };
+        let render = |result: &CompileResult| {
+            crate::lisp_host::render_loaded_effect_for_test(
+                &result.manifest,
+                &result.lib,
+                &options,
+            )
+            .expect("render isolation-test effect")
+            .samples
+        };
+
+        let golden = {
+            let solo = acquire();
+            render(&solo)
+        };
+
+        let first = acquire();
+        let second = acquire();
+        assert_ne!(
+            first.lease.as_ref().expect("first lease").artifact_dir(),
+            second.lease.as_ref().expect("second lease").artifact_dir(),
+        );
+        let barrier = std::sync::Barrier::new(2);
+        let (out_a, out_b) = std::thread::scope(|scope| {
+            let handle_a = scope.spawn(|| {
+                barrier.wait();
+                render(&first)
+            });
+            let handle_b = scope.spawn(|| {
+                barrier.wait();
+                render(&second)
+            });
+            (
+                handle_a.join().expect("render thread a"),
+                handle_b.join().expect("render thread b"),
+            )
+        });
+
+        assert_eq!(out_a, golden, "instance A corrupted by instance B");
+        assert_eq!(out_b, golden, "instance B corrupted by instance A");
         let _ = std::fs::remove_dir_all(root);
     }
 
