@@ -47,10 +47,24 @@ struct DropdownOwnerIdentity {
     stable_key: Option<String>,
 }
 
+/// Editor buffer layouts reserve disjoint 100,000-ID ranges. Include that
+/// namespace so identical stable widget paths in two buffers do not share menu
+/// state.
+const WIDGET_ID_NAMESPACE_STRIDE: u64 = 100_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DropdownStateKey {
+    Stable {
+        buffer_namespace: u64,
+        stable_widget_id: u64,
+    },
+    Layout(u64),
+}
+
 #[derive(Clone, Debug, Default)]
 struct DropdownState {
-    /// Stable layout identity of the dropdown currently owning this numeric
-    /// widget ID. Conditional subtree replacement can reuse numeric IDs.
+    /// Stable layout identity of the dropdown currently owning this state.
+    /// Conditional subtree replacement can reuse fallback numeric IDs.
     owner: Option<DropdownOwnerIdentity>,
     open: bool,
     hovered_idx: Option<usize>,
@@ -66,19 +80,36 @@ struct DropdownState {
 }
 
 thread_local! {
-    static STATES: RefCell<HashMap<u64, DropdownState>> = RefCell::new(HashMap::new());
+    /// Dropdown state keyed by stable widget identity when available, falling
+    /// back to the current layout-local widget ID.
+    static STATES: RefCell<HashMap<DropdownStateKey, DropdownState>> = RefCell::new(HashMap::new());
+    /// Resolves overlay/event widget IDs to their stable state keys. A newly
+    /// mounted conditional subtree can receive one numeric ID for its first
+    /// interaction and another after the resulting relayout.
+    static STATE_KEYS_BY_WIDGET_ID: RefCell<HashMap<u64, DropdownStateKey>> = RefCell::new(HashMap::new());
     /// Cached per-character cell widths for dropdown labels.
     /// Key: (font_size_bits, text) -> cell-widths for each character.
     static CHAR_WIDTH_CACHE: RefCell<HashMap<(u32, String), Vec<f32>>> =
         RefCell::new(HashMap::new());
 }
 
+fn state_key_for_widget_id(widget_id: u64) -> DropdownStateKey {
+    STATE_KEYS_BY_WIDGET_ID.with(|keys| {
+        keys.borrow()
+            .get(&widget_id)
+            .copied()
+            .unwrap_or(DropdownStateKey::Layout(widget_id))
+    })
+}
+
 fn get_state(widget_id: u64) -> DropdownState {
-    STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
+    let state_key = state_key_for_widget_id(widget_id);
+    STATES.with(|s| s.borrow().get(&state_key).cloned().unwrap_or_default())
 }
 
 fn set_state(widget_id: u64, state: DropdownState) {
-    STATES.with(|s| s.borrow_mut().insert(widget_id, state));
+    let state_key = state_key_for_widget_id(widget_id);
+    STATES.with(|s| s.borrow_mut().insert(state_key, state));
     super::bump_widget_state_generation();
 }
 
@@ -102,10 +133,20 @@ fn owner_identity(node: &LayoutNode) -> Option<DropdownOwnerIdentity> {
 /// close a stale menu instead of opening the new dropdown.
 fn get_state_for_node(node: &LayoutNode) -> DropdownState {
     let owner = owner_identity(node);
+    let state_key = node
+        .stable_widget_id
+        .map(|stable_widget_id| DropdownStateKey::Stable {
+            buffer_namespace: node.widget_id / WIDGET_ID_NAMESPACE_STRIDE,
+            stable_widget_id,
+        })
+        .unwrap_or(DropdownStateKey::Layout(node.widget_id));
+    STATE_KEYS_BY_WIDGET_ID.with(|keys| {
+        keys.borrow_mut().insert(node.widget_id, state_key);
+    });
     let mut replaced_owner = false;
     let state = STATES.with(|states| {
         let mut states = states.borrow_mut();
-        let state = states.entry(node.widget_id).or_default();
+        let state = states.entry(state_key).or_default();
         if owner.is_some() && state.owner != owner {
             *state = DropdownState {
                 owner,
@@ -122,10 +163,11 @@ fn get_state_for_node(node: &LayoutNode) -> DropdownState {
 }
 
 fn close_other_dropdowns(active_widget_id: u64) {
+    let active_state_key = state_key_for_widget_id(active_widget_id);
     STATES.with(|s| {
         let mut changed = false;
-        for (&widget_id, state) in s.borrow_mut().iter_mut() {
-            if widget_id == active_widget_id || !state.open {
+        for (&state_key, state) in s.borrow_mut().iter_mut() {
+            if state_key == active_state_key || !state.open {
                 continue;
             }
             state.open = false;
@@ -141,8 +183,9 @@ fn close_other_dropdowns(active_widget_id: u64) {
 
 /// Close the dropdown for a given widget_id (called when overlay is dismissed externally).
 pub fn close_dropdown(widget_id: u64) {
+    let state_key = state_key_for_widget_id(widget_id);
     STATES.with(|s| {
-        if let Some(state) = s.borrow_mut().get_mut(&widget_id) {
+        if let Some(state) = s.borrow_mut().get_mut(&state_key) {
             state.open = false;
             state.hovered_idx = None;
             state.scroll_offset = 0.0;
@@ -157,9 +200,10 @@ pub fn is_dropdown_open(widget_id: u64) -> bool {
 /// Update hovered item based on mouse position in tile-local overlay space.
 /// Returns true if the hover state changed.
 pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
+    let state_key = state_key_for_widget_id(widget_id);
     STATES.with(|s| {
         let mut states = s.borrow_mut();
-        let Some(state) = states.get_mut(&widget_id) else {
+        let Some(state) = states.get_mut(&state_key) else {
             return false;
         };
         if !state.open {
@@ -202,9 +246,10 @@ pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
 /// Scroll the open dropdown overlay by `delta_y` (trackpad pixel delta).
 /// Returns true if scroll was consumed.
 pub fn scroll_overlay(widget_id: u64, delta_y: f32) -> bool {
+    let state_key = state_key_for_widget_id(widget_id);
     STATES.with(|s| {
         let mut states = s.borrow_mut();
-        let Some(state) = states.get_mut(&widget_id) else {
+        let Some(state) = states.get_mut(&state_key) else {
             return false;
         };
         if !state.open || state.content_height <= state.visible_height {
@@ -1287,6 +1332,65 @@ mod tests {
         props.insert("value-index".to_string(), Value::Number(2.0));
 
         assert_eq!(get_selected(&props), "tri");
+    }
+
+    #[test]
+    fn open_state_follows_a_stable_dropdown_across_layout_id_churn() {
+        fn node(widget_id: u64) -> LayoutNode {
+            let mut props = HashMap::new();
+            props.insert("options".to_string(), string_list(&["off", "lfo", "env"]));
+            props.insert("value".to_string(), Value::String("off".to_string()));
+            LayoutNode {
+                widget_id,
+                stable_widget_id: Some(8_811_337),
+                subtree_root_id: Some(8_811_000),
+                parent_subtree_root_id: Some(8_811_000),
+                stable_key: None,
+                widget_type: "dropdown".to_string(),
+                rect: Rect {
+                    row: 1.0,
+                    col: 2.0,
+                    width: 5.0,
+                    height: 1.0,
+                },
+                props,
+                children: Vec::new(),
+                focusable: true,
+                animation: Default::default(),
+            }
+        }
+
+        let provisional = node(81_001);
+        let settled = node(81_019);
+        close_dropdown(provisional.widget_id);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            let outcome = DROPDOWN_WIDGET.mouse_event(
+                &provisional,
+                kind,
+                provisional.rect.col,
+                provisional.rect.row,
+                None,
+                None,
+                KeyModifiers::NONE,
+                10.0,
+                20.0,
+            );
+            assert!(matches!(outcome, MouseEventOutcome::Consume));
+        }
+        assert!(is_dropdown_open(provisional.widget_id));
+
+        let settled_state = get_state_for_node(&settled);
+        assert!(
+            settled_state.open,
+            "the relayout must not lose the menu opened by the first click"
+        );
+        assert!(!settled_state.ignore_opening_mouse_up);
+        assert!(is_dropdown_open(settled.widget_id));
+
+        close_dropdown(settled.widget_id);
     }
 
     #[test]
