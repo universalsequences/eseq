@@ -179,7 +179,7 @@ impl App {
                 self.graph.lg.0,
                 crate::audiograph::ParamMsg {
                     idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
-                    logical_id: node.pan_id as u64,
+                    logical_id: node.delay_id as u64,
                     fvalue: crate::mixer_volume::fader_to_gain(tp.get_volume()),
                 },
             );
@@ -213,7 +213,7 @@ impl App {
                 self.graph.lg.0,
                 crate::audiograph::ParamMsg {
                     idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
-                    logical_id: node.pan_id as u64,
+                    logical_id: node.delay_id as u64,
                     fvalue: if tp.is_muted() { 1.0 } else { 0.0 },
                 },
             );
@@ -233,7 +233,7 @@ impl App {
                     self.graph.lg.0,
                     crate::audiograph::ParamMsg {
                         idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
-                        logical_id: node.pan_id as u64,
+                        logical_id: node.delay_id as u64,
                         fvalue: if muted_by_solo { 1.0 } else { 0.0 },
                     },
                 );

@@ -629,11 +629,11 @@ pub(crate) fn run_event_loop(
                                             .iter()
                                             .map(|ids| ids.pan_id)
                                             .collect();
-                                        push_solo_mutes(shared.lg_raw, &shared.state, &pan_ids);
+                                        push_solo_mutes(shared.lg_raw, &shared.state);
                                     }
                                     meters.cached_track_peak_levels = read_track_peak_levels(
                                         app.graph.lg,
-                                        &shared.track_pan_ids.lock().unwrap(),
+                                        &app.graph.track_node_ids,
                                     );
                                     meters.cached_bus_peak_levels =
                                         read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
@@ -1112,7 +1112,7 @@ pub(crate) fn run_event_loop(
                                 .iter()
                                 .map(|ids| ids.pan_id)
                                 .collect();
-                            push_solo_mutes(shared.lg_raw, &shared.state, &pan_ids);
+                            push_solo_mutes(shared.lg_raw, &shared.state);
                         }
                         *shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *shared.record_armed.lock().unwrap() = vec![false; track_names.len()];
@@ -1158,7 +1158,7 @@ pub(crate) fn run_event_loop(
                         ));
                         meters.cached_track_peak_levels = read_track_peak_levels(
                             app.graph.lg,
-                            &shared.track_pan_ids.lock().unwrap(),
+                            &app.graph.track_node_ids,
                         );
                         meters.cached_bus_peak_levels =
                             read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);

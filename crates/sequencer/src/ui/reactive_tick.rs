@@ -187,7 +187,7 @@ pub(crate) fn reactive_tick_and_render(
                 ctx.shared.state.transport.peak_r.load(Ordering::Relaxed),
             ));
             ctx.meters.cached_track_peak_levels =
-                read_track_peak_levels(app.graph.lg, &ctx.shared.track_pan_ids.lock().unwrap());
+                read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
             ctx.meters.cached_rack_slot_peak_levels =
                 read_rack_slot_peak_levels(app.graph.lg, &app);
             ctx.meters.cached_bus_peak_levels =

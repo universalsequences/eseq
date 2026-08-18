@@ -2,11 +2,11 @@ use super::*;
 
 pub(crate) fn push_panner_bool(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
-    pan_id: i32,
+    node_id: u64,
     param_idx: u64,
     value: bool,
 ) {
-    if pan_id < 0 {
+    if node_id == 0 {
         return;
     }
     unsafe {
@@ -14,7 +14,7 @@ pub(crate) fn push_panner_bool(
             lg_raw,
             sequencer::audiograph::ParamMsg {
                 idx: param_idx,
-                logical_id: pan_id as u64,
+                logical_id: node_id,
                 fvalue: if value { 1.0 } else { 0.0 },
             },
         );
@@ -24,20 +24,18 @@ pub(crate) fn push_panner_bool(
 pub(crate) fn push_solo_mutes(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
     state: &Arc<SequencerState>,
-    pan_ids: &[i32],
 ) {
     let count = state.active_track_count();
     let has_solo = (0..count).any(|track| state.pattern.track_params[track].is_solo());
     for track in 0..count {
         let muted_by_solo = has_solo && !state.pattern.track_params[track].is_solo();
-        if let Some(&pan_id) = pan_ids.get(track) {
-            push_panner_bool(
-                lg_raw,
-                pan_id,
-                sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
-                muted_by_solo,
-            );
-        }
+        let fader_id = state.runtime.delay_lids[track].load(Ordering::Acquire);
+        push_panner_bool(
+            lg_raw,
+            fader_id,
+            sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+            muted_by_solo,
+        );
     }
 }
 
@@ -75,9 +73,12 @@ pub(super) fn read_panner_peak_level(lg: sequencer::audiograph::LiveGraphPtr, no
 
 pub(crate) fn read_track_peak_levels(
     lg: sequencer::audiograph::LiveGraphPtr,
-    pan_ids: &[i32],
+    track_nodes: &[app::TrackNodeIds],
 ) -> Vec<f64> {
-    read_panner_peak_levels(lg, pan_ids)
+    track_nodes
+        .iter()
+        .map(|nodes| read_panner_peak_level(lg, nodes.delay_id))
+        .collect()
 }
 
 pub(crate) fn rack_slot_peak_field(track: usize, slot_idx: usize) -> String {

@@ -202,12 +202,12 @@ impl GraphController<'_> {
                     crate::audiograph::delete_node(self.app.graph.lg.0, mod_in_clip_id);
                 }
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.mod_out_id);
+                crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.delay_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.pdc_id);
                 if track.filter_id != 0 {
                     crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
                 }
-                crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.pan_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.pan_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_r_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_id);

@@ -212,7 +212,7 @@ pub(super) fn handle(
             {
                 let mut pan_ids = track_pan_ids.lock().unwrap();
                 pan_ids.clear();
-                push_solo_mutes(lg_raw, &state, &pan_ids);
+                push_solo_mutes(lg_raw, &state);
             }
             *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
             *record_armed.lock().unwrap() = Vec::new();

@@ -62,7 +62,7 @@ pub(super) fn handle(
                 {
                     let mut pan_ids = track_pan_ids.lock().unwrap();
                     pan_ids.push(app.graph.track_node_ids[idx].pan_id);
-                    push_solo_mutes(lg_raw, &state, &pan_ids);
+                    push_solo_mutes(lg_raw, &state);
                 }
                 record_armed.lock().unwrap().push(false);
                 let rt = editor.runtime_mut();
@@ -396,7 +396,7 @@ pub(super) fn handle(
                         {
                             let mut pan_ids = track_pan_ids.lock().unwrap();
                             pan_ids.push(app.graph.track_node_ids[idx].pan_id);
-                            push_solo_mutes(lg_raw, &state, &pan_ids);
+                            push_solo_mutes(lg_raw, &state);
                         }
                         // Extend record_armed for new track
                         record_armed.lock().unwrap().push(false);
@@ -725,11 +725,11 @@ pub(super) fn handle(
                             .iter()
                             .map(|ids| ids.pan_id)
                             .collect();
-                        push_solo_mutes(lg_raw, &state, &pan_ids);
+                        push_solo_mutes(lg_raw, &state);
                     }
                     ctx.meters.cached_track_peak_levels = read_track_peak_levels(
                         app.graph.lg,
-                        &track_pan_ids.lock().unwrap(),
+                        &app.graph.track_node_ids,
                     );
                     ctx.meters.cached_bus_peak_levels =
                         read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);

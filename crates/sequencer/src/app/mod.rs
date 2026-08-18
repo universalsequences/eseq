@@ -660,10 +660,12 @@ pub struct TrackNodeIds {
     pub voice_sum_r_id: i32,
     pub pan_id: i32,
     pub filter_id: i32,
+    /// Post-FX stereo fader node.
     pub delay_id: i32,
     /// Plugin-delay-compensation node on the primary output edge
-    /// (delay_id → pdc → MIX/bus). Sends tap delay_id before this pad;
-    /// sidechains and post-FX analyzers tap pdc after it.
+    /// (delay_id → pdc → MIX/bus). `delay_id` is the post-FX fader: track
+    /// volume, mute, and solo-mute live there, and post-fader sends tap it
+    /// before this pad. Sidechains and post-FX analyzers tap pdc after it.
     pub pdc_id: i32,
     pub send_id: i32,
     pub mod_out_id: i32,
@@ -717,6 +719,7 @@ pub struct BusNodeIds {
     pub gate_id: i32,
     pub volume_id: i32,
     /// Delay compensation node on the bus output edge (volume → pdc → MIX).
+    /// The FX host terminates at `volume_id`, so this is a post-FX fader.
     pub pdc_id: i32,
     /// Watched peak-meter sink fed from the post-PDC bus output.
     pub meter_id: i32,

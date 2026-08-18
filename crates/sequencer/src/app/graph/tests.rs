@@ -5,7 +5,7 @@
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, PatternSnapshot, ProjectArrangement, SceneEvent,
-        SequencerState,
+        SequencerState, TrackOutput, TrackSendSnapshot,
     };
     use crate::app::edit::{try_apply_command, EditOutcome};
     use crate::app::{AppCommand, AudioBuses};
@@ -144,6 +144,19 @@
         assert_changed(&fx_length);
     }
 
+    unsafe extern "C" fn constant_source_process(
+        _inputs: *const *mut f32,
+        outputs: *const *mut f32,
+        frame_count: std::os::raw::c_int,
+        _state: *mut std::os::raw::c_void,
+        _buffers: *mut std::os::raw::c_void,
+    ) {
+        let output = *outputs;
+        for frame in 0..frame_count as usize {
+            *output.add(frame) = 0.5;
+        }
+    }
+
     struct TestLiveGraph {
         ptr: LiveGraphPtr,
         block_size: i32,
@@ -204,6 +217,27 @@
                 .expect("test gain node should be queued")
         }
 
+        fn add_constant_source(&self, name: &str) -> i32 {
+            let name = CString::new(name).expect("test source name should not contain NUL");
+            let node_id = unsafe {
+                crate::audiograph::add_node(
+                    self.ptr.0,
+                    crate::audiograph::NodeVTable {
+                        process: Some(constant_source_process),
+                        ..crate::audiograph::NodeVTable::default()
+                    },
+                    0,
+                    name.as_ptr(),
+                    0,
+                    1,
+                    std::ptr::null(),
+                    0,
+                )
+            };
+            assert!(node_id >= 0, "test source node should be queued");
+            node_id
+        }
+
         fn add_voice_modulator(&self, engine_id: usize, voice: usize) -> i32 {
             let name = CString::new(format!("test_modulator_{voice}"))
                 .expect("test modulator name should not contain NUL");
@@ -232,6 +266,28 @@
                 self.ptr
                     .process_next_block(output.as_mut_ptr(), self.block_size);
             }
+        }
+
+        fn read_node_state<const N: usize>(&self, node_id: i32) -> Option<[f32; N]> {
+            let mut state = [0.0; N];
+            let mut state_size = 0;
+            let copied = unsafe {
+                crate::audiograph::get_node_state_into(
+                    self.ptr.0,
+                    node_id,
+                    state.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&state),
+                    &mut state_size,
+                )
+            };
+            (copied && state_size == std::mem::size_of_val(&state)).then_some(state)
+        }
+
+        fn read_panner_state(
+            &self,
+            node_id: i32,
+        ) -> Option<[f32; crate::effects::stereo_panner::STEREO_PANNER_STATE_SIZE]> {
+            self.read_node_state(node_id)
         }
     }
 
@@ -537,6 +593,171 @@
             unsafe { crate::audiograph::graph_edit_applied_batch_serial(graph.ptr.0) } >= serial,
             "processing the next block should acknowledge the committed batch"
         );
+    }
+
+    #[test]
+    fn track_mixer_controls_and_meter_watchlist_use_the_post_fx_fader() {
+        let graph = TestLiveGraph::new("post-fx-track-fader-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add first sampler track");
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add soloed sampler track");
+
+        let nodes = app.graph.track_node_ids[0].clone();
+        assert!(unsafe {
+            crate::audiograph::add_node_to_watchlist(graph.ptr.0, nodes.pan_id)
+        });
+        let params = &app.state.pattern.track_params[0];
+        params.set_volume(0.25);
+        params.set_pan(0.4);
+        params.set_mute(true);
+        app.state.pattern.track_params[1].set_solo(true);
+        app.push_track_volume(0);
+        app.push_track_pan(0);
+        app.push_track_mute(0);
+        app.push_track_solo_mutes();
+        graph.process_block();
+
+        let fader = graph
+            .read_panner_state(nodes.delay_id)
+            .expect("the post-FX fader should be watched for mixer metering");
+        assert_eq!(
+            fader[crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME as usize],
+            crate::mixer_volume::fader_to_gain(0.25),
+        );
+        assert_eq!(
+            fader[crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE as usize],
+            1.0,
+        );
+        assert_eq!(
+            fader[crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO as usize],
+            1.0,
+        );
+
+        let pan = graph
+            .read_panner_state(nodes.pan_id)
+            .expect("explicitly watched pan state");
+        assert_eq!(
+            pan[crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME as usize],
+            1.0,
+            "track volume must not drive the pre-FX pan node",
+        );
+        assert_eq!(
+            pan[crate::effects::stereo_panner::STEREO_PANNER_PARAM_PAN as usize],
+            0.4,
+        );
+        assert_eq!(
+            pan[crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE as usize],
+            0.0,
+            "mute must remain post-FX so it also silences post-fader sends",
+        );
+        assert_eq!(
+            pan[crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO as usize],
+            0.0,
+        );
+    }
+
+    #[test]
+    fn track_fader_scales_bus_sends_and_the_bus_meter() {
+        let graph = TestLiveGraph::new("post-fader-send-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add sampler track");
+        app.graph_controller()
+            .ensure_bus_graph_node(BusId::DEFAULT_A, "Bus A");
+
+        let nodes = app.graph.track_node_ids[0].clone();
+        let source_l = graph.add_constant_source("post_fader_send_source_l");
+        let source_r = graph.add_constant_source("post_fader_send_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, nodes.voice_sum_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, nodes.voice_sum_r_id, 0);
+        }
+        app.state.pattern.track_params[0].set_output(TrackOutput::None);
+        app.graph_controller().apply_track_output_routing(0);
+        app.state.pattern.track_params[0].set_sends(vec![TrackSendSnapshot {
+            destination: BusId::DEFAULT_A,
+            amount: 1.0,
+        }]);
+        app.graph_controller().apply_track_bus_sends(0);
+        for _ in 0..4 {
+            graph.process_block();
+        }
+
+        let bus_meter_id = app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::DEFAULT_A)
+            .expect("Bus A graph nodes")
+            .meter_id;
+        let meter_at_unity = graph
+            .read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(bus_meter_id)
+            .expect("watched bus meter");
+        assert!(
+            meter_at_unity[crate::effects::peak_meter::STATE_PEAK_L] > 0.1,
+            "the post-fader send should reach the bus at unity; meter={meter_at_unity:?}"
+        );
+
+        app.state.pattern.track_params[0].set_volume(0.0);
+        app.push_track_volume(0);
+        for _ in 0..120 {
+            graph.process_block();
+        }
+        let meter_at_silence = graph
+            .read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(bus_meter_id)
+            .expect("watched bus meter after lowering the fader");
+        assert!(
+            meter_at_silence[crate::effects::peak_meter::STATE_PEAK_L] < 0.001,
+            "a -inf track fader must silence its bus sends; meter={meter_at_silence:?}"
+        );
+    }
+
+    #[test]
+    fn track_and_bus_fx_chains_terminate_at_their_post_fx_faders() {
+        let graph = TestLiveGraph::new("post-fx-chain-host-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add sampler track");
+        app.graph_controller()
+            .ensure_bus_graph_node(BusId::DEFAULT_A, "Bus A");
+
+        let track_nodes = &app.graph.track_node_ids[0];
+        let track_host = app
+            .fx_chain_host(FxChainLocator::Track(0))
+            .expect("track FX host");
+        assert_eq!(track_host.predecessor.node_id, track_nodes.pan_id);
+        assert_eq!(
+            track_host.successor,
+            ChainSuccessor::StereoNode(StereoEndpoint {
+                node_id: track_nodes.delay_id,
+                channels: 2,
+            }),
+        );
+
+        let bus_nodes = app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::DEFAULT_A)
+            .expect("Bus A graph nodes");
+        let bus_host = app
+            .fx_chain_host(FxChainLocator::Bus(BusId::DEFAULT_A))
+            .expect("bus FX host");
+        assert_eq!(bus_host.predecessor.node_id, bus_nodes.gate_id);
+        assert_eq!(
+            bus_host.successor,
+            ChainSuccessor::StereoNode(StereoEndpoint {
+                node_id: bus_nodes.volume_id,
+                channels: 2,
+            }),
+        );
+        graph.process_block();
     }
 
     #[test]

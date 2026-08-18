@@ -29,7 +29,7 @@ pub(super) fn sync_after_instrument_track_apply(
         if pan_ids.len() < app.graph.track_node_ids.len() {
             pan_ids.push(app.graph.track_node_ids[track_index].pan_id);
         }
-        push_solo_mutes(lg_raw, state, &pan_ids);
+        push_solo_mutes(lg_raw, state);
     }
     if record_armed.lock().unwrap().len() < app.tracks.len() {
         record_armed.lock().unwrap().push(false);

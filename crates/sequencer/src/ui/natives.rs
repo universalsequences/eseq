@@ -4131,7 +4131,6 @@ pub(crate) fn init_runtime(
 
     // seq-set-track-volume — (seq-set-track-volume track-idx volume)
     let st = state.clone();
-    let pan_ids = track_pan_ids.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-volume", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(vol))) = (args.first(), args.get(1))
@@ -4152,17 +4151,17 @@ pub(crate) fn init_runtime(
             track,
             change: TrackMixerInvalidation::Volume,
         });
-        // Push the panner gain straight to the audio graph so a fader drag is
+        // Push the post-FX fader straight to the audio graph so a drag is
         // heard immediately; the enqueued history command re-pushes the same
         // value when it lands, and remains the sole writer of sequencer state.
-        let pan_ids_lock = pan_ids.lock().unwrap();
-        if let Some(&pan_id) = pan_ids_lock.get(track) {
+        let fader_id = st.runtime.delay_lids[track].load(Ordering::Acquire);
+        if fader_id != 0 {
             unsafe {
                 sequencer::audiograph::params_push_wrapper(
                     lg_raw,
                     sequencer::audiograph::ParamMsg {
                         idx: sequencer::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
-                        logical_id: pan_id as u64,
+                        logical_id: fader_id,
                         fvalue: sequencer::mixer_volume::fader_to_gain(vol),
                     },
                 );

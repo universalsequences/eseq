@@ -3610,7 +3610,7 @@ pub(super) fn handle(
                                         .iter()
                                         .map(|ids| ids.pan_id)
                                         .collect();
-                                    push_solo_mutes(lg_raw, &state, &pan_ids);
+                                    push_solo_mutes(lg_raw, &state);
                                 }
                                 *record_armed.lock().unwrap() =
                                     app.graph.record_armed.clone();

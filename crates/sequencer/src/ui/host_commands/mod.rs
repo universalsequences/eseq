@@ -329,7 +329,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     {
         let mut pan_ids = track_pan_ids.lock().unwrap();
         pan_ids.push(app.graph.track_node_ids[idx].pan_id);
-        push_solo_mutes(lg_raw, state, &pan_ids);
+        push_solo_mutes(lg_raw, state);
     }
     record_armed.lock().unwrap().push(false);
 

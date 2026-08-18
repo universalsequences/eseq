@@ -32,10 +32,6 @@ impl GraphController<'_> {
                 0,
             )
         };
-        unsafe {
-            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, pan_id);
-        }
-
         let fx_out_name = CString::new(format!("{}_fx_out", name)).unwrap();
         let fx_out_id = unsafe {
             crate::audiograph::add_node(
@@ -50,6 +46,10 @@ impl GraphController<'_> {
                 0,
             )
         };
+
+        unsafe {
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, fx_out_id);
+        }
 
         let send_id = add_gain_node_checked(
             self.app.graph.lg.0,
