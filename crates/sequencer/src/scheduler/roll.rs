@@ -19,6 +19,12 @@ pub(super) struct RollState {
     /// Bumped on every NoteOff/ClearAll. Unused in phase 1; phase 4 stamps it
     /// onto enqueued roll events for exact audio-side cancel.
     pub(super) generation: u64,
+    /// (track, transpose) pairs whose NoteOn arrived since the last emission
+    /// pass — candidates for the boundary catch-up grace (a press landing
+    /// just after a grid line still catches that line; see
+    /// `schedule_roll_hits`). Consumed by the next pass; pruned on
+    /// NoteOff/ClearAll so a tap released before the pass leaves nothing.
+    pub(super) newly_pressed: Vec<(usize, f32)>,
 }
 
 impl RollState {
@@ -26,6 +32,7 @@ impl RollState {
         Self {
             held: std::array::from_fn(|_| Vec::new()),
             generation: 0,
+            newly_pressed: Vec::new(),
         }
     }
 
@@ -34,6 +41,7 @@ impl RollState {
     }
 
     pub(super) fn clear_all(&mut self) {
+        self.newly_pressed.clear();
         if self.any_held() {
             for held in &mut self.held {
                 held.clear();
@@ -50,11 +58,14 @@ impl RollState {
                         && !self.held[track].iter().any(|held| *held == transpose)
                     {
                         self.held[track].push(transpose);
+                        self.newly_pressed.push((track, transpose));
                     }
                 }
                 RollCommand::NoteOff { track, transpose } => {
                     if track < MAX_TRACKS {
                         self.held[track].retain(|held| *held != transpose);
+                        self.newly_pressed
+                            .retain(|(t, held)| *t != track || *held != transpose);
                         self.generation += 1;
                     }
                 }
@@ -83,20 +94,81 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
     track_output_events: &mut Vec<TrackOutputEvent>,
     state: &SequencerState,
     clock: &SnapshotSequencerClock,
-    roll: &RollState,
+    roll: &mut RollState,
     grid_beats: f64,
     chunk_start_beats: f64,
     chunk_end_beats: f64,
     chunk_start_sample: u64,
+    rendered: u64,
+    sample_rate: u32,
     samples_per_quarter: f64,
     pattern_epoch: u64,
     global_transpose: f32,
 ) -> bool {
     const EPS: f64 = 1.0e-9;
+    // A press this close behind a grid line still catches it — human timing
+    // slop, and exactly the play-start case where the lookahead frontier
+    // passes the first line before the press can possibly be drained.
+    const CATCH_UP_GRACE_SECONDS: f64 = 0.040;
     if grid_beats <= EPS || !roll.any_held() {
+        roll.newly_pressed.clear();
         return true;
     }
-    let samples_per_step = (grid_beats * samples_per_quarter) as f32;
+
+    // Boundary catch-up: for keys pressed since the last pass, the most
+    // recent grid line at or before the scheduling frontier is emitted
+    // retroactively when it is no further than the grace behind the RENDER
+    // head. The hit stays grid-quantized (F1 forbids unquantized keydown
+    // hits, not this): lookahead usually means the line has been scheduled
+    // past but not yet rendered, so it sounds exactly on time; at worst it is
+    // a few milliseconds late, and it always records on the line.
+    let pressed = std::mem::take(&mut roll.newly_pressed);
+    if !pressed.is_empty() {
+        let line_beats = ((chunk_start_beats + EPS) / grid_beats).floor() * grid_beats;
+        let rendered_beats = chunk_start_beats
+            - chunk_start_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
+        let grace_beats = (CATCH_UP_GRACE_SECONDS * sample_rate as f64 / samples_per_quarter)
+            .min(grid_beats * 0.5);
+        // A line at (or an epsilon before) chunk_start is emitted by the
+        // regular scan below — no catch-up needed, no double fire.
+        if line_beats < chunk_start_beats - EPS && line_beats >= rendered_beats - grace_beats {
+            let sample_time = chunk_start_sample.saturating_sub(
+                ((chunk_start_beats - line_beats) * samples_per_quarter).round() as u64,
+            );
+            for track in 0..roll.held.len().min(snapshot.tracks.len()) {
+                // Only the freshly pressed notes: any longer-held key on this
+                // track already sounded this line.
+                let notes: Vec<f32> = pressed
+                    .iter()
+                    .filter(|(t, transpose)| {
+                        *t == track && roll.held[track].contains(transpose)
+                    })
+                    .map(|(_, transpose)| *transpose)
+                    .collect();
+                if notes.is_empty() {
+                    continue;
+                }
+                if !emit_roll_hit(
+                    queue,
+                    snapshot,
+                    track_output_events,
+                    state,
+                    clock,
+                    track,
+                    &notes,
+                    grid_beats,
+                    line_beats,
+                    sample_time,
+                    samples_per_quarter,
+                    pattern_epoch,
+                    global_transpose,
+                ) {
+                    return false;
+                }
+            }
+        }
+    }
+
     let mut index = (((chunk_start_beats - EPS) / grid_beats).floor() as i64 + 1).max(0);
     loop {
         let boundary_beats = index as f64 * grid_beats;
@@ -106,81 +178,115 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
         let sample_time = chunk_start_sample.saturating_add(
             ((boundary_beats - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
         );
-        for (track, held) in roll.held.iter().enumerate() {
-            if held.is_empty() || track >= snapshot.tracks.len() {
+        for track in 0..roll.held.len().min(snapshot.tracks.len()) {
+            if roll.held[track].is_empty() {
                 continue;
             }
-            // Track defaults (F4): default step params, one chord note per
-            // held transpose (a chord if several keys are held). Step and
-            // resolved transpose stay at the shared default so
-            // `resolved_chord_transpose` passes the held notes through as-is.
-            let resolved = ResolvedStep {
-                duration: StepParam::Duration.default_value(),
-                velocity: StepParam::Velocity.default_value(),
-                speed: StepParam::Speed.default_value(),
-                aux_a: StepParam::AuxA.default_value(),
-                aux_b: StepParam::AuxB.default_value(),
-                transpose: StepParam::Transpose.default_value(),
-                pan: StepParam::Pan.default_value(),
-                chop: StepParam::Chop.default_value(),
-            };
-            let chord =
-                chord_data_from_parts(held, &[], &[], resolved.duration, resolved.transpose);
-            let event = StepEvent {
-                track,
-                samples_per_step,
-                resolved,
-                chord,
-                effect_params: resolve_effect_defaults(snapshot, track),
-                instrument_params: resolve_instrument_defaults(snapshot, track),
-                instrument_tensor_params: resolve_instrument_tensor_defaults(snapshot, track),
-                sampler_params: resolve_sampler_defaults(snapshot, track),
-                rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
-                // Step 0 stands in as the source step: roll hits are live
-                // events, not pattern reads. The fingerprint is recomputed by
-                // `enqueue_resolved_trigger`.
-                source: EventSource::Step {
-                    track,
-                    step: 0,
-                    instrument_fingerprint: 0,
-                },
-            };
-            if !enqueue_step_event(
+            let notes = roll.held[track].clone();
+            if !emit_roll_hit(
                 queue,
                 snapshot,
                 track_output_events,
-                pattern_epoch,
-                sample_time,
+                state,
+                clock,
+                track,
+                &notes,
+                grid_beats,
                 boundary_beats,
-                samples_per_quarter as f32,
+                sample_time,
+                samples_per_quarter,
+                pattern_epoch,
                 global_transpose,
-                event,
             ) {
                 return false;
-            }
-            // Record-as-heard feedback (spec 6): stamp every emitted hit with
-            // its track-local (step, delay) from the boundary geometry that
-            // scheduled it. The control thread batches these per held key and
-            // writes them back on note release; when recording is off it
-            // simply discards the drain.
-            let (step, delay, step_dur_beats) = clock.roll_record_position(
-                track,
-                boundary_beats,
-                snapshot.tracks[track].params.num_steps,
-            );
-            let duration_steps = (grid_beats / step_dur_beats) as f32;
-            for transpose in held {
-                state.push_roll_recorded_hit(crate::sequencer::RollHitRecorded {
-                    track,
-                    step,
-                    delay,
-                    transpose: *transpose,
-                    velocity: resolved.velocity,
-                    duration_steps,
-                    beat: boundary_beats,
-                });
             }
         }
         index += 1;
     }
+}
+
+/// One roll hit on one track: the enqueue (a normal ResolvedTrigger built
+/// from track defaults, one chord note per transpose — F4) plus the
+/// record-as-heard feedback (spec 6) stamping each note with the track-local
+/// (step, delay) from the boundary geometry that scheduled it.
+#[allow(clippy::too_many_arguments)]
+fn emit_roll_hit<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
+    state: &SequencerState,
+    clock: &SnapshotSequencerClock,
+    track: usize,
+    notes: &[f32],
+    grid_beats: f64,
+    boundary_beats: f64,
+    sample_time: u64,
+    samples_per_quarter: f64,
+    pattern_epoch: u64,
+    global_transpose: f32,
+) -> bool {
+    // Track defaults (F4): default step params; step and resolved transpose
+    // stay at the shared default so `resolved_chord_transpose` passes the
+    // notes through as-is.
+    let resolved = ResolvedStep {
+        duration: StepParam::Duration.default_value(),
+        velocity: StepParam::Velocity.default_value(),
+        speed: StepParam::Speed.default_value(),
+        aux_a: StepParam::AuxA.default_value(),
+        aux_b: StepParam::AuxB.default_value(),
+        transpose: StepParam::Transpose.default_value(),
+        pan: StepParam::Pan.default_value(),
+        chop: StepParam::Chop.default_value(),
+    };
+    let chord = chord_data_from_parts(notes, &[], &[], resolved.duration, resolved.transpose);
+    let event = StepEvent {
+        track,
+        samples_per_step: (grid_beats * samples_per_quarter) as f32,
+        resolved,
+        chord,
+        effect_params: resolve_effect_defaults(snapshot, track),
+        instrument_params: resolve_instrument_defaults(snapshot, track),
+        instrument_tensor_params: resolve_instrument_tensor_defaults(snapshot, track),
+        sampler_params: resolve_sampler_defaults(snapshot, track),
+        rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+        // Step 0 stands in as the source step: roll hits are live events,
+        // not pattern reads. The fingerprint is recomputed by
+        // `enqueue_resolved_trigger`.
+        source: EventSource::Step {
+            track,
+            step: 0,
+            instrument_fingerprint: 0,
+        },
+    };
+    if !enqueue_step_event(
+        queue,
+        snapshot,
+        track_output_events,
+        pattern_epoch,
+        sample_time,
+        boundary_beats,
+        samples_per_quarter as f32,
+        global_transpose,
+        event,
+    ) {
+        return false;
+    }
+    let (step, delay, step_dur_beats) = clock.roll_record_position(
+        track,
+        boundary_beats,
+        snapshot.tracks[track].params.num_steps,
+    );
+    let duration_steps = (grid_beats / step_dur_beats) as f32;
+    for transpose in notes {
+        state.push_roll_recorded_hit(crate::sequencer::RollHitRecorded {
+            track,
+            step,
+            delay,
+            transpose: *transpose,
+            velocity: resolved.velocity,
+            duration_steps,
+            beat: boundary_beats,
+        });
+    }
+    true
 }
