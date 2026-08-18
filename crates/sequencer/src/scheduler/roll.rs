@@ -20,10 +20,11 @@ pub(super) struct RollState {
     /// onto enqueued roll events for exact audio-side cancel.
     pub(super) generation: u64,
     /// (track, transpose) pairs whose NoteOn arrived since the last emission
-    /// pass — candidates for the boundary catch-up grace (a press landing
-    /// just after a grid line still catches that line; see
-    /// `schedule_roll_hits`). Consumed by the next pass; pruned on
-    /// NoteOff/ClearAll so a tap released before the pass leaves nothing.
+    /// pass — candidates for boundary catch-up (a press claims the grid line
+    /// the lookahead frontier already passed, as long as the audio hasn't
+    /// rendered it yet; see `schedule_roll_hits`). Consumed by the next pass;
+    /// pruned on NoteOff/ClearAll so a tap released before the pass leaves
+    /// nothing.
     pub(super) newly_pressed: Vec<(usize, f32)>,
 }
 
@@ -100,16 +101,11 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
     chunk_end_beats: f64,
     chunk_start_sample: u64,
     rendered: u64,
-    sample_rate: u32,
     samples_per_quarter: f64,
     pattern_epoch: u64,
     global_transpose: f32,
 ) -> bool {
     const EPS: f64 = 1.0e-9;
-    // A press this close behind a grid line still catches it — human timing
-    // slop, and exactly the play-start case where the lookahead frontier
-    // passes the first line before the press can possibly be drained.
-    const CATCH_UP_GRACE_SECONDS: f64 = 0.040;
     if grid_beats <= EPS || !roll.any_held() {
         roll.newly_pressed.clear();
         return true;
@@ -117,21 +113,20 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
 
     // Boundary catch-up: for keys pressed since the last pass, the most
     // recent grid line at or before the scheduling frontier is emitted
-    // retroactively when it is no further than the grace behind the RENDER
-    // head. The hit stays grid-quantized (F1 forbids unquantized keydown
-    // hits, not this): lookahead usually means the line has been scheduled
-    // past but not yet rendered, so it sounds exactly on time; at worst it is
-    // a few milliseconds late, and it always records on the line.
+    // retroactively — but ONLY while the audio render head has not reached it
+    // yet. That line is still the next AUDIBLE boundary, so the retroactive
+    // emission is sample-exact and never late. A line the head has already
+    // rendered is simply missed: the press waits for the next boundary (F1) —
+    // emitting it would fire immediately and land audibly behind the grid,
+    // which reads as a one-off swung hit.
     let pressed = std::mem::take(&mut roll.newly_pressed);
     if !pressed.is_empty() {
         let line_beats = ((chunk_start_beats + EPS) / grid_beats).floor() * grid_beats;
         let rendered_beats = chunk_start_beats
             - chunk_start_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
-        let grace_beats = (CATCH_UP_GRACE_SECONDS * sample_rate as f64 / samples_per_quarter)
-            .min(grid_beats * 0.5);
         // A line at (or an epsilon before) chunk_start is emitted by the
         // regular scan below — no catch-up needed, no double fire.
-        if line_beats < chunk_start_beats - EPS && line_beats >= rendered_beats - grace_beats {
+        if line_beats < chunk_start_beats - EPS && line_beats >= rendered_beats - EPS {
             let sample_time = chunk_start_sample.saturating_sub(
                 ((chunk_start_beats - line_beats) * samples_per_quarter).round() as u64,
             );

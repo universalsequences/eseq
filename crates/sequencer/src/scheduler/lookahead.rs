@@ -1720,7 +1720,6 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 chunk_end_beats,
                 scheduled_until_sample,
                 rendered,
-                sample_rate,
                 samples_per_quarter,
                 pattern_epoch,
                 process_runtime.global_transpose(),

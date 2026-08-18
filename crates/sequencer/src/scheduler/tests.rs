@@ -7913,7 +7913,6 @@
                     chunk_end,
                     chunk_start_sample,
                     chunk_start_sample,
-                    48_000,
                     ROLL_TEST_SPQ,
                     0,
                     0.0,
@@ -8040,21 +8039,53 @@
     }
 
     #[test]
-    fn roll_press_just_after_play_start_catches_the_first_grid_line() {
+    fn roll_press_catches_a_scheduled_but_unrendered_line() {
         run_with_scheduler_stack(|| {
-            // Play starts and the frontier passes the first 1/16 line before
-            // the press can be drained (the reported step-1-never-records
-            // case). The catch-up grace emits the missed line retroactively —
-            // and because it has been scheduled past but not rendered, it
-            // still sounds exactly at sample 0.
+            // The lookahead frontier passes a 1/16 line before the press
+            // drains, but the render head has not reached it yet. Catch-up
+            // emits that line retroactively — it is still the next AUDIBLE
+            // boundary, so the hit lands sample-exact on the grid.
             let (state, mut scheduler) = roll_test_state(&[]);
             let queue = ScheduledEventQueue::<64>::new();
             let frontier = drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 0, 0);
             assert_eq!(frontier, 5_200, "frontier must sit mid-grid for this test");
+            let frontier =
+                drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 1_500, frontier);
+            assert_eq!(frontier, 6_500, "frontier must sit past the 6000 line");
             assert!(drain_roll_triggers(&queue).is_empty());
 
-            // Press drained ~21ms after start (rendered has advanced 1000
-            // samples), first line (beat 0) already behind the frontier.
+            // Press drained with the 6000 line behind the frontier but ahead
+            // of the render head (5800) — the line hasn't sounded yet.
+            scheduler.roll.apply_commands(&[RollCommand::NoteOn {
+                track: 0,
+                transpose: 3.0,
+            }]);
+            drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 5_800, frontier);
+            let triggers = drain_roll_triggers(&queue);
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![6_000],
+                "the scheduled-past, unrendered line is caught sample-exact",
+            );
+            let hits = state.drain_roll_recorded_hits();
+            assert_eq!(
+                hits.iter().map(|hit| (hit.step, hit.beat)).collect::<Vec<_>>(),
+                vec![(1, 0.25)],
+            );
+        });
+    }
+
+    #[test]
+    fn roll_press_after_the_line_rendered_waits_for_the_next_boundary() {
+        run_with_scheduler_stack(|| {
+            // The render head has passed beat 0 by 1000 samples when the
+            // press drains. A retroactive emission would fire immediately —
+            // ~21ms late, an audible one-off swing — so the line counts as
+            // missed and the first hit waits for the next boundary (F1).
+            let (state, mut scheduler) = roll_test_state(&[]);
+            let queue = ScheduledEventQueue::<64>::new();
+            let frontier = drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 0, 0);
+
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
@@ -8063,14 +8094,12 @@
             let triggers = drain_roll_triggers(&queue);
             assert_eq!(
                 triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
-                vec![0, 6_000],
-                "caught-up first line plus the next boundary",
+                vec![6_000],
             );
             let hits = state.drain_roll_recorded_hits();
             assert_eq!(
                 hits.iter().map(|hit| (hit.step, hit.beat)).collect::<Vec<_>>(),
-                vec![(0, 0.0), (1, 0.25)],
-                "recording lands on step 1 then step 2",
+                vec![(1, 0.25)],
             );
         });
     }
@@ -8083,8 +8112,8 @@
             let frontier = drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 0, 0);
 
             // Render head has caught up to the frontier: beat 0 is ~108ms
-            // gone — outside the 40ms grace, so F1 semantics hold and the
-            // first hit waits for the next line.
+            // gone, so F1 semantics hold and the first hit waits for the
+            // next line.
             scheduler.roll.apply_commands(&[RollCommand::NoteOn {
                 track: 0,
                 transpose: 3.0,
