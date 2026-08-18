@@ -139,6 +139,8 @@ That regression protects the case where project scratch source, such as a graph 
 
 When changing Lisp UI structure or widget wrapper argument order, do not stop at parse/render-tree tests. Add or run a layout test that proves expected text/debug nodes have finite, nonzero measured rects inside the visible panel; regressions often look like "the panel exists, but its children measured to zero or disappeared."
 
+Do not assert on cosmetic UI copy — header/title strings, decorative labels, button captions ("MAGNITUDE TABLE"-style section titles). The author tweaks frontend text and layout freely, and those tests break without protecting any behavior. Layout tests should assert *functional* structure instead: parameter labels that drive controls, widget types (dropdown, knob, viewer), prop bindings, and finite nonzero rects. If a test only fails when someone rewords or deletes a label, it should not exist.
+
 When adding reactive props to a widget, update that widget's `bindable_props` contract. `build_widget` rejects unsupported reactive bindings by returning a string diagnostic instead of a widget map; if that rejected widget is passed through a wrapper, the wrapper may render as an empty measured container with no children. Add a regression test that passes the new prop as a `ReactiveRef`, not only as a literal number.
 
 ### Sequencer panel visual capture

@@ -5687,13 +5687,25 @@ pub(crate) fn init_runtime(
     // authoring file republishes (upsert by id) for live hot-reload.
     let st_def_sequencer = state.clone();
     let ui_ep_def_sequencer = ui_epoch.clone();
-    runtime.register_native("def-sequencer", move |args, _ctx| {
-        let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
-        let name = published.name.clone();
-        st_def_sequencer.publish_sequencer(published);
-        ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
-        Ok(Value::String(name))
-    });
+    runtime.register_native_with_docs_and_keywords(
+        "def-sequencer",
+        sequencer::lisp_host::DEF_SEQUENCER_SIGNATURE,
+        sequencer::lisp_host::DEF_SEQUENCER_DOCS,
+        sequencer::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
+        move |args, _ctx| {
+            let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            st_def_sequencer.publish_sequencer(published);
+            ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::String(name))
+        },
+    );
+    runtime.document_symbol_with_keywords(
+        "seq-emit",
+        sequencer::lisp_host::SEQ_EMIT_SIGNATURE,
+        sequencer::lisp_host::SEQ_EMIT_DOCS,
+        sequencer::lisp_host::SEQ_EMIT_KEYWORDS.iter().copied(),
+    );
 
     register_song_natives(&mut runtime);
 

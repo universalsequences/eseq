@@ -84,8 +84,16 @@ pub struct TransportState {
     pub playhead_phase: AtomicU32,
     /// The live-keyboard record quantization mode (`RecordQuantize as u8`).
     pub record_quantize: AtomicU32,
-    /// Audio output latency compensation used when timestamping keyboard note-ons.
+    /// Audio *device* output latency, in seconds (f32 bits): the cost of the
+    /// output buffer path, published once when the stream is built.
     pub record_latency_seconds: AtomicU32,
+    /// Plugin-delay-compensation latency of the current graph, in seconds
+    /// (f32 bits), republished by the latency planner whenever the plan
+    /// changes. Held separately from `record_latency_seconds` so the device
+    /// term and the graph term compose rather than clobber each other; note
+    /// timestamping uses the sum, via
+    /// [`SequencerState::total_record_latency_seconds`].
+    pub pdc_latency_seconds: AtomicU32,
     /// Monotonic audio-clock anchor published by the audio callback.
     pub record_clock: RecordClockAnchor,
     pub metronome_enabled: AtomicBool,

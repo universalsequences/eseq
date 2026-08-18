@@ -40,11 +40,6 @@ pub fn dsp_source() -> &'static str {
     include_str!("conv_reverb_dsp.lisp")
 }
 
-/// True if `name` is a dgenlisp-backed builtin (currently just the convolver).
-pub fn is_dgen_builtin(name: &str) -> bool {
-    name == NAME
-}
-
 /// Persisted reference for the bundled default IR (Lexicon 300 Rich Plate).
 pub const DEFAULT_IR_REF: &str = "lexicon-300-rich-plate";
 

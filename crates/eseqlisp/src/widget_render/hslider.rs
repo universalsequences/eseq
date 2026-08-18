@@ -143,6 +143,14 @@ impl WidgetDefinition for HorizontalSliderWidget {
         ]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "min", "max", "width", "fill", "dot-color", "haptic-min",
+            "haptic-max", "haptic-value", "on-change", "material", "plock-active", "plock-color-r",
+            "plock-color-g", "plock-color-b",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

@@ -956,7 +956,7 @@ impl App {
                     lisp_host::remove_effect_modulator(self.graph.lg.0, slot.modulator_node_id);
                 }
             }
-            crate::effects::conv_reverb::clear_instance(slot.node_id);
+            crate::effects::dgen_builtin::clear_instance(slot.node_id);
             connect_fx_chain_gap(self.graph.lg.0, wiring.predecessor, wiring.successor);
         }
         let applied =
@@ -1022,7 +1022,7 @@ impl App {
             )
         }?;
         if let Some(old_node_id) = existing {
-            crate::effects::conv_reverb::clear_instance(old_node_id);
+            crate::effects::dgen_builtin::clear_instance(old_node_id);
         }
         self.editor.lisp_libs.push(lib);
         let applied =
@@ -1079,7 +1079,7 @@ impl App {
                     wiring.predecessor.node_id,
                     successor,
                 );
-                crate::effects::conv_reverb::clear_instance(old_id);
+                crate::effects::dgen_builtin::clear_instance(old_id);
             }
             if let Some(old_modulator) = existing_modulator {
                 lisp_host::remove_effect_modulator(self.graph.lg.0, old_modulator);

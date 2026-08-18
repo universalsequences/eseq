@@ -571,6 +571,10 @@ pub struct GraphState {
     /// diff instead of disconnecting every possible track pair.
     pub applied_mod_routes: Vec<(i32, i32)>,
     pub deferred_rack_teardowns: Vec<graph::DeferredRackTeardown>,
+    /// Last (pdc node id, pad samples) set pushed by latency compensation.
+    /// Lets the per-frame tick skip graph writes when nothing changed, and
+    /// re-push when a node is rebuilt under an unchanged plan.
+    pub applied_latency_pads: Vec<(i32, u32)>,
 }
 
 impl GraphState {
@@ -657,6 +661,9 @@ pub struct TrackNodeIds {
     pub pan_id: i32,
     pub filter_id: i32,
     pub delay_id: i32,
+    /// Plugin-delay-compensation node on the primary output edge
+    /// (delay_id → pdc → MIX/bus). Sends tap delay_id before this pad.
+    pub pdc_id: i32,
     pub send_id: i32,
     pub mod_out_id: i32,
     pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
@@ -685,6 +692,8 @@ pub struct BusSendNodeIds {
     pub destination: BusId,
     pub left_id: i32,
     pub right_id: i32,
+    /// Per-send-edge delay compensation node (track fx out → pdc → send gains).
+    pub pdc_id: i32,
 }
 
 /// Audio bus node IDs, passed to App::new to reduce parameter count.
@@ -706,6 +715,8 @@ pub struct BusNodeIds {
     pub merge_id: i32,
     pub gate_id: i32,
     pub volume_id: i32,
+    /// Delay compensation node on the bus output edge (volume → pdc → MIX).
+    pub pdc_id: i32,
     pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
 }
 
@@ -2495,6 +2506,7 @@ impl App {
                 keyboard_tx,
                 applied_mod_routes: Vec::new(),
                 deferred_rack_teardowns: Vec::new(),
+                applied_latency_pads: Vec::new(),
             },
         };
         app.ensure_bus_pattern_bank_len(1);

@@ -34,7 +34,7 @@
 (param noisegain @min 0 @max 1 @default 0)
 (param oscmix @min 0 @max 1 @default 0.5)
 (param release @group amp @env amp-env @role release @default 180 @min 1 @max 5000 @unit ms)
-(param res @min 0 @max 1  @default 0.5)
+(param res @min 0.3 @max 9  @default 0.5)
 (param semitone @min -12 @max 12)
 (param shape @min 0 @max 1 @default 0)
 (param sustain @group amp @env amp-env @role sustain @default 0.8 @min 0 @max 1)

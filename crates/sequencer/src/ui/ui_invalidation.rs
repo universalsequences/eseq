@@ -244,6 +244,9 @@ pub(crate) enum MidiFxInvalidation {
 pub(crate) enum BusFxInvalidation {
     Param { slot: usize, param: usize },
     Topology,
+    /// Host-owned metadata shown by an existing effect panel changed without
+    /// changing the bus chain itself (for example a loaded table/IR name).
+    PanelTree,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]

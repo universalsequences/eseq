@@ -113,16 +113,21 @@ impl GraphController<'_> {
             crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 1, gate_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, gate_id, 0, volume_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, gate_id, 1, volume_id, 1);
+        }
+        let pdc_id = super::latency::add_pdc_node(self.app.graph.lg.0, &format!("{safe_name}_pdc"));
+        unsafe {
+            crate::audiograph::graph_connect(self.app.graph.lg.0, volume_id, 0, pdc_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, volume_id, 1, pdc_id, 1);
             crate::audiograph::graph_connect(
                 self.app.graph.lg.0,
-                volume_id,
+                pdc_id,
                 0,
                 self.app.graph.bus_l_id,
                 0,
             );
             crate::audiograph::graph_connect(
                 self.app.graph.lg.0,
-                volume_id,
+                pdc_id,
                 1,
                 self.app.graph.bus_r_id,
                 0,
@@ -135,6 +140,7 @@ impl GraphController<'_> {
             merge_id,
             gate_id,
             volume_id,
+            pdc_id,
             mod_in_clip_ids,
         });
         self.app.publish_bus_gate_runtime();
@@ -187,6 +193,7 @@ impl GraphController<'_> {
                 .expect("graph bus membership was validated before sorting")
         });
         self.app.publish_bus_gate_runtime();
+        self.app.refresh_latency_compensation();
         Ok(())
     }
 
@@ -207,18 +214,20 @@ impl GraphController<'_> {
             crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.volume_id);
             crate::audiograph::graph_disconnect(
                 self.app.graph.lg.0,
-                bus.volume_id,
+                bus.pdc_id,
                 0,
                 self.app.graph.bus_l_id,
                 0,
             );
             crate::audiograph::graph_disconnect(
                 self.app.graph.lg.0,
-                bus.volume_id,
+                bus.pdc_id,
                 1,
                 self.app.graph.bus_r_id,
                 0,
             );
+            crate::audiograph::graph_disconnect(self.app.graph.lg.0, bus.volume_id, 0, bus.pdc_id, 0);
+            crate::audiograph::graph_disconnect(self.app.graph.lg.0, bus.volume_id, 1, bus.pdc_id, 1);
             crate::audiograph::graph_disconnect(
                 self.app.graph.lg.0,
                 bus.left_id,
@@ -264,6 +273,8 @@ impl GraphController<'_> {
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.merge_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.gate_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.volume_id);
+            self.app.invalidate_latency_pad_cache();
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.pdc_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.left_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.right_id);
             for &mod_in_clip_id in &bus.mod_in_clip_ids {
@@ -372,8 +383,9 @@ impl GraphController<'_> {
         };
         let output = self.app.state.pattern.track_params[track_idx].output();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
-        self.disconnect_delay_output_from_all(nodes.delay_id);
-        self.connect_delay_output_to(nodes.delay_id, &output);
+        self.disconnect_delay_output_from_all(nodes.pdc_id);
+        self.connect_delay_output_to(nodes.pdc_id, &output);
+        self.app.refresh_latency_compensation();
     }
 
     pub fn apply_track_bus_sends(&mut self, track_idx: usize) {
@@ -453,9 +465,15 @@ impl GraphController<'_> {
                     continue;
                 }
             };
+            let pdc_id = super::latency::add_pdc_node(
+                lg,
+                &format!("track_{track_idx}_send_{}_pdc", send.destination.0),
+            );
             unsafe {
-                crate::audiograph::graph_connect(lg, delay_id, 0, left_id, 0);
-                crate::audiograph::graph_connect(lg, delay_id, 1, right_id, 0);
+                crate::audiograph::graph_connect(lg, delay_id, 0, pdc_id, 0);
+                crate::audiograph::graph_connect(lg, delay_id, 1, pdc_id, 1);
+                crate::audiograph::graph_connect(lg, pdc_id, 0, left_id, 0);
+                crate::audiograph::graph_connect(lg, pdc_id, 1, right_id, 0);
                 crate::audiograph::graph_connect(lg, left_id, 0, bus.left_id, 0);
                 crate::audiograph::graph_connect(lg, right_id, 0, bus.right_id, 0);
             }
@@ -463,14 +481,21 @@ impl GraphController<'_> {
                 destination: send.destination,
                 left_id,
                 right_id,
+                pdc_id,
             });
         }
 
+        if !old_sends.is_empty() {
+            // Send PDC nodes die below and their ids may be reused.
+            self.app.invalidate_latency_pad_cache();
+        }
         for send in old_sends {
             if let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) {
                 unsafe {
-                    crate::audiograph::graph_disconnect(lg, delay_id, 0, send.left_id, 0);
-                    crate::audiograph::graph_disconnect(lg, delay_id, 1, send.right_id, 0);
+                    crate::audiograph::graph_disconnect(lg, delay_id, 0, send.pdc_id, 0);
+                    crate::audiograph::graph_disconnect(lg, delay_id, 1, send.pdc_id, 1);
+                    crate::audiograph::graph_disconnect(lg, send.pdc_id, 0, send.left_id, 0);
+                    crate::audiograph::graph_disconnect(lg, send.pdc_id, 1, send.right_id, 0);
                     crate::audiograph::graph_disconnect(lg, send.left_id, 0, bus.left_id, 0);
                     crate::audiograph::graph_disconnect(lg, send.right_id, 0, bus.right_id, 0);
                 }
@@ -478,6 +503,7 @@ impl GraphController<'_> {
             unsafe {
                 crate::audiograph::delete_node(lg, send.left_id);
                 crate::audiograph::delete_node(lg, send.right_id);
+                crate::audiograph::delete_node(lg, send.pdc_id);
             }
         }
 
@@ -485,6 +511,7 @@ impl GraphController<'_> {
             return;
         };
         nodes.bus_send_ids = next_send_nodes;
+        self.app.refresh_latency_compensation();
     }
 
 }

@@ -251,6 +251,8 @@ fn init_engine_parts(
         merge_id: mix_merge_id,
         gate_id: mix_gate_id,
         volume_id: mix_volume_id,
+        // The MIX bus is the final sum: nothing downstream to align against.
+        pdc_id: 0,
         mod_in_clip_ids: mix_mod_in_clip_ids,
     }];
     for (id, label) in [(BusId::DEFAULT_A, "bus_A"), (BusId::DEFAULT_B, "bus_B")] {
@@ -305,6 +307,7 @@ fn init_engine_parts(
             audiograph::add_node_to_watchlist(lg, gate_id);
             audiograph::add_node_to_watchlist(lg, volume_id);
         }
+        let pdc_id = crate::effects::pdc_delay::add_pdc_node(lg, &format!("{label}_pdc"));
         unsafe {
             audiograph::graph_connect(lg, left_id, 0, merge_id, 0);
             audiograph::graph_connect(lg, right_id, 0, merge_id, 1);
@@ -312,8 +315,10 @@ fn init_engine_parts(
             audiograph::graph_connect(lg, merge_id, 1, gate_id, 1);
             audiograph::graph_connect(lg, gate_id, 0, volume_id, 0);
             audiograph::graph_connect(lg, gate_id, 1, volume_id, 1);
-            audiograph::graph_connect(lg, volume_id, 0, bus_l_id, 0);
-            audiograph::graph_connect(lg, volume_id, 1, bus_r_id, 0);
+            audiograph::graph_connect(lg, volume_id, 0, pdc_id, 0);
+            audiograph::graph_connect(lg, volume_id, 1, pdc_id, 1);
+            audiograph::graph_connect(lg, pdc_id, 0, bus_l_id, 0);
+            audiograph::graph_connect(lg, pdc_id, 1, bus_r_id, 0);
         }
         default_bus_nodes.push(BusNodeIds {
             id,
@@ -322,6 +327,7 @@ fn init_engine_parts(
             merge_id,
             gate_id,
             volume_id,
+            pdc_id,
             mod_in_clip_ids: std::array::from_fn(|input| {
                 let name = CString::new(format!("{label}_mod_in{}_clip", input + 1)).unwrap();
                 unsafe {

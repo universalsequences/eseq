@@ -173,6 +173,9 @@ impl GraphController<'_> {
             }
         }
 
+        // Every PDC node in the graph dies below; a reload may reuse their
+        // ids, so the applied-pad cache must not survive.
+        self.app.invalidate_latency_pad_cache();
         for track in self.app.graph.track_node_ids.iter().rev() {
             for rack_slot in &track.rack_slots {
                 self.delete_rack_slot_nodes(rack_slot);
@@ -200,6 +203,7 @@ impl GraphController<'_> {
                 }
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.mod_out_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
+                crate::audiograph::delete_node(self.app.graph.lg.0, track.pdc_id);
                 if track.filter_id != 0 {
                     crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
                 }
@@ -307,7 +311,7 @@ impl GraphController<'_> {
 
                 for effect_id in active_effect_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, effect_id);
-                    crate::effects::conv_reverb::clear_instance(effect_id);
+                    crate::effects::dgen_builtin::clear_instance(effect_id);
                 }
                 for modulator_id in active_effect_modulator_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);

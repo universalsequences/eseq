@@ -22,6 +22,10 @@ impl WidgetDefinition for HStackWidget {
         &["padding", "gap", "align", "justify", "width"]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &["padding", "gap", "align", "justify", "width", "height", "flex"]
+    }
+
     fn measure(
         &self,
         node: &Value,

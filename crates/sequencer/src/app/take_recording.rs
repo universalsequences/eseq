@@ -921,6 +921,35 @@ mod tests {
     }
 
     #[test]
+    fn take_notes_compensate_graph_latency_on_top_of_device_latency() {
+        // A performer plays against what they HEAR, and a spectral Filter
+        // Table delays the whole mix on top of the device buffer. Splitting
+        // the same 20 ms across the two terms must land the notes exactly
+        // where the device-only case does — the terms compose, they do not
+        // clobber each other (the planner republishes its half on every plan
+        // change, the stream writes its half once).
+        let (mut app, anchor) = capture_app();
+        app.state
+            .transport
+            .record_latency_seconds
+            .store(0.005_f32.to_bits(), Ordering::Relaxed);
+        app.state.set_pdc_latency_seconds(0.015);
+        assert!(
+            (app.state.total_record_latency_seconds() - 0.02).abs() < 1e-6,
+            "{}",
+            app.state.total_record_latency_seconds()
+        );
+
+        assert!(app.take_record_note(0, press_at_beats(anchor, 12.14), 60.0, 2.0));
+        let session = app.take_recording.as_ref().expect("session active");
+        let lane = session.lanes[0].as_ref().expect("lane punched in");
+        assert!((lane.punch_in_beat - 12.0).abs() < 1e-6, "{}", lane.punch_in_beat);
+        let chunk = &lane.chunks[0];
+        assert!(chunk.track_bits[0] & 1 == 1, "step 0 active");
+        assert!((chunk.chord_snapshot.delays[0][0] - 0.4).abs() < 1e-4);
+    }
+
+    #[test]
     fn take_notes_add_the_mid_song_transport_start_to_record_clock_beats() {
         let (mut app, anchor) = capture_app();
         app.begin_song_capture_take(8.0);

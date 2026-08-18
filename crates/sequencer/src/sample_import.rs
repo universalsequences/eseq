@@ -29,10 +29,10 @@ pub struct ImportSummary {
     pub failed: usize,
 }
 
-struct DecodedAudio {
-    sample_rate: u32,
-    channels: u16,
-    samples: Vec<f32>,
+pub(crate) struct DecodedAudio {
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) samples: Vec<f32>,
 }
 
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "aif", "aiff", "mp3", "flac"];
@@ -239,7 +239,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-fn decode_audio_file(path: &Path) -> Result<DecodedAudio, String> {
+pub(crate) fn decode_audio_file(path: &Path) -> Result<DecodedAudio, String> {
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())

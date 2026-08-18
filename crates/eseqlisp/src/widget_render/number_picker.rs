@@ -490,6 +490,17 @@ impl WidgetDefinition for NumberPickerWidget {
         ]
     }
 
+    fn completion_props(&self) -> &'static [&'static str] {
+        &[
+            "value", "min", "max", "step", "decimals", "unit", "value-scale", "width",
+            "height", "font-size", "noui", "text-align", "text-color", "active-color",
+            "background-color", "bg-color", "border-color", "cursor-color", "edit-color",
+            "focus-color", "highlight-color", "ring-color", "shadow-color", "tri-color",
+            "active", "on-change", "plock-active", "plock-color-r", "plock-color-g",
+            "plock-color-b",
+        ]
+    }
+
     fn measure(
         &self,
         node: &Value,

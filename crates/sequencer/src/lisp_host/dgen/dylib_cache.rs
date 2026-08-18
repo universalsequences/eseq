@@ -95,6 +95,7 @@ impl DGenCompileKind {
 pub enum DGenSourceOrigin {
     Custom,
     BuiltinConvolutionReverb,
+    BuiltinFilterTable,
     Draft,
 }
 

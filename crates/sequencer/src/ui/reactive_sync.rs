@@ -2259,6 +2259,16 @@ pub(super) fn apply_ui_invalidations(
                         needs_reactive_cycle = true;
                     }
                 }
+                BusFxInvalidation::PanelTree => {
+                    if fx_visible {
+                        rt.set_reactive(
+                            "SEQ",
+                            "bus-effects",
+                            build_bus_effects_value_for_selection(app, Some(selected_steps)),
+                        );
+                        needs_reactive_cycle = true;
+                    }
+                }
             },
             UiInvalidation::PianoRoll { track, change } => {
                 if track == current_track_idx {

@@ -2,6 +2,18 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "set-convolution-reverb-ir",
+    "set-filter-table-source",
+    "set-filter-table-mode",
+    "set-filter-table-engine",
+    "filter-table-editor-open",
+    "filter-table-editor-close",
+    "filter-table-editor-op",
+    "filter-table-editor-band",
+    "filter-table-editor-add-node",
+    "filter-table-editor-undo",
+    "filter-table-editor-redo",
+    "filter-table-editor-frame",
+    "filter-table-editor-save",
     "set-effect-param-batch",
     "set-effect-plock-batch",
     "set-effect-param",
@@ -42,6 +54,7 @@ pub(super) fn handle(
     let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
+    let ui_invalidations = ctx.shared.ui_invalidations.clone();
     let bus_state = ctx.shared.bus_state.clone();
     match name {
         "set-convolution-reverb-ir" => {
@@ -121,6 +134,390 @@ pub(super) fn handle(
                 _ => editor.handle_host_event(HostEvent::Status(
                     "set-convolution-reverb-ir: need slot, path".to_string(),
                 )),
+            }
+        }
+        "set-filter-table-source" => {
+            // Preset dropdown sends a bare `fltab:<stem>` reference; resolve
+            // it to the asset file before the shared path-based flow below.
+            let path_str = extract_path_from_payload(&payload);
+            let asset_stem = path_str.as_deref().and_then(|path_str| {
+                sequencer::effects::filter_table_asset::decode_asset_ref(path_str)
+                    .map(str::to_string)
+            });
+            let path_str = match asset_stem {
+                Some(stem) => {
+                    let resolved =
+                        sequencer::effects::filter_table_asset::resolve_asset_path(&stem);
+                    if resolved.is_none() {
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Filter Table preset not found: {stem}"
+                        )));
+                    }
+                    resolved.map(|path| path.to_string_lossy().into_owned())
+                }
+                None => path_str,
+            };
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let track = extract_usize_from_payload(&payload, "track");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            // Optional explicit analysis mode; otherwise the recommendation
+            // decides and the stored reference records the chosen mode.
+            let requested_mode = extract_string_from_payload(&payload, "mode")
+                .and_then(|tag| sequencer::effects::filter_table::AnalysisMode::from_tag(&tag));
+            match (slot, path_str) {
+                (Some(slot), Some(path_str)) => {
+                    let path = Path::new(&path_str);
+                    let stem = path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or(path_str.as_str())
+                        .to_string();
+                    let reference = match requested_mode {
+                        Some(mode) => sequencer::effects::filter_table::encode_table_ref(&stem, mode),
+                        None => stem,
+                    };
+                    let result = if let Some(bus_idx) = bus {
+                        app.apply_recorded_bus_effect_value_mutation(
+                            bus_idx,
+                            slot,
+                            "Set bus Filter Table",
+                            "filter-table-source",
+                            |app| app.set_filter_table_source_bus(
+                                bus_idx,
+                                slot,
+                                path,
+                                &reference,
+                            ),
+                        )
+                    } else if let Some(track) = track {
+                        app::edit::apply_recorded_track_filter_table_mutation(
+                            &mut app,
+                            track,
+                            slot,
+                            path,
+                            &reference,
+                        )
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"))
+                    } else {
+                        Err("need a track or bus".to_string())
+                    };
+                    match result {
+                        Ok(()) => {
+                            queue_effect_panel_tree_invalidation(
+                                &ui_invalidations,
+                                track,
+                                bus,
+                            );
+                            let (sample_ref, mode) =
+                                sequencer::effects::filter_table::decode_table_ref(&reference);
+                            let mode_label = mode
+                                .map(|mode| format!(" ({})", mode.label()))
+                                .unwrap_or_default();
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Loaded Filter Table: {sample_ref}{mode_label}"
+                            )));
+                        }
+                        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                            "Error loading Filter Table: {error}"
+                        ))),
+                    }
+                }
+                _ => editor.handle_host_event(HostEvent::Status(
+                    "set-filter-table-source: need slot, path".to_string(),
+                )),
+            }
+        }
+        "set-filter-table-mode" => {
+            // Re-analyze the current source under a different mode. "next"
+            // cycles; any AnalysisMode tag selects that mode directly.
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let track = extract_usize_from_payload(&payload, "track");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            let mode_str = extract_string_from_payload(&payload, "mode");
+            let result = (|| -> Result<String, String> {
+                let slot = slot.ok_or_else(|| "need a slot".to_string())?;
+                let (sample_name, current_mode) = app
+                    .filter_table_source_info(track, bus, slot)
+                    .ok_or_else(|| "load an audio sample first".to_string())?;
+                if sequencer::effects::filter_table_asset::decode_asset_ref(&sample_name).is_some()
+                {
+                    return Err(
+                        "this table is a baked asset; analysis modes apply to audio sources"
+                            .to_string(),
+                    );
+                }
+                let mode = match mode_str.as_deref() {
+                    Some("next") | None => current_mode
+                        .map(sequencer::effects::filter_table::AnalysisMode::next)
+                        .unwrap_or(sequencer::effects::filter_table::AnalysisMode::Wavetable),
+                    Some(tag) => sequencer::effects::filter_table::AnalysisMode::from_tag(tag)
+                        .ok_or_else(|| format!("unknown analysis mode '{tag}'"))?,
+                };
+                let path = app
+                    .resolve_sample_path_by_name(&sample_name)
+                    .ok_or_else(|| format!("sample '{sample_name}' could not be resolved"))?;
+                let reference =
+                    sequencer::effects::filter_table::encode_table_ref(&sample_name, mode);
+                if let Some(bus_idx) = bus {
+                    app.apply_recorded_bus_effect_value_mutation(
+                        bus_idx,
+                        slot,
+                        "Set bus Filter Table mode",
+                        "filter-table-source",
+                        |app| {
+                            app.set_filter_table_source_bus(bus_idx, slot, &path, &reference)
+                        },
+                    )?;
+                } else if let Some(track) = track {
+                    app::edit::apply_recorded_track_filter_table_mutation(
+                        &mut app,
+                        track,
+                        slot,
+                        &path,
+                        &reference,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))?;
+                } else {
+                    return Err("need a track or bus".to_string());
+                }
+                Ok(format!("Filter Table mode: {}", mode.label()))
+            })();
+            match result {
+                Ok(message) => {
+                    queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
+                    editor.handle_host_event(HostEvent::Status(message));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Error switching Filter Table mode: {error}"
+                ))),
+            }
+        }
+        "set-filter-table-engine" => {
+            // Swap the DSP engine (spectral STFT vs causal min-phase FIR) for
+            // a live Filter Table slot. "toggle" flips; an engine tag selects
+            // directly. Recorded as a chain mutation so undo/redo rebuild the
+            // node from the retained per-engine source; PDC follows via the
+            // per-frame latency refresh.
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let track = extract_usize_from_payload(&payload, "track");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            let engine_str = extract_string_from_payload(&payload, "engine");
+            let result = (|| -> Result<String, String> {
+                let slot = slot.ok_or_else(|| "need a slot".to_string())?;
+                let node_id = if let Some(bus_idx) = bus {
+                    app.buses
+                        .get(bus_idx)
+                        .and_then(|bus| bus.effect_slots.get(slot))
+                        .map(|state| state.node_id as i32)
+                } else if let Some(track) = track {
+                    app.state
+                        .pattern
+                        .effect_chains
+                        .get(track)
+                        .and_then(|chain| chain.get(slot))
+                        .map(|state| state.node_id.load(std::sync::atomic::Ordering::Relaxed) as i32)
+                } else {
+                    None
+                }
+                .ok_or_else(|| "need a track or bus".to_string())?;
+                let current = sequencer::effects::filter_table::engine_for(node_id);
+                let engine = match engine_str.as_deref() {
+                    Some("toggle") | None => current.toggled(),
+                    Some(tag) => sequencer::effects::filter_table::TableEngine::from_tag(tag)
+                        .ok_or_else(|| format!("unknown engine '{tag}'"))?,
+                };
+                if engine == current {
+                    return Ok(format!("Filter Table engine: {}", engine.display_name()));
+                }
+                if let Some(bus_idx) = bus {
+                    app.apply_recorded_bus_effect_chain_mutation(
+                        bus_idx,
+                        "Set bus Filter Table engine",
+                        |app| app.set_bus_filter_table_engine(bus_idx, slot, engine),
+                    )?;
+                } else if let Some(track) = track {
+                    app.apply_recorded_track_effect_chain_mutation(
+                        track,
+                        "Set Filter Table engine",
+                        |app| app.set_track_filter_table_engine(track, slot, engine),
+                    )?;
+                }
+                Ok(format!("Filter Table engine: {}", engine.display_name()))
+            })();
+            match result {
+                Ok(message) => {
+                    queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
+                    editor.handle_host_event(HostEvent::Status(message));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Error switching Filter Table engine: {error}"
+                ))),
+            }
+        }
+        // ---- Filter Table response editor (eseq-dtx.8) ----------------
+        // All arms delegate to the App session methods; the editor's own
+        // undo/redo is the document history, while save commits through
+        // the recorded-mutation path like any other table load. Band drag
+        // :change events preview without touching history or the panel
+        // value (the widget renders its own live drag); every other arm
+        // rebuilds the effects value so the panel reflects session state.
+        "filter-table-editor-open" => {
+            use sequencer::effects::filter_table_editor::EditorTarget;
+            let bus = extract_usize_from_payload(&payload, "bus");
+            let track = extract_usize_from_payload(&payload, "track");
+            let slot = extract_usize_from_payload(&payload, "slot");
+            let result = (|| -> Result<(), String> {
+                let slot = slot.ok_or_else(|| "need a slot".to_string())?;
+                let target = if let Some(bus) = bus {
+                    EditorTarget::Bus { bus, slot }
+                } else if let Some(track) = track {
+                    EditorTarget::Track { track, slot }
+                } else {
+                    return Err("need a track or bus".to_string());
+                };
+                app.open_filter_table_editor(target)
+            })();
+            match result {
+                Ok(()) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, None);
+                    editor.handle_host_event(HostEvent::Status(
+                        "Filter Table editor open".to_string(),
+                    ));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Error opening Filter Table editor: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-close" => {
+            // Closing drops the session, so the panel to rebuild has to be
+            // resolved while it is still there.
+            let target = sequencer::effects::filter_table_editor::session_ui_state()
+                .map(|ui| ui.target);
+            match app.close_filter_table_editor() {
+                Ok(()) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, target);
+                    editor.handle_host_event(HostEvent::Status(
+                        "Filter Table editor closed".to_string(),
+                    ));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Error closing Filter Table editor: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-op" => {
+            let result = filter_table_editor_op_from_payload(&payload)
+                .and_then(|op| app.filter_table_editor_apply_op(op, false));
+            match result {
+                Ok(()) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Filter Table edit failed: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-band" => {
+            use sequencer::effects::filter_table_editor as fte;
+            let phase =
+                extract_string_from_payload(&payload, "phase").unwrap_or_default();
+            let result = (|| -> Result<bool, String> {
+                let ui = fte::session_ui_state()
+                    .ok_or_else(|| "no Filter Table editor open".to_string())?;
+                let node = parametric_node_from_band_payload(&payload)?;
+                let op = fte::EditOp::Parametric {
+                    frame_start: 0,
+                    frame_end: ui.frames - 1,
+                    node,
+                };
+                // The band handle renders from the newest applied op, so a drag
+                // on it replaces that op rather than stacking a second copy.
+                // Preview and commit must agree, or the audition during the
+                // drag is not the table the release lands on.
+                let replacing = ui.band.is_some();
+                if phase == "commit" {
+                    app.filter_table_editor_apply_op(op, replacing)?;
+                    Ok(true)
+                } else {
+                    app.filter_table_editor_preview_op(op, replacing)?;
+                    Ok(false)
+                }
+            })();
+            match result {
+                Ok(true) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
+                }
+                Ok(false) => {}
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Filter Table node edit failed: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-add-node" => {
+            use sequencer::effects::filter_table_editor as fte;
+            let result = (|| -> Result<(), String> {
+                let ui = fte::session_ui_state()
+                    .ok_or_else(|| "no Filter Table editor open".to_string())?;
+                let kind = extract_string_from_payload(&payload, "kind")
+                    .and_then(|tag| fte::ParametricKind::from_tag(&tag))
+                    .ok_or_else(|| "unknown node kind".to_string())?;
+                app.filter_table_editor_apply_op(
+                    fte::EditOp::Parametric {
+                        frame_start: 0,
+                        frame_end: ui.frames - 1,
+                        node: kind.default_node(),
+                    },
+                    false,
+                )
+            })();
+            match result {
+                Ok(()) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Filter Table node add failed: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-undo" | "filter-table-editor-redo" => {
+            match app.filter_table_editor_history(name == "filter-table-editor-redo") {
+                Ok(stepped) => {
+                    if stepped {
+                        refresh_filter_table_editor_panels(&ui_invalidations, None);
+                    }
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Filter Table editor history failed: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-frame" => {
+            let result = extract_usize_from_payload(&payload, "frame")
+                .ok_or_else(|| "need a frame".to_string())
+                .and_then(|frame| app.filter_table_editor_select_frame(frame));
+            match result {
+                Ok(()) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, None)
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Filter Table frame select failed: {error}"
+                ))),
+            }
+        }
+        "filter-table-editor-save" => {
+            let requested = extract_string_from_payload(&payload, "name");
+            match app.filter_table_editor_save(requested.as_deref()) {
+                Ok(stem) => {
+                    refresh_filter_table_editor_panels(&ui_invalidations, None);
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Saved Filter Table '{stem}' to filter-tables/"
+                    )));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                    "Filter Table save failed: {error}"
+                ))),
             }
         }
         "set-effect-param-batch" | "set-effect-plock-batch" => {
@@ -1772,4 +2169,150 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+/// Queue the panel-tree rebuild through the normal post-event invalidation
+/// pass. Directly writing `SEQ.effects` here leaves its Lisp subscribers
+/// pending; while transport is stopped there may be no other reactive delta
+/// to run that cycle, so controlled widgets retain their previous props.
+fn queue_effect_panel_tree_invalidation(
+    invalidations: &UiInvalidationQueue,
+    track: Option<usize>,
+    bus: Option<usize>,
+) {
+    if let Some(bus) = bus {
+        invalidations.push(UiInvalidation::BusFx {
+            bus,
+            change: BusFxInvalidation::PanelTree,
+        });
+    } else if let Some(track) = track {
+        invalidations.push(UiInvalidation::TrackFx {
+            track,
+            change: TrackFxInvalidation::PanelTree,
+        });
+    }
+}
+
+/// Rebuild the panel the active Filter Table editor session is displayed in,
+/// through the same queued invalidation every other fx mutation uses — a
+/// direct `SEQ.effects` write leaves the editor's controlled widgets (frame
+/// counter, undo/redo enablement, dirty marker, band handle) showing stale
+/// props whenever the gesture is the only reactive delta that cycle.
+///
+/// `target` is only needed by the close arm, which runs after the session is
+/// gone; every other arm can leave it `None` and be resolved from the live
+/// session.
+fn refresh_filter_table_editor_panels(
+    invalidations: &UiInvalidationQueue,
+    target: Option<sequencer::effects::filter_table_editor::EditorTarget>,
+) {
+    use sequencer::effects::filter_table_editor::{session_ui_state, EditorTarget};
+    let target = target.or_else(|| session_ui_state().map(|ui| ui.target));
+    match target {
+        Some(EditorTarget::Track { track, .. }) => {
+            queue_effect_panel_tree_invalidation(invalidations, Some(track), None);
+        }
+        Some(EditorTarget::Bus { bus, .. }) => {
+            queue_effect_panel_tree_invalidation(invalidations, None, Some(bus));
+        }
+        None => {}
+    }
+}
+
+/// Translate a `filter-table-editor-band` payload (response-curve-editor
+/// axes: freq = harmonic-bin position, q = 2/width) into a parametric node.
+fn parametric_node_from_band_payload(
+    payload: &Value,
+) -> Result<sequencer::effects::filter_table_editor::ParametricNode, String> {
+    use sequencer::effects::filter_table::REFERENCE_HARMONIC;
+    use sequencer::effects::filter_table_editor::ParametricKind;
+    let kind = extract_string_from_payload(payload, "kind")
+        .and_then(|tag| ParametricKind::from_tag(&tag))
+        .ok_or_else(|| "unknown node kind".to_string())?;
+    let freq = extract_f32_from_payload(payload, "freq")
+        .ok_or_else(|| "need freq".to_string())?
+        .clamp(1.0, 1024.0);
+    let gain_db = extract_f32_from_payload(payload, "gain")
+        .ok_or_else(|| "need gain".to_string())?;
+    let q = extract_f32_from_payload(payload, "q")
+        .unwrap_or(2.0)
+        .clamp(0.25, 16.0);
+    Ok(sequencer::effects::filter_table_editor::ParametricNode {
+        kind,
+        center_oct: (freq / REFERENCE_HARMONIC as f32).log2(),
+        width_oct: 2.0 / q,
+        gain_db,
+    })
+}
+
+/// Translate a `filter-table-editor-op` payload into an [`EditOp`]. Ops act
+/// on the session's selected frame (frame ops) or on an explicit/implied
+/// frame range (`:frame-start`/`:frame-end`, defaulting to every frame).
+fn filter_table_editor_op_from_payload(
+    payload: &Value,
+) -> Result<sequencer::effects::filter_table_editor::EditOp, String> {
+    use sequencer::effects::filter_table_editor::{session_ui_state, DrawPoint, EditOp};
+    let ui = session_ui_state().ok_or_else(|| "no Filter Table editor open".to_string())?;
+    let kind = extract_string_from_payload(payload, "kind")
+        .ok_or_else(|| "need an op kind".to_string())?;
+    let selected = ui.selected_frame;
+    let frame_start = extract_usize_from_payload(payload, "frame-start").unwrap_or(0);
+    let frame_end =
+        extract_usize_from_payload(payload, "frame-end").unwrap_or(ui.frames.saturating_sub(1));
+    let value = extract_f32_from_payload(payload, "value");
+    Ok(match kind.as_str() {
+        "smooth-spectral" => EditOp::SmoothSpectral {
+            frame_start,
+            frame_end,
+            radius: extract_usize_from_payload(payload, "radius").unwrap_or(4),
+        },
+        "smooth-temporal" => EditOp::SmoothTemporal {
+            frame_start,
+            frame_end,
+            radius: extract_usize_from_payload(payload, "radius").unwrap_or(2),
+        },
+        "normalize" => EditOp::Normalize {
+            frame_start,
+            frame_end,
+        },
+        "tilt" => EditOp::Tilt {
+            frame_start,
+            frame_end,
+            db_per_octave: value.unwrap_or(3.0),
+        },
+        "shift" => EditOp::ShiftOctaves {
+            frame_start,
+            frame_end,
+            octaves: value.unwrap_or(0.5),
+        },
+        "stretch" => EditOp::StretchOctaves {
+            frame_start,
+            frame_end,
+            factor: value.unwrap_or(1.25),
+        },
+        "insert-frame" => EditOp::InsertFrame { at: selected },
+        "duplicate-frame" => EditOp::DuplicateFrame { at: selected },
+        "delete-frame" => EditOp::DeleteFrame { at: selected },
+        "move-frame" => EditOp::MoveFrame {
+            from: selected,
+            to: extract_usize_from_payload(payload, "to")
+                .ok_or_else(|| "need a destination frame".to_string())?,
+        },
+        "interpolate" => EditOp::InterpolateFrames {
+            start: extract_usize_from_payload(payload, "start").unwrap_or(0),
+            end: extract_usize_from_payload(payload, "end")
+                .unwrap_or(ui.frames.saturating_sub(1)),
+        },
+        "draw" => {
+            let points_json = extract_string_from_payload(payload, "points-json")
+                .ok_or_else(|| "draw needs points-json".to_string())?;
+            let points: Vec<DrawPoint> = serde_json::from_str(&points_json)
+                .map_err(|error| format!("draw points are malformed: {error}"))?;
+            EditOp::Draw {
+                frame: extract_usize_from_payload(payload, "frame").unwrap_or(selected),
+                points,
+            }
+        }
+        other => return Err(format!("unknown Filter Table editor op '{other}'")),
+    })
 }

@@ -175,6 +175,7 @@ impl SequencerState {
                     crate::record_quantize::RecordQuantize::DEFAULT as u32,
                 ),
                 record_latency_seconds: AtomicU32::new(0.0_f32.to_bits()),
+                pdc_latency_seconds: AtomicU32::new(0.0_f32.to_bits()),
                 record_clock: RecordClockAnchor::new(),
                 metronome_enabled: AtomicBool::new(false),
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),

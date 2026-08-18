@@ -838,9 +838,33 @@ pub(super) fn build_rack_slot_effect_value(
         "builtin".to_string(),
         value_cell(Value::Bool(
             sequencer::effects::EffectDescriptor::builtin_insert(&descriptor.name).is_some()
-                || sequencer::effects::conv_reverb::is_dgen_builtin(&descriptor.name),
+                || sequencer::effects::dgen_builtin::contains(&descriptor.name),
         )),
     );
+    if descriptor.name == sequencer::effects::filter_table::NAME {
+        let node_id = snapshot.node_id as i32;
+        insert_string_prop(
+            &mut effect,
+            "table-name",
+            sequencer::effects::filter_table::table_name_for(node_id)
+                .unwrap_or_else(|| "No table".to_string()),
+        );
+        if let Some(mode_label) = sequencer::effects::filter_table::table_ref_for(node_id)
+            .and_then(|reference| {
+                sequencer::effects::filter_table::decode_table_ref(&reference).1
+            })
+            .map(|mode| mode.label().to_string())
+        {
+            insert_string_prop(&mut effect, "table-mode", mode_label);
+        }
+        if sequencer::effects::filter_table::prepared_table_for(node_id).is_some() {
+            insert_string_prop(
+                &mut effect,
+                "table-data-key",
+                sequencer::effects::filter_table::visualization_key(node_id),
+            );
+        }
+    }
     effect.insert("params".to_string(), value_cell(Value::List(params)));
     effect.insert(
         "modulators".to_string(),

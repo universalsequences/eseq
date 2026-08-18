@@ -419,6 +419,80 @@ fn combined_response_db(bands: &[Eq8Band], frequency: f32, sample_rate: f32) -> 
     20.0 * magnitude.log10()
 }
 
+fn prop_string(props: &HashMap<String, Value>, key: &str) -> Option<String> {
+    match props.get(key) {
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+struct TableResponse {
+    bank: std::sync::Arc<super::wavetable_viewer::WavetableBank>,
+    frame_pos: f32,
+    cutoff: f32,
+    exponent: f32,
+    makeup: f32,
+}
+
+impl TableResponse {
+    fn sample_curve(&self, harmonic_pos: f32) -> f32 {
+        let frames = self.bank.wave_count.max(1);
+        let frame_pos = self.frame_pos.clamp(0.0, (frames - 1) as f32);
+        let frame0 = frame_pos.floor() as usize;
+        let frame1 = (frame0 + 1).min(frames - 1);
+        let frame_fraction = frame_pos - frame0 as f32;
+        let bin_pos = harmonic_pos.clamp(0.0, (self.bank.frame_len - 1) as f32);
+        let bin0 = bin_pos.floor() as usize;
+        let bin1 = (bin0 + 1).min(self.bank.frame_len - 1);
+        let bin_fraction = bin_pos - bin0 as f32;
+        let row_sample = |frame: usize| {
+            let base = frame * self.bank.frame_len;
+            self.bank.data[base + bin0]
+                + (self.bank.data[base + bin1] - self.bank.data[base + bin0]) * bin_fraction
+        };
+        let value = row_sample(frame0)
+            + (row_sample(frame1) - row_sample(frame0)) * frame_fraction;
+        value.max(0.0001).powf(self.exponent) * self.makeup
+    }
+
+    fn magnitude_at(&self, frequency: f32) -> f32 {
+        self.sample_curve(24.0 * frequency / self.cutoff.max(1.0))
+    }
+}
+
+fn table_response(props: &HashMap<String, Value>) -> Option<TableResponse> {
+    let key = prop_string(props, "response-data-key")?;
+    let bank = super::wavetable_viewer::published_bank(&key)?;
+    if bank.frame_len < 2 || bank.wave_count == 0 {
+        return None;
+    }
+    let frame = super::get_f32_prop(props, "response-frame", 0.0).clamp(0.0, 1.0);
+    let cutoff = super::get_f32_prop(props, "response-cutoff", 1_000.0).max(1.0);
+    let resonance = super::get_f32_prop(props, "response-resonance", 0.0).clamp(0.0, 1.0);
+    let exponent = 1.0 + 3.0 * resonance;
+    let frame_pos = frame * (bank.wave_count - 1) as f32;
+    let mut response = TableResponse {
+        bank,
+        frame_pos,
+        cutoff,
+        exponent,
+        makeup: 1.0,
+    };
+    let sample_rate = super::get_f32_prop(props, "sample-rate", DEFAULT_SAMPLE_RATE).max(1.0);
+    let bins = response.bank.frame_len;
+    let mean_square = (0..bins)
+        .map(|bin| {
+            let frequency = bin as f32 * (sample_rate * 0.5) / (bins - 1) as f32;
+            let value = response.magnitude_at(frequency);
+            value * value
+        })
+        .sum::<f32>()
+        / bins as f32;
+    // Dual-maintained with the +18 dB makeup cap in filter_table_dsp.lisp.
+    response.makeup = (1.0 / (mean_square + 0.000001).sqrt()).min(8.0);
+    Some(response)
+}
+
 fn response_y_t(db: f32, min_db: f32, max_db: f32) -> f32 {
     ((db - min_db) / (max_db - min_db).max(0.001)).clamp(0.0, 1.0)
 }
@@ -449,6 +523,9 @@ impl WidgetDefinition for Eq8EditorWidget {
             "smoothing",
             "freq-min",
             "freq-max",
+            "response-frame",
+            "response-cutoff",
+            "response-resonance",
         ]
     }
 
@@ -625,6 +702,7 @@ impl WidgetDefinition for Eq8EditorWidget {
         _viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
         let mut bands = prop_bands(&node.props);
+        let table_response = table_response(&node.props);
         if let Some(live) = live_band(node.widget_id) {
             for band in &mut bands {
                 if band.id == live.band_id {
@@ -721,10 +799,15 @@ impl WidgetDefinition for Eq8EditorWidget {
             }
         }
 
-        for idx in 0..RESPONSE_POINTS {
-            let x_t = idx as f32 / (RESPONSE_POINTS - 1) as f32;
-            let freq = freq_from_t(x_t, DEFAULT_FREQ_MIN, DEFAULT_FREQ_MAX);
-            let db = combined_response_db(&bands, freq, sample_rate).clamp(min_db, max_db);
+        let response_points = if table_response.is_some() { 256 } else { RESPONSE_POINTS };
+        for idx in 0..response_points {
+            let x_t = idx as f32 / (response_points - 1) as f32;
+            let freq = freq_from_t(x_t, min_hz, max_hz);
+            let db = table_response
+                .as_ref()
+                .map(|response| 20.0 * response.magnitude_at(freq).max(1.0e-9).log10())
+                .unwrap_or_else(|| combined_response_db(&bands, freq, sample_rate))
+                .clamp(min_db, max_db);
             let y_t = response_y_t(db, min_db, max_db);
             primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
                 center: plot_point(node.rect, x_t, y_t),
@@ -734,7 +817,8 @@ impl WidgetDefinition for Eq8EditorWidget {
             }));
         }
 
-        for band in &bands {
+        if table_response.is_none() {
+          for band in &bands {
             let x_t = freq_to_t(band.freq, band.freq_min, band.freq_max);
             let y_t = band_y_t(band);
             let center = plot_point(node.rect, x_t, y_t);
@@ -759,6 +843,7 @@ impl WidgetDefinition for Eq8EditorWidget {
                     visible_half: MetalCircleVisibleHalf::Full,
                 }));
             }
+          }
         }
 
         primitives
@@ -960,6 +1045,30 @@ mod tests {
         boosted[0].gain = 6.0;
         let db = combined_response_db(&boosted, 1_000.0, DEFAULT_SAMPLE_RATE);
         assert!(db > 5.5);
+    }
+
+    #[test]
+    fn table_response_cutoff_translates_the_curve_in_frequency() {
+        let mut row = vec![0.001; 33];
+        row[24] = 1.0;
+        let key = "eq8-table-response-cutoff-test";
+        assert!(crate::widget_render::wavetable_viewer::publish_bank(
+            key,
+            row.len(),
+            std::sync::Arc::new(row),
+        ));
+        let props = |cutoff: f64| {
+            HashMap::from([
+                ("response-data-key".to_string(), Value::String(key.to_string())),
+                ("response-frame".to_string(), Value::Number(0.0)),
+                ("response-cutoff".to_string(), Value::Number(cutoff)),
+                ("response-resonance".to_string(), Value::Number(0.0)),
+            ])
+        };
+        let low = table_response(&props(100.0)).expect("low-cutoff response");
+        let high = table_response(&props(200.0)).expect("high-cutoff response");
+        assert!(low.magnitude_at(100.0) > low.magnitude_at(200.0) * 100.0);
+        assert!(high.magnitude_at(200.0) > high.magnitude_at(100.0) * 100.0);
     }
 
     #[cfg(target_os = "macos")]

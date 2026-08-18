@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
@@ -22,6 +23,83 @@ pub struct WavetableBank {
     pub frame_len: usize,
     pub wave_count: usize,
     pub data: Arc<Vec<f32>>,
+    pub revision: u64,
+}
+
+fn live_banks() -> &'static Mutex<HashMap<String, Arc<WavetableBank>>> {
+    static BANKS: OnceLock<Mutex<HashMap<String, Arc<WavetableBank>>>> = OnceLock::new();
+    BANKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Publish frame-major data for GPU widgets without serializing large banks
+/// through Lisp values. Re-publishing the same Arc is free; replacing it bumps
+/// the revision so the Metal buffer is updated in place.
+pub fn publish_bank(key: impl Into<String>, frame_len: usize, data: Arc<Vec<f32>>) -> bool {
+    if frame_len < 2 || data.len() < frame_len || data.len() % frame_len != 0 {
+        return false;
+    }
+    let key = key.into();
+    if let Ok(mut retired) = retired_bank_keys().lock() {
+        // Republished before the renderer drained the retirement: keep the
+        // GPU buffer instead of evicting one that is live again.
+        retired.remove(&key);
+    }
+    let Ok(mut banks) = live_banks().lock() else {
+        return false;
+    };
+    if banks
+        .get(&key)
+        .is_some_and(|bank| bank.frame_len == frame_len && Arc::ptr_eq(&bank.data, &data))
+    {
+        return true;
+    }
+    static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+    let revision = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
+    banks.insert(
+        key,
+        Arc::new(WavetableBank {
+            frame_len,
+            wave_count: data.len() / frame_len,
+            data,
+            revision,
+        }),
+    );
+    true
+}
+
+/// Keys unpublished since the renderer last drained this set. GPU backends
+/// cache one buffer per bank key; without this they would never learn that a
+/// key is gone, and per-node keys (`filter-table:{node_id}:…`) never repeat,
+/// so every device rebuild would strand a buffer.
+fn retired_bank_keys() -> &'static Mutex<HashSet<String>> {
+    static RETIRED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    RETIRED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub fn remove_published_bank(key: &str) {
+    if let Ok(mut banks) = live_banks().lock() {
+        banks.remove(key);
+    }
+    if let Ok(mut retired) = retired_bank_keys().lock() {
+        retired.insert(key.to_string());
+    }
+}
+
+/// Drain the keys unpublished since the last call, for a renderer to evict
+/// from its GPU cache. Single-consumer: whoever drains owns the notification.
+/// Evicting is always safe — a key that came back is simply re-uploaded on
+/// its next draw.
+pub fn take_retired_bank_keys() -> Vec<String> {
+    retired_bank_keys()
+        .lock()
+        .map(|mut retired| retired.drain().collect())
+        .unwrap_or_default()
+}
+
+/// Pub so hosts can assert that what a widget displays is exactly what they
+/// published (the Filter Table editor's displayed-vs-runtime checks).
+pub fn published_bank(key: &str) -> Option<Arc<WavetableBank>> {
+    live_banks().lock().ok()?.get(key).cloned()
 }
 
 fn bank_cache() -> &'static Mutex<HashMap<String, Option<Arc<WavetableBank>>>> {
@@ -70,6 +148,7 @@ fn read_bank_file(path: &str) -> Option<WavetableBank> {
         frame_len,
         wave_count,
         data: Arc::new(data),
+        revision: 0,
     })
 }
 
@@ -121,7 +200,7 @@ impl WidgetDefinition for WavetableViewerWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["set", "wave", "warp", "fold"]
+        &["set", "wave", "warp", "fold", "cutoff", "resonance"]
     }
 
     fn measure(
@@ -183,10 +262,17 @@ impl WidgetDefinition for WavetableViewerWidget {
             color: bg_color,
         })];
 
-        let Some(path) = prop_str(&node.props, "file") else {
-            return primitives;
-        };
-        let Some(bank) = load_bank(&path) else {
+        let (bank_key, bank) = if let Some(key) = prop_str(&node.props, "data-key") {
+            let Some(bank) = published_bank(&key) else {
+                return primitives;
+            };
+            (key, bank)
+        } else if let Some(path) = prop_str(&node.props, "file") {
+            let Some(bank) = load_bank(&path) else {
+                return primitives;
+            };
+            (path, bank)
+        } else {
             return primitives;
         };
         if bank.wave_count == 0 {
@@ -200,7 +286,10 @@ impl WidgetDefinition for WavetableViewerWidget {
         if waves_in_set == 0 {
             return primitives;
         }
-        let wave_pos = prop_num(&node.props, "wave", 0.0);
+        let mut wave_pos = prop_num(&node.props, "wave", 0.0);
+        if matches!(node.props.get("wave-normalized"), Some(Value::Bool(true))) {
+            wave_pos *= waves_in_set.saturating_sub(1) as f32;
+        }
         let warp = prop_num(&node.props, "warp", 0.0).clamp(0.0, 1.0);
         let fold = prop_num(&node.props, "fold", 0.0).clamp(0.0, 1.0);
 
@@ -212,16 +301,19 @@ impl WidgetDefinition for WavetableViewerWidget {
             Color::rgba(0.46, 0.46, 0.48, 0.55),
         );
 
+        let magnitude = matches!(node.props.get("domain"), Some(Value::Keyword(value)) if value == "magnitude");
         primitives.push(MetalPrimitive::Wavetable(MetalWavetablePrimitive {
             rect: node.rect,
-            bank_key: path,
+            bank_key,
             data: bank.data.clone(),
+            data_revision: bank.revision,
             frame_len: bank.frame_len as u32,
             set_base: (set * waves_per_set) as u32,
             waves_in_set: waves_in_set as u32,
             wave_pos: wave_pos.clamp(0.0, (waves_in_set - 1) as f32),
             warp,
             fold,
+            domain: if magnitude { 1 } else { 0 },
             selected_color,
             inactive_color,
             bg_color,
@@ -233,6 +325,43 @@ impl WidgetDefinition for WavetableViewerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_banks_replace_data_with_a_new_revision() {
+        let key = "wavetable-viewer-published-bank-test";
+        let first = Arc::new(vec![0.0, 1.0, 0.0, -1.0]);
+        assert!(publish_bank(key, 4, first.clone()));
+        let initial = published_bank(key).expect("published bank");
+        assert!(Arc::ptr_eq(&initial.data, &first));
+        assert!(publish_bank(key, 4, first));
+        assert_eq!(published_bank(key).unwrap().revision, initial.revision);
+        assert!(publish_bank(key, 4, Arc::new(vec![1.0, 0.0, -1.0, 0.0])));
+        assert!(published_bank(key).unwrap().revision > initial.revision);
+        remove_published_bank(key);
+        assert!(published_bank(key).is_none());
+    }
+
+    #[test]
+    fn unpublishing_a_bank_retires_its_key_for_the_renderer() {
+        // Per-node keys never repeat, so a renderer that is never told a key
+        // is gone keeps its GPU buffer alive for the life of the process.
+        let key = "wavetable-viewer-retired-key-test";
+        let data = Arc::new(vec![0.0, 1.0, 0.0, -1.0]);
+        assert!(publish_bank(key, 4, data.clone()));
+        remove_published_bank(key);
+        assert!(take_retired_bank_keys().contains(&key.to_string()));
+        assert!(
+            !take_retired_bank_keys().contains(&key.to_string()),
+            "draining hands each retirement out once"
+        );
+        // Republishing before the drain keeps the live buffer.
+        assert!(publish_bank(key, 4, data.clone()));
+        remove_published_bank(key);
+        assert!(publish_bank(key, 4, data));
+        assert!(!take_retired_bank_keys().contains(&key.to_string()));
+        remove_published_bank(key);
+        take_retired_bank_keys();
+    }
 
     #[test]
     fn warp_zero_is_identity() {

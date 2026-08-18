@@ -16,6 +16,23 @@ natives are the internal hooks `def-accumulator`/`def-midi-fx`/
 
 use super::super::*;
 
+pub const DEF_SEQUENCER_SIGNATURE: &str =
+    "(def-sequencer name :resolution timebase :res timebase :tick callback :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
+pub const DEF_SEQUENCER_DOCS: &str =
+    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :init is reserved for generator initialization.";
+pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
+    ":resolution", ":res", ":tick", ":init", ":shape", ":energy-decay", ":reset-every",
+    ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
+];
+pub const SEQ_EMIT_SIGNATURE: &str =
+    "(seq-emit :track t :at offset :vel v :note n :dur beats :speed ratio :pan amount :chop count :chord (...) :quantize grid)";
+pub const SEQ_EMIT_DOCS: &str =
+    "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples. Long and abbreviated parameter names are both accepted.";
+pub const SEQ_EMIT_KEYWORDS: &[&str] = &[
+    ":track", ":at", ":vel", ":velocity", ":note", ":transpose", ":trn", ":dur",
+    ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q",
+];
+
 pub(in crate::lisp_host) fn register_sequencer_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -568,25 +585,27 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     // works directly, with the :tick closure usable on whichever VM evaluates the form.
     // `__register-sequencer` is kept as the lower-level alias.
     let sequencers_for_register = Arc::clone(&sequencers);
-    runtime.register_native_with_docs(
+    runtime.register_native_with_docs_and_keywords(
         "def-sequencer",
-        "(def-sequencer name :resolution :16 :tick (lambda () (seq-emit ...)))",
-        "Define a self-clocked lisp generator. The :tick closure runs once per :resolution boundary and emits events via seq-emit.",
+        DEF_SEQUENCER_SIGNATURE,
+        DEF_SEQUENCER_DOCS,
+        DEF_SEQUENCER_KEYWORDS.iter().copied(),
         move |args, _ctx| register_sequencer_impl(&args, &sequencers_for_register),
     );
     let sequencers_for_register_alias = Arc::clone(&sequencers);
     runtime.register_native_with_docs(
         "__register-sequencer",
-        "(__register-sequencer name :resolution :16 :tick (lambda () ...))",
+        "(__register-sequencer name :resolution timebase :res timebase :tick callback :init callback)",
         "Lower-level alias for def-sequencer.",
         move |args, _ctx| register_sequencer_impl(&args, &sequencers_for_register_alias),
     );
 
     let generator_tick_for_emit = Arc::clone(&generator_tick);
-    runtime.register_native_with_docs(
+    runtime.register_native_with_docs_and_keywords(
         "seq-emit",
-        "(seq-emit :track t :at :now :vel v :note n :dur (beats :8) :chord (list ...) :quantize :16)",
-        "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples.",
+        SEQ_EMIT_SIGNATURE,
+        SEQ_EMIT_DOCS,
+        SEQ_EMIT_KEYWORDS.iter().copied(),
         move |args, _ctx| {
             let mut guard = generator_tick_for_emit
                 .lock()

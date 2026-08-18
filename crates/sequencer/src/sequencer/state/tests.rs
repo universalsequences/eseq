@@ -139,6 +139,7 @@
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             tensor_params: Vec::new(),
             ir: None,
+            table: None,
         }
     }
 
@@ -2670,6 +2671,7 @@
                     transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
                     tensor_params: Vec::new(),
                     ir: None,
+                    table: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],

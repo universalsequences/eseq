@@ -388,6 +388,7 @@
         for track in 0..track_count {
             let nodes = TrackNodeIds {
                 sampler_ids: Vec::new(),
+                pdc_id: 0,
                 sampler_gatepitch_ids: Vec::new(),
                 sampler_modulator_ids: Vec::new(),
                 voice_sum_id: graph.add_gain(1.0, &format!("track_{track}_voice_sum")),

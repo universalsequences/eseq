@@ -234,7 +234,12 @@ pub fn completion_match(
     let (start_col, prefix) = symbol_prefix(line, cursor_col)?;
     let prefix_lower = prefix.to_ascii_lowercase();
     let mut seen = HashSet::new();
-    let mut items = completion_candidates(mode, runtime_symbols, buffer)
+    let candidates = if prefix.starts_with(':') {
+        contextual_keyword_candidates(buffer, start_col, runtime_metadata)?
+    } else {
+        completion_candidates(mode, runtime_symbols, buffer)
+    };
+    let mut items = candidates
         .into_iter()
         .filter(|item| {
             let label_lower = item.label.to_ascii_lowercase();
@@ -382,6 +387,162 @@ fn classify_token(
         return Some(TokenClass::Builtin);
     }
     None
+}
+
+fn contextual_keyword_candidates(
+    buffer: &Buffer,
+    prefix_start_col: usize,
+    runtime_metadata: &HashMap<String, SymbolMetadata>,
+) -> Option<Vec<CompletionItem>> {
+    let (callee, expects_keyword) = enclosing_form_context(buffer, prefix_start_col)?;
+    if !expects_keyword {
+        return None;
+    }
+    let metadata = runtime_metadata.get(&callee)?;
+    let mut seen = HashSet::new();
+    let items = metadata
+        .keyword_args
+        .iter()
+        .filter(|keyword| seen.insert((*keyword).clone()))
+        .map(|keyword| CompletionItem {
+            label: keyword.clone(),
+            category: Some(format!("{callee} keyword")),
+            signature: Some(metadata.signature.clone()),
+            docs: Some(format!("Keyword argument for {callee}.\n{}", metadata.docs)),
+        })
+        .collect::<Vec<_>>();
+    (!items.is_empty()).then_some(items)
+}
+
+/// Return the innermost open form's callee and whether the cursor is at a
+/// keyword-name position. The scanner deliberately considers only top-level
+/// arguments in that form, so nested callback/list expressions do not disturb
+/// keyword/value pairing.
+fn enclosing_form_context(buffer: &Buffer, prefix_start_col: usize) -> Option<(String, bool)> {
+    let mut source = String::new();
+    for (row, line) in buffer.lines.iter().enumerate().take(buffer.cursor.0 + 1) {
+        if row == buffer.cursor.0 {
+            source.push_str(&line[..prefix_start_col.min(line.len())]);
+        } else {
+            source.push_str(line);
+            source.push('\n');
+        }
+    }
+
+    let bytes = source.as_bytes();
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b';' | b'#' => in_comment = true,
+            b'"' => in_string = true,
+            b'(' => stack.push(index),
+            b')' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let open = *stack.last()?;
+    let tokens = top_level_form_tokens(&source[open + 1..]);
+    let callee = tokens.first()?.clone();
+
+    let mut expects_keyword = true;
+    for token in tokens.iter().skip(1) {
+        if expects_keyword && token.starts_with(':') {
+            expects_keyword = false;
+        } else if !expects_keyword {
+            expects_keyword = true;
+        }
+    }
+    Some((callee, expects_keyword))
+}
+
+fn top_level_form_tokens(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut token_start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let finish_token = |end: usize, token_start: &mut Option<usize>, tokens: &mut Vec<String>| {
+        if let Some(start) = token_start.take() {
+            tokens.push(source[start..end].to_string());
+        }
+    };
+
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+                if depth == 0 {
+                    finish_token(index + 1, &mut token_start, &mut tokens);
+                }
+            }
+            continue;
+        }
+        match byte {
+            b';' | b'#' if depth == 0 => {
+                finish_token(index, &mut token_start, &mut tokens);
+                in_comment = true;
+            }
+            b'"' => {
+                if depth == 0 && token_start.is_none() {
+                    token_start = Some(index);
+                }
+                in_string = true;
+            }
+            b'(' | b'[' | b'{' => {
+                if depth == 0 {
+                    finish_token(index, &mut token_start, &mut tokens);
+                    token_start = Some(index);
+                }
+                depth += 1;
+            }
+            b')' | b']' | b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    finish_token(index + 1, &mut token_start, &mut tokens);
+                }
+            }
+            byte if depth == 0 && (byte as char).is_whitespace() => {
+                finish_token(index, &mut token_start, &mut tokens);
+            }
+            _ if depth == 0 && token_start.is_none() => token_start = Some(index),
+            _ => {}
+        }
+    }
+    finish_token(source.len(), &mut token_start, &mut tokens);
+    tokens
 }
 
 fn completion_candidates(
@@ -654,6 +815,115 @@ mod tests {
     }
 
     #[test]
+    fn completion_suggests_contextual_keywords_from_callee_metadata() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(box :backg");
+        buffer.cursor = (0, buffer.lines[0].len());
+        let metadata = HashMap::from([(
+            "box".to_string(),
+            SymbolMetadata {
+                signature: "(box :background color :border-color color :padding cells child ...)"
+                    .to_string(),
+                docs: "Layout container.".to_string(),
+                keyword_args: vec![
+                    ":background".to_string(),
+                    ":border-color".to_string(),
+                    ":padding".to_string(),
+                ],
+            },
+        )]);
+
+        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+
+        assert_eq!(result.start_col, 5);
+        assert_eq!(
+            result.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>(),
+            vec![":background"]
+        );
+    }
+
+    #[test]
+    fn bare_colon_lists_all_contextual_keywords() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(def-sequencer \"pulse\" :");
+        buffer.cursor = (0, buffer.lines[0].len());
+        let metadata = HashMap::from([(
+            "def-sequencer".to_string(),
+            SymbolMetadata {
+                signature: "(def-sequencer name :resolution value :tick callback :init callback)"
+                    .to_string(),
+                docs: "Define a sequencer.".to_string(),
+                keyword_args: vec![
+                    ":resolution".to_string(),
+                    ":tick".to_string(),
+                    ":init".to_string(),
+                ],
+            },
+        )]);
+
+        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+        let labels = result.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(labels, vec![":init", ":resolution", ":tick"]);
+    }
+
+    #[test]
+    fn keyword_valued_signature_examples_are_not_treated_as_argument_names() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(seq-emit :");
+        buffer.cursor = (0, buffer.lines[0].len());
+        let metadata = HashMap::from([(
+            "seq-emit".to_string(),
+            SymbolMetadata {
+                signature: "(seq-emit :track track :at :now)".to_string(),
+                docs: "Emit an event.".to_string(),
+                keyword_args: vec![":track".to_string(), ":at".to_string()],
+            },
+        )]);
+
+        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+        let labels = result.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(labels, vec![":at", ":track"]);
+    }
+
+    #[test]
+    fn contextual_keywords_are_not_offered_in_a_keyword_value_position() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(box :background :");
+        buffer.cursor = (0, buffer.lines[0].len());
+        let metadata = HashMap::from([(
+            "box".to_string(),
+            SymbolMetadata {
+                signature: "(box :background color :padding cells child ...)".to_string(),
+                docs: "Layout container.".to_string(),
+                keyword_args: vec![":background".to_string(), ":padding".to_string()],
+            },
+        )]);
+
+        assert!(completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).is_none());
+    }
+
+    #[test]
+    fn contextual_keyword_pairing_ignores_nested_forms() {
+        let mut buffer = Buffer::from_text(
+            0,
+            "*test*",
+            "(box :on-click (lambda (x) (do x))\n  :backg",
+        );
+        buffer.cursor = (1, buffer.lines[1].len());
+        let metadata = HashMap::from([(
+            "box".to_string(),
+            SymbolMetadata {
+                signature: "(box :background color :on-click callback child ...)".to_string(),
+                docs: "Layout container.".to_string(),
+                keyword_args: vec![":background".to_string(), ":on-click".to_string()],
+            },
+        )]);
+
+        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &metadata).unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].label, ":background");
+    }
+
+    #[test]
     fn dgenlisp_highlights_param_keywords() {
         let buffer = Buffer::from_text(0, "*test*", "(param freq @default 440)");
         let spans = highlight_line(&BufferMode::DGenLisp, &buffer.lines[0], &[], &buffer);
@@ -766,6 +1036,7 @@ mod tests {
             SymbolMetadata {
                 signature: "(seq-step step)".to_string(),
                 docs: "Return a step snapshot.".to_string(),
+                keyword_args: Vec::new(),
             },
         );
         let result = completion_match(

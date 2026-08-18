@@ -2577,6 +2577,78 @@ fn tab_accepts_completion_from_runtime_symbols() {
 }
 
 #[test]
+fn tab_accepts_contextual_box_keyword_completion() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "(box :back");
+    editor.active_buffer_mut().cursor = (0, "(box :back".len());
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().text(), "(box :background");
+}
+
+#[test]
+fn typing_bare_colon_opens_box_keyword_completion() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "(box ");
+    editor.active_buffer_mut().cursor = (0, "(box ".len());
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+
+    let completion = editor.completion_state().expect("box keyword completion");
+    assert!(completion.items.iter().any(|item| item.label == ":background"));
+    assert!(completion.items.iter().any(|item| item.label == ":on-click"));
+}
+
+#[test]
+fn bare_colon_opens_keyword_completion_for_common_widget_families() {
+    for (form, expected_keyword) in [
+        ("button", ":on-click"),
+        ("slider", ":on-change"),
+        ("hslider", ":haptic-value"),
+        ("vslider", ":origin"),
+        ("number-picker", ":decimals"),
+        ("dropdown", ":options"),
+        ("menu-button", ":options"),
+        ("select", ":options"),
+        ("v-stack", ":justify"),
+        ("h-stack", ":justify"),
+        ("label", ":font-size"),
+        ("text-input", ":placeholder"),
+        ("textbox", ":max-lines"),
+    ] {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let source = format!("({form} ");
+        editor.open_scratch_buffer("*test*", &source);
+        editor.active_buffer_mut().cursor = (0, source.len());
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+
+        let completion = editor
+            .completion_state()
+            .unwrap_or_else(|| panic!("{form} keyword completion"));
+        assert!(
+            completion.items.iter().any(|item| item.label == expected_keyword),
+            "{form} should offer {expected_keyword}"
+        );
+    }
+}
+
+#[test]
+fn widget_aliases_share_canonical_keyword_metadata() {
+    let runtime = Runtime::new();
+    let metadata = runtime.symbol_metadata();
+
+    assert_eq!(metadata["slider"].keyword_args, metadata["hslider"].keyword_args);
+    assert_eq!(metadata["dropdown"].keyword_args, metadata["menu-button"].keyword_args);
+    assert_eq!(metadata["dropdown"].keyword_args, metadata["select"].keyword_args);
+}
+
+#[test]
 fn vim_normal_mode_tab_still_accepts_completion() {
     let mut runtime = Runtime::new();
     runtime.register_native("seq-step", |_args, _ctx| Ok(Value::Bool(true)));
