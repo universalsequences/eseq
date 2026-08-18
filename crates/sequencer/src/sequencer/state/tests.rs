@@ -395,6 +395,7 @@
                     arr
                 })
                 .collect(),
+            track_send_plock_snapshots: vec![vec![Vec::new(); MAX_STEPS]; num_tracks],
             instrument_types: (0..num_tracks)
                 .map(|track| {
                     if track % 2 == 0 {
@@ -2691,6 +2692,7 @@
             timebase_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_resolution_plock_snapshots: vec![[None; MAX_STEPS]; 4],
+            track_send_plock_snapshots: vec![vec![Vec::new(); MAX_STEPS]; 4],
             instrument_types: vec![InstrumentType::Sampler; 4],
             instrument_run_modes: vec![CustomInstrumentRunMode::Instrument; 4],
             mod_connections: Vec::new(),
@@ -6348,4 +6350,31 @@
             let patch = &scenes.track_pools[0].sounds.patches[&bare_refs.patch];
             assert_eq!(patch.params.midi_fx_chain, vec!["arp2".to_string()]);
         });
+    }
+
+    #[test]
+    fn scene_launch_restores_pattern_scoped_track_bus_send_baseline() {
+        let mut low = PatternSnapshot::new_default(1, &[]);
+        low.track_params[0].sends = vec![TrackSendSnapshot {
+            destination: BusId::DEFAULT_A,
+            amount: 0.15,
+        }];
+        let mut high = PatternSnapshot::new_default(1, &[]);
+        high.track_params[0].sends = vec![TrackSendSnapshot {
+            destination: BusId::DEFAULT_A,
+            amount: 0.9,
+        }];
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let low_live = low.clone();
+        state.replace_pattern_repository(vec![low, high], 0);
+        low_live.restore(&state);
+        let names = vec!["Track 1".to_string()];
+        let types = vec![InstrumentType::Sampler];
+
+        state.launch_scene(1, 1, &[-1], &[44_100], &names, &types)
+            .expect("launch high-send scene");
+        assert_eq!(state.pattern.track_params[0].sends()[0].amount, 0.9);
+        state.launch_scene(0, 1, &[-1], &[44_100], &names, &types)
+            .expect("return to low-send scene");
+        assert_eq!(state.pattern.track_params[0].sends()[0].amount, 0.15);
     }

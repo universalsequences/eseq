@@ -769,7 +769,7 @@ pub(crate) fn reactive_tick_and_render(
         if !current_track_playhead_visible && ctx.frame.prev_playhead != playhead {
             ctx.frame.prev_playhead = playhead;
         }
-        if (fx_visible || step_visible)
+        if (fx_visible || step_visible || mixer_visible)
             && current_track_playhead_changed
             && !app.tracks.is_empty()
         {
@@ -794,6 +794,13 @@ pub(crate) fn reactive_tick_and_render(
             if displayed_param_value_may_change {
                 needs_reactive_cycle |= sync_track_selection_param_binding_fields(
                     rt,
+                    &ctx.shared.state,
+                    ct,
+                    &ctx.shared.selected_steps,
+                );
+                needs_reactive_cycle |= sync_selected_track_bus_send_binding_fields(
+                    rt,
+                    &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,

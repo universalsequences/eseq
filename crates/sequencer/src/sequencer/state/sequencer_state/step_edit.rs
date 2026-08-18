@@ -392,6 +392,10 @@ impl SequencerState {
             timebase: self.pattern.timebase_plocks[track].get(step),
             swing: self.pattern.swing_plocks[track].get(step),
             swing_resolution: self.pattern.swing_resolution_plocks[track].get(step),
+            track_send_plocks: self.pattern.track_send_plocks[track].snapshot()
+                .get(step)
+                .cloned()
+                .unwrap_or_default(),
             midi_fx_plocks,
             effect_plocks,
             instrument_plocks,
@@ -1731,6 +1735,7 @@ impl SequencerState {
                 self.pattern.swing_resolution_plocks.len(),
                 "swing-resolution p-locks",
             ),
+            (self.pattern.track_send_plocks.len(), "track-send p-locks"),
             (self.pattern.midi_fx_slots.len(), "MIDI-FX slots"),
             (self.pattern.effect_chains.len(), "audio-effect slots"),
             (self.pattern.instrument_slots.len(), "instrument slots"),
@@ -1779,6 +1784,7 @@ impl SequencerState {
         self.pattern.timebase_plocks[track].clear(step);
         self.pattern.swing_plocks[track].clear(step);
         self.pattern.swing_resolution_plocks[track].clear(step);
+        self.pattern.track_send_plocks[track].clear_step(step);
 
         for slot in &self.pattern.midi_fx_slots[track] {
             slot.plocks.clear_step(step);
@@ -2211,6 +2217,11 @@ impl SequencerState {
         match snapshot.swing_resolution {
             Some(resolution) => self.pattern.swing_resolution_plocks[track].set(step, resolution),
             None => self.pattern.swing_resolution_plocks[track].clear(step),
+        }
+        self.pattern.track_send_plocks[track].clear_step(step);
+        for send in &snapshot.track_send_plocks {
+            self.pattern.track_send_plocks[track]
+                .set(step, send.destination, send.amount);
         }
 
         for (slot_idx, slot) in self.pattern.midi_fx_slots[track].iter().enumerate() {

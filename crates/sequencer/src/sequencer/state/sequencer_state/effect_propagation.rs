@@ -149,6 +149,22 @@ impl SequencerState {
                 }
                 mix.sends.retain(|send| send.destination != bus_id);
             }
+            for pattern in pool.patterns.values_mut().map(Arc::make_mut) {
+                for step in &mut pattern.seq.track_send_plock_snapshot {
+                    step.retain(|send| send.destination != bus_id);
+                }
+            }
+        }
+        drop(scenes);
+        for track in 0..self.active_track_count() {
+            let snapshot = self.pattern.track_send_plocks[track].snapshot();
+            for step in 0..MAX_STEPS {
+                if snapshot.get(step).is_some_and(|row| {
+                    row.iter().any(|send| send.destination == bus_id)
+                }) {
+                    self.pattern.track_send_plocks[track].clear(step, bus_id);
+                }
+            }
         }
     }
 

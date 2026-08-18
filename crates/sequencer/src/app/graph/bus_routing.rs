@@ -418,9 +418,6 @@ impl GraphController<'_> {
         let mut next_send_nodes = Vec::new();
 
         for send in requested_sends {
-            if send.amount <= 0.0 {
-                continue;
-            }
             let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) else {
                 continue;
             };
@@ -527,6 +524,16 @@ impl GraphController<'_> {
             return;
         };
         nodes.bus_send_ids = next_send_nodes;
+        self.app.state.set_track_send_runtime_targets(
+            track_idx,
+            nodes.bus_send_ids.iter().map(|send| {
+                crate::sequencer::TrackSendRuntimeTarget {
+                    destination: send.destination,
+                    left_id: send.left_id as u64,
+                    right_id: send.right_id as u64,
+                }
+            }).collect(),
+        );
         self.app.refresh_latency_compensation();
     }
 

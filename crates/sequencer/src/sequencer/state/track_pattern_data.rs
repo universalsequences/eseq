@@ -16,6 +16,7 @@ pub struct TrackPatternData {
     pub timebase_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_resolution_plock_snapshot: [Option<u32>; MAX_STEPS],
+    pub track_send_plock_snapshot: Vec<Vec<TrackSendSnapshot>>,
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub rack_track: Option<RackTrackSnapshot>,
@@ -69,6 +70,7 @@ impl TrackPatternData {
         self.timebase_plock_snapshot = [None; MAX_STEPS];
         self.swing_plock_snapshot = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
+        self.track_send_plock_snapshot = vec![Vec::new(); MAX_STEPS];
     }
 
     /// Copy one step's complete per-step content (activation, params,
@@ -113,6 +115,11 @@ impl TrackPatternData {
         self.swing_plock_snapshot[dst_step] = src.swing_plock_snapshot[src_step];
         self.swing_resolution_plock_snapshot[dst_step] =
             src.swing_resolution_plock_snapshot[src_step];
+        self.track_send_plock_snapshot[dst_step] = src
+            .track_send_plock_snapshot
+            .get(src_step)
+            .cloned()
+            .unwrap_or_default();
     }
 }
 
@@ -328,6 +335,10 @@ impl TrackPatternData {
             swing: self.swing_plock_snapshot[step].map(f32::from_bits),
             swing_resolution: self.swing_resolution_plock_snapshot[step]
                 .map(SwingResolution::from_index),
+            track_send_plocks: self.track_send_plock_snapshot
+                .get(step)
+                .cloned()
+                .unwrap_or_default(),
             midi_fx_plocks: self
                 .midi_fx_slots
                 .iter()
@@ -422,6 +433,7 @@ impl TrackPatternData {
         self.swing_plock_snapshot[step] = snapshot.swing.map(f32::to_bits);
         self.swing_resolution_plock_snapshot[step] =
             snapshot.swing_resolution.map(|value| value as u32);
+        self.track_send_plock_snapshot[step] = snapshot.track_send_plocks.clone();
 
         for (slot_idx, slot) in self.midi_fx_slots.iter_mut().enumerate() {
             restore_snapshot_slot_step_plocks(slot, step, snapshot.midi_fx_plocks.get(slot_idx));
@@ -888,6 +900,7 @@ impl TrackPatternData {
         state.pattern.timebase_plocks[track].restore(&self.timebase_plock_snapshot);
         state.pattern.swing_plocks[track].restore(&self.swing_plock_snapshot);
         state.pattern.swing_resolution_plocks[track].restore(&self.swing_resolution_plock_snapshot);
+        state.pattern.track_send_plocks[track].restore(&self.track_send_plock_snapshot);
 
         true
     }
@@ -1099,6 +1112,7 @@ impl TrackPatternData {
         self.timebase_plock_snapshot = [None; MAX_STEPS];
         self.swing_plock_snapshot = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
+        self.track_send_plock_snapshot = vec![Vec::new(); MAX_STEPS];
         self.instrument_type = instrument_type;
         self.instrument_run_mode = CustomInstrumentRunMode::Instrument;
         self.rack_track = None;

@@ -54,16 +54,27 @@
       (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
       (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
+(def %command-target (fx)
+  (dict :track (get fx :track-idx)
+        :rack-slot (get fx :rack-slot)
+        :slot (get fx :slot-idx)
+        :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)))
+
+(def %set-source (fx path)
+  (host-command "set-filter-table-source"
+    (merge (%command-target fx) :path path)))
+
+(def %set-engine (fx engine)
+  (host-command "set-filter-table-engine"
+    (merge (%command-target fx) :engine engine)))
+
 (def %drop-table (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((path (get payload :path)))
       (if path
         (host-command "set-filter-table-source"
-          (dict :track (get target :track)
-                :slot (get target :slot)
-                :bus (get target :bus)
-                :path path))
+          (merge target :path path))
         (status "Drop an audio sample, not a folder")))))
 
 ;; ---- Response editor (eseq-dtx.8) ------------------------------------
@@ -212,10 +223,7 @@
         (box :width 36.4 :height (if (get fx :editor) 3.3 4.15) :padding 0.25
           :background-color :instrument-control-bg :corner-radius 8
           :drop-types (list "sample")
-          :drop-meta (dict :kind "filter-table-source"
-            :track SEQ.current-track
-            :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-            :slot (get fx :slot-idx))
+          :drop-meta (merge (%command-target fx) :kind "filter-table-source")
           :drop-hover-border-color :blue
           :on-drop (lambda (event) (%drop-table event))
           (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
@@ -223,8 +231,7 @@
               ;; The table name doubles as the preset picker: the dropdown
               ;; lists every loadable .fltab (user filter-tables/ + bundled
               ;; factory presets) and loads the selection as a baked asset.
-              ;; Rack slots have no load command target, so they keep a label.
-              (if (and (get fx :table-options) (not (get fx :rack-fx)))
+              (if (get fx :table-options)
                 (subtree :key (str "filter-table-preset-" (get fx :slot-idx))
                   (dropdown
                     :value (if table-name table-name "Drop a sample / pick a preset")
@@ -233,11 +240,7 @@
                     :key (str "filter-table-preset-dd-" (get fx :slot-idx))
                     :options (get fx :table-options)
                     :on-change (lambda (v)
-                      (host-command "set-filter-table-source"
-                        (dict :track (get fx :track-idx)
-                          :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-                          :slot (get fx :slot-idx)
-                          :path (str "fltab:" v))))
+                      (%set-source fx (str "fltab:" v)))
                     :width 10.5 :height 0.85 :font-size 9))
                 (label (if table-name table-name "Drop an audio sample")
                   :font-size 9.0 :color :fg :bg :transparent))
@@ -262,9 +265,8 @@
                   (box :width 0 :height 0)))
               ;; DSP engine: Spectral (STFT; adds compensated latency to the
               ;; entire project's output) vs Min Phase (causal FIR; adds no
-              ;; output latency). Rack slots have no
-              ;; engine command target, so they keep a label.
-              (if (and table-engine (not (get fx :rack-fx)))
+              ;; output latency).
+              (if table-engine
                 (subtree :key (str "filter-table-engine-dd-" (get fx :slot-idx))
                   (dropdown
                     :value table-engine
@@ -272,11 +274,7 @@
                     :bg-color :mixer-strip-bg
                     :border-color :transparent
                     :on-change (lambda (v)
-                      (host-command "set-filter-table-engine"
-                        (dict :track (get fx :track-idx)
-                          :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
-                          :slot (get fx :slot-idx)
-                          :engine (if (= v "Min Phase") "causal" "spectral"))))
+                      (%set-engine fx (if (= v "Min Phase") "causal" "spectral")))
                     :width 6.4 :height 0.8 :font-size 7.5))
                 (if table-engine
                   (label table-engine :font-size 7.5 :color :dim :bg :transparent)

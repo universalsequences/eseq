@@ -60,6 +60,78 @@ pub struct TrackSendSnapshot {
     pub amount: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrackSendRuntimeTarget {
+    pub destination: BusId,
+    pub left_id: u64,
+    pub right_id: u64,
+}
+
+/// Pattern-owned per-step overrides for dynamic bus-send destinations.
+///
+/// Bus IDs are project-stable, while graph node IDs are transient and live in
+/// `TrackSendRuntimeTarget`. Keeping the authoring data keyed by `BusId`
+/// preserves locks across graph rebuilds and project save/load.
+pub struct TrackSendPLockData {
+    steps: Mutex<Vec<Vec<TrackSendSnapshot>>>,
+}
+
+impl TrackSendPLockData {
+    pub fn new() -> Self {
+        Self {
+            steps: Mutex::new(vec![Vec::new(); MAX_STEPS]),
+        }
+    }
+
+    pub fn get(&self, step: usize, destination: BusId) -> Option<f32> {
+        self.steps.lock().unwrap().get(step)?.iter()
+            .find(|send| send.destination == destination)
+            .map(|send| send.amount)
+    }
+
+    pub fn set(&self, step: usize, destination: BusId, amount: f32) {
+        if step >= MAX_STEPS {
+            return;
+        }
+        let mut steps = self.steps.lock().unwrap();
+        let row = &mut steps[step];
+        if let Some(send) = row.iter_mut().find(|send| send.destination == destination) {
+            send.amount = amount.clamp(0.0, 1.0);
+        } else {
+            row.push(TrackSendSnapshot {
+                destination,
+                amount: amount.clamp(0.0, 1.0),
+            });
+        }
+    }
+
+    pub fn clear(&self, step: usize, destination: BusId) {
+        if let Some(row) = self.steps.lock().unwrap().get_mut(step) {
+            row.retain(|send| send.destination != destination);
+        }
+    }
+
+    pub fn clear_step(&self, step: usize) {
+        if let Some(row) = self.steps.lock().unwrap().get_mut(step) {
+            row.clear();
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Vec<TrackSendSnapshot>> {
+        self.steps.lock().unwrap().clone()
+    }
+
+    pub fn restore(&self, snapshot: &[Vec<TrackSendSnapshot>]) {
+        let mut steps = self.steps.lock().unwrap();
+        for (step, row) in steps.iter_mut().enumerate() {
+            *row = snapshot.get(step).cloned().unwrap_or_default();
+            for send in row {
+                send.amount = send.amount.clamp(0.0, 1.0);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InstrumentType {
     Sampler,

@@ -500,6 +500,12 @@ pub enum AppCommand {
         track: usize,
         sends: Vec<TrackSendSnapshot>,
     },
+    SetTrackBusSendPlock {
+        track: usize,
+        step: usize,
+        destination: BusId,
+        value: Option<f32>,
+    },
 
     SetBusVolume {
         bus: BusId,
@@ -990,6 +996,7 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackSwingResolutionPlock { .. }
         | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
         | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::SetTrackBusSendPlock { .. }
         | AppCommand::ClearEffectPlockMulti { .. }
         | AppCommand::ClearEffectTensorPlockMulti { .. }
         | AppCommand::ClearMidiFxPlockMulti { .. }
@@ -1673,6 +1680,7 @@ mod tests {
             timebase: Some(Timebase::Eighth),
             swing: Some(62.0),
             swing_resolution: Some(SwingResolution::Eighth),
+            track_send_plocks: Vec::new(),
             midi_fx_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.5)],
                 tensor_params: vec![Some(vec![0.1, 0.2])],
@@ -1757,6 +1765,7 @@ mod tests {
             timebase: None,
             swing: None,
             swing_resolution: None,
+            track_send_plocks: Vec::new(),
             midi_fx_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.5)],
                 tensor_params: vec![Some(vec![0.1, 0.2])],
@@ -3009,6 +3018,18 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.track_params[track].set_sends(sends);
             app.graph_controller().apply_track_bus_sends(track);
         }
+
+        AppCommand::SetTrackBusSendPlock {
+            track,
+            step,
+            destination,
+            value,
+        } => match value {
+            Some(value) => app.state.pattern.track_send_plocks[track]
+                .set(step, destination, value),
+            None => app.state.pattern.track_send_plocks[track]
+                .clear(step, destination),
+        },
 
         AppCommand::SetBusVolume { bus, value } => {
             if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {

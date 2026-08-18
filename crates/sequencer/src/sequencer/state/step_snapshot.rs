@@ -11,6 +11,7 @@ pub struct StepSnapshot {
     pub timebase: Option<Timebase>,
     pub swing: Option<f32>,
     pub swing_resolution: Option<SwingResolution>,
+    pub track_send_plocks: Vec<TrackSendSnapshot>,
     pub midi_fx_plocks: Vec<StepSlotPlocks>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
@@ -25,6 +26,7 @@ pub type StepCellSnapshot = StepSnapshot;
 impl StepSnapshot {
     pub fn without_audio_plocks(&self) -> Self {
         let mut snapshot = self.clone();
+        snapshot.track_send_plocks.clear();
         for plocks in &mut snapshot.midi_fx_plocks {
             plocks.clear();
         }

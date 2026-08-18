@@ -19,6 +19,42 @@ pub(super) fn scheduled_instrument_tensor_params_from_vec(
         .collect::<ScheduledInstrumentTensorParams>()
 }
 
+pub(super) fn resolve_track_send_params(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> Vec<ScheduledEffectParam> {
+    let Some(track) = snapshot.tracks.get(track_idx) else {
+        return Vec::new();
+    };
+    let step_locks = track.steps.get(step_idx)
+        .map(|step| step.track_send_plocks.as_slice())
+        .unwrap_or_default();
+    let mut params = Vec::with_capacity(track.track_send_runtime_targets.len() * 2);
+    for target in &track.track_send_runtime_targets {
+        let baseline = track.params.sends.iter()
+            .find(|send| send.destination == target.destination)
+            .map(|send| send.amount)
+            .unwrap_or(0.0);
+        let value = step_locks.iter()
+            .find(|send| send.destination == target.destination)
+            .map(|send| send.amount)
+            .unwrap_or(baseline)
+            .clamp(0.0, 1.0);
+        params.push(ScheduledEffectParam {
+            logical_id: target.left_id,
+            idx: 0,
+            value,
+        });
+        params.push(ScheduledEffectParam {
+            logical_id: target.right_id,
+            idx: 0,
+            value,
+        });
+    }
+    params
+}
+
 pub(super) fn debug_routing_enabled() -> bool {
     std::env::var_os("TINYSEQ_DEBUG_ROUTING").is_some()
 }

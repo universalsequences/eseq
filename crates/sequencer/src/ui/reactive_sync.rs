@@ -69,6 +69,13 @@ pub(super) fn sync_after_instrument_track_apply(
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, track_index, selected_steps);
+    sync_selected_track_bus_send_binding_fields(
+        rt,
+        app,
+        state,
+        track_index,
+        selected_steps,
+    );
     sync_fx_param_binding_fields(rt, app, state, track_index, selected_steps);
     rt.set_reactive(
         "SEQ",
@@ -1884,6 +1891,13 @@ pub(super) fn apply_ui_invalidations(
                     legacy_step_grid_visible,
                 );
                 if track == current_track_idx {
+                    needs_reactive_cycle |= sync_selected_track_bus_send_binding_fields(
+                        rt,
+                        app,
+                        state,
+                        track,
+                        selected_steps,
+                    );
                     if fx_visible {
                         let next_display = displayed_plock_step(
                             state,

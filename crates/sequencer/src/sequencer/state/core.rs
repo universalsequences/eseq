@@ -45,6 +45,10 @@ pub struct PatternState {
     pub timebase_plocks: Vec<TimebasePLockData>,
     pub swing_plocks: Vec<SwingPLockData>,
     pub swing_resolution_plocks: Vec<SwingResolutionPLockData>,
+    pub track_send_plocks: Vec<TrackSendPLockData>,
+    /// Transient graph bindings for bus-send p-lock dispatch. Authoring locks
+    /// remain keyed by stable BusId and survive graph reconstruction.
+    pub track_send_runtime_targets: Mutex<Vec<Vec<TrackSendRuntimeTarget>>>,
     pub instrument_slots: Vec<EffectSlotState>,
     pub instrument_base_note_offsets: Vec<AtomicU32>,
     pub instrument_run_modes: Vec<AtomicU32>,

@@ -4205,6 +4205,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::AdjustTrackSend { .. }
         | AppCommand::SetTrackOutput { .. }
         | AppCommand::SetTrackSends { .. }
+        | AppCommand::SetTrackBusSendPlock { .. }
         | AppCommand::SetBusVolume { .. }
         | AppCommand::ToggleBusMute { .. }
         | AppCommand::ToggleBusSolo { .. }
@@ -4253,6 +4254,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         }
         AppCommand::SetTimebasePlock { track, step, .. }
         | AppCommand::SetTrackSwingPlock { track, step, .. }
+        | AppCommand::SetTrackBusSendPlock { track, step, .. }
         | AppCommand::SetTrackSwingResolutionPlock { track, step, .. }
         | AppCommand::SetEffectPlock { track, step, .. }
         | AppCommand::SetInstrumentPlock { track, step, .. }
@@ -4489,6 +4491,11 @@ enum ResolvedStepCommand<'a> {
     TogglePianoNote { step: usize, semitone: i32 },
     TimebasePlock { steps: Vec<usize>, value: Option<crate::sequencer::Timebase> },
     SwingPlock { steps: Vec<usize>, value: Option<f32> },
+    BusSendPlock {
+        steps: Vec<usize>,
+        destination: BusId,
+        value: Option<f32>,
+    },
     SwingResolutionPlock {
         steps: Vec<usize>,
         value: Option<crate::sequencer::SwingResolution>,
@@ -4507,6 +4514,7 @@ impl ResolvedStepCommand<'_> {
             | Self::Rotate { steps, .. }
             | Self::TimebasePlock { steps, .. }
             | Self::SwingPlock { steps, .. }
+            | Self::BusSendPlock { steps, .. }
             | Self::SwingResolutionPlock { steps, .. } => steps,
             Self::Paste { affected, .. } | Self::Shift { affected, .. } => affected,
         }
@@ -4528,6 +4536,8 @@ impl ResolvedStepCommand<'_> {
             Self::TimebasePlock { value: None, .. } => "Clear timebase p-lock",
             Self::SwingPlock { value: Some(_), .. } => "Set swing p-lock",
             Self::SwingPlock { value: None, .. } => "Clear swing p-lock",
+            Self::BusSendPlock { value: Some(_), .. } => "Set track bus-send p-lock",
+            Self::BusSendPlock { value: None, .. } => "Clear track bus-send p-lock",
             Self::SwingResolutionPlock { value: Some(_), .. } => "Set swing-resolution p-lock",
             Self::SwingResolutionPlock { value: None, .. } => "Clear swing-resolution p-lock",
         }
@@ -4688,6 +4698,19 @@ fn resolve_step_command(cmd: &AppCommand) -> Result<(usize, ResolvedStepCommand<
                 value: None,
             },
         ),
+        AppCommand::SetTrackBusSendPlock {
+            track,
+            step,
+            destination,
+            value,
+        } => (
+            *track,
+            ResolvedStepCommand::BusSendPlock {
+                steps: vec![*step],
+                destination: *destination,
+                value: *value,
+            },
+        ),
         AppCommand::SetTrackSwingResolutionPlock { track, step, resolution } => (
             *track,
             ResolvedStepCommand::SwingResolutionPlock {
@@ -4823,6 +4846,20 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
                 match value {
                     Some(value) => app.state.pattern.swing_plocks[track].set(*step, *value),
                     None => app.state.pattern.swing_plocks[track].clear(*step),
+                }
+            }
+        }
+        ResolvedStepCommand::BusSendPlock {
+            steps,
+            destination,
+            value,
+        } => {
+            for step in steps {
+                match value {
+                    Some(value) => app.state.pattern.track_send_plocks[track]
+                        .set(*step, *destination, *value),
+                    None => app.state.pattern.track_send_plocks[track]
+                        .clear(*step, *destination),
                 }
             }
         }
@@ -5897,6 +5934,43 @@ pub fn apply_recorded_track_effect_ir_mutation(
     Ok(EditOutcome::Applied(history_move))
 }
 
+fn prepare_filter_table_mutation(
+    source_path: &std::path::Path,
+    reference: &str,
+) -> Result<(String, String, std::sync::Arc<crate::effects::filter_table::MagnitudeTable>), EditError> {
+    // Baked assets load their payload directly; audio sources analyze under
+    // the reference's explicit mode or the recommendation. The stored
+    // reference always records what actually happened so undo/redo and
+    // reload reproduce the identical table.
+    if crate::effects::filter_table_asset::is_asset_path(source_path)
+        || crate::effects::filter_table_asset::decode_asset_ref(reference).is_some()
+    {
+        let asset = crate::effects::filter_table_asset::read_asset(source_path)
+            .map_err(EditError::InvalidTarget)?;
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&asset.meta.name)
+            .to_string();
+        let stored = crate::effects::filter_table_asset::encode_asset_ref(&stem);
+        Ok((stem, stored, std::sync::Arc::new(asset.table)))
+    } else {
+        let (sample_ref, requested) = crate::effects::filter_table::decode_table_ref(reference);
+        let (table, mode) = match requested {
+            Some(mode) => (
+                crate::effects::filter_table::prepare_table_with_mode(source_path, mode)
+                    .map_err(EditError::InvalidTarget)?,
+                mode,
+            ),
+            None => crate::effects::filter_table::prepare_table(source_path)
+                .map_err(EditError::InvalidTarget)?,
+        };
+        let sample_ref = sample_ref.to_string();
+        let stored = crate::effects::filter_table::encode_table_ref(&sample_ref, mode);
+        Ok((sample_ref, stored, std::sync::Arc::new(table)))
+    }
+}
+
 pub fn apply_recorded_track_filter_table_mutation(
     app: &mut App,
     track: usize,
@@ -5919,38 +5993,8 @@ pub fn apply_recorded_track_filter_table_mutation(
         slot_idx: Some(slot_idx),
     };
     let before = capture_device_value_snapshot(app, target)?;
-    // Baked assets load their payload directly; audio sources analyze under
-    // the reference's explicit mode or the recommendation. The stored
-    // reference always records what actually happened so undo/redo and
-    // reload reproduce the identical table.
-    let (sample_ref, stored, prepared) = if crate::effects::filter_table_asset::is_asset_path(
-        source_path,
-    ) || crate::effects::filter_table_asset::decode_asset_ref(reference).is_some()
-    {
-        let asset = crate::effects::filter_table_asset::read_asset(source_path)
-            .map_err(EditError::InvalidTarget)?;
-        let stem = source_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or(&asset.meta.name)
-            .to_string();
-        let stored = crate::effects::filter_table_asset::encode_asset_ref(&stem);
-        (stem, stored, std::sync::Arc::new(asset.table))
-    } else {
-        let (sample_ref, requested) = crate::effects::filter_table::decode_table_ref(reference);
-        let (table, mode) = match requested {
-            Some(mode) => (
-                crate::effects::filter_table::prepare_table_with_mode(source_path, mode)
-                    .map_err(EditError::InvalidTarget)?,
-                mode,
-            ),
-            None => crate::effects::filter_table::prepare_table(source_path)
-                .map_err(EditError::InvalidTarget)?,
-        };
-        let sample_ref = sample_ref.to_string();
-        let stored = crate::effects::filter_table::encode_table_ref(&sample_ref, mode);
-        (sample_ref, stored, std::sync::Arc::new(table))
-    };
+    let (sample_ref, stored, prepared) =
+        prepare_filter_table_mutation(source_path, reference)?;
     finish_active_gesture(app);
     let node_id = app.state.pattern.effect_chains
         .get(track)
@@ -5974,6 +6018,78 @@ pub fn apply_recorded_track_filter_table_mutation(
     let retained_bytes = patch.retained_bytes();
     let history_move = app.history.commit(
         format!("Load Filter Table '{sample_ref}'"),
+        None,
+        EditPatch::DeviceValues(patch),
+        retained_bytes,
+    );
+    Ok(EditOutcome::Applied(history_move))
+}
+
+pub fn apply_recorded_rack_filter_table_mutation(
+    app: &mut App,
+    track: usize,
+    rack_slot: usize,
+    effect_slot: usize,
+    source_path: &std::path::Path,
+    reference: &str,
+) -> Result<EditOutcome, EditError> {
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    let pattern = app
+        .state
+        .effective_track_pattern_id(track)
+        .ok_or(EditError::MissingTrackPattern)?;
+    let target = ResolvedDeviceTarget {
+        id: DeviceId::RackSlot(app.device_registry.rack_slot(track_id, rack_slot)),
+        track,
+        pattern,
+        slot_idx: Some(rack_slot),
+    };
+    let before = capture_device_value_snapshot(app, target)?;
+    let (sample_ref, stored, prepared) =
+        prepare_filter_table_mutation(source_path, reference)?;
+    finish_active_gesture(app);
+    let node_id = app
+        .rack_slot_effect_snapshot(track, rack_slot)
+        .map_err(EditError::InvalidTarget)?
+        .effect_slots
+        .get(effect_slot)
+        .map(|slot| slot.node_id as i32)
+        .ok_or_else(|| EditError::InvalidTarget("Rack effect slot not found".to_string()))?;
+    app.apply_prepared_filter_table_to_node(
+        node_id,
+        prepared.clone(),
+        &stored,
+        source_path,
+    )
+    .map_err(EditError::InvalidTarget)?;
+    let mut after = before.clone();
+    let DeviceValueSnapshot::RackSlot(values) = &mut after else {
+        return Err(EditError::InvalidTarget(
+            "Rack Filter Table target did not capture rack values".to_string(),
+        ));
+    };
+    let effect = values.effect_slots.get_mut(effect_slot).ok_or_else(|| {
+        EditError::InvalidTarget("Rack effect slot not found in captured values".to_string())
+    })?;
+    effect.table = Some(stored);
+    effect.prepared_table = Some(prepared);
+    if before.bit_exact_eq(&after) {
+        return Ok(EditOutcome::NoOp);
+    }
+    restore_device_value_snapshot(app, target, &after)?;
+    app.state.publish_scheduler_snapshot();
+    let patch = DeviceValuesPatch {
+        target: target.id,
+        pattern,
+        before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    let history_move = app.history.commit(
+        format!("Load rack Filter Table '{sample_ref}'"),
         None,
         EditPatch::DeviceValues(patch),
         retained_bytes,
@@ -8642,6 +8758,67 @@ mod tests {
             .expect("launch scene 0");
         assert!(app.state.capture_step_snapshot(1, 0).active);
         assert!(!app.state.capture_step_snapshot(1, 4).active);
+    }
+
+    #[test]
+    fn track_bus_send_plock_command_records_live_and_pattern_step_state() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut app = test_app(state);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let destination = BusId::DEFAULT_A;
+
+        let outcome = try_apply_command(&mut app, AppCommand::SetTrackBusSendPlock {
+            track: 0,
+            step: 5,
+            destination,
+            value: Some(0.72),
+        }).expect("record bus-send p-lock command");
+
+        assert!(matches!(outcome, EditOutcome::Applied(_)));
+        assert_eq!(app.state.pattern.track_send_plocks[0].get(5, destination), Some(0.72));
+        assert_eq!(app.state.with_scene_track_pattern(0, 0, |pattern| {
+            pattern.track_send_plock_snapshot[5][0].amount
+        }), Some(0.72));
+    }
+
+    #[test]
+    fn track_bus_send_edits_are_scoped_to_the_active_scene_pattern() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![PatternSnapshot::new_default(1, &[]), PatternSnapshot::new_default(1, &[])],
+            0,
+        );
+        PatternSnapshot::new_default(1, &[]).restore(&state);
+        let mut app = test_app(state);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app.graph.track_buffer_ids = vec![-1];
+        app.graph.track_sample_rates = vec![44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler];
+        let destination = BusId::DEFAULT_A;
+
+        try_apply_command(&mut app, AppCommand::SetTrackSends {
+            track: 0,
+            sends: vec![crate::sequencer::TrackSendSnapshot { destination, amount: 0.15 }],
+        }).expect("edit scene 1 send");
+        app.state.launch_scene(
+            1, 1, &app.graph.track_buffer_ids, &app.graph.track_sample_rates,
+            &app.tracks, &app.graph.track_instrument_types,
+        ).expect("launch scene 2");
+        try_apply_command(&mut app, AppCommand::SetTrackSends {
+            track: 0,
+            sends: vec![crate::sequencer::TrackSendSnapshot { destination, amount: 0.9 }],
+        }).expect("edit scene 2 send");
+        app.state.launch_scene(
+            0, 1, &app.graph.track_buffer_ids, &app.graph.track_sample_rates,
+            &app.tracks, &app.graph.track_instrument_types,
+        ).expect("return to scene 1");
+
+        assert_eq!(app.state.pattern.track_params[0].sends()[0].amount, 0.15);
+        assert_eq!(app.state.with_scene_track_pattern(1, 0, |pattern| {
+            pattern.track_params.sends[0].amount
+        }), Some(0.9));
     }
 
     /// Track-sound spec §2.2: loading an instrument preset on a bare lane

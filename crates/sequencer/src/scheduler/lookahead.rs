@@ -493,6 +493,17 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             if !snapshot.tracks[trigger.track].steps[trigger.step].active {
                 let sample_time = scheduled_until_sample + trigger.offset as u64;
+                let send_params = resolve_track_send_params(snapshot, trigger.track, trigger.step);
+                if !send_params.is_empty() {
+                    chunk_enqueued &= queue.push(ScheduledEvent {
+                        pattern_epoch,
+                        sample_time,
+                        kind: ScheduledEventKind::EffectParams {
+                            track: trigger.track,
+                            effect_params: send_params,
+                        },
+                    }).is_ok();
+                }
                 chunk_enqueued &= enqueue_instrument_param_change(
                     queue,
                     pattern_epoch,
@@ -777,6 +788,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 );
                 let mut effect_params =
                     resolve_effect_params(snapshot, trigger.track, trigger.step);
+                effect_params.extend(resolve_track_send_params(
+                    snapshot,
+                    trigger.track,
+                    trigger.step,
+                ));
                 let mut instrument_params =
                     resolve_instrument_params(snapshot, trigger.track, trigger.step);
                 upsert_effect_params(&mut effect_params, process_overlay.effect_params.clone());
@@ -872,6 +888,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                     ),
                                 );
                                 let mut event_effect_params = output.effect_params.clone();
+                                event_effect_params.extend(resolve_track_send_params(
+                                    snapshot,
+                                    trigger.track,
+                                    trigger.step,
+                                ));
                                 let mut event_instrument_params =
                                     scheduled_instrument_params_from_vec(
                                         output.instrument_params.clone(),
@@ -926,6 +947,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 }
                                 let chord_len = emitted.chord.len();
                                 let mut event_effect_params = emitted.effect_params;
+                                event_effect_params.extend(resolve_track_send_params(
+                                    snapshot,
+                                    target_track,
+                                    trigger.step,
+                                ));
                                 let mut event_instrument_params =
                                     scheduled_instrument_params_from_vec(emitted.instrument_params);
                                 if target_track == trigger.track {
@@ -1085,6 +1111,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
                 let same_track_process_targets = target_track == trigger.track;
                 let mut effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
+                effect_params.extend(resolve_track_send_params(snapshot, target_track, trigger.step));
                 let mut instrument_params =
                     resolve_instrument_params(snapshot, target_track, trigger.step);
                 let midi_fx_params = if same_track_process_targets {

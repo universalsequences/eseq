@@ -762,6 +762,21 @@ pub(super) fn handle(
                                 },
                             );
                         }
+                        "bus-send" => {
+                            if let Some(bus_idx) = param_idx {
+                                if let Some(bus_id) = app.buses.get(bus_idx).map(|bus| bus.id) {
+                                    app::apply_command(
+                                        &mut app,
+                                        app::AppCommand::SetTrackBusSendPlock {
+                                            track,
+                                            step,
+                                            destination: bus_id,
+                                            value: Some(value),
+                                        },
+                                    );
+                                }
+                            }
+                        }
                         "step-param" => {
                             if let Some(param_idx) = param_idx {
                                 if let Some(param) =
@@ -1242,6 +1257,22 @@ pub(super) fn handle(
                                     },
                                 )
                                 .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
+                            }
+                        }
+                        "bus-send" => {
+                            if let (Some(step), Some(bus_idx)) = (step, param_idx) {
+                                if let Some(bus_id) = app.buses.get(bus_idx).map(|bus| bus.id) {
+                                    changed = app::try_apply_command(
+                                        &mut app,
+                                        app::AppCommand::SetTrackBusSendPlock {
+                                            track,
+                                            step,
+                                            destination: bus_id,
+                                            value: None,
+                                        },
+                                    )
+                                    .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
+                                }
                             }
                         }
                         "step-param" => {

@@ -32,6 +32,7 @@ pub(super) fn handle(
     let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
+    let ui_invalidations = ctx.shared.ui_invalidations.clone();
     let bus_state = ctx.shared.bus_state.clone();
     match name {
         "set-track-output" => {
@@ -253,10 +254,10 @@ pub(super) fn handle(
                         _ => None,
                     });
                 if let (Some(bus_idx), Some(amount)) = (bus_idx, amount) {
-                    let Some(bus) = app.buses.get(bus_idx) else {
+                    let Some(bus_id) = app.buses.get(bus_idx).map(|bus| bus.id) else {
                         return;
                     };
-                    if bus.id == sequencer::sequencer::BusId::MIX {
+                    if bus_id == sequencer::sequencer::BusId::MIX {
                         return;
                     }
                     let track = payload_track
@@ -264,29 +265,83 @@ pub(super) fn handle(
                     if track >= state.active_track_count() {
                         return;
                     }
-                    let mut sends = app.state.pattern.track_params[track].sends();
-                    if let Some(send) =
-                        sends.iter_mut().find(|send| send.destination == bus.id)
-                    {
-                        send.amount = amount;
-                    } else {
-                        sends.push(TrackSendSnapshot {
-                            destination: bus.id,
-                            amount,
-                        });
-                    }
-                    sends.retain(|send| send.amount > 0.0);
-                    app::apply_command(
-                        &mut app,
-                        app::AppCommand::SetTrackSends { track, sends },
-                    );
-                    let rt = editor.runtime_mut();
-                    sync_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
-                    let current = current_track.load(Ordering::Relaxed);
-                    if track == current {
-                        sync_current_track_bus_send_binding_field(
-                            rt, &app, &state, track, bus_idx,
+                    let selected: Vec<usize> = selected_steps.lock().unwrap()
+                        .iter()
+                        .copied()
+                        .collect();
+                    let has_selection = !selected.is_empty();
+                    if !has_selection {
+                        let mut sends = app.state.pattern.track_params[track].sends();
+                        if let Some(send) =
+                            sends.iter_mut().find(|send| send.destination == bus_id)
+                        {
+                            send.amount = amount;
+                        } else {
+                            sends.push(TrackSendSnapshot {
+                                destination: bus_id,
+                                amount,
+                            });
+                        }
+                        app::apply_command(
+                            &mut app,
+                            app::AppCommand::SetTrackSends { track, sends },
                         );
+                    } else {
+                        // A zero baseline still needs a persistent graph edge so the
+                        // realtime scheduler can address this destination at a lock.
+                        let mut sends = app.state.pattern.track_params[track].sends();
+                        if !sends.iter().any(|send| send.destination == bus_id) {
+                            sends.push(TrackSendSnapshot {
+                                destination: bus_id,
+                                amount: 0.0,
+                            });
+                            app::apply_command(
+                                &mut app,
+                                app::AppCommand::SetTrackSends { track, sends },
+                            );
+                        }
+                        for step in &selected {
+                            app::apply_command(
+                                &mut app,
+                                app::AppCommand::SetTrackBusSendPlock {
+                                    track,
+                                    step: *step,
+                                    destination: bus_id,
+                                    value: Some(amount),
+                                },
+                            );
+                        }
+                        ui_invalidations.push(UiInvalidation::StepBatch {
+                            track,
+                            steps: selected.clone(),
+                        });
+                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let rt = editor.runtime_mut();
+                    let current = current_track.load(Ordering::Relaxed);
+                    if has_selection {
+                        // The persisted baseline intentionally did not change. Publish
+                        // the edited lock value instead of immediately snapping both
+                        // controls back to that baseline.
+                        rt.set_reactive(
+                            "SEQ",
+                            &track_bus_send_field(track, bus_idx),
+                            Value::Number(amount as f64),
+                        );
+                        if track == current {
+                            rt.set_reactive(
+                                "SEQ",
+                                &current_track_bus_send_field(bus_idx),
+                                Value::Number(amount as f64),
+                            );
+                        }
+                    } else {
+                        sync_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
+                        if track == current {
+                            sync_current_track_bus_send_binding_field(
+                                rt, &app, &state, track, bus_idx,
+                            );
+                        }
                     }
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();

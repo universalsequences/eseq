@@ -8124,6 +8124,92 @@
     }
 
     #[test]
+    fn selected_step_bus_send_binding_displays_lock_and_restores_baseline_on_deselect() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let app = test_app_for_track_visual_state(state.clone());
+        let destination = sequencer::sequencer::BusId::DEFAULT_A;
+        let bus_idx = app.buses.iter().position(|bus| bus.id == destination)
+            .expect("default send bus");
+        state.pattern.track_params[0].set_sends(vec![
+            sequencer::sequencer::TrackSendSnapshot { destination, amount: 0.2 },
+        ]);
+        state.pattern.track_send_plocks[0].set(4, destination, 0.8);
+        let selected = Arc::new(Mutex::new(HashSet::from([4])));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+
+        sync_selected_track_bus_send_binding_fields(
+            &mut runtime,
+            &app,
+            &state,
+            0,
+            &selected,
+        );
+        assert_eq!(
+            reactive_field_value(&runtime, "SEQ", &track_bus_send_field(0, bus_idx)),
+            Value::Number(0.8_f32 as f64),
+        );
+        assert_eq!(
+            reactive_field_value(&runtime, "SEQ", &current_track_bus_send_field(bus_idx)),
+            Value::Number(0.8_f32 as f64),
+        );
+
+        selected.lock().unwrap().clear();
+        sync_selected_track_bus_send_binding_fields(
+            &mut runtime,
+            &app,
+            &state,
+            0,
+            &selected,
+        );
+        assert_eq!(
+            reactive_field_value(&runtime, "SEQ", &current_track_bus_send_field(bus_idx)),
+            Value::Number(0.2_f32 as f64),
+        );
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.track_playheads[0].store(4, Ordering::Relaxed);
+        sync_selected_track_bus_send_binding_fields(
+            &mut runtime,
+            &app,
+            &state,
+            0,
+            &selected,
+        );
+        assert_eq!(
+            reactive_field_value(&runtime, "SEQ", &current_track_bus_send_field(bus_idx)),
+            Value::Number(0.8_f32 as f64),
+        );
+        state.transport.track_playheads[0].store(5, Ordering::Relaxed);
+        sync_selected_track_bus_send_binding_fields(
+            &mut runtime,
+            &app,
+            &state,
+            0,
+            &selected,
+        );
+        assert_eq!(
+            reactive_field_value(&runtime, "SEQ", &current_track_bus_send_field(bus_idx)),
+            Value::Number(0.2_f32 as f64),
+        );
+    }
+
+    #[test]
+    fn track_send_plock_has_standard_step_indicator() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_send_plocks[0].set(
+            6,
+            sequencer::sequencer::BusId::DEFAULT_A,
+            0.7,
+        );
+
+        let render = plock_variant_step_render_values(&state, 0);
+
+        assert_eq!(render[6].kind, 1);
+        assert_eq!(render[5].kind, 0);
+    }
+
+    #[test]
     fn track_name_sync_republishes_restored_topology_when_mirror_already_matches() {
         let state = Arc::new(SequencerState::new(2, vec![]));
         let app = test_app_for_track_visual_state(state);
@@ -36168,6 +36254,157 @@
             payload.get("value").map(|value| value.borrow().clone()),
             Some(Value::Number(0.25)),
         );
+    }
+
+    #[test]
+    fn metal_seq_filter_table_rack_slot_dropdowns_are_visible_and_target_the_slot_effect() {
+        let app = test_app_with_rack_panel();
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        let mut fx = test_fx_map(
+            "Filter Table",
+            0,
+            vec![
+                Value::Map(test_param_map("frame", 0, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("cutoff", 1, 1000.0, 40.0, 18000.0)),
+                Value::Map(test_param_map("resonance", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("mix", 3, 0.7, 0.0, 1.0)),
+                Value::Map(test_param_map("output", 4, 1.0, 0.25, 2.0)),
+            ],
+        );
+        for (key, value) in [
+            ("track-idx", Value::Number(0.0)),
+            ("rack-slot", Value::Number(0.0)),
+            ("rack-fx", Value::Bool(true)),
+            ("table-name", Value::String("Filterable".to_string())),
+            ("table-engine", Value::String("Spectral".to_string())),
+        ] {
+            fx.insert(key.to_string(), Rc::new(RefCell::new(value)));
+        }
+        fx.insert(
+            "table-options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("Filterable".to_string()),
+                Value::String("vowel-drift".to_string()),
+            ]))),
+        );
+
+        {
+            let Value::List(instruments) = &panel else {
+                panic!("instrument panel should be a list");
+            };
+            let slots_cell = {
+                let instrument = instruments[0].borrow();
+                let Value::Map(instrument) = &*instrument else {
+                    panic!("rack instrument should be a map");
+                };
+                instrument.get("slots").expect("rack slots").clone()
+            };
+            let effects_cell = {
+                let slots = slots_cell.borrow();
+                let Value::List(slots) = &*slots else {
+                    panic!("rack slots should be a list");
+                };
+                let slot = slots[0].borrow();
+                let Value::Map(slot) = &*slot else {
+                    panic!("rack slot should be a map");
+                };
+                slot.get("effects").expect("rack slot effects").clone()
+            };
+            *effects_cell.borrow_mut() = test_list(vec![Value::Map(fx)]);
+        }
+
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", panel),
+                ("bus-effects", test_list(vec![])),
+                ("delete-target-version", Value::Number(0.0)),
+                (rack_slot_delete_target_field(0, 0).as_str(), Value::Bool(false)),
+            ],
+            true,
+        );
+        editor.runtime_mut().eval_str(
+            r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-instrument-synth-ui (inst) false)
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+            "#,
+        ).expect("install rack Filter Table test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor.buffers.iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(220, 28);
+        let layout = editor.widget_layout().expect("rack Filter Table layout");
+        assert_finite_layout_tree(&layout);
+        let rack_panel = find_layout_node_by_debug_name(&layout, "rack-slot-fx-panel")
+            .expect("rack slot effect host");
+        let effect_panel = find_layout_node_by_debug_name(
+            rack_panel,
+            "audio-fx-panel-root-0-Filter Table",
+        ).expect("rack Filter Table panel");
+        let preset = find_layout_node_by_stable_key(effect_panel, "filter-table-preset-0")
+            .and_then(|node| find_layout_node_by_widget_type(node, "dropdown"))
+            .expect("rack Filterable dropdown");
+        let engine = find_layout_node_by_stable_key(effect_panel, "filter-table-engine-dd-0")
+            .and_then(|node| find_layout_node_by_widget_type(node, "dropdown"))
+            .expect("rack Spectral/Min Phase dropdown");
+        assert_finite_nonzero_rect(preset, "rack Filterable dropdown");
+        assert_finite_nonzero_rect(engine, "rack Spectral/Min Phase dropdown");
+        assert_eq!(preset.props.get("value"), Some(&Value::String("Filterable".to_string())));
+        assert_eq!(engine.props.get("value"), Some(&Value::String("Spectral".to_string())));
+
+        editor.runtime_mut().eval_str(
+            r#"(eseq.effects.builtin.filter-table/%set-source
+                (dict :track-idx 0 :rack-slot 0 :rack-fx true :slot-idx 0)
+                "fltab:vowel-drift")"#,
+        ).expect("select rack Filter Table preset");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.effects.builtin.filter-table/%set-engine
+                (dict :track-idx 0 :rack-slot 0 :rack-fx true :slot-idx 0)
+                "causal")"#,
+        ).expect("select rack Filter Table engine");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2, "dropdown commands={commands:?}");
+        for (command, expected_name) in commands.iter().zip([
+            "set-filter-table-source",
+            "set-filter-table-engine",
+        ]) {
+            let eseqlisp::host::HostCommand::Custom { name, payload } = command else {
+                panic!("expected custom host command, got {command:?}");
+            };
+            assert_eq!(name, expected_name);
+            let Value::Map(payload) = payload else {
+                panic!("Filter Table command payload should be a map: {payload:?}");
+            };
+            for (key, expected) in [("track", 0.0), ("rack-slot", 0.0), ("slot", 0.0)] {
+                assert_eq!(
+                    payload.get(key).map(|value| value.borrow().clone()),
+                    Some(Value::Number(expected)),
+                    "{expected_name} should target the selected rack effect instance",
+                );
+            }
+        }
     }
 
     // eseq-dtx.8: the response-editor section renders from session props on

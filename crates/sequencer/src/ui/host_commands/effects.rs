@@ -159,6 +159,7 @@ pub(super) fn handle(
             };
             let bus = extract_usize_from_payload(&payload, "bus");
             let track = extract_usize_from_payload(&payload, "track");
+            let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
             let slot = extract_usize_from_payload(&payload, "slot");
             // Optional explicit analysis mode; otherwise the recommendation
             // decides and the stored reference records the chosen mode.
@@ -188,6 +189,17 @@ pub(super) fn handle(
                                 &reference,
                             ),
                         )
+                    } else if let (Some(track), Some(rack_slot)) = (track, rack_slot) {
+                        app::edit::apply_recorded_rack_filter_table_mutation(
+                            &mut app,
+                            track,
+                            rack_slot,
+                            slot,
+                            path,
+                            &reference,
+                        )
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"))
                     } else if let Some(track) = track {
                         app::edit::apply_recorded_track_filter_table_mutation(
                             &mut app,
@@ -203,11 +215,21 @@ pub(super) fn handle(
                     };
                     match result {
                         Ok(()) => {
-                            queue_effect_panel_tree_invalidation(
-                                &ui_invalidations,
-                                track,
-                                bus,
-                            );
+                            if let (Some(track), Some(_)) = (track, rack_slot) {
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            } else {
+                                queue_effect_panel_tree_invalidation(
+                                    &ui_invalidations,
+                                    track,
+                                    bus,
+                                );
+                            }
                             let (sample_ref, mode) =
                                 sequencer::effects::filter_table::decode_table_ref(&reference);
                             let mode_label = mode
@@ -301,6 +323,7 @@ pub(super) fn handle(
             // per-frame latency refresh.
             let bus = extract_usize_from_payload(&payload, "bus");
             let track = extract_usize_from_payload(&payload, "track");
+            let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
             let slot = extract_usize_from_payload(&payload, "slot");
             let engine_str = extract_string_from_payload(&payload, "engine");
             let result = (|| -> Result<String, String> {
@@ -310,6 +333,10 @@ pub(super) fn handle(
                         .get(bus_idx)
                         .and_then(|bus| bus.effect_slots.get(slot))
                         .map(|state| state.node_id as i32)
+                } else if let (Some(track), Some(rack_slot)) = (track, rack_slot) {
+                    app.rack_slot_effect_snapshot(track, rack_slot)
+                        .ok()
+                        .and_then(|rack| rack.effect_slots.get(slot).map(|state| state.node_id as i32))
                 } else if let Some(track) = track {
                     app.state
                         .pattern
@@ -320,7 +347,7 @@ pub(super) fn handle(
                 } else {
                     None
                 }
-                .ok_or_else(|| "need a track or bus".to_string())?;
+                .ok_or_else(|| "need a track, rack slot, or bus".to_string())?;
                 let current = sequencer::effects::filter_table::engine_for(node_id);
                 let engine = match engine_str.as_deref() {
                     Some("toggle") | None => current.toggled(),
@@ -336,6 +363,13 @@ pub(super) fn handle(
                         "Set bus Filter Table engine",
                         |app| app.set_bus_filter_table_engine(bus_idx, slot, engine),
                     )?;
+                } else if let (Some(track), Some(rack_slot)) = (track, rack_slot) {
+                    app.apply_recorded_rack_effect_chain_mutation(
+                        track,
+                        rack_slot,
+                        "Set rack Filter Table engine",
+                        |app| app.set_rack_filter_table_engine(track, rack_slot, slot, engine),
+                    )?;
                 } else if let Some(track) = track {
                     app.apply_recorded_track_effect_chain_mutation(
                         track,
@@ -347,7 +381,17 @@ pub(super) fn handle(
             })();
             match result {
                 Ok(message) => {
-                    queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
+                    if let (Some(track), Some(_)) = (track, rack_slot) {
+                        refresh_instrument_panel_reactive(
+                            &mut editor,
+                            &app,
+                            track,
+                            &selected_steps,
+                            &ui_epoch,
+                        );
+                    } else {
+                        queue_effect_panel_tree_invalidation(&ui_invalidations, track, bus);
+                    }
                     editor.handle_host_event(HostEvent::Status(message));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(

@@ -25,7 +25,7 @@ use super::data::{
     sync_beats, ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection,
     RackRouting, StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData,
     PatternStepGeometry, Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot,
-    TrackPattern, TrackSoundState,
+    TrackPattern, TrackSendPLockData, TrackSendRuntimeTarget, TrackSendSnapshot, TrackSoundState,
     DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
     MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };

@@ -16,6 +16,7 @@ pub struct PatternSnapshot {
     pub timebase_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_resolution_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
+    pub track_send_plock_snapshots: Vec<Vec<Vec<TrackSendSnapshot>>>,
     pub instrument_types: Vec<InstrumentType>,
     pub instrument_run_modes: Vec<CustomInstrumentRunMode>,
     pub mod_connections: Vec<ModConnection>,
@@ -495,6 +496,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.timebase_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_resolution_plock_snapshots, track_idx);
+        remove_track_lane_if_present(&mut self.track_send_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
         remove_track_lane_if_present(&mut self.instrument_run_modes, track_idx);
         remove_track_lane_if_present(&mut self.rack_tracks, track_idx);
@@ -662,6 +664,8 @@ impl PatternSnapshot {
             self.swing_plock_snapshots.push([None; MAX_STEPS]);
             self.swing_resolution_plock_snapshots
                 .push([None; MAX_STEPS]);
+            self.track_send_plock_snapshots
+                .push(vec![Vec::new(); MAX_STEPS]);
             self.instrument_types.push(InstrumentType::Sampler);
             self.instrument_run_modes
                 .push(CustomInstrumentRunMode::Instrument);
@@ -675,6 +679,14 @@ impl PatternSnapshot {
         }
         while self.neural_reset_bits.len() < track_count {
             self.neural_reset_bits.push([0u64; TRACK_PATTERN_WORDS]);
+        }
+        while self.track_send_plock_snapshots.len() < track_count {
+            self.track_send_plock_snapshots
+                .push(vec![Vec::new(); MAX_STEPS]);
+        }
+        for steps in &mut self.track_send_plock_snapshots {
+            steps.truncate(MAX_STEPS);
+            steps.resize_with(MAX_STEPS, Vec::new);
         }
         while self.rack_tracks.len() < track_count {
             self.rack_tracks.push(None);
@@ -727,6 +739,7 @@ impl PatternSnapshot {
         self.timebase_plock_snapshots.truncate(track_count);
         self.swing_plock_snapshots.truncate(track_count);
         self.swing_resolution_plock_snapshots.truncate(track_count);
+        self.track_send_plock_snapshots.truncate(track_count);
         self.instrument_types.truncate(track_count);
         self.instrument_run_modes.truncate(track_count);
         self.rack_tracks.truncate(track_count);
@@ -764,6 +777,7 @@ impl PatternSnapshot {
         let mut timebase_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut swing_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut swing_resolution_plock_snapshots = Vec::with_capacity(num_tracks);
+        let mut track_send_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut inst_types = Vec::with_capacity(num_tracks);
         let mut instrument_run_modes = Vec::with_capacity(num_tracks);
         let mut rack_tracks = Vec::with_capacity(num_tracks);
@@ -845,6 +859,7 @@ impl PatternSnapshot {
             swing_plock_snapshots.push(state.pattern.swing_plocks[t].snapshot());
             swing_resolution_plock_snapshots
                 .push(state.pattern.swing_resolution_plocks[t].snapshot());
+            track_send_plock_snapshots.push(state.pattern.track_send_plocks[t].snapshot());
             inst_types.push(if t < instrument_types.len() {
                 instrument_types[t]
             } else {
@@ -921,6 +936,7 @@ impl PatternSnapshot {
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
+            track_send_plock_snapshots,
             instrument_types: inst_types,
             instrument_run_modes,
             mod_connections: Vec::new(),
@@ -1087,6 +1103,10 @@ impl PatternSnapshot {
                 .get(track)
                 .copied()
                 .unwrap_or([None; MAX_STEPS]),
+            track_send_plock_snapshot: self.track_send_plock_snapshots
+                .get(track)
+                .cloned()
+                .unwrap_or_else(|| vec![Vec::new(); MAX_STEPS]),
             instrument_type: self
                 .instrument_types
                 .get(track)
@@ -1137,6 +1157,7 @@ impl PatternSnapshot {
         self.timebase_plock_snapshots[track] = data.timebase_plock_snapshot;
         self.swing_plock_snapshots[track] = data.swing_plock_snapshot;
         self.swing_resolution_plock_snapshots[track] = data.swing_resolution_plock_snapshot;
+        self.track_send_plock_snapshots[track] = data.track_send_plock_snapshot;
         self.instrument_types[track] = data.instrument_type;
         self.instrument_run_modes[track] = data.instrument_run_mode;
         self.rack_tracks[track] = data.rack_track;
@@ -1175,6 +1196,7 @@ impl PatternSnapshot {
         self.timebase_plock_snapshots[track] = [None; MAX_STEPS];
         self.swing_plock_snapshots[track] = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshots[track] = [None; MAX_STEPS];
+        self.track_send_plock_snapshots[track] = vec![Vec::new(); MAX_STEPS];
         self.instrument_types[track] = instrument_type;
         self.instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
         self.rack_tracks[track] = None;
@@ -1237,6 +1259,8 @@ impl PatternSnapshot {
         self.swing_plock_snapshots.push([None; MAX_STEPS]);
         self.swing_resolution_plock_snapshots
             .push([None; MAX_STEPS]);
+        self.track_send_plock_snapshots
+            .push(vec![Vec::new(); MAX_STEPS]);
         self.instrument_types.push(InstrumentType::Sampler);
         self.instrument_run_modes
             .push(CustomInstrumentRunMode::Instrument);
@@ -1266,6 +1290,7 @@ impl PatternSnapshot {
             timebase_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_resolution_plock_snapshots: Vec::with_capacity(num_tracks),
+            track_send_plock_snapshots: Vec::with_capacity(num_tracks),
             instrument_types: Vec::with_capacity(num_tracks),
             instrument_run_modes: Vec::with_capacity(num_tracks),
             mod_connections: Vec::new(),
@@ -1315,6 +1340,7 @@ impl PatternSnapshot {
             && self.swing_plock_snapshots.len() == n
             && self.instrument_types.len() == n
             && self.swing_resolution_plock_snapshots.len() == n
+            && self.track_send_plock_snapshots.len() == n
             && self.instrument_run_modes.len() == n
             && self.rack_tracks.len() == n
             && self.process_chains.len() == n

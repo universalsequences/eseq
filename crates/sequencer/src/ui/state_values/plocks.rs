@@ -918,6 +918,31 @@ pub(crate) fn build_track_plocks_value(
             ),
         ));
     }
+    let send_locks = state.pattern.track_send_plocks[track].snapshot();
+    for send in send_locks.get(step).into_iter().flatten() {
+        let Some((bus_idx, bus)) = app.buses.iter().enumerate()
+            .find(|(_, bus)| bus.id == send.destination)
+        else {
+            continue;
+        };
+        let default = tp.sends().iter()
+            .find(|baseline| baseline.destination == send.destination)
+            .map(|baseline| baseline.amount)
+            .unwrap_or(0.0);
+        items.push(plock_entry(
+            step,
+            "bus-send",
+            "track sends",
+            &bus.name,
+            send.amount,
+            default,
+            0.0,
+            1.0,
+            None,
+            Some(bus_idx),
+            None,
+        ));
+    }
     for param in StepParam::ALL {
         let value = state.pattern.step_data[track].get(step, param);
         if value.to_bits() == param.default_value().to_bits() {
@@ -1381,6 +1406,7 @@ pub(crate) fn plock_variant_step_render_values(
 ) -> Vec<PlockVariantStepRender> {
     const SEQ_ONLY_COLOR: [f32; 3] = [0.545_098_07, 0.545_098_07, 0.588_235_3];
     let assignments = state.reconcile_plock_variant_registry_for_track(track);
+    let track_send_plocks = state.pattern.track_send_plocks[track].snapshot();
     (0..MAX_STEPS)
         .map(|step| {
             if let Some(assignment) = assignments.get(step).and_then(Clone::clone) {
@@ -1392,7 +1418,7 @@ pub(crate) fn plock_variant_step_render_values(
                 state.as_ref(),
                 track,
                 step,
-            ) {
+            ) || track_send_plocks.get(step).is_some_and(|row| !row.is_empty()) {
                 PlockVariantStepRender {
                     kind: 1,
                     color: SEQ_ONLY_COLOR,
@@ -1544,6 +1570,7 @@ pub(crate) fn track_step_plock_mask(
     let timebase_plocks = &state.pattern.timebase_plocks[track];
     let swing_plocks = &state.pattern.swing_plocks[track];
     let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
+    let track_send_plocks = state.pattern.track_send_plocks[track].snapshot();
     for step in 0..MAX_STEPS {
         let word = step / 64;
         let bit = 1u64 << (step % 64);
@@ -1551,6 +1578,8 @@ pub(crate) fn track_step_plock_mask(
             continue;
         }
         if timebase_plocks.has_plock(step)
+            || track_send_plocks.get(step)
+                .is_some_and(|row| !row.is_empty())
             || swing_plocks.has_plock(step)
             || swing_resolution_plocks.has_plock(step)
             || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
@@ -1577,6 +1606,7 @@ pub(crate) fn track_step_has_plock(
     let timebase_plocks = &state.pattern.timebase_plocks[track];
     let swing_plocks = &state.pattern.swing_plocks[track];
     let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
+    let track_send_plocks = state.pattern.track_send_plocks[track].snapshot();
     let effect_has_plock = (0..num_slots).any(|slot_idx| {
         let Some(slot) = chain.get(slot_idx) else {
             return false;
@@ -1637,6 +1667,8 @@ pub(crate) fn track_step_has_plock(
         || midi_fx_has_plock
         || instrument_has_plock
         || rack_slot_has_plock
+        || track_send_plocks.get(step)
+            .is_some_and(|row| !row.is_empty())
         || timebase_plocks.has_plock(step)
         || swing_plocks.has_plock(step)
         || swing_resolution_plocks.has_plock(step)

@@ -3913,6 +3913,7 @@ impl App {
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
+            track_send_plock_snapshots,
             bus_patterns,
             mod_connections,
             neural_networks,
@@ -4171,6 +4172,12 @@ impl App {
                     snapshot
                 })
                 .collect(),
+            track_send_plock_snapshots: track_send_plock_snapshots
+                .into_iter()
+                .map(|steps| steps.into_iter().take(MAX_STEPS).map(|sends| {
+                    sends.into_iter().map(Into::into).collect()
+                }).chain(std::iter::repeat_with(Vec::new)).take(MAX_STEPS).collect())
+                .collect(),
             instrument_types: self.graph.track_instrument_types.clone(),
             instrument_run_modes: instrument_run_modes
                 .into_iter()
@@ -4220,6 +4227,7 @@ impl App {
             self.push_track_pan(track_idx);
             self.push_track_mute(track_idx);
             self.push_send_gain(track_idx);
+            self.graph_controller().apply_track_bus_sends(track_idx);
             for slot_idx in 0..self.state.pattern.effect_chains[track_idx].len() {
                 let slot = &self.state.pattern.effect_chains[track_idx][slot_idx];
                 let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
@@ -4250,6 +4258,7 @@ impl App {
         }
         self.push_track_solo_mutes();
         self.push_all_restored_instrument_defaults();
+        self.state.publish_scheduler_snapshot();
     }
 }
 
@@ -4798,6 +4807,7 @@ mod tests {
                 timebase_plock_snapshots: Vec::new(),
                 swing_plock_snapshots: Vec::new(),
                 swing_resolution_plock_snapshots: Vec::new(),
+                track_send_plock_snapshots: Vec::new(),
                 bus_patterns: Vec::new(),
                 instrument_types: Vec::new(),
                 mod_connections: Vec::new(),

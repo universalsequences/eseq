@@ -9,7 +9,7 @@ use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
     CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
-    TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
+    TrackParamsSnapshot, TrackSendRuntimeTarget, TrackSendSnapshot, MAX_STEPS, NUM_PARAMS,
 };
 use super::state::{RackTrackSnapshot, SequencerState, TrackPatternData};
 
@@ -34,6 +34,7 @@ pub struct SequencerStepSnapshot {
     pub timebase_override: Option<Timebase>,
     pub swing_override: Option<f32>,
     pub swing_resolution_override: Option<SwingResolution>,
+    pub track_send_plocks: Vec<TrackSendSnapshot>,
 }
 
 impl SequencerStepSnapshot {
@@ -61,6 +62,10 @@ impl SequencerStepSnapshot {
             timebase_override: state.pattern.timebase_plocks[track].get(step),
             swing_override: state.pattern.swing_plocks[track].get(step),
             swing_resolution_override: state.pattern.swing_resolution_plocks[track].get(step),
+            track_send_plocks: state.pattern.track_send_plocks[track].snapshot()
+                .get(step)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
@@ -80,6 +85,7 @@ pub struct SequencerTrackSnapshot {
     pub midi_fx_slots: Vec<EffectSlotSnapshot>,
     pub instrument_descriptor: EffectDescriptor,
     pub instrument_slot: EffectSlotSnapshot,
+    pub track_send_runtime_targets: Vec<TrackSendRuntimeTarget>,
     pub steps: Vec<SequencerStepSnapshot>,
 }
 
@@ -234,7 +240,12 @@ impl SequencerSnapshot {
             })
             .collect();
 
+        let send_targets = state.pattern.track_send_runtime_targets.lock().unwrap();
         for (track_idx, track) in tracks.iter_mut().enumerate() {
+            track.track_send_runtime_targets = send_targets
+                .get(track_idx)
+                .cloned()
+                .unwrap_or_default();
             state.sync_rack_macro_runtime_track(track_idx, track.rack_track.as_ref());
             if let Some(rack) = track.rack_track.as_mut() {
                 rack.attach_runtime_macro_values(state.rack_macro_runtime_values(), track_idx);
@@ -348,6 +359,10 @@ fn capture_live_track(
         midi_fx_slots,
         instrument_descriptor,
         instrument_slot,
+        track_send_runtime_targets: state.pattern.track_send_runtime_targets.lock().unwrap()
+            .get(track)
+            .cloned()
+            .unwrap_or_default(),
         steps,
     }
 }
@@ -466,6 +481,10 @@ fn track_snapshot_from_pattern_data(
                 swing_override: data.swing_plock_snapshot[step_idx].map(f32::from_bits),
                 swing_resolution_override: data.swing_resolution_plock_snapshot[step_idx]
                     .map(SwingResolution::from_index),
+                track_send_plocks: data.track_send_plock_snapshot
+                    .get(step_idx)
+                    .cloned()
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -484,6 +503,7 @@ fn track_snapshot_from_pattern_data(
         midi_fx_slots: data.midi_fx_slots.clone(),
         instrument_descriptor,
         instrument_slot: data.instrument_slot.clone(),
+        track_send_runtime_targets: Vec::new(),
         steps,
     }
 }

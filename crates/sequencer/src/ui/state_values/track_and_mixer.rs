@@ -325,6 +325,46 @@ pub(crate) fn sync_current_track_bus_send_binding_fields(
     }
 }
 
+/// Synchronize send controls to the same display step used by synth/effect
+/// parameters: selection first, then the playback step, then the pattern
+/// baseline. Both mixer-strip and current-track controls share these fields,
+/// so selection and playhead changes must update both projections together.
+pub(crate) fn sync_selected_track_bus_send_binding_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
+    let locks = display_step.map(|_| state.pattern.track_send_plocks[track].snapshot());
+    let mut dirty = false;
+    for (bus_idx, bus) in app.buses.iter().enumerate() {
+        if bus.id == sequencer::sequencer::BusId::MIX {
+            continue;
+        }
+        let Some(baseline) = track_bus_send_amount(app, state, track, bus_idx) else {
+            continue;
+        };
+        let amount = display_step
+            .and_then(|step| locks.as_ref()?.get(step))
+            .and_then(|row| row.iter().find(|send| send.destination == bus.id))
+            .map(|send| send.amount)
+            .unwrap_or(baseline);
+        dirty |= rt.set_reactive(
+            "SEQ",
+            &track_bus_send_field(track, bus_idx),
+            Value::Number(amount as f64),
+        ).effects_dirty;
+        dirty |= rt.set_reactive(
+            "SEQ",
+            &current_track_bus_send_field(bus_idx),
+            Value::Number(amount as f64),
+        ).effects_dirty;
+    }
+    dirty
+}
+
 pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
     let routes = state.current_mod_connections();
     Value::List(

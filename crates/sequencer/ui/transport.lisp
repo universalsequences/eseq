@@ -764,9 +764,9 @@
             :on-click |x y r| (if SEQ.song-manual-latch (seq-song-back-to-song) nil)
             (back-to-arrangement-icon
               :active (if SEQ.song-manual-latch 1 0))))))
-
+    
     ;; Single continuous LED panel
-    (box :background "transport-led-bg" :height 1.4 :width 61
+    (box :background "transport-led-bg" :height 1.4 :width 67
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
@@ -776,9 +776,9 @@
               ;; arrangement clock during playback/capture.
               :playhead (bind-seq "transport-playhead")
               :song-position-beats
-                (if (= SEQ.song-mode "stopped")
-                  (bind-seq "song-cursor-beats")
-                  (bind-seq "song-position-beats"))
+              (if (= SEQ.song-mode "stopped")
+                (bind-seq "song-cursor-beats")
+                (bind-seq "song-position-beats"))
               :use-song-position true
               :font-size 15 :width 10 :height 1.2
               :color '(rgba 0.85 0.85 0.85 1)
@@ -813,13 +813,14 @@
                 :options %record-quantize-options
                 :on-change seq-set-record-quantize
                 :width 5.2 :height 1.15 :font-size 9))
+            (box :width 0.5)
             (subtree :key "transport-metronome-toggle"
               (box :debug-name "transport-metronome-toggle"
                 :width 3.4 :height 1.1
                 :background "pattern-pill-bg"
                 :on-click |x y r| (host-command "toggle-metronome")
                 (v-stack :align :center
-                  (label "CLK"
+                  (label "MET"
                     :font-size 9
                     :color (if SEQ.metronome :white :gray)
                     :hover-color :white
@@ -831,7 +832,8 @@
                 :width 5.0 :height 1.1
                 :background "pattern-pill-bg"
                 :on-click |x y r| (host-command "toggle-roll-mode")
-                (h-stack :align :center :gap 0.3
+                (h-stack :align :baseline :gap 0.3
+            (box :width 0.2)
                   (label "ROLL"
                     :font-size 9
                     :color (if SEQ.roll-mode :white :gray)
@@ -949,7 +951,7 @@
                 
                 :color (if (> SEQ.num-patterns 1) :white :dark-gray)
                 :bg :transparent))))))
-
+    
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.
     (box :width 0 :flex 1)

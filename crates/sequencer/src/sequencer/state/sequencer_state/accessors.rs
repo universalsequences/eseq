@@ -111,6 +111,10 @@ impl SequencerState {
                 swing_resolution_plocks: (0..MAX_TRACKS)
                     .map(|_| SwingResolutionPLockData::new())
                     .collect(),
+                track_send_plocks: (0..MAX_TRACKS)
+                    .map(|_| TrackSendPLockData::new())
+                    .collect(),
+                track_send_runtime_targets: Mutex::new(vec![Vec::new(); MAX_TRACKS]),
                 instrument_slots: (0..MAX_TRACKS).map(|_| EffectSlotState::empty()).collect(),
                 instrument_base_note_offsets: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
@@ -402,6 +406,16 @@ impl SequencerState {
             .track_params
             .get(track)
             .map(capture_track_params_snapshot)
+    }
+
+    pub fn set_track_send_runtime_targets(
+        &self,
+        track: usize,
+        targets: Vec<TrackSendRuntimeTarget>,
+    ) {
+        if let Some(slot) = self.pattern.track_send_runtime_targets.lock().unwrap().get_mut(track) {
+            *slot = targets;
+        }
     }
 
     pub(crate) fn live_rack_track_snapshot(&self, track: usize) -> Option<RackTrackSnapshot> {

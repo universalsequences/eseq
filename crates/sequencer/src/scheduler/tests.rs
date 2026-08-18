@@ -3,11 +3,11 @@
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
         midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
         reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
-        resolve_sampler_params, resolved_slot_param_value, run_midi_fx_chain_for_track,
-        schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, EmittedNetworkEventSource,
-        LiveMidiFxTrackState, MidiFxEvent, MidiFxQuantizerState, SchedulerLookaheadState,
-        SnapshotSequencerClock,
+        resolve_sampler_params, resolve_track_send_params, resolved_slot_param_value,
+        run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
+        swung_network_sample_time, track_active_note_spans_at_beat,
+        track_note_spans_for_trigger, EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent,
+        MidiFxQuantizerState, SchedulerLookaheadState, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{
@@ -40,6 +40,98 @@
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn track_send_plock_resolves_at_step_and_restores_pattern_baseline() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let destination = crate::sequencer::BusId::DEFAULT_A;
+        state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+            destination,
+            amount: 0.2,
+        }]);
+        state.pattern.track_send_plocks[0].set(3, destination, 0.85);
+        state.set_track_send_runtime_targets(0, vec![crate::sequencer::TrackSendRuntimeTarget {
+            destination,
+            left_id: 700,
+            right_id: 701,
+        }]);
+        let snapshot = state.publish_scheduler_snapshot();
+
+        let locked = resolve_track_send_params(&snapshot, 0, 3);
+        assert_eq!(
+            locked.iter().map(|param| (param.logical_id, param.value)).collect::<Vec<_>>(),
+            vec![(700, 0.85), (701, 0.85)],
+        );
+        let restored = resolve_track_send_params(&snapshot, 0, 4);
+        assert_eq!(
+            restored.iter().map(|param| (param.logical_id, param.value)).collect::<Vec<_>>(),
+            vec![(700, 0.2), (701, 0.2)],
+        );
+    }
+
+    #[test]
+    fn scheduler_events_apply_track_send_plock_then_restore_zero_baseline() {
+        // schedule_playing_lookahead needs the scheduler thread's stack budget.
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            let destination = crate::sequencer::BusId::DEFAULT_A;
+            state.pattern.track_params[0].set_sends(vec![crate::sequencer::TrackSendSnapshot {
+                destination,
+                amount: 0.0,
+            }]);
+            state.pattern.track_send_plocks[0].set(1, destination, 0.8);
+            state.set_track_send_runtime_targets(0, vec![crate::sequencer::TrackSendRuntimeTarget {
+                destination,
+                left_id: 700,
+                right_id: 701,
+            }]);
+            for step in 0..3 {
+                state.toggle_step_and_clear_plocks(0, step);
+            }
+            // Toggling an empty step clears its complete payload, so stamp the lock
+            // after activating the step exactly as the authoring command does.
+            state.pattern.track_send_plocks[0].set(1, destination, 0.8);
+            state.toggle_play();
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                24_000,
+                24_000,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+
+            let mut values = Vec::new();
+            while let Some(event) = queue.pop() {
+                if let ScheduledEventKind::ResolvedTrigger { step, effect_params, .. } = event.kind {
+                    let value = effect_params.iter()
+                        .find(|param| param.logical_id == 700)
+                        .map(|param| param.value);
+                    values.push((step, value));
+                }
+            }
+            assert!(values.contains(&(0, Some(0.0))), "step 0 baseline missing: {values:?}");
+            assert!(values.contains(&(1, Some(0.8))), "step 1 send p-lock missing: {values:?}");
+            assert!(values.contains(&(2, Some(0.0))), "step 2 baseline restore missing: {values:?}");
+        });
+    }
 
     fn test_resolved_step() -> ResolvedStep {
         ResolvedStep {
@@ -7666,6 +7758,7 @@
             .session_snapshot(&base_snapshot)
             .is_none());
     }
+
     // ── Track rolling (docs/rolling-core-spec.md, phase 1) ──────────────────
 
     use super::{schedule_roll_hits, RollState};

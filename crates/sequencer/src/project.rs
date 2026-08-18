@@ -1191,6 +1191,8 @@ pub struct ProjectPattern {
     )]
     pub swing_resolution_plock_snapshots: Vec<Vec<Option<u32>>>,
     #[serde(default)]
+    pub track_send_plock_snapshots: Vec<Vec<Vec<ProjectTrackSend>>>,
+    #[serde(default)]
     pub bus_patterns: Vec<ProjectBusPatternSnapshot>,
     #[serde(default)]
     pub mod_connections: Vec<ProjectModConnection>,
@@ -1549,6 +1551,12 @@ impl ProjectPattern {
                 .swing_resolution_plock_snapshots
                 .iter()
                 .map(|steps| steps.to_vec())
+                .collect(),
+            track_send_plock_snapshots: snapshot.track_send_plock_snapshots
+                .iter()
+                .map(|steps| steps.iter().map(|sends| {
+                    sends.iter().cloned().map(ProjectTrackSend::from).collect()
+                }).collect())
                 .collect(),
             bus_patterns,
             mod_connections: snapshot
@@ -3047,6 +3055,7 @@ mod tests {
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
+                track_send_plock_snapshots: Vec::new(),
                 bus_patterns: Vec::new(),
                 instrument_types: vec![
                     ProjectInstrumentType::Custom,
@@ -3215,6 +3224,23 @@ mod tests {
         let restored: ProjectFile =
             serde_json::from_str(&json).expect("deserialize arrangement project");
         assert_eq!(restored.arrangement, Some(sample_arrangement()));
+    }
+
+    #[test]
+    fn track_send_plocks_round_trip_through_project_serialization() {
+        let mut project = sample_project();
+        project.patterns[0].track_send_plock_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; project.tracks.len()];
+        project.patterns[0].track_send_plock_snapshots[0][7] = vec![ProjectTrackSend {
+            destination: crate::sequencer::DEFAULT_BUS_A_ID,
+            amount: 0.73,
+        }];
+
+        let json = serde_json::to_string(&project).expect("serialize send p-lock");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize send p-lock");
+        let send = &restored.patterns[0].track_send_plock_snapshots[0][7][0];
+        assert_eq!(send.destination, crate::sequencer::DEFAULT_BUS_A_ID);
+        assert_eq!(send.amount, 0.73);
     }
 
     #[test]

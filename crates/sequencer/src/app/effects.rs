@@ -2119,6 +2119,94 @@ impl App {
         Ok(true)
     }
 
+    /// Recompile a rack-slot Filter Table for a different engine while
+    /// preserving the effect values stored in every rack pattern.
+    pub fn set_rack_filter_table_engine(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        engine: crate::effects::filter_table::TableEngine,
+    ) -> Result<bool, String> {
+        use crate::effects::filter_table;
+        let before = self
+            .state
+            .capture_rack_slot_pattern_state(track, rack_slot)?;
+        let old_node_id = before
+            .live
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack effect slot not found".to_string())?;
+        if old_node_id == 0 {
+            return Err("Filter Table node not live".to_string());
+        }
+        if filter_table::engine_for(old_node_id) == engine {
+            return Ok(false);
+        }
+
+        let source = filter_table::dsp_source_for(engine);
+        let result = self.editor.dylib_cache.acquire(
+            lisp_host::DGenCompileKind::Effect,
+            lisp_host::DGenSourceOrigin::BuiltinFilterTable,
+            source,
+            self.graph.sample_rate,
+            None,
+        )?;
+        let manifest = result.manifest.clone();
+        self.apply_compiled_rack_slot_effect_to_slot_sync(
+            track,
+            rack_slot,
+            effect_slot,
+            filter_table::NAME,
+            result,
+        )?;
+        self.retain_effect_source(
+            Self::rack_slot_fx_locator(track, rack_slot),
+            effect_slot,
+            RetainedEffectSource::Compiled {
+                name: filter_table::NAME.to_string(),
+                source: source.to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinFilterTable,
+            },
+        )?;
+
+        let compiled = self
+            .state
+            .capture_rack_slot_pattern_state(track, rack_slot)?;
+        let compiled_slot = compiled
+            .live
+            .effect_slots
+            .get(effect_slot)
+            .cloned()
+            .ok_or_else(|| "Compiled rack effect slot not found".to_string())?;
+        let compiled_descriptor = compiled.live.effect_descriptors[effect_slot].clone();
+        let compiled_name = compiled.live.custom_effect_names[effect_slot].clone();
+        let mut restored = before;
+        let restore_compiled_identity = |slot: &mut crate::sequencer::RackSlotSnapshot| {
+            slot.effect_slots[effect_slot].node_id = compiled_slot.node_id;
+            slot.effect_slots[effect_slot].modulator_node_id = compiled_slot.modulator_node_id;
+            slot.effect_descriptors[effect_slot] = compiled_descriptor.clone();
+            slot.custom_effect_names[effect_slot] = compiled_name.clone();
+        };
+        restore_compiled_identity(&mut restored.live);
+        for (_, slot) in &mut restored.patterns {
+            restore_compiled_identity(slot);
+        }
+        self.state
+            .restore_rack_slot_effect_pattern_state(track, &restored)?;
+
+        let node_id = compiled_slot.node_id as i32;
+        filter_table::record_compiled_instance(node_id, &manifest, source);
+        self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
+        self.reapply_filter_table_after_engine_change(
+            node_id,
+            &restored.live.effect_slots[effect_slot].authoring_values(),
+        )?;
+        Ok(true)
+    }
+
     /// Bus twin of [`Self::set_track_filter_table_engine`].
     pub fn set_bus_filter_table_engine(
         &mut self,
@@ -3912,7 +4000,7 @@ impl App {
         }
     }
 
-    pub(super) fn rack_slot_effect_snapshot(
+    pub fn rack_slot_effect_snapshot(
         &self,
         track: usize,
         rack_slot: usize,
