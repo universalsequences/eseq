@@ -45085,6 +45085,7 @@
                 ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
+                ("armed-rack-id", Value::Number(-1.0)),
                 ("song-bound-clip", Value::Nil),
                 ("track-selected-0", Value::Bool(true)),
                 ("track-selected-1", Value::Bool(false)),
@@ -45327,6 +45328,7 @@
             "seq-toggle-record-arm",
             "seq-toggle-track-mute",
             "seq-toggle-track-solo",
+            "seq-toggle-rack-arm",
             "seq-set-track",
             "seq-set-track-volume",
             "seq-set-track-pan",
@@ -45884,10 +45886,87 @@
             "group bus strips should expose an effect drop callback"
         );
         assert!(
-            group_bus_strip.rect.width > 0.0 && group_bus_strip.rect.height > 0.0,
-            "group bus drop zone should have a finite visible rect: {:?}",
+            group_bus_strip.rect.width >= 10.0 && group_bus_strip.rect.height > 0.0,
+            "group strip should be wide enough for channel controls: {:?}",
             group_bus_strip.rect
         );
+        let group_mute = find_node_by_stable_key_suffix(&layout, "/group-mute-7")
+            .expect("plain group mute control");
+        let group_solo = find_node_by_stable_key_suffix(&layout, "/group-solo-7")
+            .expect("plain group solo control");
+        assert_finite_nonzero_rect(group_mute, "plain group mute control");
+        assert_finite_nonzero_rect(group_solo, "plain group solo control");
+        assert!(
+            find_node_by_stable_key_suffix(&layout, "/group-arm-7").is_none(),
+            "plain groups should not expose a record-arm control"
+        );
+        for (control, expected) in [
+            (group_mute, "seq-toggle-bus-mute:[2]"),
+            (group_solo, "seq-toggle-bus-solo:[2]"),
+        ] {
+            let on_click = control
+                .props
+                .get("on-click")
+                .cloned()
+                .expect("group bus control should expose a click callback");
+            editor
+                .runtime_mut()
+                .invoke(on_click, vec![Value::Map(Default::default())])
+                .expect("click group bus control");
+            assert_eq!(
+                calls.lock().unwrap().last().map(String::as_str),
+                Some(expected),
+                "group mute/solo should control the backing bus"
+            );
+        }
+        calls.lock().unwrap().clear();
+
+        // A drum rack uses the same group bus controls and adds pad-play arm.
+        // Mutating the fixture from a plain group proves the two strip kinds
+        // intentionally diverge rather than all groups receiving an R button.
+        let Some(Value::List(groups)) = editor.runtime_mut().eval_str("SEQ.groups").unwrap() else {
+            panic!("mixer groups should be a list");
+        };
+        let Some(group_cell) = groups.first() else {
+            panic!("mixer fixture should contain a group");
+        };
+        let Value::Map(mut rack_group) = group_cell.borrow().clone() else {
+            panic!("mixer group should be a map");
+        };
+        rack_group.insert("rack".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "groups",
+            Value::List(vec![Rc::new(RefCell::new(Value::Map(rack_group)))]),
+        );
+        editor.runtime_mut().set_reactive("SEQ", "armed-rack-id", Value::Number(7.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let rack_layout = editor.widget_layout().expect("rack mixer layout");
+        let rack_arm = find_node_by_stable_key_suffix(&rack_layout, "/group-arm-7")
+            .expect("drum rack arm control");
+        assert_finite_nonzero_rect(rack_arm, "drum rack arm control");
+        assert_eq!(
+            node_text(rack_arm).as_deref(),
+            Some("R"),
+            "the rack-only control should be record arm"
+        );
+        let rack_arm_click = rack_arm
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("rack arm should expose a click callback");
+        editor
+            .runtime_mut()
+            .invoke(rack_arm_click, vec![Value::Map(Default::default())])
+            .expect("click rack arm");
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-rack-arm:[7]"),
+            "rack arm should toggle the rack's stable group id"
+        );
+        calls.lock().unwrap().clear();
+
         let group_badge = find_node_by_stable_key_suffix(&layout, "/group-badge-7")
             .expect("group badge click target");
         assert_finite_nonzero_rect(group_badge, "mixer group badge");

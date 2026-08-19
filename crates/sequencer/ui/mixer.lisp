@@ -1192,14 +1192,55 @@
   (let ((idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (and (>= idx 0) (= eseq.seq-core-state/selected-bus idx))))
 
+;; Mute and solo always operate on the group's backing bus. A rack additionally
+;; owns a pad-play arm state; a plain mixer group deliberately has no arm
+;; control because it is not an input target.
+(def %group-control-buttons (gidx bus-idx)
+  (let ((group (nth SEQ.groups gidx))
+      (gid (get (nth SEQ.groups gidx) :id))
+      (rack (get (nth SEQ.groups gidx) :rack))
+      (muted (and (>= bus-idx 0) (nth SEQ.bus-mutes bus-idx)))
+      (soloed (and (>= bus-idx 0) (nth SEQ.bus-solos bus-idx)))
+      (armed (and rack (= SEQ.armed-rack-id gid))))
+    (h-stack :gap 0.35 :align :center
+      (button "M"
+        :key (str "group-mute-" gid)
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
+        :background-color (%button-bg muted)
+        :color (if muted :black :dim)
+        :on-click (lambda (event) (if (>= bus-idx 0)
+          (do (%select-group gidx) (seq-toggle-bus-mute bus-idx))
+          nil)))
+      (button "S"
+        :key (str "group-solo-" gid)
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
+        :background-color (%button-bg soloed)
+        :color (if soloed :black :dim)
+        :on-click (lambda (event) (if (>= bus-idx 0)
+          (do (%select-group gidx) (seq-toggle-bus-solo bus-idx))
+          nil)))
+      (if rack
+        (button "R"
+          :key (str "group-arm-" gid)
+          :width 2.1 :height 1.0 :padding 0 :font-size 10
+          :border-color :transparent
+          :background-color (%arm-bg armed)
+          :color (if armed :black :dim)
+          :on-click (lambda (event)
+            (do (%select-group gidx) (seq-toggle-rack-arm gid))))
+        (box :width 0.0 :height 0.0 :bg :transparent)))))
+
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
-;; the container, over the container color.
+;; the container, over the container color. It matches a bus strip's width so
+;; the full rack mute/solo/arm row has room without crowding the container.
 (def %group-header-slot (gidx)
   (let ((group (nth SEQ.groups gidx))
       (c (%group-color gidx))
       (bus-idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 9.0 :height 13.72
+      :width 10.3 :height 13.72
       :corner-radius 12
       :padding 0.0
       :background-color :mixer-strip-bg
@@ -1215,10 +1256,10 @@
         ;; them selects the group's bus (%bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
-          (box  :width :fill :height 9.55
+          (box :width :fill :height 8.2
             (%bus-meter-control bus-idx))
           (box :width 0.0 :height 0.0 :bg :transparent))
-        (box :height 0.95)
+        (%group-control-buttons gidx bus-idx)
         (%bus-mod-port-row (get group :bus-id))
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
