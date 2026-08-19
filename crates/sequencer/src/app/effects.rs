@@ -6146,10 +6146,10 @@ mod tests {
         assert_eq!(converted.bus_id, plain_group.bus_id);
         let rack = converted.rack.as_ref().expect("converted rack config");
         assert_eq!(rack.pads.len(), 2);
-        assert_eq!(rack.pads[0].pad_note, DRUM_RACK_FIRST_PAD_NOTE);
-        assert_eq!(rack.pads[1].pad_note, DRUM_RACK_FIRST_PAD_NOTE + 1);
-        assert_eq!(converted.rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE), Some(kick));
-        assert_eq!(converted.rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE + 1), Some(snare));
+        assert_eq!(rack.pads[0].pad_note, 0, "the first member lands on C4");
+        assert_eq!(rack.pads[1].pad_note, 1);
+        assert_eq!(converted.rack_pad_track(0), Some(kick));
+        assert_eq!(converted.rack_pad_track(1), Some(snare));
 
         let serialized = serde_json::to_string(converted).expect("serialize converted group");
         let loaded: crate::project::ProjectTrackGroup =

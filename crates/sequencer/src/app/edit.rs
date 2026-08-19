@@ -154,6 +154,12 @@ fn rollback_effect_chain_edit<S: EffectChainHistoryState>(
     }
 }
 
+/// Pad order used when adopting a plain group's existing member tracks: begin
+/// on the default C4 page, then wrap from the top of the pad domain to C1.
+fn group_conversion_pad_notes() -> impl Iterator<Item = i32> {
+    (0..=DRUM_RACK_LAST_PAD_NOTE).chain(DRUM_RACK_FIRST_PAD_NOTE..0)
+}
+
 impl App {
     pub(super) fn capture_synchronized_scene_structure_state(
         &mut self,
@@ -2651,8 +2657,8 @@ impl App {
     }
 
     /// Upgrades a plain track group to a drum rack without replacing its bus
-    /// or member lanes. Existing members claim consecutive pads from the
-    /// bottom of the drum-rack keyboard, in the same order as the group.
+    /// or member lanes. Existing members claim consecutive pads from C4 in
+    /// group order, wrapping to C1 after the highest supported pad note.
     pub fn convert_group_to_drum_rack_recorded(
         &mut self,
         group_id: u64,
@@ -2676,8 +2682,13 @@ impl App {
             }
 
             let mut rack = crate::project::ProjectRackConfig::default();
-            let mapped = rack.map_unmapped_members(group.members.len());
-            if mapped != group.members.len() {
+            for (member, pad_note) in group_conversion_pad_notes()
+                .take(group.members.len())
+                .enumerate()
+            {
+                rack.push_pad(crate::project::ProjectRackPad { pad_note, member });
+            }
+            if rack.pads.len() != group.members.len() {
                 return Err("Could not assign every group member to a drum rack pad".to_string());
             }
             group.rack = Some(rack);
@@ -9309,9 +9320,23 @@ mod tests {
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, InstrumentType, PatternSnapshot, SequencerState,
-        SwingResolution, Timebase,
+        SwingResolution, Timebase, DRUM_RACK_TOTAL_PAD_NOTES,
     };
     use crate::app::AudioBuses;
+
+    #[test]
+    fn group_conversion_pad_order_starts_at_c4_and_wraps_at_the_maximum() {
+        let notes = group_conversion_pad_notes().collect::<Vec<_>>();
+        assert_eq!(notes.len(), DRUM_RACK_TOTAL_PAD_NOTES);
+        assert_eq!(notes[0], 0, "the first adopted member lands on C4");
+        assert_eq!(notes[DRUM_RACK_LAST_PAD_NOTE as usize], DRUM_RACK_LAST_PAD_NOTE);
+        assert_eq!(
+            notes[DRUM_RACK_LAST_PAD_NOTE as usize + 1],
+            DRUM_RACK_FIRST_PAD_NOTE,
+            "the note after the top of the domain wraps to C1",
+        );
+        assert_eq!(notes.last(), Some(&-1));
+    }
 
     struct TestLiveGraph(LiveGraphPtr);
 
