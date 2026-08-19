@@ -817,11 +817,13 @@ pub(crate) fn run_event_loop(
                     // named command is semantic; user lisp can move its key.
                     let sequence_roll_binding = editor.buffer_mode_keybinding("*sequencer*", key)
                         == Some("eseq.seq-grid-mode/sequence-roll-hold");
-                    // Intercept keyboard for live recording when any track is armed.
-                    // Sequence roll itself is pattern-wide and does not require an
-                    // armed track.
+                    // Sequence roll and its rate keys are transport-wide:
+                    // neither requires an armed track. Text/value widget focus
+                    // still wins in `should_route_to_live_keyboard` below.
+                    let roll_rate_key = is_active_roll_rate_key(&shared.state, &key);
                     let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a);
                     let recording_key_outcome = if (sequence_roll_binding
+                        || roll_rate_key
                         || any_armed
                         || held_note_for_key(&shared.held_notes, &key))
                         && should_route_to_live_keyboard(

@@ -392,6 +392,24 @@ pub(crate) fn held_note_for_key(
     })
 }
 
+/// Rate keys are transport-level roll controls, not armed-track input. They
+/// remain available whenever roll mode is enabled; focused text/value editors
+/// still take precedence through `should_route_to_live_keyboard`.
+pub(crate) fn is_active_roll_rate_key(
+    state: &SequencerState,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind};
+
+    state.transport.roll_mode.load(Ordering::Relaxed)
+        && key.kind == KeyEventKind::Press
+        && key.modifiers.is_empty()
+        && matches!(
+            key.code,
+            KeyCode::Char(c) if sequencer::sequencer::Timebase::roll_rate_from_key(c).is_some()
+        )
+}
+
 pub(crate) fn should_route_to_live_keyboard(
     editor: &Editor,
     key: &crossterm::event::KeyEvent,
@@ -1853,7 +1871,8 @@ mod live_keyboard_tests {
     use super::{
         build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        handle_recording_key, held_note_for_key, note_from_key, quantized_record_position,
+        handle_recording_key, held_note_for_key, is_active_roll_rate_key, note_from_key,
+        quantized_record_position,
         sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, RollRecordBuffer, SequencerHistoryShortcut, SoftStepParamEdit,
         PROCESS_LANE_MODE_OFFSET,
@@ -1954,6 +1973,20 @@ mod live_keyboard_tests {
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
 
         assert!(held_note_for_key(&held, &key));
+    }
+
+    #[test]
+    fn roll_rate_keys_are_active_without_any_armed_track() {
+        let state = SequencerState::new(1, vec![]);
+        let key = KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE);
+        assert!(!is_active_roll_rate_key(&state, &key));
+
+        state.transport.roll_mode.store(true, Ordering::Release);
+        assert!(is_active_roll_rate_key(&state, &key));
+        assert!(!is_active_roll_rate_key(
+            &state,
+            &KeyEvent::new(KeyCode::Char('7'), KeyModifiers::CONTROL),
+        ));
     }
 
     #[test]
