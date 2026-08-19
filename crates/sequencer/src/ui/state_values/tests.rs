@@ -48524,6 +48524,31 @@
             track_count * step_count,
             "member rows are ordinary track rows, so every track keeps its step grid"
         );
+
+        // eseq-4b5.22: the rack header's meter reads the rack's BACKING BUS
+        // peak, not a track peak, so `bus-peak-*` has a live consumer in
+        // *sequencer* even when the mixer is hidden. This pins the binding
+        // that `track_and_bus_meter_bindings_visible` exists to keep synced —
+        // re-gating bus peaks on mixer visibility alone freezes this meter.
+        let rack_meter = find_layout_node_by_stable_key_suffix(&layout, "/rack-volume-control-7")
+            .expect("rack header should render its volume/meter control");
+        assert_eq!(
+            rack_meter.props.get("background"),
+            Some(&Value::String("seqv-track-volume-meter".to_string())),
+            "the rack fader is the same meter/fader widget the track rows use"
+        );
+        assert!(
+            matches!(
+                rack_meter.props.get("level"),
+                Some(Value::ReactiveRef {
+                    namespace,
+                    field,
+                    ..
+                }) if namespace == "SEQ" && field == "bus-peak-2"
+            ),
+            "the rack meter level must bind the backing bus peak (bus 2), got {:?}",
+            rack_meter.props.get("level")
+        );
     }
 
     /// Drum rack v2 slice 3: the header's arm dot is a read of the host's
