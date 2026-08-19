@@ -45900,6 +45900,20 @@
             find_node_by_stable_key_suffix(&layout, "/group-arm-7").is_none(),
             "plain groups should not expose a record-arm control"
         );
+        // Mute polarity: a strip that is passing audio is lit and a muted one
+        // goes dark, the same way track and bus strips paint their own mute
+        // buttons. This group's bus is unmuted, so its "M" must be lit —
+        // inverted, an unmuted group reads as muted next to its neighbours.
+        assert_eq!(
+            format!("{:?}", group_mute.props.get("background-color")),
+            "Some(('rgba 0.95 0.48 0.18 1))",
+            "an unmuted group's mute button should be lit like a track/bus strip's"
+        );
+        assert_eq!(
+            format!("{:?}", group_mute.props.get("color")),
+            "Some(:black)",
+            "an unmuted group's mute label should be the lit-state color"
+        );
         for (control, expected) in [
             (group_mute, "seq-toggle-bus-mute:[2]"),
             (group_solo, "seq-toggle-bus-solo:[2]"),

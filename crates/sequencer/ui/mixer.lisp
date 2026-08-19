@@ -1196,31 +1196,30 @@
 ;; owns a pad-play arm state; a plain mixer group deliberately has no arm
 ;; control because it is not an input target.
 (def %group-control-buttons (gidx bus-idx)
-  (let ((group (nth SEQ.groups gidx))
-      (gid (get (nth SEQ.groups gidx) :id))
+  (let ((gid (get (nth SEQ.groups gidx) :id))
       (rack (get (nth SEQ.groups gidx) :rack))
-      (muted (and (>= bus-idx 0) (nth SEQ.bus-mutes bus-idx)))
-      (soloed (and (>= bus-idx 0) (nth SEQ.bus-solos bus-idx)))
+      (muted (nth SEQ.bus-mutes bus-idx))
+      (soloed (nth SEQ.bus-solos bus-idx))
       (armed (and rack (= SEQ.armed-rack-id gid))))
     (h-stack :gap 0.35 :align :center
+      ;; Mute is lit when the strip is *passing* audio and goes dark when
+      ;; muted, matching the track and bus strips right next to it.
       (button "M"
         :key (str "group-mute-" gid)
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (%button-bg muted)
-        :color (if muted :black :dim)
-        :on-click (lambda (event) (if (>= bus-idx 0)
-          (do (%select-group gidx) (seq-toggle-bus-mute bus-idx))
-          nil)))
+        :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
+        :color (if muted :dim :black)
+        :on-click (lambda (event)
+          (do (%select-group gidx) (seq-toggle-bus-mute bus-idx))))
       (button "S"
         :key (str "group-solo-" gid)
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
         :background-color (%button-bg soloed)
         :color (if soloed :black :dim)
-        :on-click (lambda (event) (if (>= bus-idx 0)
-          (do (%select-group gidx) (seq-toggle-bus-solo bus-idx))
-          nil)))
+        :on-click (lambda (event)
+          (do (%select-group gidx) (seq-toggle-bus-solo bus-idx))))
       (if rack
         (button "R"
           :key (str "group-arm-" gid)
@@ -1256,10 +1255,11 @@
         ;; them selects the group's bus (%bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
-          (box :width :fill :height 8.2
-            (%bus-meter-control bus-idx))
+          (v-stack :gap 0.4 :align :center
+            (box :width :fill :height 8.2
+              (%bus-meter-control bus-idx))
+            (%group-control-buttons gidx bus-idx))
           (box :width 0.0 :height 0.0 :bg :transparent))
-        (%group-control-buttons gidx bus-idx)
         (%bus-mod-port-row (get group :bus-id))
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
