@@ -786,7 +786,6 @@
 
     fn sample_rack_track_snapshot() -> RackTrackSnapshot {
         RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![RackSlotSnapshot {
                 instrument_type: InstrumentType::Custom,
                 instrument_run_mode: CustomInstrumentRunMode::Instrument,
@@ -1595,7 +1594,6 @@
         source.rack_tracks[1] = Some(sample_rack_track_snapshot());
         let data = source.track_pattern_data(1).unwrap();
         let rack = data.rack_track.as_ref().unwrap();
-        assert_eq!(rack.routing, RackRouting::Broadcast);
         assert_eq!(rack.slots.len(), 1);
         assert_eq!(rack.slots[0].instrument_base_note_offset, 7.0);
         assert_eq!(rack.slots[0].gain, 0.8);
@@ -1605,7 +1603,6 @@
         target.set_track_pattern_data(0, data);
 
         let restored = target.rack_tracks[0].as_ref().unwrap();
-        assert_eq!(restored.routing, RackRouting::Broadcast);
         assert_eq!(restored.slots[0].instrument_type, InstrumentType::Custom);
         assert_eq!(
             restored.slots[0].track_sound_state.loaded_preset.as_deref(),
@@ -1621,7 +1618,7 @@
         state.set_rack_track_for_all_pattern_snapshots(0, initial.clone());
         let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88);
 
-        state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
+        state.append_rack_slot_for_all_pattern_snapshots(0, appended);
 
         let live = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
@@ -1660,7 +1657,7 @@
 
         let appended = sample_sampler_rack_slot(123, "current-layer", 48_000, 88);
 
-        assert!(state.append_rack_slot_to_current_pattern(0, RackRouting::Broadcast, appended));
+        assert!(state.append_rack_slot_to_current_pattern(0, appended));
 
         let live = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
@@ -1879,12 +1876,10 @@
         first.instrument_types[0] = InstrumentType::Rack;
         second.instrument_types[0] = InstrumentType::Rack;
         first.rack_tracks[0] = Some(RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![sample_sampler_rack_slot(101, "pattern-one", 44_100, 11)],
             default_rack_macros(),
         ));
         second.rack_tracks[0] = Some(RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![sample_sampler_rack_slot(202, "pattern-two", 44_100, 22)],
             default_rack_macros(),
         ));
@@ -1944,7 +1939,6 @@
         state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
         state.append_rack_slot_for_all_pattern_snapshots(
             0,
-            RackRouting::Broadcast,
             sample_sampler_rack_slot(123, "layer", 48_000, 88),
         );
 
@@ -1976,7 +1970,7 @@
         let initial = sample_rack_track_snapshot();
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
         let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88);
-        state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
+        state.append_rack_slot_for_all_pattern_snapshots(0, appended);
 
         assert!(state.remove_rack_slot_from_all_pattern_snapshots(0, 0));
 
@@ -5301,7 +5295,6 @@
         }
         state.append_rack_slot_for_all_pattern_snapshots(
             0,
-            RackRouting::Broadcast,
             sample_sampler_rack_slot(12, "before", 48_000, 77),
         );
         let snapshot = state.capture_rack_slot_pattern_state(0, 1).unwrap();

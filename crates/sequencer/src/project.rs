@@ -15,7 +15,7 @@ use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, ProjectArrangement, RackRouting, RackSlotParamPlocks,
+    ModDestination, PatternSnapshot, ProjectArrangement, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SerializedSongContext, SwingResolution, Timebase,
     TrackId, TrackOutput, TrackParamsSnapshot,
     TrackRegistry, TrackSendSnapshot, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
@@ -2180,27 +2180,10 @@ impl From<ProjectCustomInstrumentRunMode> for CustomInstrumentRunMode {
     }
 }
 
-impl From<RackRouting> for ProjectRackRouting {
-    fn from(value: RackRouting) -> Self {
-        match value {
-            RackRouting::Broadcast => Self::Broadcast,
-        }
-    }
-}
-
-impl From<ProjectRackRouting> for RackRouting {
-    /// A legacy `by_pitch` rack loads as a plain layering rack: its slots stay
-    /// audible instead of being silently dropped, and nothing routes by
-    /// transpose any more.
-    fn from(_value: ProjectRackRouting) -> Self {
-        RackRouting::Broadcast
-    }
-}
-
 impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
     fn from(value: RackTrackSnapshot) -> Self {
         Self {
-            routing: ProjectRackRouting::from(value.routing),
+            routing: ProjectRackRouting::Broadcast,
             slots: value
                 .slots
                 .into_iter()
@@ -2217,8 +2200,10 @@ impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
 
 impl From<ProjectRackTrackPattern> for RackTrackSnapshot {
     fn from(value: ProjectRackTrackPattern) -> Self {
+        // A legacy `by_pitch` rack loads as a plain layering rack: its slots
+        // stay audible instead of being silently dropped, and nothing routes
+        // by transpose any more.
         let mut rack = Self {
-            routing: RackRouting::from(value.routing),
             slots: value
                 .slots
                 .into_iter()
@@ -5106,19 +5091,37 @@ mod tests {
     }
 
     #[test]
-    fn legacy_by_pitch_rack_loads_as_a_broadcast_layering_rack() {
+    fn legacy_by_pitch_rack_loads_as_a_plain_layering_rack() {
         let pattern = ProjectRackTrackPattern {
             routing: ProjectRackRouting::ByPitch,
-            slots: Vec::new(),
+            slots: vec![ProjectRackSlotPattern {
+                instrument_type: ProjectInstrumentType::Sampler,
+                instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
+                instrument_base_note_offset: 0.0,
+                choke_group: None,
+                gain: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                max_polyphony: 4,
+                param_plocks: Vec::new(),
+                instrument_slot: ProjectEffectSlot::default(),
+                effect_slots: Vec::new(),
+                custom_effects: Vec::new(),
+                track_sound_state: ProjectTrackSoundState::default(),
+                sample_path: Some("samples/kick.wav".to_string()),
+                sample_name: Some("kick".to_string()),
+            }],
             macros: default_project_rack_macros(),
         };
 
         let snapshot = RackTrackSnapshot::from(pattern);
 
         assert_eq!(
-            snapshot.routing,
-            RackRouting::Broadcast,
-            "the pitch-routed drum rack is gone; legacy racks degrade to layering"
+            snapshot.slots.len(),
+            1,
+            "the pitch-routed drum rack is gone; legacy racks degrade to plain \
+             layering with every slot still audible"
         );
     }
 

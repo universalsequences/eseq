@@ -8,7 +8,7 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
     rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentSlotResetSummary,
-    InstrumentType, ModDestination, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    InstrumentType, ModDestination, RackSlotParamPlocks, RackSlotSnapshot,
     RackTrackSnapshot, TrackOutput, TrackSoundState, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
     MAX_SAMPLER_POOLS, MAX_TRACKS,
 };

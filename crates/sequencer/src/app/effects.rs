@@ -9,7 +9,7 @@ use crate::effects::{
     BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
-use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType, RackRouting};
+use crate::sequencer::{BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType};
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
 
@@ -402,7 +402,7 @@ impl App {
             .cloned()
             .flatten()
             .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
-        if rack.routing != RackRouting::Broadcast || rack.slots.get(slot).is_none() {
+        if rack.slots.get(slot).is_none() {
             return Err("Invalid instrument rack layer".to_string());
         }
 

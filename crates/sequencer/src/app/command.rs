@@ -1272,7 +1272,7 @@ mod tests {
     use crate::quantized_launch::PatternLaunchTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
+        default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType,
         RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState,
         StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot,
         TrackSoundState, NUM_PARAMS,
@@ -1493,7 +1493,6 @@ mod tests {
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             RackTrackSnapshot::new(
-                RackRouting::Broadcast,
                 vec![RackSlotSnapshot {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,

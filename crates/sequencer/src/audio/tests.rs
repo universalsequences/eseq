@@ -38,7 +38,7 @@ use crate::scheduled_event::{
 };
 use crate::sequencer::{
     default_rack_macros, CustomInstrumentRunMode, InstrumentType, RackMacroCurve,
-    RackMacroMapping, RackMacroTarget, RackRouting, RackSlotParam, RackSlotParamPlocks,
+    RackMacroMapping, RackMacroTarget, RackSlotParam, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
 };
 use super::{preview, VoicePool};
@@ -115,7 +115,6 @@ fn rack_routing_test_slot() -> RackSlotSnapshot {
 #[test]
 fn rack_macro_is_effective_default_beneath_target_plock() {
     let mut rack = RackTrackSnapshot::new(
-        RackRouting::Broadcast,
         vec![rack_routing_test_slot()],
         default_rack_macros(),
     );
@@ -148,7 +147,6 @@ fn rack_macro_is_effective_default_beneath_target_plock() {
 fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
     let state = SequencerState::new(1, vec![Vec::new()]);
     let mut rack = RackTrackSnapshot::new(
-        RackRouting::Broadcast,
         vec![rack_routing_test_slot()],
         default_rack_macros(),
     );
@@ -398,7 +396,6 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     voice_pools[unrelated_pool_id].voices[0].active = true;
 
     let sampler_rack = RackTrackSnapshot::new(
-        RackRouting::Broadcast,
         vec![released_sampler, triggering_sampler, unrelated_sampler],
         crate::sequencer::default_rack_macros(),
     );
@@ -486,7 +483,6 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     });
 
     let custom_rack = RackTrackSnapshot::new(
-        RackRouting::Broadcast,
         vec![released_custom, triggering_custom, unrelated_custom],
         crate::sequencer::default_rack_macros(),
     );

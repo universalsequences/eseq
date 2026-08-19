@@ -469,9 +469,7 @@
        :h-align :center
        :v-align :center
        :drop-types (list "sample" "instrument" "sound")
-       :drop-meta (dict :kind "rack-empty-selected"
-                        :track (get inst :track)
-                        :routing (get inst :routing))
+       :drop-meta (dict :track (get inst :track))
        :drop-hover-border-color :mixer-strip-selected-border
        :on-drop (lambda (event) (%rack-panel-drop-on-container event))
     (label "Drop an Instrument or Sample"
@@ -574,9 +572,7 @@
             (box :width 0 :height 0)))))
     :debug-name "rack-panel"
     :drop-types (list "sample" "instrument" "sound")
-    :drop-meta (dict :kind "rack-panel"
-      :track (get inst :track)
-      :routing (get inst :routing))
+    :drop-meta (dict :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (%rack-panel-drop-on-container event))
     :background "fx-panel-bg"

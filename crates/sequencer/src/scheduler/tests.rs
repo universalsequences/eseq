@@ -239,7 +239,6 @@
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             crate::sequencer::RackTrackSnapshot::new(
-                crate::sequencer::RackRouting::Broadcast,
                 Vec::new(),
                 macros,
             ),

@@ -4756,12 +4756,12 @@
     }
 
     #[test]
-    fn metal_seq_browser_layer_button_appends_sample_to_current_broadcast_rack() {
+    fn metal_seq_browser_layer_button_appends_sample_to_the_open_rack_panel() {
         let mut editor = browser_editor_on_instrument_tab();
         let mut rack = HashMap::new();
         rack.insert(
-            "routing".to_string(),
-            Rc::new(RefCell::new(Value::String("broadcast".to_string()))),
+            "is-rack".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
         );
         editor
             .runtime_mut()
@@ -10688,7 +10688,6 @@
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             sequencer::sequencer::RackTrackSnapshot::new(
-                sequencer::sequencer::RackRouting::Broadcast,
                 vec![sequencer::sequencer::RackSlotSnapshot {
                     instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                     instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
@@ -10758,14 +10757,13 @@
     }
 
     #[test]
-    fn rack_instrument_panel_value_lists_broadcast_slots() {
+    fn rack_instrument_panel_value_lists_layer_slots() {
         let app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));
 
         let panel = build_instrument_panel_value(&app, 0, &selected);
 
         assert!(value_contains_string(&panel, "rack"));
-        assert!(value_contains_string(&panel, "broadcast"));
         assert!(value_contains_string(&panel, "Layer Alpha"));
 
         let Value::List(items) = &panel else {
@@ -10774,6 +10772,11 @@
         let Value::Map(rack) = &*items[0].borrow() else {
             panic!("rack panel item should be a map");
         };
+        assert_eq!(
+            rack.get("is-rack").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true)),
+            "the browser reads this flag to tell an open rack panel from none"
+        );
         assert_eq!(
             rack.get("selected-slot")
                 .map(|value| value.borrow().clone()),

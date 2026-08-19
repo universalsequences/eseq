@@ -877,7 +877,6 @@ impl GraphController<'_> {
     pub fn add_rack_track(
         &mut self,
         name: &str,
-        routing: RackRouting,
         slots: Vec<RackSlotBuildSpec<'_>>,
     ) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();
@@ -1075,7 +1074,6 @@ impl GraphController<'_> {
         }
 
         let rack_track = RackTrackSnapshot {
-            routing,
             slots: rack_slot_snapshots,
             macros: crate::sequencer::default_rack_macros(),
             runtime_macro_values: None,
@@ -1088,11 +1086,7 @@ impl GraphController<'_> {
     }
 
     pub fn add_empty_layer_rack_track(&mut self) -> Result<usize, String> {
-        self.add_rack_track(
-            "Layer Rack",
-            RackRouting::Broadcast,
-            Vec::<RackSlotBuildSpec<'_>>::new(),
-        )
+        self.add_rack_track("Layer Rack", Vec::<RackSlotBuildSpec<'_>>::new())
     }
 
     pub fn group_track_to_instrument_rack(&mut self, track: usize) -> Result<(), String> {
@@ -1542,7 +1536,7 @@ impl GraphController<'_> {
             )
             .collect();
 
-        let idx = self.add_rack_track(&track_name, RackRouting::Broadcast, specs)?;
+        let idx = self.add_rack_track(&track_name, specs)?;
         for (path, buffer_id, _, sample_name) in loaded_slots {
             self.app
                 .register_loaded_sample_path(&sample_name, buffer_id, path);

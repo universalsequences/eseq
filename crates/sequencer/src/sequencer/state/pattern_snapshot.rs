@@ -32,7 +32,6 @@ pub struct PatternSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct RackTrackSnapshot {
-    pub routing: RackRouting,
     pub slots: Vec<RackSlotSnapshot>,
     pub macros: Vec<RackMacro>,
     pub(crate) runtime_macro_values: Option<Arc<RackMacroRuntimeValues>>,
@@ -40,9 +39,8 @@ pub struct RackTrackSnapshot {
 }
 
 impl RackTrackSnapshot {
-    pub fn new(routing: RackRouting, slots: Vec<RackSlotSnapshot>, macros: Vec<RackMacro>) -> Self {
+    pub fn new(slots: Vec<RackSlotSnapshot>, macros: Vec<RackMacro>) -> Self {
         Self {
-            routing,
             slots,
             macros,
             runtime_macro_values: None,

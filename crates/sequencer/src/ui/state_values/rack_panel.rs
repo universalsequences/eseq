@@ -1031,9 +1031,6 @@ pub(super) fn build_rack_panel_value(
         }
     }
 
-    let routing_name = match rack.routing {
-        sequencer::sequencer::RackRouting::Broadcast => "broadcast",
-    };
     let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack);
     let selected_step = selected_plock_step(selected);
     let slots: Vec<Rc<RefCell<Value>>> = rack
@@ -1235,7 +1232,9 @@ pub(super) fn build_rack_panel_value(
             .map(|name| instrument_display_name(name))
             .unwrap_or_else(|| "Rack".to_string()),
     );
-    insert_string_prop(&mut panel_map, "routing", routing_name);
+    // Presence flag: the browser uses this to tell "a rack panel is open"
+    // from "no rack panel", which is all the old `:routing` string ever meant.
+    panel_map.insert("is-rack".to_string(), value_cell(Value::Bool(true)));
     let macros = rack
         .macros
         .iter()

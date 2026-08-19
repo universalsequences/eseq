@@ -16,7 +16,7 @@ use crate::project::{
 };
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
-    PatternSnapshot, RackRouting, RackTrackSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
+    PatternSnapshot, RackTrackSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
 };
 
 use super::fx_chain::{FxChainLocator, FxGraphEditBatch};
@@ -2482,7 +2482,7 @@ impl App {
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
-                            routing: crate::project::ProjectRackRouting::from(rack.routing),
+                            routing: crate::project::ProjectRackRouting::Broadcast,
                             slots,
                         },
                     })
@@ -3246,12 +3246,8 @@ impl App {
                             // Legacy `by_pitch` racks load as layering racks:
                             // drum racks are track groups now
                             // (docs/drum-rack-v2-spec.md).
-                            let routing = RackRouting::from(*routing);
-                            self.graph_controller().add_rack_track(
-                                "Layer Rack",
-                                routing,
-                                build_specs,
-                            )?;
+                            self.graph_controller()
+                                .add_rack_track("Layer Rack", build_specs)?;
                             let saved_rack_effects = rack_pattern
                                 .as_ref()
                                 .into_iter()
@@ -3920,7 +3916,6 @@ impl App {
                     .flatten()
                     .map(RackTrackSnapshot::from)
                     .unwrap_or_else(|| graph_rack.clone());
-                saved_rack.routing = graph_rack.routing;
                 let mut rebound_slots = Vec::with_capacity(graph_rack.slots.len());
                 for (slot_idx, graph_slot) in graph_rack.slots.iter().enumerate() {
                     let mut slot = saved_rack

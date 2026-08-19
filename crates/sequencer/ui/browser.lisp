@@ -288,16 +288,19 @@
   (set! sbrowser-tab "samples")
   (status "Add drum rack"))
 
-(def %current-rack-routing ()
+;; True when a rack panel is actually open in the sidebar — the only thing the
+;; old `:routing` string ever distinguished now that Broadcast is the sole
+;; routing (docs/drum-rack-v2-spec.md).
+(def %rack-panel-open? ()
   (if (= SEQ.sidebar-kind "rack")
     (if (> (len SEQ.instrument-panel) 0)
-      (get (nth SEQ.instrument-panel 0) :routing)
-      "")
-    ""))
+      (= (get (nth SEQ.instrument-panel 0) :is-rack) true)
+      false)
+    false))
 
 (def add-layer-rack-track ()
   (let ((path (sample-selected-path)))
-    (if (and (= (%current-rack-routing) "broadcast")
+    (if (and (%rack-panel-open?)
              (not (= path "")))
       (do
         (set! sbrowser-auditioned-sample path)

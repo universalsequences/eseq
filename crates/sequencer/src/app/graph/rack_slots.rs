@@ -118,11 +118,9 @@ impl GraphController<'_> {
             .push(rack_slot_nodes);
         self.publish_rack_slot_panner_runtime(track_idx);
         self.app.set_rack_selected_slot(track_idx, slot_idx);
-        self.app.state.append_rack_slot_for_all_pattern_snapshots(
-            track_idx,
-            rack.routing,
-            rack_slot,
-        );
+        self.app
+            .state
+            .append_rack_slot_for_all_pattern_snapshots(track_idx, rack_slot);
         self.refresh_rack_signature_from_live_state(track_idx);
         self.app
             .state
@@ -314,11 +312,9 @@ impl GraphController<'_> {
             .push(rack_slot_nodes);
         self.publish_rack_slot_panner_runtime(track_idx);
         self.app.set_rack_selected_slot(track_idx, slot_idx);
-        self.app.state.append_rack_slot_for_all_pattern_snapshots(
-            track_idx,
-            rack.routing,
-            rack_slot,
-        );
+        self.app
+            .state
+            .append_rack_slot_for_all_pattern_snapshots(track_idx, rack_slot);
         self.refresh_rack_signature_from_live_state(track_idx);
         self.app
             .state
@@ -356,9 +352,6 @@ impl GraphController<'_> {
             .cloned()
             .flatten()
             .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
-        if rack.routing != RackRouting::Broadcast {
-            return Err("Replace drum rack instruments on their pad".to_string());
-        }
         let existing = rack
             .slots
             .get(slot_idx)
@@ -419,7 +412,7 @@ impl GraphController<'_> {
             .cloned()
             .flatten()
             .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
-        if rack.routing != RackRouting::Broadcast || rack.slots.get(slot_idx).is_none() {
+        if rack.slots.get(slot_idx).is_none() {
             return Err("Invalid instrument rack layer".to_string());
         }
 

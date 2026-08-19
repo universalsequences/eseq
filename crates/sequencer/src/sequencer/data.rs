@@ -170,15 +170,6 @@ impl InstrumentType {
     }
 }
 
-/// How a rack fans a trigger across its slots. Drum racks are track groups
-/// now (`docs/drum-rack-v2-spec.md`), so the pitch-routed variant is gone and
-/// only the Instrument Rack's layering behaviour remains.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RackRouting {
-    #[default]
-    Broadcast,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CustomInstrumentRunMode {
     #[default]

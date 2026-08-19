@@ -10135,7 +10135,6 @@ mod tests {
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             crate::sequencer::RackTrackSnapshot::new(
-                crate::sequencer::RackRouting::Broadcast,
                 vec![crate::sequencer::RackSlotSnapshot {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode:
@@ -10227,7 +10226,6 @@ mod tests {
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             crate::sequencer::RackTrackSnapshot::new(
-                crate::sequencer::RackRouting::Broadcast,
                 vec![crate::sequencer::RackSlotSnapshot {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: crate::sequencer::CustomInstrumentRunMode::Instrument,

@@ -46,7 +46,6 @@
 
     fn topology_test_rack() -> RackTrackSnapshot {
         RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![
                 topology_test_slot(InstrumentType::Sampler, None),
                 topology_test_slot(InstrumentType::Sampler, None),
@@ -102,7 +101,6 @@
         assert_changed(&slot_count);
 
         let mut slot_order = RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![
                 topology_test_slot(InstrumentType::Sampler, None),
                 topology_test_slot(InstrumentType::Custom, Some(7)),
