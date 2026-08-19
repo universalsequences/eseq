@@ -419,17 +419,18 @@
   :state ()
   :shader
   (sdf/layer
-    (sdf/fill 
-      (sdf/translate -0.4 0
-        (sdf/rounded-rect 0.1 1.40 0.05))
-      :dim
-      )
-    
-    (sdf/fill 
-      (sdf/translate 1.58 1.3
-        (sdf/rounded-rect 2 0.1 0.05))
-      :dim
-      )
+    (sdf/fill (sdf/translate -0.4 0 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate -0.4 0.5 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate -0.4 -0.5 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate 0 1.0 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate -0.4 1.0 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate 0.4 1.0 (sdf/circle 0.2))
+      :dim)
     ))
 
 (defwidget seqv-rec-arm-dot
@@ -2093,7 +2094,7 @@
           :on-click |x y r| (%select-rack gidx))
         (button (if (eseq.drum-rack-v2/collapsed? gidx) "▸" "▾")
           :key (str "rack-collapse-" (eseq.drum-rack-v2/group-id gidx))
-          :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :width 1.55 :height 1.4 :padding 0 :font-size 15
           :background-color '(rgba 0.1 0.1 0.1 1.0)
           :border-color :transparent
           :color :white
@@ -2158,7 +2159,7 @@
       :border-width 2
       :border-color :mixer-strip-border
       :corner-radius 10
-      :padding 0.0145
+      :padding 0.345
       (v-stack :width :fill :gap 0.1
         (%rack-header-row gidx)
         (if (eseq.drum-rack-v2/collapsed? gidx)
