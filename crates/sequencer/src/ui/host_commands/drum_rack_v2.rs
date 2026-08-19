@@ -157,7 +157,7 @@ pub(super) fn handle(
                         .find(|group| group.id == group_id)
                         .map(|group| group.name.clone())
                         .unwrap_or_else(|| "Kit".to_string());
-                    sync_after_kit_load(app, editor, ctx);
+                    sync_after_rack_structure_change(app, editor, ctx);
                     let status = if failures.is_empty() {
                         format!("Loaded kit '{name}'")
                     } else {
@@ -189,9 +189,16 @@ fn sync_rack_pad_map(
     ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
-/// A kit load creates a group, a bus and N tracks in one go, so it needs the
-/// full new-track sync once at the end rather than per pad.
-fn sync_after_kit_load(app: &mut app::App, editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
+/// Republishes everything a rack-shaped structure edit can touch: the group
+/// list, the bus mixer, and the per-track vectors for any member tracks the
+/// edit created. A kit load creates a group, a bus and N tracks in one go, so
+/// it needs the full new-track sync once at the end rather than per pad;
+/// "create drum rack" in the browser creates at most one member track.
+pub(super) fn sync_after_rack_structure_change(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) {
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();

@@ -25,9 +25,8 @@ use crate::quantized_launch::{DuePatternLaunch, PatternLaunchTarget};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackRouting, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot,
-    DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START, DRUM_RACK_LAST_PAD_NOTE,
-    DRUM_RACK_PAD_BANK_STRIDE, DRUM_RACK_PAD_COUNT, MAX_STEPS, STEPS_PER_PAGE,
+    KeyboardTrigger, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot, MAX_STEPS,
+    STEPS_PER_PAGE,
 };
 use crate::track_color::TrackColor;
 
@@ -913,7 +912,6 @@ pub struct App {
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub rack_selected_slots: Vec<usize>,
-    pub rack_pad_bank_starts: Vec<i32>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     pub current_project_name: Option<String>,
@@ -1947,10 +1945,6 @@ impl App {
         while self.rack_selected_slots.len() < self.tracks.len() {
             self.rack_selected_slots.push(0);
         }
-        self.rack_pad_bank_starts.truncate(self.tracks.len());
-        while self.rack_pad_bank_starts.len() < self.tracks.len() {
-            self.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
-        }
     }
 
     pub fn rack_selected_slot(&self, track: usize, slot_count: usize) -> usize {
@@ -1972,77 +1966,18 @@ impl App {
     }
 
     /// Select a physical rack slot while preserving each rack routing mode's
-    /// selection identity. Broadcast racks select by slot index; drum racks
-    /// select by the slot's pad note so sparse pad assignments stay correct.
+    /// selection identity: a rack selects by slot index.
     pub fn select_rack_slot(
         &mut self,
         track: usize,
         rack: &RackTrackSnapshot,
         slot_idx: usize,
     ) -> bool {
-        let Some(slot) = rack.slots.get(slot_idx) else {
+        if rack.slots.get(slot_idx).is_none() {
             return false;
-        };
-        match rack.routing {
-            RackRouting::Broadcast => self.set_rack_selected_slot(track, slot_idx),
-            RackRouting::ByPitch => {
-                let Some(pad_note) = slot.pad_note else {
-                    return false;
-                };
-                self.set_rack_selected_pad_note(track, pad_note);
-            }
         }
+        self.set_rack_selected_slot(track, slot_idx);
         true
-    }
-
-    pub fn rack_selected_pad_note(&self, track: usize) -> i32 {
-        let raw = self.rack_selected_slots.get(track).copied().unwrap_or(0) as i32;
-        raw.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE)
-    }
-
-    fn drum_rack_bank_start_for_pad_note(pad_note: i32) -> i32 {
-        let clamped = pad_note.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE);
-        let relative = clamped - DRUM_RACK_FIRST_PAD_NOTE;
-        let start = DRUM_RACK_FIRST_PAD_NOTE
-            + (relative / DRUM_RACK_PAD_BANK_STRIDE) * DRUM_RACK_PAD_BANK_STRIDE;
-        start.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START)
-    }
-
-    pub fn rack_pad_bank_start(&self, track: usize) -> i32 {
-        self.rack_pad_bank_starts
-            .get(track)
-            .copied()
-            .unwrap_or(DRUM_RACK_FIRST_PAD_NOTE)
-            .clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START)
-    }
-
-    pub fn set_rack_pad_bank_start(&mut self, track: usize, bank_start: i32) {
-        self.normalize_rack_selected_slots();
-        let bank_start = bank_start.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START);
-        if let Some(selected_bank) = self.rack_pad_bank_starts.get_mut(track) {
-            *selected_bank = bank_start;
-        }
-        let selected_pad = self.rack_selected_pad_note(track);
-        let bank_end = bank_start + DRUM_RACK_PAD_COUNT as i32 - 1;
-        if selected_pad < bank_start || selected_pad > bank_end {
-            self.set_rack_selected_pad_note(track, bank_start);
-        }
-    }
-
-    pub fn set_rack_selected_pad_note(&mut self, track: usize, pad_note: i32) {
-        self.normalize_rack_selected_slots();
-        let pad_note = pad_note.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE);
-        if let Some(selected) = self.rack_selected_slots.get_mut(track) {
-            *selected = pad_note as usize;
-        }
-        let bank_start = self.rack_pad_bank_start(track);
-        let bank_end = bank_start + DRUM_RACK_PAD_COUNT as i32 - 1;
-        if pad_note < bank_start || pad_note > bank_end {
-            let new_bank_start = Self::drum_rack_bank_start_for_pad_note(pad_note);
-            if let Some(selected_bank) = self.rack_pad_bank_starts.get_mut(track) {
-                *selected_bank = new_bank_start;
-            }
-        }
     }
 
     pub fn selected_rack_slot_index_for_rack(
@@ -2050,17 +1985,7 @@ impl App {
         track: usize,
         rack: &RackTrackSnapshot,
     ) -> Option<usize> {
-        match rack.routing {
-            RackRouting::Broadcast => {
-                (!rack.slots.is_empty()).then(|| self.rack_selected_slot(track, rack.slots.len()))
-            }
-            RackRouting::ByPitch => {
-                let selected_pad = self.rack_selected_pad_note(track);
-                rack.slots
-                    .iter()
-                    .position(|slot| slot.pad_note == Some(selected_pad))
-            }
-        }
+        (!rack.slots.is_empty()).then(|| self.rack_selected_slot(track, rack.slots.len()))
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::instruments::sampler::LoadedSample) {
@@ -2389,7 +2314,6 @@ impl App {
             groups: Vec::new(),
             sampler_paths: Vec::new(),
             rack_selected_slots: Vec::new(),
-            rack_pad_bank_starts: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
             current_project_name: None,

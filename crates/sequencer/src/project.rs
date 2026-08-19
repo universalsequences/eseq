@@ -1653,6 +1653,10 @@ pub enum ProjectInstrumentType {
     Rack,
 }
 
+/// Serialized rack routing. `ByPitch` was the v1 drum rack, which is now a
+/// track group (`docs/drum-rack-v2-spec.md`); the variant is kept only so
+/// projects written before the cleanup still deserialize, and it loads as a
+/// plain `Broadcast` rack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectRackRouting {
@@ -1740,8 +1744,6 @@ pub struct ProjectRackSlotPattern {
     pub instrument_run_mode: ProjectCustomInstrumentRunMode,
     #[serde(default)]
     pub instrument_base_note_offset: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pad_note: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choke_group: Option<u8>,
     #[serde(default = "default_rack_slot_gain")]
@@ -2153,17 +2155,16 @@ impl From<RackRouting> for ProjectRackRouting {
     fn from(value: RackRouting) -> Self {
         match value {
             RackRouting::Broadcast => Self::Broadcast,
-            RackRouting::ByPitch => Self::ByPitch,
         }
     }
 }
 
 impl From<ProjectRackRouting> for RackRouting {
-    fn from(value: ProjectRackRouting) -> Self {
-        match value {
-            ProjectRackRouting::Broadcast => RackRouting::Broadcast,
-            ProjectRackRouting::ByPitch => RackRouting::ByPitch,
-        }
+    /// A legacy `by_pitch` rack loads as a plain layering rack: its slots stay
+    /// audible instead of being silently dropped, and nothing routes by
+    /// transpose any more.
+    fn from(_value: ProjectRackRouting) -> Self {
+        RackRouting::Broadcast
     }
 }
 
@@ -2332,7 +2333,6 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             instrument_type: ProjectInstrumentType::from(value.instrument_type),
             instrument_run_mode: ProjectCustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
-            pad_note: value.pad_note,
             choke_group: value.choke_group,
             gain: value.gain,
             pan: value.pan,
@@ -2364,7 +2364,6 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             instrument_type: InstrumentType::from(value.instrument_type),
             instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
-            pad_note: value.pad_note,
             choke_group: value.choke_group,
             gain: value.gain,
             pan: value.pan.clamp(-1.0, 1.0),
@@ -4924,7 +4923,10 @@ mod tests {
     }
 
     #[test]
-    fn rack_track_serializes_and_deserializes_by_pitch_pad_metadata() {
+    /// Projects written before the v1 drum rack was deleted still carry
+    /// `"routing":"by_pitch"`; they must parse rather than fail the load
+    /// (docs/drum-rack-v2-spec.md, "What survives from rack v1").
+    fn legacy_by_pitch_rack_project_still_deserializes_and_drops_its_pad_map() {
         let json = r#"
         {
             "version": 1,
@@ -5010,23 +5012,39 @@ mod tests {
         }
         let rack = project.patterns[0].rack_tracks[0].as_ref().unwrap();
         assert_eq!(rack.routing, ProjectRackRouting::ByPitch);
-        assert_eq!(rack.slots[0].pad_note, Some(0));
         assert_eq!(rack.slots[0].choke_group, Some(1));
         assert_eq!(rack.slots[0].max_polyphony, 1);
-        assert_eq!(rack.slots[1].pad_note, Some(2));
         assert_eq!(rack.slots[1].choke_group, Some(1));
         assert_eq!(rack.slots[1].instrument_base_note_offset, 7.0);
 
+        // Per-slot pad notes were the v1 pad selector and no longer round-trip;
+        // everything else about the rack survives the load.
         let serialized = serde_json::to_string(&project).unwrap();
         assert!(serialized.contains("\"routing\":\"by_pitch\""));
-        assert!(serialized.contains("\"pad_note\":0"));
+        assert!(!serialized.contains("\"pad_note\""));
         assert!(serialized.contains("\"choke_group\":1"));
 
         let restored: ProjectFile = serde_json::from_str(&serialized).unwrap();
         let restored_rack = restored.patterns[0].rack_tracks[0].as_ref().unwrap();
         assert_eq!(restored_rack.routing, ProjectRackRouting::ByPitch);
-        assert_eq!(restored_rack.slots[0].pad_note, Some(0));
-        assert_eq!(restored_rack.slots[1].pad_note, Some(2));
+        assert_eq!(restored_rack.slots[0].choke_group, Some(1));
+    }
+
+    #[test]
+    fn legacy_by_pitch_rack_loads_as_a_broadcast_layering_rack() {
+        let pattern = ProjectRackTrackPattern {
+            routing: ProjectRackRouting::ByPitch,
+            slots: Vec::new(),
+            macros: default_project_rack_macros(),
+        };
+
+        let snapshot = RackTrackSnapshot::from(pattern);
+
+        assert_eq!(
+            snapshot.routing,
+            RackRouting::Broadcast,
+            "the pitch-routed drum rack is gone; legacy racks degrade to layering"
+        );
     }
 
     #[test]
@@ -5099,7 +5117,6 @@ mod tests {
                     instrument_type: ProjectInstrumentType::Sampler,
                     instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,

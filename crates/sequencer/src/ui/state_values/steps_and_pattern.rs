@@ -242,18 +242,6 @@ pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
     format!("seq-track-step-active-{track}-{step}")
 }
 
-pub(crate) fn drum_lane_step_active_field(track: usize, pad_note: i32, step: usize) -> String {
-    format!("drum-lane-step-active-{track}-{pad_note}-{step}")
-}
-
-pub(crate) fn drum_lane_step_selected_field(track: usize, pad_note: i32, step: usize) -> String {
-    format!("drum-lane-step-selected-{track}-{pad_note}-{step}")
-}
-
-pub(crate) fn drum_lane_step_duration_field(track: usize, pad_note: i32, step: usize) -> String {
-    format!("drum-lane-step-duration-{track}-{pad_note}-{step}")
-}
-
 /// Registry field caching a hex digest of all four per-step binding lanes for
 /// a track. When it is unchanged, the per-step field writes are skipped
 /// entirely; single-step sync paths invalidate it by writing Nil.

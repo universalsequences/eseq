@@ -424,28 +424,6 @@ impl App {
         )
     }
 
-    pub fn add_saved_instrument_slot_to_drum_rack_pad_sync(
-        &mut self,
-        track: usize,
-        pad_note: i32,
-        name: &str,
-    ) -> Result<usize, String> {
-        let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
-        let lib_ptr: *const lisp_host::LoadedDGenLib =
-            &self.editor.instrument_libs[prepared.lib_index];
-        unsafe {
-            self.graph_controller().add_custom_slot_to_drum_rack_pad(
-                track,
-                pad_note,
-                &prepared.name,
-                prepared.engine_id,
-                &prepared.manifest,
-                &*lib_ptr,
-                prepared.run_mode,
-            )
-        }
-    }
-
     pub fn try_add_cached_saved_instrument_track_sync(
         &mut self,
         name: &str,

@@ -222,7 +222,6 @@ pub(crate) struct SharedHandles {
     /// piano-roll clipboard for the same reason: copy/paste are host commands
     /// applied where the loop context is in scope, not `App` state.
     pub(crate) arrangement_clipboard: app::song_region::ArrangementClipboardHandle,
-    pub(crate) selected_drum_lane_steps: Arc<Mutex<HashSet<DrumLaneStepSelection>>>,
 }
 
 /// Borrowed bundle of the event loop's grouped state, passed to the

@@ -5,7 +5,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "add-track-sampler",
     "add-track-rack",
     "add-track-layer-rack",
-    "add-track-rack-sample",
     "add-track-modulator",
     "swap-track-builtin-instrument",
     "add-track-sample",
@@ -139,49 +138,51 @@ pub(super) fn handle(
                 )));
             }
         },
+        // Creating a drum rack builds a track group carrying a pad map, not a
+        // slot-based rack track (docs/drum-rack-v2-spec.md, "Core model"). Pads
+        // claim member tracks lazily, so a rack created from a selected sample
+        // starts with exactly one member on the first pad.
         "add-track-rack" => {
             let path_str = extract_path_from_payload(&payload)
                 .filter(|path| !path.trim().is_empty());
-            let result = if let Some(path_str) = path_str {
-                let path = Path::new(&path_str);
-                app.graph_controller().add_sampler_drum_rack_track(
-                    path,
-                    sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
-                )
-            } else {
-                app.graph_controller().add_empty_rack_track()
-            };
-            let result = result.and_then(|idx| {
-                app.commit_created_track(idx, "Add drum rack track")?;
-                Ok(idx)
+            let result = app.create_drum_rack_recorded(None).and_then(|(group_id, _)| {
+                let Some(path_str) = path_str else {
+                    return Ok((group_id, None));
+                };
+                let track = app.graph_controller().add_track(Path::new(&path_str))?;
+                let pad_note = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
+                if !host_commands::add_new_track_to_group(
+                    &mut app,
+                    track,
+                    Some(group_id),
+                    Some(pad_note),
+                ) {
+                    return Err("Could not assign the sample to the rack's first pad".to_string());
+                }
+                app.commit_created_track(track, "Add drum rack pad")?;
+                register_waveform_sample(Path::new(&path_str));
+                Ok((group_id, Some(track)))
             });
             match result {
-                Ok(idx) => {
-                    sync_after_instrument_track_apply(
+                Ok((group_id, _)) => {
+                    host_commands::drum_rack_v2::sync_after_rack_structure_change(
                         &mut app,
                         &mut editor,
-                        &state,
-                        idx,
-                        &current_track,
-                        &mut *ctx.track_names,
-                        &track_pan_ids,
-                        &record_armed,
-                        &selected_steps,
-                        &accumulator_names,
-                        &ctx.meters.cached_track_peak_levels,
-                        &ctx.meters.cached_bus_peak_levels,
-                        &ui_epoch,
-                        lg_raw,
+                        ctx,
                     );
-                    let new_name = app.tracks[idx].clone();
+                    let name = app
+                        .groups
+                        .iter()
+                        .find(|group| group.id == group_id)
+                        .map(|group| group.name.clone())
+                        .unwrap_or_else(|| "Drum Rack".to_string());
                     editor.handle_host_event(HostEvent::Status(format!(
-                        "Added drum rack track {}: {new_name}",
-                        idx + 1
+                        "Added drum rack: {name}"
                     )));
                 }
                 Err(e) => {
                     editor.handle_host_event(HostEvent::Status(format!(
-                        "Error adding drum rack track: {e}"
+                        "Error adding drum rack: {e}"
                     )));
                 }
             }
@@ -227,55 +228,6 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error adding layer rack track: {e}"
                     )));
-                }
-            }
-        }
-        "add-track-rack-sample" => {
-            let path_str = extract_path_from_payload(&payload);
-            match path_str {
-                Some(path_str) => {
-                    let path = PathBuf::from(path_str);
-                    match app.graph_controller().add_sampler_drum_rack_track(
-                        &path,
-                        sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
-                    ).and_then(|idx| {
-                        app.commit_created_track(idx, "Add drum rack track")?;
-                        Ok(idx)
-                    }) {
-                        Ok(idx) => {
-                            sync_after_instrument_track_apply(
-                                &mut app,
-                                &mut editor,
-                                &state,
-                                idx,
-                                &current_track,
-                                &mut *ctx.track_names,
-                                &track_pan_ids,
-                                &record_armed,
-                                &selected_steps,
-                                &accumulator_names,
-                                &ctx.meters.cached_track_peak_levels,
-                                &ctx.meters.cached_bus_peak_levels,
-                                &ui_epoch,
-                                lg_raw,
-                            );
-                            let new_name = app.tracks[idx].clone();
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Added drum rack track {}: {new_name}",
-                                idx + 1
-                            )));
-                        }
-                        Err(e) => {
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Error adding drum rack track: {e}"
-                            )));
-                        }
-                    }
-                }
-                None => {
-                    editor.handle_host_event(HostEvent::Status(
-                        "Drum rack track creation is missing a sample path".to_string(),
-                    ));
                 }
             }
         }

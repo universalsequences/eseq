@@ -18,7 +18,7 @@
 ;; its spelling and is reached flat by an unconverted caller —
 ;; ui/capture-fixtures/rack-macro-mapping-sidebar.lisp (rack-macro-arm) — or
 ;; by Rust test evals in src/ui/state_values/tests.rs and src/ui/tests.rs
-;; (the rack-panel-toggle-*/rack-slot-*/rack-pad-*/drop entry points).
+;; (the rack-panel-toggle-*/rack-slot-*/drop entry points).
 ;; (The buffers.lisp aliases retired with eseq.effects.buffers, which now
 ;; imports this module.)
 
@@ -221,34 +221,20 @@
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((track (get target :track))
-          (routing (get target :routing))
-          (pad-note (get target :pad-note))
           (path (get payload :path))
           (name (get payload :name))
           (drag-type (get event :drag-type)))
-      (if (= routing "by-pitch")
-        (if (= drag-type "sample")
-          (if path
-            (host-command "add-rack-sample-pad"
-              (dict :track track :pad-note pad-note :path path :preserve-browser-context true))
-            (status "Drop a sample file, not a folder"))
-          (if (= drag-type "instrument")
-            (if name
-              (host-command "add-rack-instrument-pad"
-                (dict :track track :pad-note pad-note :name name))
-              (status "Drop an instrument, not a folder"))
-            (status "Drop a sample or instrument")))
-        (if (= drag-type "sample")
-          (if path
-            (host-command "add-rack-sample-slot"
-              (dict :track track :path path :preserve-browser-context true))
-            (status "Drop a sample file, not a folder"))
-          (if (= drag-type "instrument")
-            (if name
-              (host-command "add-rack-instrument-slot"
-                (dict :track track :name name))
-              (status "Drop an instrument, not a folder"))
-            (status "Drop a sample or instrument")))))))
+      (if (= drag-type "sample")
+        (if path
+          (host-command "add-rack-sample-slot"
+            (dict :track track :path path :preserve-browser-context true))
+          (status "Drop a sample file, not a folder"))
+        (if (= drag-type "instrument")
+          (if name
+            (host-command "add-rack-instrument-slot"
+              (dict :track track :name name))
+            (status "Drop an instrument, not a folder"))
+          (status "Drop a sample or instrument"))))))
 
 (def %rack-panel-drop-on-container (event)
   (if (= (get event :drag-type) "sound")
@@ -279,132 +265,6 @@
                       :preserve-browser-context true))
               (status "Drop a sample file, not a folder")))
           (status "Drop a sample or instrument"))))))
-
-(def rack-panel-drop-on-drum-pad (event)
-  (let ((target (get event :target)))
-    (rack-panel-drop-on-rack
-      (dict :drag-type (get event :drag-type)
-            :payload (get event :payload)
-            :target (dict :track (get target :track)
-                          :routing "by-pitch"
-                          :pad-note (get target :pad-note))))))
-
-(def rack-pad-select (pad)
-  (host-command "select-rack-pad"
-    (dict :track (get pad :track) :pad-note (get pad :pad-note))))
-
-(def rack-pad-bank-select (inst bank)
-  (host-command "select-rack-pad-bank"
-    (dict :track (get inst :track) :bank-start (get bank :bank-start))))
-
-(def %drum-rack-pad-bank-cell (inst bank)
-  (let ((selected (get bank :selected)))
-    (box :key (str "drum-rack-bank-" (get bank :bank-start))
-         :debug-name "drum-rack-pad-bank"
-         :width 3.65
-         :height 0.78
-         :padding 0.05
-         :selected selected
-         :background-color (if selected '(rgba 0.34 0.36 0.38 1.0) '(rgba 0.12 0.13 0.14 1.0))
-         :border-width 1
-         :border-color (if selected '(rgba 0.58 0.60 0.62 1.0) '(rgba 0.20 0.21 0.22 1.0))
-         :corner-radius 1
-         :on-click |x y r| (rack-pad-bank-select inst bank)
-      (label (get bank :label)
-        :font-size 5.6
-        :color (if selected :white :dim)
-        :bg :transparent
-        :width :fill
-        :text-align :center))))
-
-(def %drum-rack-pad-bank-selector (inst)
-  (v-stack :debug-name "drum-rack-pad-bank-selector"
-           :width 3.8
-           :height st/fx-panel-body-content-height
-           :gap 0.055
-           :align :center
-    (each (get inst :pad-banks) |bank idx|
-      (%drum-rack-pad-bank-cell inst bank))))
-
-(def %rack-drum-pad-cell (pad)
-  (let ((occupied (get pad :occupied))
-      (selected (get pad :selected)))
-    (box :key (str "drum-rack-pad-" (get pad :pad-note))
-      :debug-name "drum-rack-pad"
-      :width 6.55
-      :height 2.35
-      :padding 0.18
-      :selected selected
-      :background-color (if selected
-        '(rgba 0.30 0.37 0.39 1.0)
-        (if occupied '(rgba 0.18 0.22 0.23 1.0) '(rgba 0.12 0.13 0.14 1.0)))
-      :border-width 1
-      :border-color (if selected '(rgba 0.40 0.82 0.90 1.0) '(rgba 0.30 0.31 0.32 1.0))
-      :corner-radius 10
-      :drop-types (list "sample" "instrument")
-      :drop-meta (dict :kind "drum-rack-pad"
-        :track (get pad :track)
-        :pad-note (get pad :pad-note))
-      :drop-hover-border-color :mixer-strip-selected-border
-      :on-drop (lambda (event) (rack-panel-drop-on-drum-pad event))
-      :on-click |x y r| (rack-pad-select pad)
-      (v-stack :width :fill :height :fill :gap 0.05
-        (label (get pad :label)
-          :font-size 8.1
-          :color (if selected :white :gray)
-          :bg :transparent
-          :width :fill
-          :text-align :center)
-        (box :width :fill :flex 1 :h-align :center :v-align :center
-          (label (if occupied (substring (get pad :display-name) 0 12) "")
-            :font-size 6.8
-            :color (if occupied :white :dim)
-            :bg :transparent
-            :width :fill
-            :text-align :center))
-        (if occupied
-          (h-stack :width :fill :height 0.62 :gap 0.12 :align :center
-            (button "M"
-              :width 1.0 :height 0.56 :padding 0 :font-size 6.5
-              :background-color (if (get pad :mute) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-              :color (if (get pad :mute) :black :dim)
-              :on-click |x y r| (%rack-slot-set-mute pad (not (get pad :mute))))
-            (button "S"
-              :width 1.0 :height 0.56 :padding 0 :font-size 6.5
-              :background-color (if (get pad :solo) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-              :color (if (get pad :solo) :black :dim)
-              :on-click |x y r| (%rack-slot-set-solo pad (not (get pad :solo))))
-            (dropdown :value-index (get pad :choke-group)
-              :options (%rack-choke-group-options)
-              :width 3.85
-              :height 0.56
-              :font-size 6.2
-              :on-change (lambda (v) (rack-slot-set-choke-group-label pad v))))
-          (box :width :fill :height 0.62))))))
-
-(def %drum-rack-pad-row (pads row-start)
-  (h-stack :width :fill :height 2.43 :gap 0.18 :align :center
-    (%rack-drum-pad-cell (nth pads row-start))
-    (%rack-drum-pad-cell (nth pads (+ row-start 1)))
-    (%rack-drum-pad-cell (nth pads (+ row-start 2)))
-    (%rack-drum-pad-cell (nth pads (+ row-start 3)))))
-
-(def %drum-rack-pad-grid (inst)
-  (h-stack :debug-name "drum-rack-pad-grid"
-           :width :fill
-           :height st/fx-panel-body-content-height
-           :gap 0.24
-           :align :center
-    (%drum-rack-pad-bank-selector inst)
-    (v-stack :debug-name "drum-rack-pad-grid-cells"
-             :width :fill
-             :height st/fx-panel-body-content-height
-             :gap 0.08
-             :align :center
-      (%drum-rack-pad-row (get inst :pads) 0)
-      (%drum-rack-pad-row (get inst :pads) 4)
-      (%drum-rack-pad-row (get inst :pads) 8)
-      (%drum-rack-pad-row (get inst :pads) 12))))
 
 (def rack-slot-select (slot)
   (host-command "select-rack-slot"
@@ -611,8 +471,7 @@
        :drop-types (list "sample" "instrument" "sound")
        :drop-meta (dict :kind "rack-empty-selected"
                         :track (get inst :track)
-                        :routing (get inst :routing)
-                        :pad-note (get inst :selected-pad-note))
+                        :routing (get inst :routing))
        :drop-hover-border-color :mixer-strip-selected-border
        :on-drop (lambda (event) (%rack-panel-drop-on-container event))
     (label "Drop an Instrument or Sample"
@@ -701,26 +560,23 @@
           (%rack-panel-view-toolbar)
           (if st/rack-panel-macros-open (%rack-macro-bank inst) (box :width 0 :height 0))
           (if st/rack-panel-slot-list-open
-            (if (= (get inst :routing) "by-pitch")
-              (%drum-rack-pad-grid inst)
-              (box
-                :background-color :bg
-                :border-color :buffer-bg
-                :corner-radius 10
-                (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
-                  (if (> (len (get inst :slots)) 0)
-                    (each (get inst :slots) |slot idx|
-                      (%rack-slot-row slot))
-                    (box :width :fill :height 9 :h-align :center :v-align :center
-                      (label "Drop an Instrument or Sample"
-                        :font-size 11 :color :dim :bg :transparent))))))
+            (box
+              :background-color :bg
+              :border-color :buffer-bg
+              :corner-radius 10
+              (v-stack :debug-name "rack-chain-list" :gap 0.025 :height 5 :width :fill
+                (if (> (len (get inst :slots)) 0)
+                  (each (get inst :slots) |slot idx|
+                    (%rack-slot-row slot))
+                  (box :width :fill :height 9 :h-align :center :v-align :center
+                    (label "Drop an Instrument or Sample"
+                      :font-size 11 :color :dim :bg :transparent)))))
             (box :width 0 :height 0)))))
     :debug-name "rack-panel"
     :drop-types (list "sample" "instrument" "sound")
     :drop-meta (dict :kind "rack-panel"
       :track (get inst :track)
-      :routing (get inst :routing)
-      :pad-note (get inst :selected-pad-note))
+      :routing (get inst :routing))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (%rack-panel-drop-on-container event))
     :background "fx-panel-bg"

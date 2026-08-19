@@ -6,6 +6,6 @@
     :audio-fx ("filter"))
   (track :instrument "core/drift" :name "Drift")
   (track :modulator :name "Modulator")
-  (track :drum-rack :name "Drums"))
+  (track :layer-rack :name "Drums"))
 
 (load "@/ui/themes/mac-osx-light-theme.lisp")

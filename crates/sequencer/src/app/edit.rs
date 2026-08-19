@@ -3007,8 +3007,6 @@ impl App {
             color: self.track_colors.get(track).copied(),
             collapsed: self.track_collapsed.get(track).copied().unwrap_or(false),
             rack_selected_slot: self.rack_selected_slots.get(track).copied().unwrap_or(0),
-            rack_pad_bank_start: self.rack_pad_bank_starts.get(track).copied()
-                .unwrap_or(crate::sequencer::DRUM_RACK_FIRST_PAD_NOTE),
             record_armed: self.graph.record_armed.get(track).copied().unwrap_or(false),
             groups: self.groups.clone(),
             macro_mappings: self.macro_engine.capture_track_topology_mappings(track),
@@ -3049,7 +3047,6 @@ impl App {
         self.track_colors[appended] = patch.color.unwrap_or(self.track_colors[appended]);
         self.track_collapsed[appended] = patch.collapsed;
         self.rack_selected_slots[appended] = patch.rack_selected_slot;
-        self.rack_pad_bank_starts[appended] = patch.rack_pad_bank_start;
         self.graph.record_armed[appended] = patch.record_armed;
         self.state.move_appended_track_pattern_lane_to(patch.index, &patch.patterns)?;
         self.graph_controller().move_appended_track_to(patch.index)?;
@@ -10079,7 +10076,6 @@ mod tests {
                     instrument_run_mode:
                         crate::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -10171,7 +10167,6 @@ mod tests {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: crate::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,

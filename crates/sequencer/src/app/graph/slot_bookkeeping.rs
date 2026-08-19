@@ -56,7 +56,6 @@ impl GraphController<'_> {
         self.app.push_next_track_color();
         self.app.push_default_track_collapsed();
         self.app.rack_selected_slots.push(0);
-        self.app.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
         self.app
             .graph
             .effect_descriptors
@@ -342,7 +341,6 @@ impl GraphController<'_> {
         debug_assert_eq!(self.app.graph.record_armed.len(), self.app.tracks.len());
         debug_assert_eq!(self.app.sampler_paths.len(), self.app.tracks.len());
         debug_assert_eq!(self.app.rack_selected_slots.len(), self.app.tracks.len());
-        debug_assert_eq!(self.app.rack_pad_bank_starts.len(), self.app.tracks.len());
     }
 
     pub(super) fn initialize_instrument_slot(&mut self, track: usize, name: &str, manifest: &DGenManifest) {

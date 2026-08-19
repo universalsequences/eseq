@@ -119,12 +119,6 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-sounds",
-        build_all_track_drum_sounds_value(app),
-    );
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
@@ -629,14 +623,7 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-sounds",
-        build_all_track_drum_sounds_value(app),
-    );
     sync_all_rack_slot_selection_binding_fields(rt, app);
-    sync_all_drum_lane_step_binding_fields(rt, state, app);
     rt.set_reactive(
         "SEQ",
         "track-mod-output-available",
@@ -766,8 +753,6 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));

@@ -14,8 +14,7 @@ use super::{
     for_each_custom_voice_route_update,
     free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
     instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
-    mute_group_winner_for_block_events, rack_slot_matches_routing,
-    rack_slot_playback_transpose, resolve_live_instrument_defaults,
+    mute_group_winner_for_block_events, resolve_live_instrument_defaults,
     resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
     resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
     select_output_channels, select_output_config, store_active_keyboard_note,
@@ -92,12 +91,11 @@ fn rack_effect_plock_resolution_requires_matching_parameter_identity() {
     assert_eq!(resolved_slot_param_value(&slot, 3, 1, default), default);
 }
 
-fn rack_routing_test_slot(pad_note: Option<i32>) -> RackSlotSnapshot {
+fn rack_routing_test_slot() -> RackSlotSnapshot {
     RackSlotSnapshot {
         instrument_type: InstrumentType::Sampler,
         instrument_run_mode: CustomInstrumentRunMode::Instrument,
         instrument_base_note_offset: 0.0,
-        pad_note,
         choke_group: None,
         gain: 1.0,
         pan: 0.0,
@@ -118,7 +116,7 @@ fn rack_routing_test_slot(pad_note: Option<i32>) -> RackSlotSnapshot {
 fn rack_macro_is_effective_default_beneath_target_plock() {
     let mut rack = RackTrackSnapshot::new(
         RackRouting::Broadcast,
-        vec![rack_routing_test_slot(None)],
+        vec![rack_routing_test_slot()],
         default_rack_macros(),
     );
     rack.macros[0].value = 0.75;
@@ -151,7 +149,7 @@ fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
     let state = SequencerState::new(1, vec![Vec::new()]);
     let mut rack = RackTrackSnapshot::new(
         RackRouting::Broadcast,
-        vec![rack_routing_test_slot(None)],
+        vec![rack_routing_test_slot()],
         default_rack_macros(),
     );
     rack.macros[0].mappings.push(RackMacroMapping {
@@ -359,51 +357,12 @@ fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
 }
 
 #[test]
-fn rack_by_pitch_matches_only_the_selected_pad_and_plays_fixed_slot_pitch() {
-    let c1_slot = rack_routing_test_slot(Some(0));
-    let d1_slot = rack_routing_test_slot(Some(2));
-    let unmapped_slot = rack_routing_test_slot(None);
-
-    assert!(rack_slot_matches_routing(
-        &c1_slot,
-        RackRouting::Broadcast,
-        9.0
-    ));
-    assert!(rack_slot_matches_routing(
-        &c1_slot,
-        RackRouting::ByPitch,
-        0.0
-    ));
-    assert!(rack_slot_matches_routing(
-        &d1_slot,
-        RackRouting::ByPitch,
-        2.0
-    ));
-    assert!(!rack_slot_matches_routing(
-        &c1_slot,
-        RackRouting::ByPitch,
-        2.0
-    ));
-    assert!(!rack_slot_matches_routing(
-        &unmapped_slot,
-        RackRouting::ByPitch,
-        0.0
-    ));
-
-    assert_eq!(
-        rack_slot_playback_transpose(RackRouting::Broadcast, 7.0),
-        7.0
-    );
-    assert_eq!(rack_slot_playback_transpose(RackRouting::ByPitch, 7.0), 0.0);
-}
-
-#[test]
 fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
-    let mut released_sampler = rack_routing_test_slot(Some(0));
+    let mut released_sampler = rack_routing_test_slot();
     released_sampler.choke_group = Some(2);
-    let mut triggering_sampler = rack_routing_test_slot(Some(1));
+    let mut triggering_sampler = rack_routing_test_slot();
     triggering_sampler.choke_group = Some(2);
-    let mut unrelated_sampler = rack_routing_test_slot(Some(2));
+    let mut unrelated_sampler = rack_routing_test_slot();
     unrelated_sampler.choke_group = Some(3);
 
     let released_pool_id = crate::sequencer::rack_slot_pool_index(0, 0).unwrap();
@@ -439,7 +398,7 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     voice_pools[unrelated_pool_id].voices[0].active = true;
 
     let sampler_rack = RackTrackSnapshot::new(
-        RackRouting::ByPitch,
+        RackRouting::Broadcast,
         vec![released_sampler, triggering_sampler, unrelated_sampler],
         crate::sequencer::default_rack_macros(),
     );
@@ -477,15 +436,15 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         "unrelated sampler gate-off block event should remain"
     );
 
-    let mut released_custom = rack_routing_test_slot(Some(3));
+    let mut released_custom = rack_routing_test_slot();
     released_custom.instrument_type = InstrumentType::Custom;
     released_custom.choke_group = Some(7);
     released_custom.track_sound_state.engine_id = Some(4);
-    let mut triggering_custom = rack_routing_test_slot(Some(4));
+    let mut triggering_custom = rack_routing_test_slot();
     triggering_custom.instrument_type = InstrumentType::Custom;
     triggering_custom.choke_group = Some(7);
     triggering_custom.track_sound_state.engine_id = Some(5);
-    let mut unrelated_custom = rack_routing_test_slot(Some(5));
+    let mut unrelated_custom = rack_routing_test_slot();
     unrelated_custom.instrument_type = InstrumentType::Custom;
     unrelated_custom.choke_group = Some(8);
     unrelated_custom.track_sound_state.engine_id = Some(6);
@@ -527,7 +486,7 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     });
 
     let custom_rack = RackTrackSnapshot::new(
-        RackRouting::ByPitch,
+        RackRouting::Broadcast,
         vec![released_custom, triggering_custom, unrelated_custom],
         crate::sequencer::default_rack_macros(),
     );

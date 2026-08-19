@@ -889,7 +889,6 @@ impl GraphController<'_> {
                 "Rack tracks support at most {MAX_RACK_SLOTS} slots"
             ));
         }
-        validate_rack_build_slot_pad_map(routing, &slots)?;
         self.force_reap_all_rack_teardowns();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
@@ -956,7 +955,6 @@ impl GraphController<'_> {
                         instrument_type: InstrumentType::Sampler,
                         instrument_run_mode: CustomInstrumentRunMode::Instrument,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
-                        pad_note: slot.pad_note,
                         choke_group: slot.choke_group,
                         gain: slot.gain,
                         pan: slot.pan.clamp(-1.0, 1.0),
@@ -1041,7 +1039,6 @@ impl GraphController<'_> {
                         instrument_type: InstrumentType::Custom,
                         instrument_run_mode: custom.run_mode,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
-                        pad_note: slot.pad_note,
                         choke_group: slot.choke_group,
                         gain: slot.gain,
                         pan: slot.pan.clamp(-1.0, 1.0),
@@ -1088,14 +1085,6 @@ impl GraphController<'_> {
         self.app.sampler_paths.push(None);
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
-    }
-
-    pub fn add_empty_rack_track(&mut self) -> Result<usize, String> {
-        self.add_rack_track(
-            "Drum Rack",
-            RackRouting::ByPitch,
-            Vec::<RackSlotBuildSpec<'_>>::new(),
-        )
     }
 
     pub fn add_empty_layer_rack_track(&mut self) -> Result<usize, String> {
@@ -1537,7 +1526,6 @@ impl GraphController<'_> {
                         sample_name: sample_name.clone(),
                     }),
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -1559,48 +1547,6 @@ impl GraphController<'_> {
             self.app
                 .register_loaded_sample_path(&sample_name, buffer_id, path);
         }
-        Ok(idx)
-    }
-
-    pub fn add_sampler_drum_rack_track(
-        &mut self,
-        wav_path: &Path,
-        pad_note: i32,
-    ) -> Result<usize, String> {
-        if !validate_drum_rack_pad_note(pad_note) {
-            return Err(format!("Unsupported drum rack pad note {pad_note}"));
-        }
-        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
-        self.app.submit_sample_analysis(&loaded);
-        let sample_name =
-            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
-        let specs = vec![RackSlotBuildSpec {
-            instrument: RackSlotInstrumentBuildSpec::Sampler(RackSamplerBuildSpec {
-                buffer_id: loaded.buffer_id,
-                sample_rate: loaded.sample_rate,
-                sample_name: sample_name.clone(),
-            }),
-            instrument_base_note_offset: 0.0,
-            pad_note: Some(pad_note),
-            choke_group: None,
-            gain: 1.0,
-            pan: 0.0,
-            mute: false,
-            solo: false,
-            max_polyphony: DEFAULT_DRUM_SLOT_MAX_POLYPHONY,
-            param_plocks: None,
-            instrument_slot: None,
-            effect_slots: None,
-            effect_descriptors: None,
-            custom_effect_names: None,
-            track_sound_state: None,
-        }];
-        let idx = self.add_rack_track("Drum Rack", RackRouting::ByPitch, specs)?;
-        self.app.register_loaded_sample_path(
-            &sample_name,
-            loaded.buffer_id,
-            wav_path.to_path_buf(),
-        );
         Ok(idx)
     }
 

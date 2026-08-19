@@ -260,10 +260,19 @@ Follow the `each`-based widget generation convention (never `map`).
   retarget to "create member track + assign pad").
 - Choke-group semantics (re-keyed to member tracks).
 
-Deleted: `ByPitch` slot matching in dispatch, transpose-as-pad-selector, the
-drum-lane projection helpers and their history actions, per-slot mix fields
-(subsumed by member track channels), `RackSlotParamPlocks` (subsumed by real
-per-track p-locks).
+Deleted (as shipped): the `RackRouting::ByPitch` variant and its slot matching
+in dispatch, transpose-as-pad-selector, the v1 drum-rack track and pad-fill
+constructors, the sidebar 4x4 pad grid and its pad-bank state, the drum-lane
+projection helpers and their history actions, and the `Sound` param mode that
+projected transpose as a pad name. The browser's "Add drum rack" now creates a
+rack group; a legacy `by_pitch` project still deserializes and loads as a plain
+layering rack.
+
+Per-slot mix fields (`gain`/`pan`/`mute`/`solo`) and `RackSlotParamPlocks` were
+**kept**: they are also the Instrument Rack's per-layer mixer and per-layer
+p-locks, and "Instrument Rack changes" is a non-goal above. Only the drum-lane
+UI that surfaced them for drum racks is gone. They can be revisited if and when
+the Instrument Rack itself is redesigned.
 
 ## Phasing
 

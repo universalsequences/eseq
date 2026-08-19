@@ -1196,14 +1196,7 @@ pub(super) fn sync_all_track_sequencer_state_inner(
         "track-transposes",
         build_all_track_param_lists_value(state, app, StepParam::Transpose),
     );
-    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-sounds",
-        build_all_track_drum_sounds_value(app),
-    );
     sync_all_rack_slot_selection_binding_fields(rt, app);
-    sync_all_drum_lane_step_binding_fields(rt, state, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_transposes = started.expect("profile timer").elapsed();
     }

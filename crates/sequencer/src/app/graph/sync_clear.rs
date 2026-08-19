@@ -220,7 +220,6 @@ impl GraphController<'_> {
         self.app.track_collapsed.clear();
         self.app.sampler_paths.clear();
         self.app.rack_selected_slots.clear();
-        self.app.rack_pad_bank_starts.clear();
         self.app.graph.track_node_ids.clear();
         self.app.graph.applied_mod_routes.clear();
         self.app.graph.track_buffer_ids.clear();

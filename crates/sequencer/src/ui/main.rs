@@ -192,7 +192,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         midi_fx_names: _,
         sample_browser,
         piano_roll_clipboard,
-        selected_drum_lane_steps,
     } = init_runtime(
         &app,
         state.clone(),
@@ -265,7 +264,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         accumulator_names: accumulator_names.clone(),
         piano_roll_clipboard: piano_roll_clipboard.clone(),
         arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-        selected_drum_lane_steps: selected_drum_lane_steps.clone(),
     };
 
     run_event_loop(app, editor, backend, track_names, shared)?;

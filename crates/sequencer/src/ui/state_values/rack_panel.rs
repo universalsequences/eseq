@@ -1033,10 +1033,7 @@ pub(super) fn build_rack_panel_value(
 
     let routing_name = match rack.routing {
         sequencer::sequencer::RackRouting::Broadcast => "broadcast",
-        sequencer::sequencer::RackRouting::ByPitch => "by-pitch",
     };
-    let selected_pad_note = app.rack_selected_pad_note(track);
-    let pad_bank_start = app.rack_pad_bank_start(track);
     let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack);
     let selected_step = selected_plock_step(selected);
     let slots: Vec<Rc<RefCell<Value>>> = rack
@@ -1059,13 +1056,6 @@ pub(super) fn build_rack_panel_value(
                 "display-name",
                 instrument_display_name(&raw_name),
             );
-            if let Some(pad_note) = slot.pad_note {
-                slot_map.insert(
-                    "pad-note".to_string(),
-                    value_cell(Value::Number(pad_note as f64)),
-                );
-                insert_string_prop(&mut slot_map, "pad-label", drum_rack_pad_label(pad_note));
-            }
             slot_map.insert(
                 "choke-group".to_string(),
                 value_cell(Value::Number(slot.choke_group.unwrap_or(0) as f64)),
@@ -1208,35 +1198,6 @@ pub(super) fn build_rack_panel_value(
             Rc::new(RefCell::new(Value::Map(slot_map)))
         })
         .collect();
-    let mut pads: Vec<Rc<RefCell<Value>>> =
-        Vec::with_capacity(sequencer::sequencer::DRUM_RACK_PAD_COUNT);
-    for row in (0..4).rev() {
-        for col in 0..4 {
-            let pad_note = pad_bank_start + row * 4 + col;
-            pads.push(rack_pad_value(
-                app,
-                track,
-                &rack,
-                pad_note,
-                selected_pad_note,
-            ));
-        }
-    }
-    let mut bank_starts = Vec::new();
-    let mut bank_start = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
-    loop {
-        bank_starts.push(bank_start);
-        if bank_start >= sequencer::sequencer::DRUM_RACK_LAST_PAD_BANK_START {
-            break;
-        }
-        let next = bank_start + sequencer::sequencer::DRUM_RACK_PAD_BANK_STRIDE;
-        bank_start = next.min(sequencer::sequencer::DRUM_RACK_LAST_PAD_BANK_START);
-    }
-    let pad_banks: Vec<Rc<RefCell<Value>>> = bank_starts
-        .into_iter()
-        .rev()
-        .map(|bank_start| drum_rack_pad_bank_value(bank_start, pad_bank_start))
-        .collect();
     let selected_instrument = selected_slot.and_then(|slot_idx| {
         rack.slots.get(slot_idx).and_then(|slot| {
             build_selected_rack_slot_instrument_value(
@@ -1260,19 +1221,6 @@ pub(super) fn build_rack_panel_value(
                 .map(|slot_idx| slot_idx as f64)
                 .unwrap_or(-1.0),
         )),
-    );
-    panel_map.insert(
-        "selected-pad-note".to_string(),
-        value_cell(Value::Number(selected_pad_note as f64)),
-    );
-    panel_map.insert(
-        "pad-bank-start".to_string(),
-        value_cell(Value::Number(pad_bank_start as f64)),
-    );
-    insert_string_prop(
-        &mut panel_map,
-        "pad-bank-label",
-        drum_rack_pad_bank_label(pad_bank_start),
     );
     insert_string_prop(
         &mut panel_map,
@@ -1466,11 +1414,6 @@ pub(super) fn build_rack_panel_value(
                 })
                 .sum::<usize>() as f64,
         )),
-    );
-    panel_map.insert("pads".to_string(), Rc::new(RefCell::new(Value::List(pads))));
-    panel_map.insert(
-        "pad-banks".to_string(),
-        Rc::new(RefCell::new(Value::List(pad_banks))),
     );
     if let Some(selected_instrument) = selected_instrument {
         panel_map.insert("selected-instrument".to_string(), selected_instrument);

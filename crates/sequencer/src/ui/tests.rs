@@ -1,5 +1,5 @@
     use super::{
-        apply_bus_mixer_history_host_command, apply_drum_lane_history_host_command,
+        apply_bus_mixer_history_host_command,
         apply_piano_roll_gesture_update,
         apply_piano_roll_history_host_command,
         apply_selected_steps_delete, apply_slice3_history_host_command,
@@ -379,85 +379,6 @@
             sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
-        assert!(!state.pattern.patterns[0].is_active(5));
-    }
-
-    #[test]
-    fn metal_drum_lane_edits_are_individually_replayable() {
-        let (state, mut app) = history_test_app();
-
-        let toggle = history_value_map([
-            ("op", Value::Keyword("toggle".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("step", Value::Number(2.0)),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &toggle)
-            .expect("toggle drum-lane step");
-        assert!(state.pattern.patterns[0].is_active(2));
-
-        let duration = history_value_map([
-            ("op", Value::Keyword("duration".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("step", Value::Number(2.0)),
-            ("duration", Value::Number(3.0)),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &duration)
-            .expect("set drum-lane duration");
-        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
-
-        let move_action = history_value_map([
-            ("op", Value::Keyword("move".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("steps", piano_roll_id_list([2])),
-            ("delta", Value::Number(3.0)),
-            ("move-selection", Value::Bool(false)),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &move_action)
-            .expect("move drum-lane step");
-        assert!(!state.pattern.patterns[0].is_active(2));
-        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
-
-        let clear = history_value_map([
-            ("op", Value::Keyword("clear".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("steps", piano_roll_id_list([5])),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &clear)
-            .expect("clear drum-lane step");
-        assert!(!state.pattern.patterns[0].is_active(5));
-        assert_eq!(app.history.undo_len(), 4);
-
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert_ne!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert!(!state.pattern.patterns[0].is_active(2));
-
-        for _ in 0..4 {
-            assert!(matches!(
-                sequencer::app::edit::redo(&mut app),
-                sequencer::app::history::HistoryReplay::Applied(_)
-            ));
-        }
         assert!(!state.pattern.patterns[0].is_active(5));
     }
 
@@ -1884,7 +1805,6 @@
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
-            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -2539,7 +2459,6 @@
             midi_fx_names: _,
             sample_browser,
             piano_roll_clipboard,
-            selected_drum_lane_steps,
         } = init_runtime(
             &app,
             state.clone(),
@@ -4902,7 +4821,6 @@
                 accumulator_names: accumulator_names.clone(),
                 piano_roll_clipboard: piano_roll_clipboard.clone(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-                selected_drum_lane_steps: selected_drum_lane_steps.clone(),
             };
             let mut sessions = EditSessionState::default();
             let mut frame_diff = FrameDiffState::default();
@@ -5517,8 +5435,7 @@
                         .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
                         .unwrap_or_else(|| {
                             panic!(
-                                "the *step* panel must render a number-picker keyed {picker_key} \
-                                 (a drum-rack track swaps Transpose for a sound dropdown)"
+                                "the *step* panel must render a number-picker keyed {picker_key}"
                             )
                         });
                     (
@@ -5942,7 +5859,6 @@
                 accumulator_names: accumulator_names.clone(),
                 piano_roll_clipboard: piano_roll_clipboard.clone(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-                selected_drum_lane_steps: selected_drum_lane_steps.clone(),
             };
             let mut sessions = EditSessionState::default();
             let mut gesture_state = GestureState::default();
@@ -9633,7 +9549,6 @@
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
-            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),

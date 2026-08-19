@@ -527,7 +527,6 @@ pub struct TrackDeletionPatch {
     pub color: Option<crate::track_color::TrackColor>,
     pub collapsed: bool,
     pub rack_selected_slot: usize,
-    pub rack_pad_bank_start: i32,
     pub record_armed: bool,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub macro_mappings: crate::macro_engine::TrackTopologyMacroMappings,

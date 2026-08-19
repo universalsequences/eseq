@@ -1498,7 +1498,6 @@ mod tests {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,

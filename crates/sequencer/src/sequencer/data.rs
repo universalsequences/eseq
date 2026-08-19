@@ -5,15 +5,12 @@ use crate::audio::MAX_VOICES;
 
 pub const MAX_TRACKS: usize = 64;
 pub const MAX_RACK_SLOTS: usize = 16;
-pub const DRUM_RACK_PAD_COUNT: usize = 16;
-// Banks move by octave while the visible 4x4 grid spans sixteen chromatic pads.
-pub const DRUM_RACK_PAD_BANK_STRIDE: i32 = 12;
+/// A drum rack pad answers to one MIDI note, so the pad map spans the whole
+/// note range (docs/drum-rack-v2-spec.md, "Core model").
 pub const DRUM_RACK_TOTAL_PAD_NOTES: usize = 128;
 pub const DRUM_RACK_FIRST_PAD_NOTE: i32 = 0;
 pub const DRUM_RACK_LAST_PAD_NOTE: i32 =
     DRUM_RACK_FIRST_PAD_NOTE + DRUM_RACK_TOTAL_PAD_NOTES as i32 - 1;
-pub const DRUM_RACK_LAST_PAD_BANK_START: i32 =
-    DRUM_RACK_LAST_PAD_NOTE - DRUM_RACK_PAD_COUNT as i32 + 1;
 pub const MAX_INSTRUMENT_ENGINES: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_SAMPLER_POOLS: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_STEPS: usize = 256;
@@ -173,11 +170,13 @@ impl InstrumentType {
     }
 }
 
+/// How a rack fans a trigger across its slots. Drum racks are track groups
+/// now (`docs/drum-rack-v2-spec.md`), so the pitch-routed variant is gone and
+/// only the Instrument Rack's layering behaviour remains.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RackRouting {
     #[default]
     Broadcast,
-    ByPitch,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

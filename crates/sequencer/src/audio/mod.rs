@@ -94,7 +94,7 @@ use crate::scheduled_event::{
 };
 use crate::sequencer::{
     rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackRouting, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
+    KeyboardTrigger, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
     SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
     MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };

@@ -166,24 +166,6 @@ pub(super) fn rack_slot_accepts_resolved(params: ResolvedRackSlotParams, has_sol
     }
 }
 
-pub(super) fn rack_slot_matches_routing(
-    slot: &RackSlotSnapshot,
-    routing: RackRouting,
-    transpose: f32,
-) -> bool {
-    match routing {
-        RackRouting::Broadcast => true,
-        RackRouting::ByPitch => slot.pad_note == Some(transpose.round() as i32),
-    }
-}
-
-pub(super) fn rack_slot_playback_transpose(routing: RackRouting, transpose: f32) -> f32 {
-    match routing {
-        RackRouting::Broadcast => transpose,
-        RackRouting::ByPitch => 0.0,
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RackSlotNoteOff {
     Custom { logical_id: u64 },
@@ -569,9 +551,6 @@ pub(super) fn fire_live_keyboard_rack_note(
     let mut active_voice_count = 0;
 
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
-        if !rack_slot_matches_routing(slot, rack.routing, transpose) {
-            continue;
-        }
         if !rack_slot_accepts_trigger(slot, has_solo) {
             continue;
         }
@@ -585,7 +564,6 @@ pub(super) fn fire_live_keyboard_rack_note(
                 0,
             );
         }
-        let playback_transpose = rack_slot_playback_transpose(rack.routing, transpose);
         let instrument_params = resolve_rack_slot_instrument_defaults(&slot.instrument_slot);
         match slot.instrument_type {
             InstrumentType::Sampler => {
@@ -622,7 +600,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                 let (voice_lid, gatepitch_id, modulator_id) = {
                     let voice = data.voice_pools[pool_id]
                         .allocate_voice_retriggering_same_note_with_limit(
-                            playback_transpose,
+                            transpose,
                             slot.max_polyphony,
                         );
                     (voice.logical_id, voice.gatepitch_id, voice.modulator_id)
@@ -644,7 +622,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             0,
                             gatepitch_seq,
                             custom_pitch_hz(
-                                playback_transpose + slot.instrument_base_note_offset,
+                                transpose + slot.instrument_base_note_offset,
                                 0.0,
                             ),
                             trigger.velocity,
@@ -658,7 +636,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         voice_lid,
                         0,
                         sampler_seq,
-                        playback_transpose + slot.instrument_base_note_offset,
+                        transpose + slot.instrument_base_note_offset,
                         trigger.velocity,
                         sampler_params.playback_speed,
                         attack_samples,
@@ -713,7 +691,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             parent_track_idx,
                             rack_slot_pool_index(parent_track_idx, slot_idx)
                                 .expect("validated rack slot must have a route identity"),
-                            playback_transpose,
+                            transpose,
                         )
                     else {
                         continue;
@@ -724,7 +702,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         parent_track_idx,
                         rack_slot_pool_index(parent_track_idx, slot_idx)
                             .expect("validated rack slot must have a route identity"),
-                        playback_transpose,
+                        transpose,
                         slot.max_polyphony > 1,
                         slot.max_polyphony,
                     )
@@ -742,7 +720,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                 }
                 let key_locked_instrument_params = key_locked_snapshot_instrument_params(
                     &slot.instrument_slot,
-                    playback_transpose,
+                    transpose,
                     slot.instrument_base_note_offset,
                     None,
                     &instrument_params,
@@ -753,7 +731,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                     slot.instrument_base_note_offset,
                 );
                 let pitch_hz =
-                    custom_pitch_hz(playback_transpose, slot.instrument_base_note_offset);
+                    custom_pitch_hz(transpose, slot.instrument_base_note_offset);
                 cancel_gate_off_for_lid(
                     &mut data.countdown_events,
                     &mut data.block_events,
@@ -1107,21 +1085,6 @@ pub(super) fn fire_rack_resolved(
         if !rack_slot_accepts_resolved(slot_params, has_solo) {
             continue;
         }
-        let receives_trigger = if chord.count > 0 {
-            (0..chord.count).any(|note_idx| {
-                let transpose = resolved_chord_transpose(
-                    chord.notes[note_idx],
-                    chord.step_transpose,
-                    resolved.transpose,
-                );
-                rack_slot_matches_routing(slot, rack.routing, transpose)
-            })
-        } else {
-            rack_slot_matches_routing(slot, rack.routing, resolved.transpose)
-        };
-        if !receives_trigger {
-            continue;
-        }
         unsafe {
             dispatch_snapshot_effect_params_at_step(data.lg.0, &slot.effect_slots, step);
         }
@@ -1149,9 +1112,6 @@ pub(super) fn fire_rack_resolved(
                     chord.step_transpose,
                     resolved.transpose,
                 );
-                if !rack_slot_matches_routing(slot, rack.routing, transpose) {
-                    continue;
-                }
                 if let Some(choke_group) = slot.choke_group {
                     release_rack_choke_group_voices(
                         data,
@@ -1162,11 +1122,10 @@ pub(super) fn fire_rack_resolved(
                         frame_offset,
                     );
                 }
-                let playback_transpose = rack_slot_playback_transpose(rack.routing, transpose);
                 let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
                     key_locked_snapshot_instrument_params(
                         &slot.instrument_slot,
-                        playback_transpose,
+                        transpose,
                         slot_params.base_note_offset,
                         key_lock_plock_step,
                         &instrument_params,
@@ -1186,7 +1145,7 @@ pub(super) fn fire_rack_resolved(
                     slot_idx,
                     slot,
                     slot_params,
-                    playback_transpose,
+                    transpose,
                     resolved.velocity,
                     resolved.speed,
                     note_gate,
@@ -1197,9 +1156,6 @@ pub(super) fn fire_rack_resolved(
                 );
             }
         } else {
-            if !rack_slot_matches_routing(slot, rack.routing, resolved.transpose) {
-                continue;
-            }
             if let Some(choke_group) = slot.choke_group {
                 release_rack_choke_group_voices(
                     data,
@@ -1210,11 +1166,10 @@ pub(super) fn fire_rack_resolved(
                     frame_offset,
                 );
             }
-            let playback_transpose = rack_slot_playback_transpose(rack.routing, resolved.transpose);
             let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
                 key_locked_snapshot_instrument_params(
                     &slot.instrument_slot,
-                    playback_transpose,
+                    resolved.transpose,
                     slot_params.base_note_offset,
                     key_lock_plock_step,
                     &instrument_params,
@@ -1234,7 +1189,7 @@ pub(super) fn fire_rack_resolved(
                 slot_idx,
                 slot,
                 slot_params,
-                playback_transpose,
+                resolved.transpose,
                 resolved.velocity,
                 resolved.speed,
                 rack_gate,

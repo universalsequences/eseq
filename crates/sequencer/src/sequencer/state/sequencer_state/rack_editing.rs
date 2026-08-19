@@ -335,7 +335,6 @@ impl SequencerState {
                 instrument_type,
                 instrument_run_mode,
                 instrument_base_note_offset: data.instrument_base_note_offset,
-                pad_note: None,
                 choke_group: None,
                 gain: 1.0,
                 pan: 0.0,

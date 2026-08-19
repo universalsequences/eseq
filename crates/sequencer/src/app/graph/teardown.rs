@@ -1076,9 +1076,6 @@ impl GraphController<'_> {
         if track_idx < self.app.rack_selected_slots.len() {
             self.app.rack_selected_slots.remove(track_idx);
         }
-        if track_idx < self.app.rack_pad_bank_starts.len() {
-            self.app.rack_pad_bank_starts.remove(track_idx);
-        }
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
         self.app.graph.track_buffer_ids.remove(track_idx);

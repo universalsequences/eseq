@@ -20,7 +20,6 @@
             instrument_type,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,
-            pad_note: None,
             choke_group: None,
             gain: 1.0,
             pan: 0.0,
@@ -78,13 +77,11 @@
         slot.solo = true;
         slot.max_polyphony = 1;
         slot.sample_id = Some((99, "other-kick".to_string(), 48_000));
-        slot.pad_note = Some(36);
         slot.choke_group = Some(2);
         assert!(slot
             .param_plocks
             .set(0, crate::sequencer::RackSlotParam::Gain, 0.75));
         second.macros[0].value = 0.8;
-        second.routing = RackRouting::ByPitch;
 
         assert_eq!(
             rack_topology_signature(&first),
@@ -3135,7 +3132,6 @@
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -3257,7 +3253,6 @@
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -3375,7 +3370,6 @@
                     instrument_run_mode:
                         crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,

@@ -1410,7 +1410,6 @@ impl App {
                         .get(track)
                         .copied()
                         .unwrap_or(0.0),
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -1461,7 +1460,6 @@ impl App {
                         .get(track)
                         .copied()
                         .unwrap_or(0.0),
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -3208,7 +3206,6 @@ impl App {
                                         .as_ref()
                                         .map(|slot| slot.instrument_base_note_offset)
                                         .unwrap_or(0.0),
-                                    pad_note: saved_slot.as_ref().and_then(|slot| slot.pad_note),
                                     choke_group: saved_slot
                                         .as_ref()
                                         .and_then(|slot| slot.choke_group),
@@ -3246,13 +3243,12 @@ impl App {
                                         .map(|slot| slot.track_sound_state.clone()),
                                 });
                             }
+                            // Legacy `by_pitch` racks load as layering racks:
+                            // drum racks are track groups now
+                            // (docs/drum-rack-v2-spec.md).
                             let routing = RackRouting::from(*routing);
-                            let rack_name = match routing {
-                                RackRouting::Broadcast => "Layer Rack",
-                                RackRouting::ByPitch => "Drum Rack",
-                            };
                             self.graph_controller().add_rack_track(
-                                rack_name,
+                                "Layer Rack",
                                 routing,
                                 build_specs,
                             )?;

@@ -791,7 +791,6 @@
                 instrument_type: InstrumentType::Custom,
                 instrument_run_mode: CustomInstrumentRunMode::Instrument,
                 instrument_base_note_offset: 7.0,
-                pad_note: None,
                 choke_group: None,
                 gain: 0.8,
                 pan: -0.2,
@@ -851,13 +850,11 @@
         sample_name: &str,
         sample_rate: u32,
         instrument_slot_id: usize,
-        pad_note: Option<i32>,
     ) -> RackSlotSnapshot {
         RackSlotSnapshot {
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: -12.0,
-            pad_note,
             choke_group: None,
             gain: 0.5,
             pan: 0.25,
@@ -1622,7 +1619,7 @@
         let state = SequencerState::new(1, Vec::new());
         let initial = sample_rack_track_snapshot();
         state.set_rack_track_for_all_pattern_snapshots(0, initial.clone());
-        let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88, None);
+        let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88);
 
         state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
 
@@ -1661,7 +1658,7 @@
         state.restore_current_pattern_from_repository().unwrap();
         state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
 
-        let appended = sample_sampler_rack_slot(123, "current-layer", 48_000, 88, None);
+        let appended = sample_sampler_rack_slot(123, "current-layer", 48_000, 88);
 
         assert!(state.append_rack_slot_to_current_pattern(0, RackRouting::Broadcast, appended));
 
@@ -1692,8 +1689,6 @@
     fn replace_rack_slot_source_preserves_pad_controls_and_slot_plocks() {
         let state = SequencerState::new(1, Vec::new());
         let mut initial = sample_rack_track_snapshot();
-        initial.routing = RackRouting::ByPitch;
-        initial.slots[0].pad_note = Some(2);
         initial.slots[0].choke_group = Some(3);
         initial.slots[0].instrument_base_note_offset = 5.0;
         initial.slots[0].gain = 0.7;
@@ -1714,7 +1709,6 @@
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: -12.0,
-            pad_note: Some(9),
             choke_group: Some(8),
             gain: 0.2,
             pan: 0.5,
@@ -1740,7 +1734,6 @@
         assert_eq!(live_slot.instrument_type, InstrumentType::Sampler);
         assert_eq!(live_slot.sample_id.as_ref().unwrap().1, "replacement");
         assert_eq!(live_slot.instrument_slot.node_id, 188);
-        assert_eq!(live_slot.pad_note, Some(2));
         assert_eq!(live_slot.choke_group, Some(3));
         assert_eq!(live_slot.instrument_base_note_offset, 5.0);
         assert_eq!(live_slot.gain, 0.7);
@@ -1756,7 +1749,6 @@
         let repository = state.export_pattern_repository();
         let restored = &repository[0].rack_tracks[0].as_ref().unwrap().slots[0];
         assert_eq!(restored.sample_id.as_ref().unwrap().1, "replacement");
-        assert_eq!(restored.pad_note, Some(2));
         assert_eq!(restored.choke_group, Some(3));
         assert_eq!(restored.instrument_base_note_offset, 5.0);
         assert_eq!(
@@ -1778,8 +1770,6 @@
         state.restore_current_pattern_from_repository().unwrap();
 
         let mut initial = sample_rack_track_snapshot();
-        initial.routing = RackRouting::ByPitch;
-        initial.slots[0].pad_note = Some(0);
         initial.slots[0].choke_group = Some(4);
         initial.slots[0].instrument_base_note_offset = 5.0;
         initial.slots[0].gain = 0.7;
@@ -1796,7 +1786,7 @@
             .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
-        let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88, Some(9));
+        let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88);
         replacement.choke_group = Some(8);
         replacement.instrument_base_note_offset = -24.0;
         replacement.gain = 0.2;
@@ -1812,7 +1802,6 @@
             .unwrap()
             .clone();
         assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "replacement");
-        assert_eq!(live.slots[0].pad_note, Some(0));
         assert_eq!(live.slots[0].choke_group, Some(4));
         assert_eq!(live.slots[0].instrument_base_note_offset, 5.0);
         assert_eq!(live.slots[0].gain, 0.7);
@@ -1835,7 +1824,6 @@
         let current = &repository[0].rack_tracks[0].as_ref().unwrap().slots[0];
         let other = &repository[1].rack_tracks[0].as_ref().unwrap().slots[0];
         assert_eq!(current.sample_id.as_ref().unwrap().1, "replacement");
-        assert_eq!(current.pad_note, Some(0));
         assert_eq!(current.choke_group, Some(4));
         assert_eq!(current.param_plocks.get(4, RackSlotParam::Gain), Some(0.25));
         assert!(other.sample_id.is_none());
@@ -1843,7 +1831,6 @@
             other.track_sound_state.loaded_preset.as_deref(),
             Some("rack-lead")
         );
-        assert_eq!(other.pad_note, Some(0));
         assert_eq!(other.choke_group, Some(4));
         assert_eq!(other.param_plocks.get(4, RackSlotParam::Gain), Some(0.25));
     }
@@ -1893,24 +1880,12 @@
         second.instrument_types[0] = InstrumentType::Rack;
         first.rack_tracks[0] = Some(RackTrackSnapshot::new(
             RackRouting::Broadcast,
-            vec![sample_sampler_rack_slot(
-                101,
-                "pattern-one",
-                44_100,
-                11,
-                None,
-            )],
+            vec![sample_sampler_rack_slot(101, "pattern-one", 44_100, 11)],
             default_rack_macros(),
         ));
         second.rack_tracks[0] = Some(RackTrackSnapshot::new(
             RackRouting::Broadcast,
-            vec![sample_sampler_rack_slot(
-                202,
-                "pattern-two",
-                44_100,
-                22,
-                None,
-            )],
+            vec![sample_sampler_rack_slot(202, "pattern-two", 44_100, 22)],
             default_rack_macros(),
         ));
         state.replace_pattern_repository(vec![first, second], 0);
@@ -1970,7 +1945,7 @@
         state.append_rack_slot_for_all_pattern_snapshots(
             0,
             RackRouting::Broadcast,
-            sample_sampler_rack_slot(123, "layer", 48_000, 88, None),
+            sample_sampler_rack_slot(123, "layer", 48_000, 88),
         );
 
         assert!(state.remove_rack_slot_from_current_pattern(0, 0));
@@ -2000,7 +1975,7 @@
         let state = SequencerState::new(1, Vec::new());
         let initial = sample_rack_track_snapshot();
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
-        let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88, None);
+        let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88);
         state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
 
         assert!(state.remove_rack_slot_from_all_pattern_snapshots(0, 0));
@@ -5151,107 +5126,6 @@
     }
 
     #[test]
-    fn drum_lane_steps_expand_and_collapse_polyphonic_step_storage() {
-        let state = make_state_with_instrument();
-        let track = 0;
-        let step = 3;
-
-        assert!(state.toggle_drum_lane_step(track, step, 0));
-        assert!(state.pattern.patterns[track].is_active(step));
-        assert_eq!(
-            state.pattern.step_data[track].get(step, StepParam::Transpose),
-            0.0
-        );
-        assert_eq!(state.pattern.chord_data[track].count(step), 0);
-
-        assert!(state.toggle_drum_lane_step(track, step, 12));
-        assert_eq!(state.pattern.chord_data[track].count(step), 2);
-        assert_eq!(state.pattern.chord_data[track].get(step, 0), 0.0);
-        assert_eq!(state.pattern.chord_data[track].get(step, 1), 12.0);
-        assert_eq!(
-            state.set_drum_lane_step_duration(track, step, 0, 4.0),
-            Some(4.0)
-        );
-        assert_eq!(
-            state.set_drum_lane_step_duration(track, step, 12, 2.0),
-            Some(2.0)
-        );
-        assert_eq!(state.drum_lane_step_duration(track, step, 0), Some(4.0));
-        assert_eq!(state.drum_lane_step_duration(track, step, 12), Some(2.0));
-
-        assert!(!state.toggle_drum_lane_step(track, step, 0));
-        assert!(state.pattern.patterns[track].is_active(step));
-        assert_eq!(state.pattern.chord_data[track].count(step), 0);
-        assert_eq!(
-            state.pattern.step_data[track].get(step, StepParam::Transpose),
-            12.0
-        );
-
-        assert!(!state.toggle_drum_lane_step(track, step, 12));
-        assert_step_is_default(&state, track, step);
-    }
-
-    #[test]
-    fn drum_lane_drag_moves_only_the_requested_pad_hits() {
-        let state = make_state_with_instrument();
-        let track = 0;
-
-        assert!(state.toggle_drum_lane_step(track, 2, 0));
-        assert!(state.toggle_drum_lane_step(track, 2, 12));
-        assert!(state.toggle_drum_lane_step(track, 4, 0));
-        assert!(state.toggle_drum_lane_step(track, 6, 12));
-        assert!(state.toggle_drum_lane_step(track, 8, 24));
-        state.pattern.step_data[track].set(8, StepParam::Velocity, 0.42);
-
-        assert!(state.move_drum_lane_steps(track, 0, &[2, 4], 2));
-        assert!(state.move_drum_lane_steps(track, 24, &[8], 2));
-
-        assert!(state.pattern.patterns[track].is_active(2));
-        assert_eq!(state.pattern.chord_data[track].count(2), 0);
-        assert_eq!(
-            state.pattern.step_data[track]
-                .get(2, StepParam::Transpose)
-                .round() as i32,
-            12,
-            "the other pad hit at the source must remain"
-        );
-        assert!(state.pattern.patterns[track].is_active(4));
-        assert_eq!(
-            state.pattern.step_data[track]
-                .get(4, StepParam::Transpose)
-                .round() as i32,
-            0,
-            "the first selected hit should move to step 4"
-        );
-        assert_eq!(state.pattern.chord_data[track].count(6), 2);
-        let notes = (0..2)
-            .map(|voice| state.pattern.chord_data[track].get(6, voice).round() as i32)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            notes,
-            vec![0, 12],
-            "the destination's other pad must remain"
-        );
-        assert!(!state.pattern.patterns[track].is_active(8));
-        assert!(state.pattern.patterns[track].is_active(10));
-        assert_eq!(
-            state.pattern.step_data[track].get(10, StepParam::Velocity),
-            0.42,
-            "a lone hit moved to an empty destination should retain its full step payload"
-        );
-        assert_eq!(state.clear_drum_lane_steps(track, 0, &[6]), 1);
-        assert!(state.pattern.patterns[track].is_active(6));
-        assert_eq!(state.pattern.chord_data[track].count(6), 0);
-        assert_eq!(
-            state.pattern.step_data[track]
-                .get(6, StepParam::Transpose)
-                .round() as i32,
-            12,
-            "deleting a selected lane hit must retain the other pad at that step"
-        );
-    }
-
-    #[test]
     fn published_scheduler_snapshot_reflects_initial_state() {
         let state = SequencerState::new(
             2,
@@ -5428,13 +5302,13 @@
         state.append_rack_slot_for_all_pattern_snapshots(
             0,
             RackRouting::Broadcast,
-            sample_sampler_rack_slot(12, "before", 48_000, 77, None),
+            sample_sampler_rack_slot(12, "before", 48_000, 77),
         );
         let snapshot = state.capture_rack_slot_pattern_state(0, 1).unwrap();
         assert!(state.replace_rack_slot_source_in_current_pattern(
             0,
             1,
-            sample_sampler_rack_slot(13, "after", 44_100, 88, None),
+            sample_sampler_rack_slot(13, "after", 44_100, 88),
         ));
         state
             .restore_rack_slot_pattern_state(

@@ -797,7 +797,6 @@ pub(super) fn sync_step_batch_structural_bindings(
             }
         }
     }
-    dirty |= sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, steps);
     if track == current_track_idx {
         let cursor_step = fx_step_cursor_from_runtime(rt);
         dirty |= sync_fx_step_cursor_binding_fields(
@@ -880,33 +879,6 @@ pub(super) fn sync_track_duration_span_binding_fields(
                 Value::Bool(step < num_steps && track_step_duration_covered(state, track, step)),
             )
             .effects_dirty;
-    }
-    dirty
-}
-
-pub(super) fn sync_drum_lane_duration_span_binding_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    track: usize,
-    start_step: usize,
-) -> bool {
-    let mut dirty = false;
-    for sound in drum_rack_sound_options(app, track) {
-        for step in start_step.min(MAX_STEPS)..MAX_STEPS {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &drum_lane_step_duration_field(track, sound.pad_note, step),
-                    Value::Bool(drum_lane_step_duration_covered(
-                        state,
-                        track,
-                        sound.pad_note,
-                        step,
-                    )),
-                )
-                .effects_dirty;
-        }
     }
     dirty
 }
@@ -1675,11 +1647,6 @@ pub(super) fn apply_ui_invalidations(
     // reconcile over all MAX_STEPS, so collect the touched steps here and do
     // one reconcile per track after the loop.
     let mut plock_render_steps: Vec<(usize, Vec<usize>)> = Vec::new();
-    // Drum-rack lanes place a hit on the pad row named by the step's Transpose,
-    // so a transpose edit moves the hit between rows. `drum_rack_sound_options`
-    // needs a rack-track lock plus a SEQ namespace read, so this is likewise
-    // batched to one call per track.
-    let mut drum_lane_transpose_steps: Vec<(usize, Vec<usize>)> = Vec::new();
     // The piano roll renders notes from transpose/velocity/duration, so a
     // step-param edit on the current track moves them. One sync per apply,
     // never one per step.
@@ -1831,9 +1798,6 @@ pub(super) fn apply_ui_invalidations(
                         step_param_track_lists.push((track, param));
                     }
                     push_deferred_track_step(&mut plock_render_steps, track, step);
-                    if param == StepParam::Transpose {
-                        push_deferred_track_step(&mut drum_lane_transpose_steps, track, step);
-                    }
                     if track == current_track_idx {
                         piano_roll_step_params_dirty = true;
                     }
@@ -1841,8 +1805,6 @@ pub(super) fn apply_ui_invalidations(
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
-                    needs_reactive_cycle |=
-                        sync_drum_lane_duration_span_binding_fields(rt, state, app, track, step);
                     if !duration_span_tracks.contains(&track) {
                         duration_span_tracks.push(track);
                     }
@@ -2376,12 +2338,6 @@ pub(super) fn apply_ui_invalidations(
                     sync_track_step_plock_render_fields(rt, track, step, render);
             }
         }
-    }
-    // Cheap no-op on non-drum tracks (`drum_rack_sound_options` returns empty
-    // before any namespace read).
-    for (track, steps) in drum_lane_transpose_steps {
-        needs_reactive_cycle |=
-            sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, &steps);
     }
     if piano_roll_step_params_dirty {
         sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
