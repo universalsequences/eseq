@@ -93,6 +93,86 @@
         :width 30 :font-size 12 :h-align :center
         :color :dim :bg :transparent))))
 
+;; ── Drum rack selection panel (docs/drum-rack-v2-spec.md) ──────────────
+;; Selecting a rack selects its backing bus (ui/sequencer.lisp, %select-rack),
+;; so without this branch a kit shows up here as a bare — usually empty — bus
+;; chain. A rack has to feel like a track in *fx*: its kit first, then the
+;; rack-level effects that bus chain really is.
+;;
+;; The pads come from ui/sequencer.lisp — one pad-cell component, so drops,
+;; badges and audition cannot drift between the grid's PADS view and this
+;; panel. Spelled qualified rather than imported ON PURPOSE: this module is
+;; loaded from the effects manifest, which several Rust harnesses load on its
+;; own, and an import edge would drag the whole sequencer view (and its
+;; top-level registrations) into every one of them. Nothing below runs unless
+;; a rack is selected, which cannot happen without the sequencer loaded.
+
+(def %selected-rack ()
+  (if (pw/has-selected-bus?)
+    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
+    -1))
+
+(def %rack-pad-member-name (gidx pad)
+  (let ((track (if (= pad nil) -1 (get pad :track))))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (nth SEQ.track-names track)
+      "")))
+
+;; Kit controls beside the pads: what the pad focus is, a one-click jump into
+;; that pad's member track, and saving the whole rack as a browser kit.
+(def %rack-panel-controls (gidx)
+  (let ((pad (eseq.sequencer/selected-pad gidx)))
+    (v-stack :debug-name "rack-fx-panel-controls"
+      :width 8.8 :height :fill :gap 0.3 :align :start :padding 0.1
+      (label "KIT" :font-size 9 :color :blue :bg :transparent)
+      (label (eseq.drum-rack-v2/group-name gidx)
+        :font-size 11 :color :white :bg :transparent)
+      (label (if (= pad nil) "No pad selected" (str "Pad " (get pad :label)))
+        :font-size 8 :color :dim :bg :transparent)
+      (label (substring (%rack-pad-member-name gidx pad) 0 14)
+        :font-size 8 :color :white :bg :transparent)
+      (button "OPEN PAD TRACK"
+        :key (str "rack-fx-open-pad-" (eseq.drum-rack-v2/group-id gidx))
+        :width 8.4 :height 1.1 :padding 0 :font-size 8
+        :background-color (if (= pad nil)
+          '(rgba 0.1 0.1 0.1 1.0)
+          '(rgba 0.18 0.22 0.23 1.0))
+        :border-color :transparent
+        :color (if (= pad nil) :dim :white)
+        :on-click |x y r| (if (= pad nil) nil (eseq.sequencer/open-pad-member-fx gidx pad)))
+      (button "SAVE KIT"
+        :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
+        :width 8.4 :height 1.1 :padding 0 :font-size 8
+        :background-color '(rgba 0.1 0.1 0.1 1.0)
+        :border-color :transparent
+        :color :dim
+        :on-click |x y r| (eseq.drum-rack-v2/save-kit gidx))
+      (box :flex 1 :width 0 :height 0 :bg :transparent)
+      (label "Drop a sample or instrument on a pad"
+        :width 8.4 :font-size 6.8 :color :dim :bg :transparent))))
+
+(def %rack-selection-panel (gidx)
+  (v-stack :padding 0.05 :gap 1
+    (h-stack :gap 1 :align :start
+      (box :debug-name "rack-fx-pads-panel"
+        :key (str "rack-fx-pads-panel-" (eseq.drum-rack-v2/group-id gidx))
+        :background-color :buffer-bg
+        :corner-radius 10
+        :border-color :mixer-strip-border
+        :border-width 2
+        :height st/fx-fixed-panel-height
+        :padding 0.1
+        :v-align :start :h-align :start
+        (h-stack :gap 0.2 :align :start
+          (eseq.sequencer/rack-pad-grid gidx false)
+          (%rack-panel-controls gidx)))
+      ;; Rack-level fx still matter: the bus chain stays right here, edited the
+      ;; same way an ordinary bus selection edits it.
+      (each (filter |fx| (> (len (get fx :params)) 0) (%selected-bus-effects)) |fx slot-idx|
+        (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
+          (ep/fx-panel (get fx :name) (get fx :params) fx)))
+      (%drop-placeholder-panel))))
+
 (def %bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
@@ -142,7 +222,10 @@
 
 (effect-buffer "*fx*"
   (if (pw/has-selected-bus?)
-    (%bus-selection-panel)
+    (let ((gidx (%selected-rack)))
+      (if (>= gidx 0)
+        (%rack-selection-panel gidx)
+        (%bus-selection-panel)))
     (if (= SEQ.num-tracks 0)
     (empty-track-fallback)
     ;; Mapping changes the wrapper structure of every compatible parameter.

@@ -48634,6 +48634,161 @@
         );
     }
 
+    /// A sequencer harness that also loads the effect buffers, so the *fx*
+    /// buffer's rack branch can be rendered against a real rack.
+    fn rack_fx_panel_editor() -> eseqlisp::Editor {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+        let rt = editor.runtime_mut();
+        for (key, value) in [
+            ("compiling", Value::Bool(false)),
+            ("available-effects", test_list(vec![])),
+            ("available-builtin-effects", test_list(vec![])),
+            ("available-midi-effects", test_list(vec![])),
+            ("effects", test_list(vec![])),
+            ("midi-effects", test_list(vec![])),
+            ("instrument-panel", test_list(vec![])),
+            ("process-slots", test_list(vec![])),
+            ("bus-effects", test_list(vec![test_list(vec![]); 3])),
+            ("delete-target-version", Value::Number(0.0)),
+        ] {
+            rt.set_reactive("SEQ", key, value);
+        }
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Kit")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                "#,
+            )
+            .expect("install rack fx panel test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        editor
+    }
+
+    /// eseq-4b5.10: selecting a drum rack selects its backing bus, so without a
+    /// rack branch the *fx* buffer answers a kit with the bus's (usually empty)
+    /// effect chain. A rack has to feel like a track here: the pad interface —
+    /// same cells, same drops, same audition — plus the rack bus chain, while
+    /// an ordinary bus still gets the generic panel.
+    #[test]
+    fn metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer() {
+        let mut editor = rack_fx_panel_editor();
+        // The rack's backing bus is bus 2 (`rack_group_fixture`'s bus id).
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+
+        let pads = find_layout_node_by_debug_name(&layout, "rack-fx-pads-panel")
+            .unwrap_or_else(|| panic!("rack pad panel; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(pads, "rack pad panel");
+        let grid = find_layout_node_by_stable_key_suffix(pads, "/rack-pad-grid-7")
+            .unwrap_or_else(|| panic!("rack pad grid; layout={layout_summaries:#?}"));
+        // The kit has to fit the fx strip's fixed panel height like any other
+        // panel, or it spills out of the buffer.
+        assert_layout_inside(grid, pads, "rack pad grid");
+        // The panel draws the SHARED pad cell, so the pad interface keeps the
+        // drop targets and audition the sequencer's PADS view gives it.
+        for cell in [0, 5] {
+            let node =
+                find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
+                    .unwrap_or_else(|| panic!("pad cell {cell}; layout={layout_summaries:#?}"));
+            assert_finite_nonzero_rect(node, "rack pad cell");
+            assert!(
+                node.props.contains_key("on-drop") && node.props.contains_key("drop-types"),
+                "pad cell {cell} should stay a drop target in the fx panel"
+            );
+            assert!(
+                node.props.contains_key("on-click"),
+                "pad cell {cell} should still audition"
+            );
+        }
+        // The rack bus's own chain stays reachable from the same panel.
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-drop-placeholder-panel").is_some(),
+            "the rack bus effect chain should remain editable; layout={layout_summaries:#?}"
+        );
+
+        // A pad click focuses the pad, which is what gives the panel a member
+        // track to open.
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-fx-open-pad-7").is_some(),
+            "the panel should offer a jump to the pad's member track"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%select-pad 0 (nth (eseq.drum-rack-v2/pads 0) 1))")
+            .expect("selecting a pad should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (eseq.sequencer/selected-pad 0) :track)")
+                .expect("focused pad should resolve"),
+            Some(Value::Number(2.0)),
+            "the focused pad names its member track"
+        );
+        // Opening a pad runs the ordinary "edit this track" path, which the
+        // perf editor does not carry natives for.
+        for native in ["seq-clear-selection", "seq-set-track", "set-track-cursor"] {
+            editor
+                .runtime_mut()
+                .register_native(native, |_args, _ctx| Ok(Value::Bool(true)));
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(eseq.sequencer/open-pad-member-fx 0 (nth (eseq.drum-rack-v2/pads 0) 1))",
+            )
+            .expect("opening a pad's member should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.seq-core-state/selected-bus")
+                .expect("bus selection should resolve"),
+            Some(Value::Number(-1.0)),
+            "opening a pad hands the fx buffer that member track's own panel"
+        );
+
+        // An ordinary bus is untouched by the rack branch.
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 1)")
+            .expect("select a plain bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let bus_layout = editor.widget_layout().expect("plain bus fx layout");
+        assert!(
+            find_layout_node_by_debug_name(&bus_layout, "rack-fx-pads-panel").is_none(),
+            "a plain bus should still show the generic bus panel"
+        );
+    }
+
     /// Drains one host command and returns its numeric payload fields in the
     /// order the command declares them.
     fn rack_host_command_payload(

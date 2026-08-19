@@ -1790,6 +1790,33 @@
       (nth SEQ.track-names track)
       "")))
 
+;; The pad the rack's *fx* panel is focused on, as (group id, pad note) — the
+;; pad map's own key, so the focus survives track reindexing exactly as chokes
+;; and note nudges do. Per-pad fx are the member track's own chain by design
+;; (docs/drum-rack-v2-spec.md, "UI"), so all a pad selection has to do is name
+;; the member the panel offers to open.
+(defstate %pad-selected-group -1)
+(defstate %pad-selected-note -1)
+
+(def %select-pad (gidx pad)
+  (do
+    (set! %pad-selected-group (eseq.drum-rack-v2/group-id gidx))
+    (set! %pad-selected-note (get pad :pad-note))))
+
+(def pad-selected? (gidx pad)
+  (and (not (= pad nil))
+    (= %pad-selected-group (eseq.drum-rack-v2/group-id gidx))
+    (= %pad-selected-note (get pad :pad-note))))
+
+;; The focused pad of a rack, or nil when the focus names another rack (or no
+;; pad answers to the focused note any more).
+(def selected-pad (gidx)
+  (if (= %pad-selected-group (eseq.drum-rack-v2/group-id gidx))
+    (reduce |acc pad| (if (= (get pad :pad-note) %pad-selected-note) pad acc)
+      nil
+      (eseq.drum-rack-v2/pads gidx))
+    nil))
+
 ;; Lazy pads (docs/drum-rack-v2-spec.md, "Track budget"): dropping a sound on an
 ;; EMPTY cell is what makes that pad claim a track. The new member is mapped to
 ;; exactly this cell's pad note, so it is playable by pad click and armed key
@@ -1841,6 +1868,17 @@
       (drop-on-track event)
       (%drop-on-empty-pad event gidx cell))))
 
+;; A pad's own fx ARE its member track's chain (docs/drum-rack-v2-spec.md,
+;; "UI"), so "open this pad" means: make its member the track under edit. That
+;; drops the bus selection, which is exactly what swaps the *fx* buffer from
+;; the rack panel to that member's instrument and effects — in place, without
+;; touching the workspace layout.
+(def open-pad-member-fx (gidx pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (select-track-for-edit track)
+      nil)))
+
 (def %pad-cell (gidx cell)
   (let ((pad (%pad-at gidx cell)))
     (box
@@ -1850,14 +1888,22 @@
         '(rgba 0.12 0.13 0.14 1.0)
         '(rgba 0.18 0.22 0.23 1.0))
       :border-width 1
-      :border-color '(rgba 0.30 0.31 0.32 1.0)
+      :border-color (if (pad-selected? gidx pad)
+        :mixer-strip-selected-border
+        '(rgba 0.30 0.31 0.32 1.0))
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-hover-background-color :mixer-control-bg
       :corner-radius 8
       :drop-types (%pad-cell-drop-types pad)
       :drop-meta (%pad-cell-drop-meta gidx cell pad)
       :on-drop (lambda (event) (%drop-on-pad-cell event gidx cell))
-      :on-click |x y r| (if (= pad nil) nil (eseq.drum-rack-v2/trigger-pad gidx pad))
+      ;; A hit both plays the pad and focuses it: auditioning IS how you pick
+      ;; the pad you then want to open, so the two must not need two gestures.
+      :on-click |x y r| (if (= pad nil)
+        nil
+        (do
+          (%select-pad gidx pad)
+          (eseq.drum-rack-v2/trigger-pad gidx pad)))
       (v-stack :width :fill :height :fill :gap 0.05
         (label (if (= pad nil) "" (get pad :label))
           :font-size 8 :color :dim :bg :transparent
@@ -1896,9 +1942,15 @@
         :on-click |x y r| (set! %pad-grid-bank
           (min (- (%pad-grid-banks gidx) 1) (+ (%pad-grid-bank-clamped gidx) 1)))))))
 
-(def %rack-pad-grid (gidx)
+(def %pad-grid-intrinsic-width 26.45)
+
+;; The pad grid as a component: the sequencer block draws it full-width under a
+;; rack header, the *fx* rack panel draws it at its intrinsic width beside the
+;; rack's own controls. One definition, so pad badges, drops and audition can
+;; never differ between the two surfaces.
+(def rack-pad-grid (gidx fill)
   (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
-    :width :fill :padding 0.2
+    :width (if fill :fill %pad-grid-intrinsic-width) :padding 0.2
     :background-color '(rgba 0.09 0.10 0.11 1.0)
     :corner-radius 8
     (v-stack :gap 0.1 :align :start
@@ -2011,7 +2063,7 @@
         ;; The pad grid belongs to the header, not to the member rows, so a
         ;; collapsed rack can still be finger-drummed.
         (if (%pad-grid-open? gidx)
-          (%rack-pad-grid gidx)
+          (rack-pad-grid gidx true)
           (box :width 0.0 :height 0.0 :bg :transparent))
         (if (eseq.drum-rack-v2/collapsed? gidx)
           (box :width 0.0 :height 0.0 :bg :transparent)

@@ -72,6 +72,19 @@
       -1
       (range 0 (len SEQ.bus-ids)))))
 
+;; Index (in SEQ.groups) of the rack backed by bus `bus-idx`, else -1. Selecting
+;; a rack selects its bus (ui/sequencer.lisp, %select-rack), so this is how a
+;; bus-driven surface — the *fx* buffer — asks "is this selection a kit?".
+(def rack-of-bus (bus-idx)
+  (if (< bus-idx 0)
+    -1
+    (reduce |acc gidx|
+      (if (>= acc 0)
+        acc
+        (if (and (rack? gidx) (= (bus-index gidx) bus-idx)) gidx acc))
+      -1
+      (range 0 (len SEQ.groups)))))
+
 ;; ── Rack arming ─────────────────────────────────────────────────────────
 ;; Which rack the live keyboard plays as pads (SEQ.armed-rack-id, -1 = none).
 ;; The host owns this: `seq-toggle-rack-arm` flips it, disarms the rack's own
