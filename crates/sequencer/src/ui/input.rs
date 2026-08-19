@@ -560,6 +560,16 @@ pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
     )
 }
 
+fn metal_selected_drum_rack_bus(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str(
+        "(if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0) \
+           eseq.seq-core-state/selected-bus -1)",
+    ) {
+        Ok(Some(Value::Number(bus))) if bus >= 0.0 => Some(bus as usize),
+        _ => None,
+    }
+}
+
 fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
     match mode {
         0 => Some(StepParam::Velocity),
@@ -1272,14 +1282,26 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && !focused_widget_captures_text_input(editor)
     {
         if let Some(shortcut) = pattern_length_shortcut(key) {
-            if metal_has_selected_bus(editor) {
-                return false;
-            }
-            let command = match shortcut {
-                PatternLengthShortcut::Double => "(eseq.seq-grid-mode/double-track-pattern)",
-                PatternLengthShortcut::Halve => "(eseq.seq-grid-mode/halve-track-pattern)",
+            let command = if metal_has_selected_bus(editor) {
+                let Some(bus) = metal_selected_drum_rack_bus(editor) else {
+                    return false;
+                };
+                let operation = match shortcut {
+                    PatternLengthShortcut::Double => "double",
+                    PatternLengthShortcut::Halve => "halve",
+                };
+                format!("(seq-resize-drum-rack-patterns {bus} :{operation})")
+            } else {
+                match shortcut {
+                    PatternLengthShortcut::Double => {
+                        "(eseq.seq-grid-mode/double-track-pattern)".to_string()
+                    }
+                    PatternLengthShortcut::Halve => {
+                        "(eseq.seq-grid-mode/halve-track-pattern)".to_string()
+                    }
+                }
             };
-            let _ = editor.runtime_mut().eval_str(command);
+            let _ = editor.runtime_mut().eval_str(&command);
             editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
             return true;
@@ -3701,6 +3723,53 @@ mod live_keyboard_tests {
                 .unwrap(),
             Some(Value::String("".to_string()))
         );
+    }
+
+    #[test]
+    fn command_plus_and_minus_resize_all_patterns_when_drum_rack_bus_is_selected() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate eseq.seq-core-state/selected-bus 2)
+                (def eseq.seq-core-state/seq-has-selected-bus? () true)
+                (def eseq.drum-rack-v2/rack-of-bus (bus) 4)
+                "#,
+            )
+            .expect("install selected rack fixture");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor.runtime_mut().register_native(
+                "seq-resize-drum-rack-patterns",
+                move |args, _ctx| {
+                    calls.lock().unwrap().push(args.to_vec());
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        for (key, operation) in [('+', "double"), ('-', "halve")] {
+            assert!(handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ));
+            let calls = calls.lock().unwrap();
+            let args = calls.last().expect("rack resize native call");
+            assert_eq!(args.first(), Some(&Value::Number(2.0)));
+            assert_eq!(args.get(1), Some(&Value::Keyword(operation.to_string())));
+        }
     }
 
     #[test]

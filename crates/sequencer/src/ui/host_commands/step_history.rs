@@ -13,6 +13,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "print-step-param-release",
     "move-step-history",
     "slice2-history-action",
+    "resize-drum-rack-patterns",
     "slice3-history-action",
     "bus-mixer-history-action",
     "toggle-step",
@@ -643,6 +644,71 @@ pub(super) fn handle(
                     ));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+            }
+        }
+        "resize-drum-rack-patterns" => {
+            let Value::Map(map) = &payload else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Drum rack pattern resize failed: invalid payload".to_string(),
+                ));
+                return;
+            };
+            let Some(bus_index) = map_usize(map, "bus") else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Drum rack pattern resize failed: invalid bus".to_string(),
+                ));
+                return;
+            };
+            let Some(bus_id) = app.buses.get(bus_index).map(|bus| bus.id.0) else {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Drum rack pattern resize failed: bus {bus_index} does not exist"
+                )));
+                return;
+            };
+            let Some(group) = app
+                .groups
+                .iter()
+                .find(|group| group.bus_id == bus_id && group.rack.is_some())
+            else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Drum rack pattern resize failed: selected bus is not a drum rack"
+                        .to_string(),
+                ));
+                return;
+            };
+            let group_id = group.id;
+            let members = group.members.clone();
+            let change = match map_string(map, "op").as_deref() {
+                Some("double") => app::edit::PatternLengthChange::Double,
+                Some("halve") => app::edit::PatternLengthChange::Halve,
+                _ => {
+                    editor.handle_host_event(HostEvent::Error(
+                        "Drum rack pattern resize failed: invalid operation".to_string(),
+                    ));
+                    return;
+                }
+            };
+            match app.resize_drum_rack_patterns_recorded(group_id, change) {
+                Ok(app::edit::EditOutcome::Applied(result)) => {
+                    *auto_follow_override_until.lock().unwrap() =
+                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                    for track in members {
+                        ui_invalidations.push(UiInvalidation::Pattern(
+                            PatternInvalidation::WholeTrack { track },
+                        ));
+                    }
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.show_transient_message(result.label);
+                }
+                Ok(app::edit::EditOutcome::NoOp) => {}
+                Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
+                    editor.handle_host_event(HostEvent::Error(
+                        "Drum rack resize was applied without history".to_string(),
+                    ));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                    "Could not resize drum rack patterns: {error:?}"
+                ))),
             }
         }
         "slice3-history-action" => {

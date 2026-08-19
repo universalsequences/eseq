@@ -5530,6 +5530,44 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(new_len as f64))
     });
 
+    // Rack headers select their backing bus. The host resolves that stable bus
+    // to a rack group and applies the operation to all real member tracks.
+    runtime.register_native("seq-resize-drum-rack-patterns", move |args, ctx| {
+        let Some(Value::Number(bus)) = args.first() else {
+            return Err("seq-resize-drum-rack-patterns: expected bus index".into());
+        };
+        if *bus < 0.0 {
+            return Err(
+                "seq-resize-drum-rack-patterns: bus index must be non-negative".into(),
+            );
+        }
+        let operation = match args.get(1) {
+            Some(Value::Keyword(operation))
+            | Some(Value::String(operation))
+            | Some(Value::Symbol(operation))
+                if operation == "double" || operation == "halve" => operation.clone(),
+            _ => {
+                return Err(
+                    "seq-resize-drum-rack-patterns: expected :double or :halve".into(),
+                )
+            }
+        };
+        let mut payload = HashMap::new();
+        payload.insert(
+            "bus".to_string(),
+            Rc::new(RefCell::new(Value::Number(*bus))),
+        );
+        payload.insert(
+            "op".to_string(),
+            Rc::new(RefCell::new(Value::Keyword(operation))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "resize-drum-rack-patterns".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Bool(true))
+    });
+
     let ct = current_track.clone();
     runtime.register_native(
         "seq-propagate-current-track-to-all-patterns",

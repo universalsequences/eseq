@@ -5,7 +5,7 @@ use crate::sequencer::{
     BusId, PatternId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId,
     DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE, MAX_STEPS,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -52,6 +52,12 @@ pub enum EditOutcome {
     NoOp,
     Applied(HistoryMove),
     AppliedUnrecorded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternLengthChange {
+    Double,
+    Halve,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2725,6 +2731,42 @@ impl App {
             rack.pads[pad_index].pad_note = new_note;
             Ok(())
         })
+    }
+
+    /// Resizes every member's own pattern in one history transaction. Members
+    /// deliberately keep independent lengths, so each command applies the
+    /// normal per-track clamping and duplication semantics.
+    pub fn resize_drum_rack_patterns_recorded(
+        &mut self,
+        group_id: u64,
+        change: PatternLengthChange,
+    ) -> Result<EditOutcome, EditError> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .ok_or_else(|| EditError::InvalidTarget(format!(
+                "track group {group_id} does not exist"
+            )))?;
+        if group.rack.is_none() {
+            return Err(EditError::InvalidTarget(format!(
+                "track group {group_id} is not a drum rack"
+            )));
+        }
+        let commands = group
+            .members
+            .iter()
+            .copied()
+            .map(|track| match change {
+                PatternLengthChange::Double => AppCommand::DuplicateTrackPattern { track },
+                PatternLengthChange::Halve => AppCommand::HalveTrackPattern { track },
+            })
+            .collect::<Vec<_>>();
+        let label = match change {
+            PatternLengthChange::Double => "Double drum rack patterns",
+            PatternLengthChange::Halve => "Halve drum rack patterns",
+        };
+        apply_recorded_pattern_geometry_commands(self, &commands, label)
     }
 
     pub fn rename_group_recorded(&mut self, group_id: u64, name: String) -> Result<(), String> {
@@ -7516,83 +7558,140 @@ fn apply_recorded_pattern_geometry_command(
     app: &mut App,
     cmd: &AppCommand,
 ) -> Result<EditOutcome, EditError> {
-    let track = pattern_geometry_track(cmd).ok_or(EditError::UnsupportedCommand)?;
-    let track_id = app
-        .track_registry
-        .id_at(track)
-        .ok_or(EditError::TrackOutOfRange { track })?;
-    // Lazily materialize the pattern when the current scene is bare for the
-    // track (takes spec 11.1): the first edit in a bare scene creates the
-    // pattern and lifts the empty-cell silencing.
-    let pattern_id =
-        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
-    let target = TrackPatternId {
-        track: track_id,
-        pattern: pattern_id,
-    };
-    let steps = (0..MAX_STEPS).collect::<Vec<_>>();
-    let (before, registry_before) = app
-        .state
-        .capture_pattern_step_cells(track, pattern_id, &steps)
-        .map_err(EditError::ReplayFailed)?;
-    let num_steps_before = app
-        .state
-        .capture_pattern_num_steps(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
+    apply_recorded_pattern_geometry_commands(
+        app,
+        std::slice::from_ref(cmd),
+        pattern_geometry_label(cmd),
+    )
+}
 
-    super::command::execute_command(app, cmd.clone());
-    app.state.reconcile_plock_variant_registry_for_track(track);
+/// Applies pattern geometry edits to distinct tracks as one atomic history
+/// entry. Capturing every target before executing any command keeps a rack-wide
+/// resize from becoming a sequence of independently undoable track edits.
+fn apply_recorded_pattern_geometry_commands(
+    app: &mut App,
+    commands: &[AppCommand],
+    label: &'static str,
+) -> Result<EditOutcome, EditError> {
+    struct PendingGeometry {
+        command: AppCommand,
+        track: usize,
+        target: TrackPatternId,
+        pattern_id: PatternId,
+        steps: Vec<usize>,
+        before: Vec<StepCellSnapshot>,
+        registry_before: PlockVariantRegistry,
+        num_steps_before: usize,
+    }
 
-    let (after, registry_after) = app
-        .state
-        .capture_pattern_step_cells(track, pattern_id, &steps)
-        .map_err(EditError::ReplayFailed)?;
-    let num_steps_after = app
-        .state
-        .capture_pattern_num_steps(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
-    let cells = steps
-        .into_iter()
-        .zip(before)
-        .zip(after)
-        .filter_map(|((step, before), after)| {
-            (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
-                step,
-                before,
-                after,
+    let mut seen_tracks = HashSet::new();
+    let mut pending = Vec::with_capacity(commands.len());
+    for command in commands {
+        let track = pattern_geometry_track(command).ok_or(EditError::UnsupportedCommand)?;
+        if !seen_tracks.insert(track) {
+            return Err(EditError::InvalidTarget(format!(
+                "pattern geometry batch contains track {track} more than once"
+            )));
+        }
+        let track_id = app
+            .track_registry
+            .id_at(track)
+            .ok_or(EditError::TrackOutOfRange { track })?;
+        // Lazily materialize the pattern when the current scene is bare for the
+        // track (takes spec 11.1), exactly as a single-track geometry edit does.
+        let pattern_id =
+            ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
+        let target = TrackPatternId {
+            track: track_id,
+            pattern: pattern_id,
+        };
+        let steps = (0..MAX_STEPS).collect::<Vec<_>>();
+        let (before, registry_before) = app
+            .state
+            .capture_pattern_step_cells(track, pattern_id, &steps)
+            .map_err(EditError::ReplayFailed)?;
+        let num_steps_before = app
+            .state
+            .capture_pattern_num_steps(track, pattern_id)
+            .map_err(EditError::ReplayFailed)?;
+        pending.push(PendingGeometry {
+            command: command.clone(),
+            track,
+            target,
+            pattern_id,
+            steps,
+            before,
+            registry_before,
+            num_steps_before,
+        });
+    }
+
+    let mut patches = Vec::with_capacity(pending.len());
+    for pending in pending {
+        super::command::execute_command(app, pending.command);
+        app.state
+            .reconcile_plock_variant_registry_for_track(pending.track);
+        let (after, registry_after) = app
+            .state
+            .capture_pattern_step_cells(pending.track, pending.pattern_id, &pending.steps)
+            .map_err(EditError::ReplayFailed)?;
+        let num_steps_after = app
+            .state
+            .capture_pattern_num_steps(pending.track, pending.pattern_id)
+            .map_err(EditError::ReplayFailed)?;
+        let cells = pending
+            .steps
+            .into_iter()
+            .zip(pending.before)
+            .zip(after)
+            .filter_map(|((step, before), after)| {
+                (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
+                    step,
+                    before,
+                    after,
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    if cells.is_empty() && num_steps_before == num_steps_after {
+            .collect::<Vec<_>>();
+        if cells.is_empty() && pending.num_steps_before == num_steps_after {
+            continue;
+        }
+        patches.push(PatternGeometryPatch {
+            target: pending.target,
+            num_steps_before: pending.num_steps_before,
+            num_steps_after,
+            cells: StepCellsPatch {
+                target: pending.target,
+                cells,
+                variant_registry_before: pending.registry_before,
+                variant_registry_after: registry_after,
+            },
+        });
+    }
+
+    if patches.is_empty() {
         return Ok(EditOutcome::NoOp);
     }
-    let patch = PatternGeometryPatch {
-        target,
-        num_steps_before,
-        num_steps_after,
-        cells: StepCellsPatch {
-            target,
-            cells,
-            variant_registry_before: registry_before,
-            variant_registry_after: registry_after,
-        },
+    let patch = if patches.len() == 1 {
+        EditPatch::PatternGeometry(patches.pop().expect("one geometry patch"))
+    } else {
+        EditPatch::Composite(
+            patches
+                .into_iter()
+                .map(EditPatch::PatternGeometry)
+                .collect(),
+        )
     };
-    if let Err(error) = replay_pattern_geometry_patch(app, &patch, ApplyMode::Redo) {
-        return match replay_pattern_geometry_patch(app, &patch, ApplyMode::Undo) {
+    if let Err(error) = replay_patch(app, &patch, ApplyMode::Redo) {
+        return match replay_patch(app, &patch, ApplyMode::Undo) {
             Ok(_) => Err(error),
             Err(rollback_error) => Err(EditError::ReplayFailed(format!(
                 "{error:?}; rollback also failed: {rollback_error:?}"
             ))),
         };
     }
-    let retained_bytes = patch.retained_bytes();
+    let retained_bytes = edit_patch_retained_bytes(&patch);
     finish_active_gesture(app);
-    let history_move = app.history.commit(
-        pattern_geometry_label(cmd),
-        None,
-        EditPatch::PatternGeometry(patch),
-        retained_bytes,
-    );
+    let history_move = app.history.commit(label, None, patch, retained_bytes);
     Ok(EditOutcome::Applied(history_move))
 }
 
@@ -11065,6 +11164,66 @@ mod tests {
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 32);
         assert!(app.state.pattern.patterns[0].is_active(19));
+    }
+
+    #[test]
+    fn drum_rack_pattern_resize_uses_member_lengths_and_one_undo_entry() {
+        let mut app = test_app(SequencerState::new(
+            3,
+            vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ],
+        ));
+        app.tracks = vec![
+            "Kick".to_string(),
+            "Snare".to_string(),
+            "Hat".to_string(),
+        ];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(3).unwrap();
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 41,
+            name: "Kit".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0, 1, 2],
+            bus_id: 7,
+            rack: Some(crate::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        });
+        for (track, length) in [8, 1, MAX_STEPS].into_iter().enumerate() {
+            app.state.pattern.track_params[track].set_num_steps(length);
+        }
+        app.state.pattern.patterns[0].set_step_active(3, true);
+
+        let doubled = app
+            .resize_drum_rack_patterns_recorded(41, PatternLengthChange::Double)
+            .expect("double rack member patterns");
+        assert!(matches!(doubled, EditOutcome::Applied(_)));
+        fn lengths(app: &App) -> Vec<usize> {
+            (0..3)
+                .map(|track| app.state.pattern.track_params[track].get_num_steps())
+                .collect()
+        }
+        assert_eq!(lengths(&app), vec![16, 2, MAX_STEPS]);
+        assert!(app.state.pattern.patterns[0].is_active(11));
+        assert_eq!(app.history.undo_len(), 1, "rack resize is one undo step");
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(lengths(&app), vec![8, 1, MAX_STEPS]);
+        assert!(!app.state.pattern.patterns[0].is_active(11));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+
+        let halved = app
+            .resize_drum_rack_patterns_recorded(41, PatternLengthChange::Halve)
+            .expect("halve rack member patterns");
+        assert!(matches!(halved, EditOutcome::Applied(_)));
+        assert_eq!(lengths(&app), vec![8, 1, MAX_STEPS / 2]);
+        assert_eq!(app.history.undo_len(), 2, "halve adds one undo step");
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(lengths(&app), vec![16, 2, MAX_STEPS]);
     }
 
     #[test]
