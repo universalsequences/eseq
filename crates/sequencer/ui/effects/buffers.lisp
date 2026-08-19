@@ -6,6 +6,7 @@
 ;; (import eseq.effects.buffers) from library code.
 (module eseq.effects.buffers)
 
+(import eseq.drum-rack-v2)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.instrument-panel :as ip)
@@ -101,11 +102,15 @@
 ;;
 ;; The pads come from ui/sequencer.lisp — one pad-cell component, so drops,
 ;; badges and audition cannot drift between the grid's PADS view and this
-;; panel. Spelled qualified rather than imported ON PURPOSE: this module is
-;; loaded from the effects manifest, which several Rust harnesses load on its
-;; own, and an import edge would drag the whole sequencer view (and its
-;; top-level registrations) into every one of them. Nothing below runs unless
-;; a rack is selected, which cannot happen without the sequencer loaded.
+;; panel. The eseq.sequencer names are spelled qualified rather than imported
+;; ON PURPOSE: this module is loaded from the effects manifest, which several
+;; Rust harnesses load on its own, and an import edge would drag the whole
+;; sequencer view (and its top-level registrations) into every one of them.
+;; They only run inside the rack branch, which cannot be reached without the
+;; sequencer loaded. eseq.drum-rack-v2 IS imported (at the top of this file):
+;; %selected-rack asks it about every bus selection, and it is a pure lookups
+;; module over SEQ.groups — no view, no top-level registrations — that answers
+;; -1 when no groups state exists.
 
 (def %selected-rack ()
   (if (pw/has-selected-bus?)
