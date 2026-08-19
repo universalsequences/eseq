@@ -169,8 +169,19 @@ pub(crate) fn reactive_tick_and_render(
     // playhead passes. The tick pushes targeted Step invalidations (drained
     // below in this same frame) instead of bumping ui_epoch; the writes ride
     // the open "Record take" undo transaction like live note recording.
-    if tick_step_print(ctx.shared) {
+    let step_print_tick = tick_step_print(ctx.shared, editor.runtime_mut());
+    if step_print_tick.printed {
         app.mark_recording_take_changed();
+    }
+    if step_print_tick.display_dirty {
+        // The picker readouts moved to (or back from) the print latch: flush
+        // them through the same cycle + *step* refresh a normal param edit
+        // gets, so the display tracks the sweep tightly.
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*step*");
+    }
+    if step_print_tick.printed || step_print_tick.display_dirty {
         editor.mark_needs_redraw();
     }
 
