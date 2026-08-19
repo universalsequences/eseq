@@ -6,6 +6,27 @@ pub(super) const COMMANDS: &[&str] = &[
     "toggle-roll-mode",
 ];
 
+pub(crate) fn toggle_roll_mode(state: &SequencerState, editor: &mut Editor) -> bool {
+    let enabled = !state.transport.roll_mode.fetch_xor(true, Ordering::AcqRel);
+    eprintln!("[roll-debug] host-command toggle-roll-mode enabled={enabled}");
+    if !enabled {
+        // Toggling roll mode off always clears stuck rolls
+        // (docs/rolling-core-spec.md 7).
+        state
+            .transport
+            .sequence_rolling
+            .store(false, Ordering::Release);
+        state.push_roll_command(sequencer::sequencer::RollCommand::ClearAll);
+    }
+    editor
+        .runtime_mut()
+        .set_reactive("SEQ", "roll-mode", Value::Bool(enabled));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    enabled
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -47,23 +68,7 @@ pub(super) fn handle(
             editor.mark_needs_redraw();
         }
         "toggle-roll-mode" => {
-            let enabled = !state.transport.roll_mode.fetch_xor(true, Ordering::AcqRel);
-            eprintln!("[roll-debug] host-command toggle-roll-mode enabled={enabled}");
-            if !enabled {
-                // Toggling roll mode off always clears stuck rolls
-                // (docs/rolling-core-spec.md 7).
-                state
-                    .transport
-                    .sequence_rolling
-                    .store(false, Ordering::Release);
-                state.push_roll_command(sequencer::sequencer::RollCommand::ClearAll);
-            }
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "roll-mode", Value::Bool(enabled));
-            editor.runtime_mut().run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            editor.mark_needs_redraw();
+            toggle_roll_mode(&state, editor);
         }
         "toggle-metronome" => {
             let enabled = !state
@@ -78,5 +83,32 @@ pub(super) fn handle(
             editor.mark_needs_redraw();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eseqlisp::EditorConfig;
+
+    #[test]
+    fn direct_roll_toggle_updates_transport_without_deferred_host_dispatch() {
+        let state = SequencerState::new(1, vec![]);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![("roll-mode", Value::Bool(false))],
+            true,
+        );
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+
+        assert!(toggle_roll_mode(&state, &mut editor));
+        assert!(state.transport.roll_mode.load(Ordering::Acquire));
+        assert!(!toggle_roll_mode(&state, &mut editor));
+        assert!(!state.transport.roll_mode.load(Ordering::Acquire));
+        assert!(matches!(
+            state.drain_roll_commands().as_slice(),
+            [sequencer::sequencer::RollCommand::ClearAll]
+        ));
     }
 }

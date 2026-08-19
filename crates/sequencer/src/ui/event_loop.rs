@@ -828,10 +828,7 @@ pub(crate) fn run_event_loop(
                             true,
                         )
                     {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(host-command \"toggle-roll-mode\")");
-                        editor.refresh_runtime_side_effects();
+                        super::host_commands::toggle_roll_mode(&shared.state, &mut editor);
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }
