@@ -6114,6 +6114,64 @@ mod tests {
         graph.process_block();
     }
 
+    #[test]
+    fn converting_plain_group_to_drum_rack_maps_members_and_undoes_in_place() {
+        let graph = TestLiveGraph::new("group-to-drum-rack-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.tracks[kick] = "Acoustic Kick".to_string();
+        app.tracks[snare] = "Bright Snare".to_string();
+        let bus = app.group_tracks_recorded(vec![kick, snare]).expect("plain group");
+        let group_index = app.groups.iter().position(|group| group.bus_id == bus.0)
+            .expect("plain group exists");
+        app.groups[group_index].name = "Live Drums".to_string();
+        app.groups[group_index].collapsed = true;
+        let group_id = app.groups[group_index].id;
+        let plain_group = app.groups[group_index].clone();
+        let names = app.tracks.clone();
+        let history_before = app.history.undo_len();
+
+        app.convert_group_to_drum_rack_recorded(group_id)
+            .expect("plain group should convert");
+
+        assert_eq!(app.history.undo_len(), history_before + 1);
+        assert_eq!(app.tracks, names, "conversion preserves member track names and lanes");
+        let converted = &app.groups[group_index];
+        assert_eq!(converted.id, plain_group.id);
+        assert_eq!(converted.name, plain_group.name);
+        assert_eq!(converted.color, plain_group.color);
+        assert_eq!(converted.collapsed, plain_group.collapsed);
+        assert_eq!(converted.members, plain_group.members);
+        assert_eq!(converted.bus_id, plain_group.bus_id);
+        let rack = converted.rack.as_ref().expect("converted rack config");
+        assert_eq!(rack.pads.len(), 2);
+        assert_eq!(rack.pads[0].pad_note, DRUM_RACK_FIRST_PAD_NOTE);
+        assert_eq!(rack.pads[1].pad_note, DRUM_RACK_FIRST_PAD_NOTE + 1);
+        assert_eq!(converted.rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE), Some(kick));
+        assert_eq!(converted.rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE + 1), Some(snare));
+
+        let serialized = serde_json::to_string(converted).expect("serialize converted group");
+        let loaded: crate::project::ProjectTrackGroup =
+            serde_json::from_str(&serialized).expect("load converted group");
+        assert_eq!(loaded, *converted, "converted rack metadata round-trips");
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.groups[group_index], plain_group, "undo restores the plain group");
+        assert_eq!(app.tracks, names);
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(app.groups[group_index].is_rack());
+        assert_eq!(app.groups[group_index].members, vec![kick, snare]);
+        assert_eq!(app.tracks, names);
+        graph.process_block();
+    }
+
     /// eseq-4b5.8: a track can reach a rack without anyone naming a pad note —
     /// the mixer group-header drop, the track-badge drag and move-to-group all
     /// do. Those members used to land padless, which means invisible in the pad

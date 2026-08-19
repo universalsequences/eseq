@@ -46000,6 +46000,51 @@
         }
         calls.lock().unwrap().clear();
 
+        let group_badge = find_node_by_stable_key_suffix(&layout, "/group-badge-7")
+            .expect("plain group badge");
+        let open_group_menu = group_badge
+            .props
+            .get("on-right-click")
+            .cloned()
+            .expect("plain group badge should expose a context menu");
+        editor
+            .runtime_mut()
+            .invoke(
+                open_group_menu.clone(),
+                vec![map_value([
+                    ("col", Value::Number(20.0)),
+                    ("row", Value::Number(8.0)),
+                ])],
+            )
+            .expect("open plain group context menu");
+        editor.refresh_runtime_side_effects();
+        let menu_layout = editor.widget_layout().expect("plain group context menu layout");
+        let convert_item = find_layout_node_by_text(
+            &menu_layout,
+            "Convert to Drum Rack",
+        )
+        .expect("plain group should offer drum-rack conversion");
+        assert_finite_nonzero_rect(convert_item, "convert group to drum rack menu item");
+        let convert = convert_item.props.get("on-select").cloned()
+            .expect("conversion item should expose a select callback");
+        editor.runtime_mut().invoke(convert, vec![Value::Nil])
+            .expect("select drum-rack conversion");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "convert-group-to-drum-rack");
+                let Value::Map(payload) = payload else {
+                    panic!("conversion payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0)),
+                );
+            }
+            other => panic!("expected group conversion host command, got {other:?}"),
+        }
+
         // A drum rack uses the same group bus controls and adds pad-play arm.
         // Mutating the fixture from a plain group proves the two strip kinds
         // intentionally diverge rather than all groups receiving an R button.
@@ -46038,6 +46083,25 @@
             Some("R"),
             "the rack-only control should be record arm"
         );
+        editor
+            .runtime_mut()
+            .invoke(
+                open_group_menu,
+                vec![map_value([
+                    ("col", Value::Number(20.0)),
+                    ("row", Value::Number(8.0)),
+                ])],
+            )
+            .expect("open rack context menu");
+        editor.refresh_runtime_side_effects();
+        let rack_menu_layout = editor.widget_layout().expect("rack context menu layout");
+        assert!(
+            find_layout_node_by_text(&rack_menu_layout, "Convert to Drum Rack").is_none(),
+            "an existing drum rack must not offer conversion",
+        );
+        editor.runtime_mut().eval_str("(set! eseq.mixer/%track-menu-open false)")
+            .expect("close rack context menu");
+        editor.refresh_runtime_side_effects();
         let rack_arm_click = rack_arm
             .props
             .get("on-click")

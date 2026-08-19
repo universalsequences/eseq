@@ -3,6 +3,7 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "reveal-sequencer-track",
     "rename-track",
+    "convert-group-to-drum-rack",
     "add-track-sampler",
     "add-track-rack",
     "add-track-layer-rack",
@@ -133,6 +134,30 @@ pub(super) fn handle(
                 _ => editor.handle_host_event(HostEvent::Error(
                     "Track rename requires a track and name".to_string(),
                 )),
+            }
+        }
+        "convert-group-to-drum-rack" => {
+            let Some(group_id) = extract_usize_from_payload(&payload, "group-id")
+                .map(|group_id| group_id as u64)
+            else {
+                editor.handle_host_event(HostEvent::Status(
+                    "Convert group to drum rack requires a group id".to_string(),
+                ));
+                return;
+            };
+            match app.convert_group_to_drum_rack_recorded(group_id) {
+                Ok(()) => {
+                    host_commands::drum_rack_v2::sync_after_rack_structure_change(
+                        &mut app,
+                        &mut editor,
+                        ctx,
+                        None,
+                    );
+                    editor.handle_host_event(HostEvent::Status(
+                        "Converted group to drum rack".to_string(),
+                    ));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
         "add-track-sampler" => match app.graph_controller().add_blank_sampler_track()

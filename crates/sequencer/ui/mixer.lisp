@@ -19,6 +19,7 @@
 (defstate %track-menu-col 0)
 (defstate %track-menu-row 0)
 (defstate %track-menu-track -1)
+(defstate %track-menu-group-id -1)
 (defstate %track-renaming -1)
 (defstate %track-rename-draft "")
 
@@ -26,6 +27,9 @@
 ;; Duplicate/Delete/Group/color actions added later.
 (def %track-menu-actions
   (list (dict :id :rename :label "Rename")))
+
+(def %group-menu-actions
+  (list (dict :id :convert-drum-rack :label "Convert to Drum Rack")))
 
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))
@@ -855,6 +859,15 @@
 (def %open-track-menu (event i)
   (do
     (set! %track-menu-track i)
+    (set! %track-menu-group-id -1)
+    (set! %track-menu-col (get event :col))
+    (set! %track-menu-row (get event :row))
+    (set! %track-menu-open true)))
+
+(def %open-group-menu (event gidx)
+  (do
+    (set! %track-menu-track -1)
+    (set! %track-menu-group-id (get (nth SEQ.groups gidx) :id))
     (set! %track-menu-col (get event :col))
     (set! %track-menu-row (get event :row))
     (set! %track-menu-open true)))
@@ -875,17 +888,30 @@
       (set! %track-rename-draft ""))
     nil))
 
+(def %track-context-menu-actions ()
+  (if (>= %track-menu-group-id 0)
+    (let ((gidx (%group-index-by-id %track-menu-group-id)))
+      (if (or (< gidx 0) (get (nth SEQ.groups gidx) :rack))
+        (list)
+        %group-menu-actions))
+    %track-menu-actions))
+
 (def %select-track-menu-action (action)
   (if (= (get action :id) :rename)
     (%begin-track-rename %track-menu-track)
-    nil))
+    (if (= (get action :id) :convert-drum-rack)
+      (do
+        (set! %track-menu-open false)
+        (host-command "convert-group-to-drum-rack"
+          (dict :group-id %track-menu-group-id)))
+      nil)))
 
 (def %track-context-menu ()
   (context-menu :is-open %track-menu-open
     :anchor-col %track-menu-col
     :anchor-row %track-menu-row
     :on-close (lambda () (set! %track-menu-open false))
-    (each %track-menu-actions |action|
+    (each (%track-context-menu-actions) |action|
       (menu-item (get action :label)
         :key (str "track-menu-" (get action :id))
         :on-select (lambda (event) (%select-track-menu-action action))))))
@@ -1336,6 +1362,7 @@
           :selected (%group-delete-target? (get group :id))
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (%select-group-delete-target gidx))
+          :on-right-click (lambda (event) (%open-group-menu event gidx))
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")
               :width 2.0 :height 0.9 :padding 0 :font-size 14

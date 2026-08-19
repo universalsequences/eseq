@@ -2650,6 +2650,41 @@ impl App {
         })
     }
 
+    /// Upgrades a plain track group to a drum rack without replacing its bus
+    /// or member lanes. Existing members claim consecutive pads from the
+    /// bottom of the drum-rack keyboard, in the same order as the group.
+    pub fn convert_group_to_drum_rack_recorded(
+        &mut self,
+        group_id: u64,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Convert group to drum rack", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            if group.is_rack() {
+                return Err(format!("Track group {group_id} is already a drum rack"));
+            }
+            if !group.rack_members.is_empty() {
+                return Err(
+                    "A group containing drum racks cannot be converted to a drum rack"
+                        .to_string(),
+                );
+            }
+            if group.members.len() > crate::sequencer::DRUM_RACK_TOTAL_PAD_NOTES {
+                return Err(format!(
+                    "Track group {group_id} has more members than a drum rack has pads"
+                ));
+            }
+
+            let mut rack = crate::project::ProjectRackConfig::default();
+            let mapped = rack.map_unmapped_members(group.members.len());
+            if mapped != group.members.len() {
+                return Err("Could not assign every group member to a drum rack pad".to_string());
+            }
+            group.rack = Some(rack);
+            Ok(())
+        })
+    }
+
     /// Browser "create drum rack", both halves as one transaction: the rack
     /// group (with its backing bus) and — when a sound was dropped onto the
     /// browser action — the member track that claims the rack's first pad.
