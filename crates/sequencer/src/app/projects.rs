@@ -1509,22 +1509,30 @@ impl App {
     }
 
     pub fn load_sound_onto_track(&mut self, track: usize, path: &Path) -> Result<(), String> {
-        if track >= self.tracks.len() {
-            return Err(format!("Invalid track index {}", track + 1));
-        }
         let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
         let fallback_name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
+        self.load_sound_preset_onto_track(track, sound, fallback_name)
+    }
+
+    fn load_sound_preset_onto_track(
+        &mut self,
+        track: usize,
+        sound: crate::project::ProjectSoundPreset,
+        fallback_name: &str,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
         let track_id = self.track_registry.id_at(track)
             .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         self.apply_recorded_instrument_binding_mutation(track, "Load Sound", |app| {
             app.load_container_preset_onto_track(track, sound, fallback_name)?;
             app.device_registry.clear_rack_track(track_id);
             Ok(())
-        })?;
-        Ok(())
+        })
     }
 
     pub fn add_track_from_sound(&mut self, path: &Path) -> Result<usize, String> {
@@ -1862,6 +1870,239 @@ impl App {
             }
         }
         Ok((group_id, failures))
+    }
+
+    /// Auditions a kit into an existing drum rack as one atomic authoring edit.
+    /// Existing lanes are reused by pad note, so their patterns stay put while
+    /// the sounds behind them change; pads absent from the new kit disappear
+    /// and new notes receive new, empty member lanes. Undo restores the exact
+    /// previous rack topology and every member instrument.
+    pub fn load_kit_onto_rack(&mut self, group_id: u64, path: &Path) -> Result<String, String> {
+        let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Kit");
+        let kit_name = if kit.metadata.name.trim().is_empty() {
+            fallback_name.to_string()
+        } else {
+            kit.metadata.name.trim().to_string()
+        };
+        let group = self.groups.iter().find(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let rack = group.rack.as_ref()
+            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+        let old_ids = group.members.iter().map(|track| {
+            self.track_registry.id_at(*track)
+                .ok_or_else(|| format!("Drum rack member {} has no stable identity", track + 1))
+        }).collect::<Result<Vec<_>, String>>()?;
+        let old_by_note = rack.pads.iter().filter_map(|pad| {
+            group.members.get(pad.member)
+                .and_then(|track| self.track_registry.id_at(*track))
+                .map(|id| (pad.pad_note, id))
+        }).collect::<std::collections::HashMap<_, _>>();
+
+        let mut seen_notes = std::collections::HashSet::new();
+        for pad in &kit.pads {
+            if !(crate::sequencer::DRUM_RACK_FIRST_PAD_NOTE..=crate::sequencer::DRUM_RACK_LAST_PAD_NOTE)
+                .contains(&pad.pad_note)
+            {
+                return Err(format!("Kit pad note {} is outside the drum rack range", pad.pad_note));
+            }
+            if !seen_notes.insert(pad.pad_note) {
+                return Err(format!("Kit contains duplicate pad note {}", pad.pad_note));
+            }
+        }
+        let resulting_track_count = self.tracks.len() - old_ids.len() + kit.pads.len();
+        if resulting_track_count == 0 {
+            return Err("A kit cannot remove the last remaining track".to_string());
+        }
+
+        let history_checkpoint = self.history.clone();
+        let history_len = self.history.undo_len();
+        let result = (|| {
+            let mut desired = Vec::with_capacity(kit.pads.len());
+            for pad in kit.pads {
+                let pad_name = if pad.name.trim().is_empty() {
+                    format!("Pad {}", pad.pad_note)
+                } else {
+                    pad.name.trim().to_string()
+                };
+                let track_id = if let Some(track_id) = old_by_note.get(&pad.pad_note).copied() {
+                    let track = self.track_registry.index_of(track_id)
+                        .ok_or_else(|| format!("Kit pad {pad_name} lost its member track"))?;
+                    self.load_sound_preset_onto_track(track, pad.sound, &pad_name)?;
+                    track_id
+                } else {
+                    let track = self.add_track_from_sound_preset(pad.sound, &pad_name)?;
+                    if let Err(error) = self.commit_created_track(track, "Load kit pad") {
+                        let rollback = self.graph_controller().delete_track(track);
+                        return match rollback {
+                            Ok(_) => Err(error),
+                            Err(rollback_error) => Err(format!(
+                                "{error}; failed to remove the uncommitted kit member: {rollback_error}"
+                            )),
+                        };
+                    }
+                    self.track_registry.id_at(track)
+                        .ok_or_else(|| format!("Kit pad {pad_name} has no stable identity"))?
+                };
+                desired.push((pad.pad_note, pad.choke_group, track_id));
+            }
+
+            let desired_ids = desired.iter().map(|(_, _, id)| *id)
+                .collect::<std::collections::HashSet<_>>();
+            let desired_for_group = desired.clone();
+            let kit_name_for_group = kit_name.clone();
+            let kit_color = kit.color;
+            self.apply_recorded_bus_group_structure_mutation("Load kit into drum rack", |app| {
+                let group_index = app.groups.iter().position(|group| group.id == group_id)
+                    .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+                let bus = BusId(app.groups[group_index].bus_id);
+                let mut members = desired_for_group.iter().map(|(_, _, id)| {
+                    app.track_registry.index_of(*id)
+                        .ok_or_else(|| "A loaded kit member disappeared".to_string())
+                }).collect::<Result<Vec<_>, String>>()?;
+                members.sort_unstable();
+                members.dedup();
+                for track in &members {
+                    app.set_track_output_all_scenes_unrecorded(*track, TrackOutput::Bus(bus));
+                }
+                for old_id in &old_ids {
+                    if !desired_ids.contains(old_id) {
+                        if let Some(track) = app.track_registry.index_of(*old_id) {
+                            app.set_track_output_all_scenes_unrecorded(track, TrackOutput::Mix);
+                        }
+                    }
+                }
+                let pads = desired_for_group.iter().map(|(note, _, id)| {
+                    let track = app.track_registry.index_of(*id)
+                        .ok_or_else(|| "A loaded kit member disappeared".to_string())?;
+                    let member = members.binary_search(&track)
+                        .map_err(|_| "A loaded kit member was not assigned to the rack".to_string())?;
+                    Ok(crate::project::ProjectRackPad { pad_note: *note, member })
+                }).collect::<Result<Vec<_>, String>>()?;
+                let group = &mut app.groups[group_index];
+                group.name.clone_from(&kit_name_for_group);
+                group.color = kit_color;
+                group.members = members;
+                group.rack = Some(crate::project::ProjectRackConfig {
+                    pads,
+                    choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
+                });
+                Ok(())
+            })?;
+
+            let mut removed = old_ids.iter().filter(|id| !desired_ids.contains(id))
+                .filter_map(|id| self.track_registry.index_of(*id)).collect::<Vec<_>>();
+            removed.sort_unstable_by(|a, b| b.cmp(a));
+            for track in removed {
+                self.delete_track_recorded(track)?;
+            }
+            crate::app::edit::squash_history_since(self, history_len, "Audition kit on drum rack");
+            Ok(kit_name.clone())
+        })();
+        match result {
+            Ok(name) => Ok(name),
+            Err(error) => match crate::app::edit::rollback_history_to(self, history_checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Kit audition failed ({error}); restoring the rack also failed ({rollback_error:?})"
+                )),
+            },
+        }
+    }
+
+    /// Replaces a selected drum rack with one Sound while preserving the
+    /// rack's first lane as the resulting track. This is the rack equivalent
+    /// of swapping a track instrument: the lane's patterns remain, nested
+    /// parent-group membership is transferred, and one undo restores the rack.
+    pub fn replace_rack_with_sound(&mut self, group_id: u64, path: &Path) -> Result<usize, String> {
+        let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Sound");
+        let group = self.groups.iter().find(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        if !group.is_rack() {
+            return Err(format!("Track group {group_id} is not a drum rack"));
+        }
+        let member_ids = group.members.iter().map(|track| {
+            self.track_registry.id_at(*track)
+                .ok_or_else(|| format!("Drum rack member {} has no stable identity", track + 1))
+        }).collect::<Result<Vec<_>, String>>()?;
+        let parent_id = self.groups.iter()
+            .find(|parent| parent.rack_members.contains(&group_id))
+            .map(|parent| parent.id);
+
+        let history_checkpoint = self.history.clone();
+        let history_len = self.history.undo_len();
+        let result = (|| {
+            let replacement_id = if let Some(id) = member_ids.first().copied() {
+                let track = self.track_registry.index_of(id)
+                    .ok_or_else(|| "The rack's first member disappeared".to_string())?;
+                self.load_sound_preset_onto_track(track, sound, fallback_name)?;
+                id
+            } else {
+                let track = self.add_track_from_sound_preset(sound, fallback_name)?;
+                if let Err(error) = self.commit_created_track(track, "Create Sound track") {
+                    let rollback = self.graph_controller().delete_track(track);
+                    return match rollback {
+                        Ok(_) => Err(error),
+                        Err(rollback_error) => Err(format!(
+                            "{error}; failed to remove the uncommitted Sound track: {rollback_error}"
+                        )),
+                    };
+                }
+                self.track_registry.id_at(track)
+                    .ok_or_else(|| "The replacement Sound track has no stable identity".to_string())?
+            };
+
+            self.apply_recorded_bus_group_structure_mutation("Replace drum rack with Sound", |app| {
+                let replacement = app.track_registry.index_of(replacement_id)
+                    .ok_or_else(|| "The replacement Sound track disappeared".to_string())?;
+                let rack_index = app.groups.iter().position(|group| group.id == group_id)
+                    .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+                if let Some(position) = app.groups[rack_index].members.iter()
+                    .position(|track| *track == replacement)
+                {
+                    app.groups[rack_index].members.remove(position);
+                    app.groups[rack_index].rack.as_mut()
+                        .expect("validated rack")
+                        .remap_after_member_removed(position);
+                }
+                if let Some(parent_id) = parent_id {
+                    let parent = app.groups.iter().position(|group| group.id == parent_id)
+                        .ok_or_else(|| "The rack's parent group disappeared".to_string())?;
+                    app.groups[parent].rack_members.retain(|id| *id != group_id);
+                    let bus = BusId(app.groups[parent].bus_id);
+                    let position = app.groups[parent].members.partition_point(|track| *track < replacement);
+                    app.groups[parent].members.insert(position, replacement);
+                    app.set_track_output_all_scenes_unrecorded(replacement, TrackOutput::Bus(bus));
+                } else {
+                    app.set_track_output_all_scenes_unrecorded(replacement, TrackOutput::Mix);
+                }
+                Ok(())
+            })?;
+
+            let mut removed = member_ids.iter().skip(1)
+                .filter_map(|id| self.track_registry.index_of(*id)).collect::<Vec<_>>();
+            removed.sort_unstable_by(|a, b| b.cmp(a));
+            for track in removed {
+                self.delete_track_recorded(track)?;
+            }
+            self.delete_group_recorded(group_id)?;
+            crate::app::edit::squash_history_since(self, history_len, "Audition Sound on drum rack");
+            self.track_registry.index_of(replacement_id)
+                .ok_or_else(|| "The replacement Sound track disappeared".to_string())
+        })();
+        match result {
+            Ok(track) => Ok(track),
+            Err(error) => match crate::app::edit::rollback_history_to(self, history_checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Sound audition failed ({error}); restoring the rack also failed ({rollback_error:?})"
+                )),
+            },
+        }
     }
 
     pub fn load_rack_preset_onto_track(&mut self, track: usize, name: &str) -> Result<(), String> {

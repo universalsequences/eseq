@@ -2382,6 +2382,41 @@
         }
     }
 
+    /// eseq-4b5.19: the browser addresses kit and Sound auditions to the
+    /// selected drum rack instead of appending or targeting the stale track.
+    #[test]
+    fn metal_seq_browser_selected_rack_auditions_kits_and_sounds_into_the_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        apply_rack_group_bindings(&mut editor, false);
+        editor.runtime_mut().eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("select rack backing bus");
+        editor.runtime_mut().run_reactive_cycle();
+        let _ = editor.drain_host_commands();
+
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
+        ).expect("audition selected rack kit");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%load-sound (dict :label "Bass" :path "sounds/Bass.sound"))"#,
+        ).expect("audition selected rack Sound");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2);
+        for (command, expected_name, expected_path) in [
+            (&commands[0], "load-kit", "kits/House-Kit.kit"),
+            (&commands[1], "audition-sound-on-rack", "sounds/Bass.sound"),
+        ] {
+            let eseqlisp::host::HostCommand::Custom { name, payload } = command else {
+                panic!("expected custom host command, got {command:?}");
+            };
+            assert_eq!(name, expected_name);
+            let Value::Map(payload) = payload else { panic!("expected command map") };
+            assert_eq!(payload.get("path").map(|value| value.borrow().clone()),
+                Some(Value::String(expected_path.to_string())));
+            assert_eq!(payload.get("group-id").map(|value| value.borrow().clone()),
+                Some(Value::Number(7.0)));
+        }
+    }
+
     /// eseq-4b5.17: the rack header's save icon enters a Kits-tab naming flow;
     /// confirming there emits the addressed save command instead of writing
     /// immediately from the FX panel.

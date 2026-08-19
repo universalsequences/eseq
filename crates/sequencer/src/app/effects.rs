@@ -6532,6 +6532,106 @@ mod tests {
         graph.process_block();
     }
 
+    /// eseq-4b5.19: auditioning a kit on a selected rack reuses lanes at the
+    /// same pad notes, replaces the rest of the pad topology, and is one undo.
+    #[test]
+    fn selected_drum_rack_kit_audition_replaces_contents_and_undoes() {
+        let graph = TestLiveGraph::new("drum-rack-selected-kit-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app.create_drum_rack_recorded(Some("Old Kit".to_string())).unwrap();
+        let kick = app.graph_controller().add_track(sample).unwrap();
+        let snare = app.graph_controller().add_track(sample).unwrap();
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).unwrap();
+        app.assign_rack_pad_track_recorded(group_id, 38, snare).unwrap();
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.state.toggle_step_and_clear_plocks(snare, 1);
+        let kick_id = app.track_registry.id_at(kick).unwrap();
+        let snare_id = app.track_registry.id_at(snare).unwrap();
+
+        let mut kit = app.capture_rack_as_kit(group_id, "New Kit", Vec::new(), String::new()).unwrap();
+        let new_pad = crate::project::ProjectKitPad {
+            pad_note: 42,
+            choke_group: Some(3),
+            name: "Hat".to_string(),
+            sound: kit.pads[0].sound.clone(),
+        };
+        kit.pads.retain(|pad| pad.pad_note == 36);
+        kit.pads.push(new_pad);
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-selected-kit-{}-{:?}", std::process::id(), std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("New-Kit.kit");
+        std::fs::write(&path, serde_json::to_string(&kit).unwrap()).unwrap();
+        let history_before = app.history.undo_len();
+
+        assert_eq!(app.load_kit_onto_rack(group_id, &path).unwrap(), "New Kit");
+        assert_eq!(app.history.undo_len(), history_before + 1, "audition is one undo entry");
+        let loaded = app.groups.iter().find(|group| group.id == group_id).unwrap();
+        assert_eq!(loaded.name, "New Kit");
+        assert_eq!(app.track_registry.index_of(kick_id), loaded.rack_pad_track(36));
+        assert!(app.state.pattern.patterns[loaded.rack_pad_track(36).unwrap()].is_active(0),
+            "the matching pad keeps its pattern lane");
+        assert_eq!(loaded.rack_pad_track(38), None);
+        let hat = loaded.rack_pad_track(42).expect("new kit pad");
+        assert!(!app.state.pattern.patterns[hat].is_active(1), "new pads start with empty lanes");
+        assert_eq!(loaded.rack.as_ref().unwrap().choke_group(
+            loaded.rack.as_ref().unwrap().pad_index_for_note(42).unwrap()), Some(3));
+
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        let restored = app.groups.iter().find(|group| group.id == group_id).unwrap();
+        assert_eq!(restored.name, "Old Kit");
+        assert_eq!(app.track_registry.index_of(kick_id), restored.rack_pad_track(36));
+        assert_eq!(app.track_registry.index_of(snare_id), restored.rack_pad_track(38));
+        assert!(app.state.pattern.patterns[restored.rack_pad_track(38).unwrap()].is_active(1));
+        std::fs::remove_dir_all(directory).unwrap();
+        graph.process_block();
+    }
+
+    /// eseq-4b5.19: a Sound replaces the selected rack as one ordinary track;
+    /// undo restores the complete rack and both member lanes.
+    #[test]
+    fn selected_drum_rack_sound_audition_swaps_to_one_track_and_undoes() {
+        let graph = TestLiveGraph::new("drum-rack-selected-sound-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app.create_drum_rack_recorded(Some("Kit".to_string())).unwrap();
+        let kick = app.graph_controller().add_track(sample).unwrap();
+        let snare = app.graph_controller().add_track(sample).unwrap();
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).unwrap();
+        app.assign_rack_pad_track_recorded(group_id, 38, snare).unwrap();
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.state.toggle_step_and_clear_plocks(snare, 1);
+        let kick_id = app.track_registry.id_at(kick).unwrap();
+        let snare_id = app.track_registry.id_at(snare).unwrap();
+        let sound = app.capture_rack_as_kit(
+            group_id, "Kit", Vec::new(), String::new()).unwrap()
+            .pads.into_iter().find(|pad| pad.pad_note == 38).unwrap().sound;
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-selected-sound-{}-{:?}", std::process::id(), std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("Audition.sound");
+        std::fs::write(&path, serde_json::to_string(&sound).unwrap()).unwrap();
+        let history_before = app.history.undo_len();
+
+        let track = app.replace_rack_with_sound(group_id, &path).unwrap();
+        assert_eq!(app.history.undo_len(), history_before + 1, "audition is one undo entry");
+        assert!(app.groups.iter().all(|group| group.id != group_id));
+        assert_eq!(app.track_registry.index_of(kick_id), Some(track));
+        assert_eq!(app.track_registry.index_of(snare_id), None);
+        assert!(app.state.pattern.patterns[track].is_active(0), "the rack's first lane survives");
+
+        assert!(matches!(crate::app::edit::undo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        let restored = app.groups.iter().find(|group| group.id == group_id).expect("rack restored");
+        assert_eq!(app.track_registry.index_of(kick_id), restored.rack_pad_track(36));
+        assert_eq!(app.track_registry.index_of(snare_id), restored.rack_pad_track(38));
+        assert!(app.state.pattern.patterns[restored.rack_pad_track(38).unwrap()].is_active(1));
+        std::fs::remove_dir_all(directory).unwrap();
+        graph.process_block();
+    }
+
     #[test]
     fn deleting_a_rack_member_track_drops_its_pad_and_reindexes_the_others() {
         let graph = TestLiveGraph::new("drum-rack-member-delete-test", 64, 44_100, 2);

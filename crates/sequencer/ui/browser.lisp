@@ -21,6 +21,7 @@
 ;; and are a host→script protocol, not this module's API).
 
 (import eseq.track-collapse)
+(import eseq.drum-rack-v2)
 
 ;; ── State ──
 ;; The `eseq.vanilla/` names below are the §3 cross-module def escape hatch
@@ -425,6 +426,15 @@
       (if %preview-buffer
         (host-command "preview-sample" (dict :path %preview-path)))
       (status "Sample preview on"))))
+
+(def %selected-drum-rack ()
+  (if (eseq.seq-core-state/seq-has-selected-bus?)
+    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
+    -1))
+
+(def %selected-drum-rack-id ()
+  (let ((gidx (%selected-drum-rack)))
+    (if (>= gidx 0) (eseq.drum-rack-v2/group-id gidx) -1)))
 
 (def activate-sample (item)
   (let ((path (get item :path)))
@@ -932,10 +942,14 @@
       SEQ.sound-presets)))
 
 (def %load-sound (item)
-  (if (= SEQ.num-tracks 0)
-    (status "Create a track before loading a Sound")
-    (host-command "load-sound-onto-track"
-      (dict :track SEQ.current-track :path (get item :path)))))
+  (let ((rack-id (%selected-drum-rack-id)))
+    (if (>= rack-id 0)
+      (host-command "audition-sound-on-rack"
+        (dict :group-id rack-id :path (get item :path)))
+      (if (= SEQ.num-tracks 0)
+        (status "Create a track before loading a Sound")
+        (host-command "load-sound-onto-track"
+          (dict :track SEQ.current-track :path (get item :path)))))))
 
 (def %sounds-panel ()
   (let ((items (%visible-sounds)))
@@ -953,8 +967,8 @@
 
 ;; ── Kits (docs/drum-rack-v2-spec.md, "Polish") ──────────────────────────
 ;; A kit is a drum rack saved as a browser object: group config + one Sound
-;; per pad, no patterns. Loading one builds a brand-new rack beside the
-;; existing tracks rather than replacing anything.
+;; per pad, no patterns. Activating one replaces the selected drum rack's kit;
+;; with no rack selected it builds a new rack beside the existing tracks.
 
 (def %visible-kits ()
   (if (= search-filter "") SEQ.kit-presets
@@ -963,7 +977,10 @@
       SEQ.kit-presets)))
 
 (def %load-kit (item)
-  (host-command "load-kit" (dict :path (get item :path))))
+  (let ((rack-id (%selected-drum-rack-id)))
+    (if (>= rack-id 0)
+      (host-command "load-kit" (dict :path (get item :path) :group-id rack-id))
+      (host-command "load-kit" (dict :path (get item :path))))))
 
 (def enter-kit-save (group-id name)
   (set! search-filter "")
