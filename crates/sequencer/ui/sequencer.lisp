@@ -2134,6 +2134,7 @@
           :on-click |x y r| (%select-rack gidx)
           (badge (%track-name-display (eseq.drum-rack-v2/group-name gidx))
             :key (str "rack-name-label-" (eseq.drum-rack-v2/group-id gidx))
+            :icon (eseq.track-collapse/group-type-icon (nth SEQ.groups gidx))
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
             :background-color :transparent

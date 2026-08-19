@@ -26830,7 +26830,7 @@
                 ),
                 (
                     "track-instrument-types",
-                    test_string_list(&["sampler", "custom", "sampler"]),
+                    test_string_list(&["sampler", "custom", "rack"]),
                 ),
                 (
                     "track-mod-output-available",
@@ -27002,6 +27002,15 @@
             Some(&Value::Keyword("waveform".to_string())),
             "sampler mixer badges should reuse the sidebar waveform icon"
         );
+        let rack_badge_content =
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-2")
+                .expect("expanded instrument rack badge content should render");
+        assert_finite_nonzero_rect(rack_badge_content, "instrument rack mixer badge content");
+        assert_eq!(
+            rack_badge_content.props.get("icon"),
+            Some(&Value::Keyword("sliders".to_string())),
+            "instrument rack mixer badges should use the device-rack icon"
+        );
         let compact_mute =
             find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-mute-1")
                 .expect("collapsed track mute should render");
@@ -27038,6 +27047,15 @@
         );
         assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-0").is_some());
         assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-2").is_some());
+        let rack_track_name =
+            find_layout_node_by_stable_key_suffix(&sequencer_layout, "/track-name-label-2")
+                .expect("instrument rack sequencer badge should render");
+        assert_finite_nonzero_rect(rack_track_name, "instrument rack sequencer badge");
+        assert_eq!(
+            rack_track_name.props.get("icon"),
+            Some(&Value::Keyword("sliders".to_string())),
+            "instrument rack sequencer badges should use the device-rack icon"
+        );
         assert_eq!(
             count_stable_key_prefix(&sequencer_layout, "eseq.sequencer/step-cell-"),
             32,
@@ -45981,6 +45999,14 @@
         let rack_arm = find_node_by_stable_key_suffix(&rack_layout, "/group-arm-7")
             .expect("drum rack arm control");
         assert_finite_nonzero_rect(rack_arm, "drum rack arm control");
+        let rack_name = find_node_by_stable_key_suffix(&rack_layout, "/group-name-label-7")
+            .expect("drum rack mixer badge");
+        assert_finite_nonzero_rect(rack_name, "drum rack mixer badge");
+        assert_eq!(
+            rack_name.props.get("icon"),
+            Some(&Value::Keyword("sampler".to_string())),
+            "drum rack mixer badges should reuse the Kits tab icon"
+        );
         assert_eq!(
             node_text(rack_arm).as_deref(),
             Some("R"),
@@ -48512,6 +48538,14 @@
                 "rack header should render {key}"
             );
         }
+        let rack_name = find_layout_node_by_stable_key_suffix(&layout, "/rack-name-label-7")
+            .expect("drum rack sequencer badge");
+        assert_finite_nonzero_rect(rack_name, "drum rack sequencer badge");
+        assert_eq!(
+            rack_name.props.get("icon"),
+            Some(&Value::Keyword("sampler".to_string())),
+            "drum rack sequencer badges should reuse the Kits tab icon"
+        );
 
         // The rack subtree is the whole block: header row plus member rows.
         // Track ids are 1000 + index in this fixture.

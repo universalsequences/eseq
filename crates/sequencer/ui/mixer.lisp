@@ -1278,9 +1278,15 @@
                 (do
                   (%select-group gidx)
                   (%toggle-group-collapsed (get group :id)))))
-            (label (substring (get group :name) 0 10)
+            (badge (substring (get group :name) 0 10)
+              :key (str "group-name-label-" (get group :id))
+              :icon (eseq.track-collapse/group-type-icon group)
               :font-size 11
               :h-align :center
+              :background-color :transparent
+              :border-color :transparent
+              :highlight-color :transparent
+              :shadow-color :transparent
               :color :black
               :bg :transparent))        )))))
 
