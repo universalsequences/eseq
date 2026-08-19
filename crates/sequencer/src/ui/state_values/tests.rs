@@ -49218,3 +49218,176 @@
             );
         }
     }
+
+    /// Drum rack v2 slice 2 (`docs/drum-rack-v2-spec.md` "UI"): the grid draws
+    /// a rack as a header row over its member tracks, and the header owns the
+    /// backing bus's mute/solo/volume.
+    fn rack_group_fixture(collapsed: bool) -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.9, 0.45, 0.15],
+            collapsed,
+            members: vec![1, 2],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig {
+                pads: vec![
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 36,
+                        member: 0,
+                    },
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 38,
+                        member: 1,
+                    },
+                ],
+                choke_groups: vec![None, Some(1)],
+            }),
+        }
+    }
+
+    fn apply_rack_group_bindings(editor: &mut eseqlisp::Editor, collapsed: bool) {
+        let groups = [rack_group_fixture(collapsed)];
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "groups", build_groups_value(&groups));
+        rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(&groups));
+        rt.set_reactive("SEQ", "bus-ids", test_number_list(&[0.0, 1.0, 2.0]));
+        rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Kit"]));
+        rt.set_reactive("SEQ", "bus-volumes", test_number_list(&[1.0, 1.0, 0.8]));
+        rt.set_reactive("SEQ", "bus-mutes", test_bool_list(&[false, false, false]));
+        rt.set_reactive("SEQ", "bus-solos", test_bool_list(&[false, false, false]));
+        for bus in 0..3 {
+            rt.set_reactive("SEQ", &format!("bus-peak-{bus}"), Value::Number(0.0));
+        }
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+    }
+
+    #[test]
+    fn metal_seq_groups_value_carries_rack_pad_map() {
+        let groups = [rack_group_fixture(false)];
+        let Value::List(items) = build_groups_value(&groups) else {
+            panic!("groups value should be a list");
+        };
+        let Some(Value::Map(group)) = items.first().map(|cell| cell.borrow().clone()) else {
+            panic!("groups value should hold one group map");
+        };
+        assert_eq!(
+            group.get("rack").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true)),
+            "a group carrying a pad map is a rack"
+        );
+        let Some(Value::List(pads)) = group.get("pads").map(|cell| cell.borrow().clone()) else {
+            panic!("rack group should expose its pads");
+        };
+        assert_eq!(pads.len(), 2, "both pads should be exposed");
+        let Value::Map(second) = pads[1].borrow().clone() else {
+            panic!("pad should be a map");
+        };
+        for (field, expected) in [
+            ("pad-note", 38.0),
+            // member position 1 resolves to member track 2 …
+            ("member", 1.0),
+            ("track", 2.0),
+            ("choke", 1.0),
+        ] {
+            assert_eq!(
+                second.get(field).map(|cell| cell.borrow().clone()),
+                Some(Value::Number(expected)),
+                "pad field {field} should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_sequencer_renders_drum_rack_header_over_member_track_rows() {
+        let track_count = 4;
+        let step_count = 16;
+        let mut editor = sequencer_perf_editor(track_count, step_count);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let layout = editor
+            .widget_layout()
+            .expect("rack sequencer layout should build");
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            let normalized = status.to_ascii_lowercase();
+            if normalized.contains("error") || normalized.contains("unknown") {
+                panic!("rack sequencer layout status: {status}");
+            }
+        }
+
+        for key in [
+            "/rack-arm-7",
+            "/rack-mute-7",
+            "/rack-solo-7",
+            "/rack-collapse-7",
+            "/rack-name-label-7",
+            "/rack-volume-control-7",
+        ] {
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
+                "rack header should render {key}"
+            );
+        }
+
+        // The rack subtree is the whole block: header row plus member rows.
+        // Track ids are 1000 + index in this fixture.
+        let block = find_layout_node_by_stable_key_suffix(&layout, "sequencer-rack-7")
+            .expect("rack block should render");
+        assert!(
+            find_layout_node_by_stable_key_suffix(block, "/rack-arm-7").is_some(),
+            "the rack header belongs to the rack block"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + member)),
+                1,
+                "member track {member} should render its standard row nested in the rack"
+            );
+        }
+        for loose in [0usize, 3] {
+            assert_eq!(
+                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + loose)),
+                0,
+                "non-member track {loose} should stay outside the rack block"
+            );
+            assert_eq!(
+                count_stable_key_prefix(&layout, &format!("sequencer-track-{}", 1000 + loose)),
+                1,
+                "non-member track {loose} should still render as a loose row"
+            );
+        }
+        assert_eq!(
+            count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
+            track_count * step_count,
+            "member rows are ordinary track rows, so every track keeps its step grid"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_collapsed_drum_rack_hides_member_rows() {
+        let track_count = 4;
+        let step_count = 16;
+        let mut editor = sequencer_perf_editor(track_count, step_count);
+        apply_rack_group_bindings(&mut editor, true);
+
+        let layout = editor
+            .widget_layout()
+            .expect("collapsed rack sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-arm-7").is_some(),
+            "collapsing a rack keeps its header row"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(&layout, &format!("sequencer-track-{}", 1000 + member)),
+                0,
+                "collapsing a rack folds member track {member} away"
+            );
+        }
+        assert_eq!(
+            count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
+            (track_count - 2) * step_count,
+            "only the loose tracks keep their step grids while the rack is collapsed"
+        );
+    }

@@ -483,7 +483,12 @@ pub(crate) fn sync_selected_tracks_bindings(
 }
 
 /// Builds `SEQ.groups`: one map per group with id, name, color, bus-id, anchor
-/// (lowest member index), collapsed flag, and ordered member indices.
+/// (lowest member index), collapsed flag, ordered member indices, and — for a
+/// drum rack (`docs/drum-rack-v2-spec.md`) — the `rack` flag plus its pad map.
+///
+/// Each pad carries both `member` (its position in `members`, the serialized
+/// form) and `track` (the resolved track index), so the UI can badge a member
+/// row without re-walking the member list.
 pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup]) -> Value {
     list_value(groups.iter().map(|group| {
         let anchor = group.members.iter().copied().min().unwrap_or(0);
@@ -501,6 +506,36 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
                 "members",
                 list_value(group.members.iter().map(|m| Value::Number(*m as f64))),
             ),
+            ("rack", Value::Bool(group.is_rack())),
+            ("pads", build_rack_pads_value(group)),
+        ])
+    }))
+}
+
+/// Builds a rack group's `pads` entry: one map per pad with its note, member
+/// position, resolved track index and choke group (`-1` when unassigned).
+/// Empty for a plain group.
+fn build_rack_pads_value(group: &sequencer::project::ProjectTrackGroup) -> Value {
+    let Some(rack) = group.rack.as_ref() else {
+        return list_value(std::iter::empty());
+    };
+    list_value(rack.pads.iter().enumerate().map(|(pad_idx, pad)| {
+        let track = group.members.get(pad.member).copied();
+        let choke = rack
+            .choke_groups
+            .get(pad_idx)
+            .copied()
+            .flatten()
+            .map(|g| g as f64)
+            .unwrap_or(-1.0);
+        map_value([
+            ("pad-note", Value::Number(pad.pad_note as f64)),
+            ("member", Value::Number(pad.member as f64)),
+            (
+                "track",
+                Value::Number(track.map(|t| t as f64).unwrap_or(-1.0)),
+            ),
+            ("choke", Value::Number(choke)),
         ])
     }))
 }

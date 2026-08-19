@@ -20,6 +20,9 @@
 
 (import eseq.track-collapse)
 
+;; Drum rack v2: rack lookups over SEQ.groups (docs/drum-rack-v2-spec.md).
+(import eseq.drum-rack-v2)
+
 (import eseq.seq-panels)
 
 (def %track-peak (i)
@@ -1927,57 +1930,201 @@
                         row))))))))))))
   )
 
+;; One track's grid row. Rack members render through this exact path — a rack
+;; member is an ordinary track, so its pattern length, timebase p-locks,
+;; accumulator and expanded step editor all come along for free.
+;; :muted is a binding (not a value read) so mute/solo changes update the row
+;; chrome without rerunning the enclosing subtree.
+(def %track-row (i)
+  (box :width :fill
+      :key (str "track-drop-" i)
+      :selected (track-selected-binding i)
+      :muted (bind-seq-nth "track-muted-effective" i)
+      :background-color :buffer-bg
+      :selected-background-color :mixer-strip-selected-bg
+      :muted-background-color :mixer-strip-muted-bg
+      :border-width 2
+      :corner-radius 10
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :muted-border-color :mixer-strip-border
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types (if (eseq.track-collapse/replaceable-instrument? i)
+        (list "sample" "instrument" "sound")
+        (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample")))
+      :drop-meta (dict :kind "track" :track i)
+      :on-drop (lambda (event) (drop-on-track event))
+      :padding 0.0145
+      :on-click |x y r| (select-track-for-edit i)
+      (if (%track-expanded? (nth SEQ.track-ids i))
+        (v-stack 
+          :width :fill :gap 0.2
+          (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+            (track-header i)
+            (%expanded-track-quick-controls i (nth SEQ.track-ids i))
+            (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+            (%track-actions i))
+          (%expanded-track-editor i (nth SEQ.track-ids i)))
+        (if (eseq.seqv-track-params/seqv-track-drum-rack? i)
+          ;; Drum racks put the rack header on its own row so the slot
+          ;; lanes get the full width for their per-slot gutters.
+          (v-stack :width :fill :gap 0.2
+            (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+              (track-header i)
+              (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+              (%track-actions i))
+            (%drum-track-grid i))
+          (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+            (v-stack (box :height 0.1)
+              (track-header i))
+            (%track-grid i)
+            (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+            (%track-actions i))))))
+
+;; ── Drum rack v2 (docs/drum-rack-v2-spec.md) ────────────────────────────
+;; A rack is a track group with a pad map, so the grid draws it as one block:
+;; a header row that owns the kit (arm, the backing bus's mute/solo/volume,
+;; name, collapse) with its member tracks nested beneath as ordinary rows.
+
+(def %rack-bus-volume-from-event (bus-idx event)
+  (let ((sx (get event :sx)))
+    (if (= sx nil)
+      nil
+      (seq-set-bus-volume bus-idx (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0))))))))
+
+;; Volume/meter for the rack's backing bus — the rack fader of the spec. A rack
+;; always has a bus, but the lists it resolves against are rebuilt per frame, so
+;; an unresolved index degrades to a spacer instead of an error.
+(def %rack-volume-control (gidx bus-idx)
+  (let ((c (eseq.drum-rack-v2/color gidx)))
+    (v-stack (box :height 0.13)
+      (if (>= bus-idx 0)
+        (box
+          :key (str "rack-volume-control-" (eseq.drum-rack-v2/group-id gidx))
+          :width 8.2 :height 1.25
+          :background "seqv-track-volume-meter"
+          :level (bind-seq (str "bus-peak-" bus-idx))
+          :volume (bind-seq-nth "bus-volumes" bus-idx)
+          :track-r (nth c 0)
+          :track-g (nth c 1)
+          :track-b (nth c 2)
+          :on-click (lambda (event) (%rack-bus-volume-from-event bus-idx event))
+          :on-drag (lambda (event) (%rack-bus-volume-from-event bus-idx event)))
+        (box :width 8.2 :height 1.25 :bg :transparent)))))
+
+;; Selecting a rack selects its backing bus, exactly as the mixer's group
+;; header does, so the fx panel follows the rack chain.
+(def %select-rack (gidx)
+  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
+    (if (>= bus-idx 0)
+      (set! eseq.seq-core-state/selected-bus bus-idx)
+      false)))
+
+(def %rack-header-body (gidx)
+  (let ((c (eseq.drum-rack-v2/color gidx))
+      (bus-idx (eseq.drum-rack-v2/bus-index gidx))
+      (armed (eseq.drum-rack-v2/armed? gidx))
+      (muted (and (>= bus-idx 0) (nth SEQ.bus-mutes bus-idx)))
+      (soloed (and (>= bus-idx 0) (nth SEQ.bus-solos bus-idx))))
+    (box :background "seqv-track-container"
+      :padding 0.1
+      :on-click |x y r| (%select-rack gidx)
+      (h-stack :gap 0.4 :align :center
+        (box
+          :key (str "rack-color-badge-" (eseq.drum-rack-v2/group-id gidx))
+          :width 0.68 :height 2.0
+          :background "seqv-track-color-badge"
+          :track-r (nth c 0)
+          :track-g (nth c 1)
+          :track-b (nth c 2)
+          :on-click |x y r| (%select-rack gidx))
+        (button (if (eseq.drum-rack-v2/collapsed? gidx) "▸" "▾")
+          :key (str "rack-collapse-" (eseq.drum-rack-v2/group-id gidx))
+          :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :background-color '(rgba 0.1 0.1 0.1 1.0)
+          :border-color :transparent
+          :color :white
+          :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
+        ;; Arm = pad-play mode: the live keyboard becomes this kit's pads.
+        ;; Slice 2 ships the control; the note->pad->member trigger path lands
+        ;; with the pad-play slice, which takes over `armed-rack-id`.
+        (box :width 2 :height 1.5
+          :background "seqv-rec-arm-dot"
+          :key (str "rack-arm-" (eseq.drum-rack-v2/group-id gidx))
+          :active (if armed 1 0)
+          :on-click |x y r| (do
+            (%select-rack gidx)
+            (eseq.drum-rack-v2/toggle-armed gidx)))
+        (button "M"
+          :key (str "rack-mute-" (eseq.drum-rack-v2/group-id gidx))
+          :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :border-color :transparent
+          :background-color (%mute-bg muted)
+          :color (if muted :gray :black)
+          :on-click |x y r| (if (>= bus-idx 0)
+            (do (%select-rack gidx) (seq-toggle-bus-mute bus-idx))
+            nil))
+        (button "S"
+          :key (str "rack-solo-" (eseq.drum-rack-v2/group-id gidx))
+          :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :background-color (%solo-bg soloed)
+          :border-color :transparent
+          :color (if soloed :white :gray)
+          :on-click |x y r| (if (>= bus-idx 0)
+            (do (%select-rack gidx) (seq-toggle-bus-solo bus-idx))
+            nil))
+        (box :width 8.6 :height 1
+          :key (str "rack-select-" (eseq.drum-rack-v2/group-id gidx))
+          :background-color :transparent
+          :on-click |x y r| (%select-rack gidx)
+          (badge (%track-name-display (eseq.drum-rack-v2/group-name gidx))
+            :key (str "rack-name-label-" (eseq.drum-rack-v2/group-id gidx))
+            :font-size 11 :width 8.6 :height 1 :padding 0
+            :h-align :left
+            :background-color :transparent
+            :border-color :transparent
+            :highlight-color :transparent
+            :shadow-color :transparent
+            :color (if muted (rgba 0.4 0.4 0.4 0.6) :dim)
+            :bg :transparent))
+        (%rack-volume-control gidx bus-idx)))))
+
+(def %rack-header-row (gidx)
+  (subtree :key (str "seqv-rack-header-" (eseq.drum-rack-v2/group-id gidx))
+    (%rack-header-body gidx)))
+
+(def %rack-block (gidx)
+  (let ((c (eseq.drum-rack-v2/color gidx)))
+    (box :width :fill
+      :key (str "rack-block-" (eseq.drum-rack-v2/group-id gidx))
+      :background-color (rgba (nth c 0) (nth c 1) (nth c 2) 0.22)
+      :border-width 2
+      :border-color :mixer-strip-border
+      :corner-radius 10
+      :padding 0.0145
+      (v-stack :width :fill :gap 0.1
+        (%rack-header-row gidx)
+        (if (eseq.drum-rack-v2/collapsed? gidx)
+          (box :width 0.0 :height 0.0 :bg :transparent)
+          (v-stack :width :fill :gap 0.0
+            (each (eseq.drum-rack-v2/visible-members gidx) |m|
+              (subtree :key (str "sequencer-track-" (nth SEQ.track-ids m))
+                (%track-row m)))))))))
+
+(def %grid-render-item (item)
+  (if (= (get item :kind) "rack")
+    (let ((gidx (get item :gidx)))
+      (subtree :key (str "sequencer-rack-" (eseq.drum-rack-v2/group-id gidx))
+        (%rack-block gidx)))
+    (let ((i (get item :track)))
+      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
+        (%track-row i)))))
+
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0
-    (each (eseq.track-collapse/visible-track-indices) |i|
-      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        ;; :muted is a binding (not a value read) so mute/solo changes update
-        ;; the row chrome without rerunning this subtree.
-        (box :width :fill
-          :key (str "track-drop-" i)
-          :selected (track-selected-binding i)
-          :muted (bind-seq-nth "track-muted-effective" i)
-          :background-color :buffer-bg
-          :selected-background-color :mixer-strip-selected-bg
-          :muted-background-color :mixer-strip-muted-bg
-          :border-width 2
-          :corner-radius 10
-          :border-color :mixer-strip-border
-          :selected-border-color :mixer-strip-selected-border
-          :muted-border-color :mixer-strip-border
-          :drop-hover-border-color :mixer-strip-selected-border
-          :drop-types (if (eseq.track-collapse/replaceable-instrument? i)
-            (list "sample" "instrument" "sound")
-            (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample")))
-          :drop-meta (dict :kind "track" :track i)
-          :on-drop (lambda (event) (drop-on-track event))
-          :padding 0.0145
-          :on-click |x y r| (select-track-for-edit i)
-          (if (%track-expanded? (nth SEQ.track-ids i))
-            (v-stack 
-              :width :fill :gap 0.2
-              (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (track-header i)
-                (%expanded-track-quick-controls i (nth SEQ.track-ids i))
-                (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (%track-actions i))
-              (%expanded-track-editor i (nth SEQ.track-ids i)))
-            (if (eseq.seqv-track-params/seqv-track-drum-rack? i)
-              ;; Drum racks put the rack header on its own row so the slot
-              ;; lanes get the full width for their per-slot gutters.
-              (v-stack :width :fill :gap 0.2
-                (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                  (track-header i)
-                  (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                  (%track-actions i))
-                (%drum-track-grid i))
-              (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (v-stack (box :height 0.1)
-                  (track-header i))
-                (%track-grid i)
-                (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (%track-actions i)))))))
-   
+    (each (eseq.drum-rack-v2/grid-render-items) |item|
+      (%grid-render-item item))
+
      (box :key "new-track-drop-zone"
       :width :fill :height 2.4 :flex 1
       :background-color :transparent
