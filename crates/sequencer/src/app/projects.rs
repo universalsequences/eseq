@@ -3669,8 +3669,18 @@ impl App {
                 // Enforce the rack invariants on load: pads point at live
                 // members, pad notes are unique, one pad per member.
                 let member_count = group.members.len();
+                let group_name = group.name.clone();
                 if let Some(rack) = group.rack.as_mut() {
                     rack.sanitize(member_count);
+                    // Repair projects saved before every attach path mapped a
+                    // pad: a member with no pad is unreachable from the grid,
+                    // so give it the next free note in member order.
+                    let repaired = rack.map_unmapped_members(member_count);
+                    if repaired > 0 {
+                        eprintln!(
+                            "Project load: mapped {repaired} padless member(s) of drum rack '{group_name}' onto free pads"
+                        );
+                    }
                 }
                 group
             })

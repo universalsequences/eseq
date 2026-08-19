@@ -2536,8 +2536,14 @@ impl App {
 
     /// Adds an existing track to a group as a member routed into the group's
     /// backing bus. With `pad_note`, the group must be a rack and the track
-    /// becomes the member backing that pad. Unrecorded: callers either wrap
-    /// this in a bus/group structure mutation or commit the created track.
+    /// becomes the member backing that pad. Without one, a rack group still
+    /// maps the member — to its next free pad note — because a padless rack
+    /// member is invisible in the pad grid and unreachable by pad click, armed
+    /// key or choke (docs/drum-rack-v2-spec.md, "Core model"). Every add path
+    /// (mixer group-header drop, move-track-to-group, badge drag) therefore
+    /// lands on the grid without having to know about pads.
+    /// Unrecorded: callers either wrap this in a bus/group structure mutation
+    /// or commit the created track.
     pub fn attach_track_to_group(
         &mut self,
         track: usize,
@@ -2552,18 +2558,27 @@ impl App {
         if self.groups.iter().any(|group| group.members.contains(&track)) {
             return Err(format!("Track {} already belongs to a group", track + 1));
         }
-        if let Some(pad_note) = pad_note {
-            if !self.groups[group_index].is_rack() {
+        let pad_note = match (pad_note, self.groups[group_index].rack.as_ref()) {
+            (Some(_), None) => {
                 return Err(format!("Track group {group_id} is not a drum rack"));
             }
-            if !(DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad_note) {
-                return Err(format!("Unsupported drum rack pad note {pad_note}"));
+            (Some(pad_note), Some(rack)) => {
+                if !(DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad_note) {
+                    return Err(format!("Unsupported drum rack pad note {pad_note}"));
+                }
+                if rack.pad_index_for_note(pad_note).is_some() {
+                    return Err(format!("Drum rack pad {pad_note} is already occupied"));
+                }
+                Some(pad_note)
             }
-            let rack = self.groups[group_index].rack.as_ref().expect("rack checked above");
-            if rack.pad_index_for_note(pad_note).is_some() {
-                return Err(format!("Drum rack pad {pad_note} is already occupied"));
-            }
-        }
+            // Joining a rack without a note: claim the next free pad rather
+            // than land as an unreachable padless member. All notes mapped is
+            // a full rack, not a silent half-add.
+            (None, Some(rack)) => Some(rack.next_free_pad_note().ok_or_else(|| {
+                format!("Drum rack {group_id} has no free pad left")
+            })?),
+            (None, None) => None,
+        };
         let bus_id = BusId(self.groups[group_index].bus_id);
         self.set_track_output_all_scenes_unrecorded(
             track,

@@ -4830,7 +4830,7 @@ mod tests {
     use super::*;
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use crate::sequencer::{default_empty_effect_chain, SequencerState, DRUM_RACK_FIRST_PAD_NOTE};
     use crate::app::AudioBuses;
     use std::sync::{mpsc, Mutex};
     use std::time::Duration;
@@ -6111,6 +6111,97 @@ mod tests {
         app.delete_group_recorded(group_id).expect("rack deletion should record");
         assert!(app.groups.is_empty());
         assert!(app.buses.iter().all(|bus| bus.id != bus_id));
+        graph.process_block();
+    }
+
+    /// eseq-4b5.8: a track can reach a rack without anyone naming a pad note —
+    /// the mixer group-header drop, the track-badge drag and move-to-group all
+    /// do. Those members used to land padless, which means invisible in the pad
+    /// grid and unreachable by pad click, armed key or choke, so joining a rack
+    /// claims the next free pad note instead.
+    #[test]
+    fn joining_a_rack_without_a_pad_note_claims_the_next_free_pad() {
+        let graph = TestLiveGraph::new("drum-rack-auto-pad-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack should be created");
+
+        // The mixer group-header sample drop: a fresh track attached with no
+        // `pad-note` payload.
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.attach_track_to_group(kick, group_id, None)
+            .expect("a padless join should still map a pad");
+        let rack = app.groups[0].rack.as_ref().expect("rack config");
+        assert_eq!(rack.pads.len(), 1);
+        assert_eq!(rack.pads[0].pad_note, DRUM_RACK_FIRST_PAD_NOTE);
+        assert_eq!(app.groups[0].rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE), Some(kick));
+
+        // An explicit note still wins, and the next auto-assign skips it.
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.attach_track_to_group(snare, group_id, Some(DRUM_RACK_FIRST_PAD_NOTE + 1))
+            .expect("explicit pad note");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.attach_track_to_group(hat, group_id, None).expect("third join");
+        assert_eq!(
+            app.groups[0].rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE + 2),
+            Some(hat),
+            "auto-assign takes the lowest note no pad answers to yet",
+        );
+        assert_eq!(app.groups[0].rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE + 1), Some(snare));
+
+        // Every member is reachable: no member sits outside the pad map.
+        let rack = app.groups[0].rack.as_ref().expect("rack config");
+        assert_eq!(rack.pads.len(), app.groups[0].members.len());
+
+        // A plain group still takes members without inventing pads.
+        let a = app.graph_controller().add_blank_sampler_track().expect("plain track a");
+        let b = app.graph_controller().add_blank_sampler_track().expect("plain track b");
+        let plain_bus = app.group_tracks_recorded(vec![a, b]).expect("plain group");
+        let plain = app
+            .groups
+            .iter()
+            .find(|group| group.bus_id == plain_bus.0)
+            .expect("plain group exists");
+        assert!(plain.rack.is_none(), "a plain group has no pad map to fill");
+        assert_eq!(plain.members, vec![a, b]);
+        graph.process_block();
+    }
+
+    /// eseq-4b5.8: dragging a track badge onto a rack (move-track-to-group)
+    /// maps a pad too, and undoing the move takes that pad back off the grid.
+    #[test]
+    fn moving_a_track_into_a_rack_maps_a_pad_and_undo_removes_it() {
+        let graph = TestLiveGraph::new("drum-rack-move-pad-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+
+        let clap = app.graph_controller().add_blank_sampler_track().expect("clap track");
+        let rack_index = app.groups.iter().position(|group| group.id == group_id).expect("rack");
+        app.move_track_to_group_recorded(clap, rack_index)
+            .expect("moving a track into a rack should record");
+        assert_eq!(
+            app.groups[rack_index].rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE),
+            Some(clap),
+            "a moved-in track is playable from the grid",
+        );
+        assert_eq!(app.groups[rack_index].rack_pad_track(36), Some(kick));
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        let rack = app.groups[rack_index].rack.as_ref().expect("rack config");
+        assert_eq!(
+            rack.pads.len(),
+            1,
+            "undoing the move takes the auto-created pad with it",
+        );
+        assert_eq!(app.groups[rack_index].rack_pad_track(36), Some(kick));
         graph.process_block();
     }
 

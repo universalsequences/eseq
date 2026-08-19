@@ -125,8 +125,9 @@
 (def pads (gidx)
   (get (group-at gidx) :pads))
 
-;; The pad backing a member track, or nil when the member has no pad (a legal
-;; kit member that the pad keyboard cannot reach).
+;; The pad backing a member track. Every member gets a pad when it joins the
+;; rack, so nil is only the defensive case (a project the load repair could not
+;; map because the rack was full).
 (def pad-of-track (gidx track)
   (reduce |acc pad|
     (if (= acc nil) (if (= (get pad :track) track) pad acc) acc)

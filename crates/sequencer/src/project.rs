@@ -18,7 +18,8 @@ use crate::sequencer::{
     ModDestination, PatternSnapshot, ProjectArrangement, RackRouting, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SerializedSongContext, SwingResolution, Timebase,
     TrackId, TrackOutput, TrackParamsSnapshot,
-    TrackRegistry, TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    TrackRegistry, TrackSendSnapshot, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
+    DRUM_RACK_LAST_PAD_NOTE, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
@@ -1075,6 +1076,34 @@ impl ProjectRackConfig {
 
     pub fn pad_index_for_member(&self, member: usize) -> Option<usize> {
         self.pads.iter().position(|pad| pad.member == member)
+    }
+
+    /// Lowest pad note no pad answers to yet, or `None` once all 128 notes are
+    /// mapped. This is what a member joining the rack without an explicit note
+    /// claims, so members added by mixer drops stay reachable from the grid
+    /// (docs/drum-rack-v2-spec.md, "Core model": a member with no pad is
+    /// unplayable and invisible).
+    pub fn next_free_pad_note(&self) -> Option<i32> {
+        (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE)
+            .find(|note| self.pad_index_for_note(*note).is_none())
+    }
+
+    /// Repairs a rack whose members outnumber its pads — projects saved before
+    /// every attach path mapped a pad — by giving each unmapped member the next
+    /// free note, in member order. Returns how many pads it created.
+    pub fn map_unmapped_members(&mut self, member_count: usize) -> usize {
+        let mut created = 0;
+        for member in 0..member_count {
+            if self.pad_index_for_member(member).is_some() {
+                continue;
+            }
+            let Some(pad_note) = self.next_free_pad_note() else {
+                break;
+            };
+            self.push_pad(ProjectRackPad { pad_note, member });
+            created += 1;
+        }
+        created
     }
 
     /// Choke group of the pad at `pad_index`, if it has one.
@@ -4138,6 +4167,52 @@ mod tests {
             ],
         );
         assert_eq!(rack.choke_groups, vec![Some(1), Some(5)]);
+    }
+
+    /// eseq-4b5.8: projects saved before every attach path mapped a pad hold
+    /// rack members with no pad — invisible in the grid and unplayable. Load
+    /// repairs them onto free notes in member order.
+    #[test]
+    fn rack_maps_unmapped_members_onto_free_pad_notes() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad { pad_note: 36, member: 1 });
+        rack.set_choke_group(0, Some(2));
+
+        // Members 0, 2 and 3 arrived through a mixer drop and got no pad.
+        assert_eq!(rack.map_unmapped_members(4), 3);
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 1 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 0 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE + 1, member: 2 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE + 2, member: 3 },
+            ],
+            "free notes are claimed lowest-first, skipping the taken one",
+        );
+        assert_eq!(
+            rack.choke_groups,
+            vec![Some(2), None, None, None],
+            "repair never disturbs an existing pad's choke group",
+        );
+
+        // A rack that already maps every member is left alone.
+        assert_eq!(rack.map_unmapped_members(4), 0);
+        assert_eq!(rack.pads.len(), 4);
+    }
+
+    /// The pad map is finite: a rack with every note taken cannot map more
+    /// members, and says so instead of looping or panicking.
+    #[test]
+    fn rack_with_every_pad_note_taken_has_no_free_note() {
+        let mut rack = ProjectRackConfig::default();
+        for (member, pad_note) in (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).enumerate() {
+            rack.push_pad(ProjectRackPad { pad_note, member });
+        }
+        assert_eq!(rack.next_free_pad_note(), None);
+        let members = rack.pads.len();
+        assert_eq!(rack.map_unmapped_members(members + 4), 0);
+        assert_eq!(rack.pads.len(), members);
     }
 
     #[test]

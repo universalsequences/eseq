@@ -1714,8 +1714,8 @@
     (v-stack :key (str "rack-member-chrome-" (eseq.drum-rack-v2/group-id gidx) "-" i)
       :width 4.8 :gap 0.12 :align :center :padding 0.15
       (if (= pad nil)
-        ;; A member with no pad is legal (an fx-return-ish kit track); it just
-        ;; has nothing for the pad keyboard to answer with.
+        ;; Every member claims a pad on join, so this is the defensive case:
+        ;; a member the pad keyboard has nothing to answer with.
         (badge "—"
           :key (str "rack-pad-none-" (eseq.drum-rack-v2/group-id gidx) "-" i)
           :font-size 9 :width 4.6 :height 0.9 :padding 0

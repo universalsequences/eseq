@@ -79,9 +79,14 @@ pub struct ProjectRackPad {
 Invariants (inherit all track-group invariants, plus):
 
 - Every pad's `member` points at a live member of the same group.
-- A member track may back at most one pad. Members without a pad are legal
-  (an fx-return-ish track inside the kit) but not reachable from the pad
-  keyboard.
+- A member track may back at most one pad, and **every member has one**. A
+  padless member is not reachable from the pad keyboard, does not appear in the
+  pad grid, and has no choke selector — it is invisible, unplayable dead
+  weight — so joining a rack always maps a pad: callers that name a `pad_note`
+  get that pad, callers that don't (the mixer group-header drop, the track-badge
+  drag, move-track-to-group) get the lowest free note. A rack with all 128 notes
+  mapped is full and refuses the join. Projects saved before this rule are
+  repaired on load: unmapped members claim free notes in member order.
 - `pad_note` values are unique within a rack.
 - Deleting a member track removes its pad; deleting the group deletes the rack
   config with it. Track reindex-on-delete updates `members` exactly as the
