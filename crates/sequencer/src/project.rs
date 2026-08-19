@@ -1353,6 +1353,8 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
 pub struct ProjectTrack {
     pub id: TrackId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<TrackColor>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub collapsed: bool,
@@ -1383,6 +1385,8 @@ struct ProjectTrackWire {
     #[serde(default)]
     id: Option<TrackId>,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     color: Option<TrackColor>,
     #[serde(default)]
     collapsed: bool,
@@ -1402,6 +1406,7 @@ impl<'de> Deserialize<'de> for ProjectTrack {
         }
         Ok(Self {
             id,
+            name: wire.name,
             color: wire.color,
             collapsed: wire.collapsed,
             kind: wire.kind,
@@ -1421,6 +1426,7 @@ fn migrate_project_tracks(
             .zip(registry.ids().iter().copied())
             .map(|(track, id)| ProjectTrack {
                 id,
+                name: track.name,
                 color: track.color,
                 collapsed: track.collapsed,
                 kind: track.kind,
@@ -1459,6 +1465,7 @@ fn migrate_project_tracks(
         };
         migrated.push(ProjectTrack {
             id,
+            name: track.name,
             color: track.color,
             collapsed: track.collapsed,
             kind: track.kind,
@@ -3393,6 +3400,7 @@ mod tests {
             tracks: vec![
                 ProjectTrack {
                     id: TrackId(1),
+                    name: Some("Warm Prophet".to_string()),
                     color: Some(TrackColor::new(0.96, 0.28, 0.52)),
                     collapsed: true,
                     kind: ProjectTrackKind::Custom {
@@ -3401,6 +3409,7 @@ mod tests {
                 },
                 ProjectTrack {
                     id: TrackId(2),
+                    name: Some("Studio Kick".to_string()),
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
                     collapsed: false,
                     kind: ProjectTrackKind::Sampler {
@@ -4379,6 +4388,26 @@ mod tests {
     }
 
     #[test]
+    fn project_tracks_without_saved_names_remain_backward_compatible() {
+        let project = sample_project();
+        let mut json = serde_json::to_value(project).expect("serialize project");
+        for track in json["tracks"]
+            .as_array_mut()
+            .expect("serialized project tracks")
+        {
+            track
+                .as_object_mut()
+                .expect("serialized project track")
+                .remove("name");
+        }
+
+        let restored: ProjectFile =
+            serde_json::from_value(json).expect("deserialize project without track names");
+
+        assert!(restored.tracks.iter().all(|track| track.name.is_none()));
+    }
+
+    #[test]
     fn current_project_format_roundtrips() {
         let mut project = sample_project();
         let identity = crate::process::project_slot_identity_id(
@@ -4401,6 +4430,8 @@ mod tests {
         assert_eq!(restored.name, project.name);
         assert_eq!(restored.current_pattern, project.current_pattern);
         assert_eq!(restored.current_track, project.current_track);
+        assert_eq!(restored.tracks[0].name.as_deref(), Some("Warm Prophet"));
+        assert_eq!(restored.tracks[1].name.as_deref(), Some("Studio Kick"));
         assert_eq!(
             restored.patterns[0].project_process_lane_overrides,
             project.patterns[0].project_process_lane_overrides
@@ -5208,6 +5239,7 @@ mod tests {
             },
             track: ProjectTrack {
                 id: TrackId(1),
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {
@@ -5269,6 +5301,7 @@ mod tests {
             },
             track: ProjectTrack {
                 id: TrackId(1),
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {
@@ -5351,6 +5384,7 @@ mod tests {
             },
             track: ProjectTrack {
                 id: TrackId(1),
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {

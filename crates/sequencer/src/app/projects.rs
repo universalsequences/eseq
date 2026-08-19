@@ -1380,6 +1380,7 @@ impl App {
             .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
         let ProjectTrack {
             id,
+            name: track_name,
             color,
             collapsed,
             kind,
@@ -1427,6 +1428,7 @@ impl App {
                 (
                     ProjectTrack {
                         id,
+                        name: track_name,
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
@@ -1477,6 +1479,7 @@ impl App {
                 (
                     ProjectTrack {
                         id,
+                        name: track_name,
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
@@ -2720,6 +2723,7 @@ impl App {
                     }
                     Ok(ProjectTrack {
                         id,
+                        name: Some(name.clone()),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
@@ -2736,6 +2740,7 @@ impl App {
                     };
                     Ok(ProjectTrack {
                         id,
+                        name: Some(name.clone()),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Sampler {
@@ -2747,6 +2752,7 @@ impl App {
                 {
                     Ok(ProjectTrack {
                         id,
+                        name: Some(name.clone()),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Modulator,
@@ -2762,6 +2768,7 @@ impl App {
                         .unwrap_or_else(|| name.clone());
                     Ok(ProjectTrack {
                         id,
+                        name: Some(name.clone()),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Custom { instrument_name },
@@ -3252,6 +3259,11 @@ impl App {
                         offset: 0,
                     };
                 } else {
+                    let saved_name = pending.project.tracks[track_idx]
+                        .name
+                        .as_ref()
+                        .filter(|name| !name.trim().is_empty())
+                        .cloned();
                     let saved_color = pending.project.tracks[track_idx].color();
                     let saved_collapsed = pending.project.tracks[track_idx].collapsed();
                     match &pending.project.tracks[track_idx].kind {
@@ -3557,6 +3569,9 @@ impl App {
                                 );
                             }
                         }
+                    }
+                    if let Some(name) = saved_name {
+                        self.tracks[track_idx] = name;
                     }
                     if let Some(color) = saved_color {
                         self.set_track_color(track_idx, color);
@@ -5225,6 +5240,7 @@ mod tests {
             groups: Vec::new(),
             tracks: vec![ProjectTrack {
                 id: crate::sequencer::TrackId(1),
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Sampler {

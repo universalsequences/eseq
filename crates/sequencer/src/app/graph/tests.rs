@@ -928,6 +928,60 @@
     }
 
     #[test]
+    fn rack_track_custom_name_survives_project_save_and_load() {
+        let graph = TestLiveGraph::new("rack-track-name-project-roundtrip-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_empty_layer_rack_track()
+            .expect("add rack track");
+        app.tracks[0] = "Aurora Layers".to_string();
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let project_name = format!(
+            "__test-rack-track-name-roundtrip-{}-{nonce}",
+            std::process::id()
+        );
+        let project = app
+            .capture_project(&project_name)
+            .expect("rack project should capture");
+        assert_eq!(project.tracks[0].name.as_deref(), Some("Aurora Layers"));
+        let project_path = crate::project::save_project(&project_name, &project)
+            .expect("rack project should save");
+        let _cleanup = TestProjectFile(project_path);
+
+        app.queue_project_load_named(&project_name)
+            .expect("rack project should queue");
+        app.advance_pending_project_load()
+            .expect("existing project should clear");
+        app.advance_pending_project_load()
+            .expect("rack project track should load");
+
+        assert_eq!(app.tracks, vec!["Aurora Layers"]);
+        app.editor.pending_project_load = None;
+
+        let legacy_project_name = format!("{project_name}-without-name");
+        let mut legacy_project = project;
+        legacy_project.tracks[0].name = None;
+        let legacy_project_path =
+            crate::project::save_project(&legacy_project_name, &legacy_project)
+                .expect("legacy rack project should save");
+        let _legacy_cleanup = TestProjectFile(legacy_project_path);
+        app.queue_project_load_named(&legacy_project_name)
+            .expect("legacy rack project should queue");
+        app.advance_pending_project_load()
+            .expect("named rack project should clear");
+        app.advance_pending_project_load()
+            .expect("legacy rack project track should load");
+
+        assert_eq!(app.tracks, vec!["Layer Rack"]);
+        app.editor.pending_project_load = None;
+        graph.process_block();
+    }
+
+    #[test]
     fn loading_arranged_project_over_another_clears_old_arrangement_before_tracks() {
         let graph = TestLiveGraph::new("arranged-project-reload-test");
         let mut app = test_app_with_track_count(&graph, 0);
@@ -3111,6 +3165,7 @@
             },
             track: crate::project::ProjectTrack {
                 id: crate::sequencer::TrackId(1),
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3161,6 +3216,15 @@
         app.load_sound_onto_track(0, &sound_path)
             .expect("Sound should load onto the target track");
 
+        assert_eq!(app.tracks[0], "Test Rack Sound");
+        assert_eq!(
+            app.capture_project("__sound-track-name-capture__")
+                .expect("loaded Sound should capture")
+                .tracks[0]
+                .name
+                .as_deref(),
+            Some("Test Rack Sound")
+        );
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
         assert_eq!(
             app.state.pattern.effect_chains[0][track_fx_slot]
@@ -3232,6 +3296,7 @@
             },
             track: crate::project::ProjectTrack {
                 id: crate::sequencer::TrackId(1),
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3348,6 +3413,7 @@
             },
             track: crate::project::ProjectTrack {
                 id: track_id,
+                name: None,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
