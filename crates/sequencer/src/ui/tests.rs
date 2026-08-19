@@ -13,7 +13,7 @@
         pull_shared_bus_state, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        track_and_bus_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
         FxDeleteChain, ParamSyncRevision, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
         NEW_INSTRUMENT_STARTER_DSP,
     };
@@ -1179,11 +1179,11 @@
     }
 
     #[test]
-    fn sequencer_visibility_keeps_track_meter_bindings_live_without_mixer() {
-        assert!(track_meter_bindings_visible(true, false));
-        assert!(track_meter_bindings_visible(false, true));
-        assert!(track_meter_bindings_visible(true, true));
-        assert!(!track_meter_bindings_visible(false, false));
+    fn sequencer_visibility_keeps_track_and_drum_rack_bus_meter_bindings_live_without_mixer() {
+        assert!(track_and_bus_meter_bindings_visible(true, false));
+        assert!(track_and_bus_meter_bindings_visible(false, true));
+        assert!(track_and_bus_meter_bindings_visible(true, true));
+        assert!(!track_and_bus_meter_bindings_visible(false, false));
     }
 
     #[test]

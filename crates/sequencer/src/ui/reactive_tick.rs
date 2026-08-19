@@ -215,8 +215,8 @@ pub(crate) fn reactive_tick_and_render(
         let step_visible = editor_has_visible_buffer(&editor, "*step*");
         let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
         let master_meter_visible = transport_visible || mixer_visible;
-        let track_meter_visible =
-            track_meter_bindings_visible(mixer_visible, sequencer_visible);
+        let track_and_bus_meter_visible =
+            track_and_bus_meter_bindings_visible(mixer_visible, sequencer_visible);
         let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
             || editor_has_visible_buffer(&editor, "*piano-roll*");
         let previous_playhead = ctx.frame.prev_playhead;
@@ -723,7 +723,7 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_peak_r_level = ctx.meters.cached_peak_r_level;
         }
         if ctx.meters.cached_track_peak_levels != ctx.frame.prev_track_peak_levels {
-            if track_meter_visible {
+            if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_track_peak_field_delta(
                     editor.runtime_mut(),
                     &ctx.frame.prev_track_peak_levels,
@@ -733,7 +733,7 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_track_peak_levels = ctx.meters.cached_track_peak_levels.clone();
         }
         if ctx.meters.cached_rack_slot_peak_levels != ctx.frame.prev_rack_slot_peak_levels {
-            if track_meter_visible {
+            if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_rack_slot_peak_field_delta(
                     editor.runtime_mut(),
                     &ctx.frame.prev_rack_slot_peak_levels,
@@ -743,7 +743,7 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_rack_slot_peak_levels = ctx.meters.cached_rack_slot_peak_levels.clone();
         }
         if ctx.meters.cached_bus_peak_levels != ctx.frame.prev_bus_peak_levels {
-            if mixer_visible {
+            if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_bus_peak_field_delta(
                     editor.runtime_mut(),
                     &ctx.frame.prev_bus_peak_levels,
@@ -1115,10 +1115,8 @@ pub(crate) fn reactive_tick_and_render(
             let started = Instant::now();
             sync_track_mixer_state(rt, &app, &ctx.shared.state);
             sync_bus_mixer_state(rt, &app);
-            if track_meter_visible {
+            if track_and_bus_meter_visible {
                 sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-            }
-            if mixer_visible {
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             }
             sync_mixer_elapsed = started.elapsed();

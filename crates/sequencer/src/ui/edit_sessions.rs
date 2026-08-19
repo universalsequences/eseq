@@ -1218,7 +1218,13 @@ pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     })
 }
 
-pub(super) fn track_meter_bindings_visible(mixer_visible: bool, sequencer_visible: bool) -> bool {
+/// Track meters are rendered by both track views, while bus meters are also
+/// rendered by mixer strips and drum-rack headers. Keep the shared bindings
+/// live while either consumer buffer is visible.
+pub(super) fn track_and_bus_meter_bindings_visible(
+    mixer_visible: bool,
+    sequencer_visible: bool,
+) -> bool {
     mixer_visible || sequencer_visible
 }
 
