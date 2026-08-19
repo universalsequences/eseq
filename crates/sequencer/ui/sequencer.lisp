@@ -1752,27 +1752,39 @@
 ;; goes straight down the live pad path. The grid renders in the *fx* buffer's
 ;; rack panel (ui/effects/buffers.lisp); the sequencer header carries no pad
 ;; toggle of its own.
+;;
+;; Cells are NOTE-POSITIONAL: a cell is a fixed MIDI note and draws whichever
+;; pad answers to it, so label and position can never contradict each other.
+;; The note geometry — octave-aligned pages, lowest note bottom-left — lives
+;; in eseq.drum-rack-v2; what lives here is which page is showing.
 
-(defstate %pad-grid-bank 0)
+;; Which page of notes the grid shows, as (group id, page). One rack panel is
+;; on screen at a time, so a single slot scoped by group id IS per-rack state:
+;; a rack the page was never set for — or any rack other than the one last
+;; paged — re-derives its own default instead of inheriting a stale page.
+(defstate %pad-grid-page-group -1)
+(defstate %pad-grid-page 0)
 
-;; Banks always leave room for one more pad, so the next lazy pad is reachable
-;; even from a rack whose last bank is exactly full.
-(def %pad-grid-banks (gidx)
-  (max 1 (ceil (/ (+ (len (eseq.drum-rack-v2/pads gidx)) 1) 16.0))))
+(def %pad-page (gidx)
+  (if (= %pad-grid-page-group (eseq.drum-rack-v2/group-id gidx))
+    (eseq.drum-rack-v2/clamp-pad-page %pad-grid-page)
+    (eseq.drum-rack-v2/default-pad-page gidx)))
 
-(def %pad-grid-bank-clamped (gidx)
-  (max 0 (min %pad-grid-bank (- (%pad-grid-banks gidx) 1))))
+(def %set-pad-page (gidx page)
+  (do
+    (set! %pad-grid-page-group (eseq.drum-rack-v2/group-id gidx))
+    (set! %pad-grid-page (eseq.drum-rack-v2/clamp-pad-page page))))
 
-;; Absolute pad index of a grid position in the visible bank.
-(def %pad-index (gidx cell)
-  (+ (* 16 (%pad-grid-bank-clamped gidx)) cell))
+;; The note a grid position names on the visible page — the cell's identity,
+;; occupied or not.
+(def %pad-cell-note (gidx cell)
+  (eseq.drum-rack-v2/cell-note (%pad-page gidx) cell))
 
-;; Pad at a grid position within the visible bank, or nil past the end of the
-;; pad map.
+;; Pad drawn at a grid position: the one whose pad note IS this cell's note,
+;; or nil. Pads on other pages simply do not render here; the grid is sparse
+;; by design and never compacts.
 (def %pad-at (gidx cell)
-  (let ((pads (eseq.drum-rack-v2/pads gidx))
-      (idx (%pad-index gidx cell)))
-    (if (< idx (len pads)) (nth pads idx) nil)))
+  (eseq.drum-rack-v2/pad-at-note gidx (%pad-cell-note gidx cell)))
 
 (def %pad-cell-name (pad)
   (let ((track (get pad :track)))
@@ -1814,23 +1826,21 @@
 (def %drop-on-empty-pad (event gidx cell)
   (let ((payload (get event :payload))
       (group-id (eseq.drum-rack-v2/group-id gidx))
-      (note (eseq.drum-rack-v2/pad-note-for-cell gidx (%pad-index gidx cell))))
+      (note (%pad-cell-note gidx cell)))
     (let ((path (get payload :path))
         (name (get payload :name)))
-      (if (< note 0)
-        (status "This drum rack has no free pad left")
-        (if (= (get event :drag-type) "instrument")
-          (if name
-            (do
-              (set! sbrowser-loading-instrument-name name)
-              (host-command "add-track-instrument"
-                (dict :name name :group-id group-id :pad-note note)))
-            (status "Drop an instrument, not a folder"))
-          (if path
-            (host-command "add-track-sample"
-              (dict :path path :group-id group-id :pad-note note
-                :preserve-browser-context true))
-            (status "Drop a sample file, not a folder")))))))
+      (if (= (get event :drag-type) "instrument")
+        (if name
+          (do
+            (set! sbrowser-loading-instrument-name name)
+            (host-command "add-track-instrument"
+              (dict :name name :group-id group-id :pad-note note)))
+          (status "Drop an instrument, not a folder"))
+        (if path
+          (host-command "add-track-sample"
+            (dict :path path :group-id group-id :pad-note note
+              :preserve-browser-context true))
+          (status "Drop a sample file, not a folder"))))))
 
 ;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
 ;; same replacement a drop on the member's grid row does — so pad identity,
@@ -1850,7 +1860,8 @@
       (dict :kind "track" :track track)
       (dict :kind "rack-pad"
         :group-id (eseq.drum-rack-v2/group-id gidx)
-        :cell cell))))
+        :cell cell
+        :pad-note (%pad-cell-note gidx cell)))))
 
 (def %drop-on-pad-cell (event gidx cell)
   (let ((track (%pad-cell-track (%pad-at gidx cell))))
@@ -1895,8 +1906,13 @@
           (%select-pad gidx pad)
           (eseq.drum-rack-v2/trigger-pad gidx pad)))
       (v-stack :width :fill :height :fill :gap 0.05
-        (label (if (= pad nil) "" (get pad :label))
-          :font-size 8 :color :dim :bg :transparent
+        ;; The note is the cell's own, so an empty cell still says which note
+        ;; a drop here would claim.
+        (label (if (= pad nil)
+            (eseq.drum-rack-v2/note-label (%pad-cell-note gidx cell))
+            (get pad :label))
+          :font-size 8 :color (if (= pad nil) '(rgba 0.42 0.44 0.46 1.0) :dim)
+          :bg :transparent
           :width :fill :text-align :center)
         (label (if (= pad nil) "" (substring (%pad-cell-name pad) 0 12))
           :font-size 6.8 :color :white :bg :transparent
@@ -1907,30 +1923,33 @@
           :font-size 6.2 :color :dim :bg :transparent
           :width :fill :text-align :center)))))
 
+;; Row 0 renders at the TOP and carries the page's HIGHEST four notes: the
+;; grid reads bottom-up, so the bottom-left cell is the page's C.
 (def %pad-grid-row (gidx row)
   (h-stack :gap 0.15 :align :center
     (each (range 0 4) |col|
       (%pad-cell gidx (+ (* row 4) col)))))
 
-(def %pad-grid-bank-selector (gidx)
-  (if (< (%pad-grid-banks gidx) 2)
-    (box :width 0.0 :height 0.0 :bg :transparent)
-    (h-stack :gap 0.15 :align :center
-      (button "◂"
-        :key (str "rack-pad-bank-prev-" (eseq.drum-rack-v2/group-id gidx))
-        :width 1.4 :height 0.9 :padding 0 :font-size 8
-        :background-color '(rgba 0.1 0.1 0.1 1.0)
-        :border-color :transparent :color :dim
-        :on-click |x y r| (set! %pad-grid-bank (max 0 (- (%pad-grid-bank-clamped gidx) 1))))
-      (label (str (+ (%pad-grid-bank-clamped gidx) 1) "/" (%pad-grid-banks gidx))
-        :font-size 8 :color :dim :bg :transparent)
-      (button "▸"
-        :key (str "rack-pad-bank-next-" (eseq.drum-rack-v2/group-id gidx))
-        :width 1.4 :height 0.9 :padding 0 :font-size 8
-        :background-color '(rgba 0.1 0.1 0.1 1.0)
-        :border-color :transparent :color :dim
-        :on-click |x y r| (set! %pad-grid-bank
-          (min (- (%pad-grid-banks gidx) 1) (+ (%pad-grid-bank-clamped gidx) 1)))))))
+;; Paging walks the note range, not the pad list: every octave is reachable so
+;; a new pad can be placed anywhere, and the readout names the notes on screen
+;; rather than a meaningless "1/2".
+(def %pad-grid-page-selector (gidx)
+  (h-stack :gap 0.15 :align :center
+    (button "◂"
+      :key (str "rack-pad-page-prev-" (eseq.drum-rack-v2/group-id gidx))
+      :width 1.4 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent :color :dim
+      :on-click |x y r| (%set-pad-page gidx (- (%pad-page gidx) 1)))
+    (label (eseq.drum-rack-v2/pad-page-label (%pad-page gidx))
+      :key (str "rack-pad-page-label-" (eseq.drum-rack-v2/group-id gidx))
+      :font-size 8 :color :dim :bg :transparent)
+    (button "▸"
+      :key (str "rack-pad-page-next-" (eseq.drum-rack-v2/group-id gidx))
+      :width 1.4 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent :color :dim
+      :on-click |x y r| (%set-pad-page gidx (+ (%pad-page gidx) 1)))))
 
 (def %pad-grid-intrinsic-width 26.45)
 
@@ -1944,7 +1963,7 @@
     :background-color '(rgba 0.09 0.10 0.11 1.0)
     :corner-radius 8
     (v-stack :gap 0.1 :align :start
-      (%pad-grid-bank-selector gidx)
+      (%pad-grid-page-selector gidx)
       (each (range 0 4) |row|
         (%pad-grid-row gidx row)))))
 

@@ -200,25 +200,60 @@
   (host-command "save-rack-as-kit"
     (dict :group-id (group-id gidx) :name (group-name gidx) :overwrite true)))
 
-;; ── Lazy pads (docs/drum-rack-v2-spec.md, "Track budget") ───────────────
-;; "A pad only claims a track when a sound is dropped on it": an empty cell in
-;; the pad grid is a drop target, and the note it claims comes from its grid
-;; position. The pad map is dense — grid position IS the pad index — so an
-;; empty cell always sits past the end of the map and the note its index names
-;; is normally free. Pad notes are nudgeable though, so a taken candidate falls
-;; back to the lowest free note rather than handing the host a collision.
+;; ── Pad grid geometry (docs/drum-rack-v2-spec.md, "UI") ─────────────────
+;; The 4x4 pad grid is NOT a window onto the pad vec: a cell IS a fixed MIDI
+;; note, and a pad renders at the cell its `pad_note` names (empty everywhere
+;; else). A page shows sixteen consecutive notes with the LOWEST bottom-left,
+;; ascending left-to-right then bottom-to-top, the way a drum rack reads
+;; everywhere else. Pages are octave-aligned — page k starts at note 12k — so
+;; the bottom-left cell of every page is a C; the price is a four-note overlap
+;; between adjacent pages, which is exactly what a plain 16-note stride cannot
+;; buy. The top page is clamped so no cell ever names a note above 127.
 
-(def %pad-note-free? (gidx note)
-  (= (len (filter (lambda (p) (= (get p :pad-note) note)) (pads gidx))) 0))
+(def %note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
 
-;; Lowest note no pad answers to yet, or -1 for a full rack. Mirrors the host's
-;; `ProjectRackConfig::next_free_pad_note`.
-(def %next-free-pad-note (gidx)
-  (reduce |acc n| (if (>= acc 0) acc (if (%pad-note-free? gidx n) n acc))
-    -1
-    (range 0 128)))
+;; Note name as the host writes pad labels (`drum_rack_pad_label`): note 0 is C4.
+(def note-label (note)
+  (let ((n (%clamp-pad-note note)))
+    (str (nth %note-names (mod n 12)) (+ 4 (floor (/ n 12))))))
 
-;; The pad note an empty grid cell at absolute pad index `idx` claims.
-(def pad-note-for-cell (gidx idx)
-  (let ((wanted (%clamp-pad-note idx)))
-    (if (%pad-note-free? gidx wanted) wanted (%next-free-pad-note gidx))))
+;; Pages 0..9: page 9 spans notes 108..123, and 12*10+15 would run past 127.
+(def pad-page-count () 10)
+
+(def clamp-pad-page (page)
+  (max 0 (min (- (pad-page-count) 1) page)))
+
+;; Lowest note of a page — always a C.
+(def pad-page-base (page)
+  (* 12 (clamp-pad-page page)))
+
+;; The page a note is drawn on. Overlap means a note can also appear in the
+;; top row of the page below; this names the canonical one.
+(def page-of-note (note)
+  (clamp-pad-page (floor (/ (%clamp-pad-note note) 12))))
+
+;; Cell -> note, a pure function of (page, cell). Cell 0 is the TOP-left cell
+;; of the rendered grid, so row 0 carries the page's highest four notes.
+(def cell-note (page cell)
+  (+ (pad-page-base page)
+    (+ (* 4 (- 3 (floor (/ cell 4)))) (mod cell 4))))
+
+(def pad-page-label (page)
+  (str (note-label (pad-page-base page)) "–" (note-label (+ (pad-page-base page) 15))))
+
+;; The pad answering to a note, or nil — how a grid cell finds what to draw.
+(def pad-at-note (gidx note)
+  (reduce |acc pad| (if (= (get pad :pad-note) note) pad acc)
+    nil
+    (pads gidx)))
+
+;; The page an empty rack opens on: the drum home (note 36, the GM kick).
+(def %empty-rack-home-note () 36)
+
+;; Where a rack's grid opens: the page holding its lowest pad, so a kit that
+;; lives at C7 does not open onto empty octaves.
+(def default-pad-page (gidx)
+  (let ((ps (pads gidx)))
+    (if (= (len ps) 0)
+      (page-of-note (%empty-rack-home-note))
+      (page-of-note (reduce |acc pad| (min acc (get pad :pad-note)) 127 ps)))))

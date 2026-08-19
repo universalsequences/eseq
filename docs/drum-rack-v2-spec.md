@@ -65,7 +65,7 @@ pub struct ProjectTrackGroup {
 }
 
 pub struct ProjectRackConfig {
-    pub pads: Vec<ProjectRackPad>,         // ordered; pad grid position = index
+    pub pads: Vec<ProjectRackPad>,         // ordered; grid position is by pad_note, not index
     #[serde(default)]
     pub choke_groups: Vec<Option<u8>>,     // parallel to pads
 }
@@ -235,11 +235,32 @@ The grid view renders the rack as a header row plus full member rows:
 - Pad grid (4×4 performance view) stays a *view* over the pad map for finger
   drumming / slot browsing; it owns no sequencing. It renders in the **`*fx*`
   rack panel** — selecting a rack selects its bus, and that panel answers with
-  the kit rather than a bare bus chain — drawing the pad map sixteen cells at a
-  time (cell position = pad index, banked past sixteen pads). A cell click hits
-  the pad down the live path (member track at base pitch), so choke groups and
-  the member's own fx chain apply exactly as from the keyboard, and it also
-  focuses the pad so the panel can open that member's own track.
+  the kit rather than a bare bus chain. The grid is **note-positional**: a cell
+  IS a fixed MIDI note, and it draws whichever pad answers to that note — grid
+  position derives from `pad_note`, *never* from the pad's index in the vec, so
+  a pad's label and its position can never contradict each other. Cells with no
+  pad are empty; the grid is sparse and never compacts.
+  - A page shows sixteen consecutive notes with the **lowest bottom-left**,
+    ascending left→right then bottom→top. Pages are **octave-aligned** (page
+    *k* starts at note `12k`), so the bottom-left cell of every page is a C;
+    the price is a four-note overlap between adjacent pages, which is exactly
+    what a plain 16-note stride cannot buy. The top page is clamped at *k* = 9
+    (notes 108–123) so no cell ever names a note past 127.
+  - Paging walks the note range, not the pad list, and its readout names the
+    notes on screen. A rack's grid opens on the page holding its lowest pad —
+    a kit that lives at C7 must not open onto empty octaves — and an empty rack
+    opens at the drum home (note 36). Page state is scoped to the rack, so one
+    rack's page never leaks into another's grid.
+  - Dropping on an **empty** cell maps the new pad to *exactly* that cell's
+    note (lazy pads, "Track budget"); there is no next-free fallback, because
+    an occupied cell is never routed down the empty-drop path. Drops that name
+    no cell — mixer group header, track badge, move-track-to-group — keep the
+    lowest-free-note behavior.
+
+  A cell click hits the pad down the live path (member track at base pitch), so
+  choke groups and the member's own fx chain apply exactly as from the
+  keyboard, and it also focuses the pad so the panel can open that member's own
+  track.
 - The pad-note badge is a note name with −/+ nudges, and the choke selector is
   an Off/1..16 dropdown; both address the pad by *(rack group id, pad note)*,
   never by track index, and both are ordinary recorded edits.

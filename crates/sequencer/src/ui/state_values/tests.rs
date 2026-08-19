@@ -48489,8 +48489,10 @@
         // `metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer`. What
         // this test pins is where each cell's drop is addressed.
 
-        // An empty cell addresses the rack by (group id, pad note) derived from
-        // its grid position — cell 5 of bank 0 is pad note 5.
+        // An empty cell addresses the rack by (group id, pad note) — the note
+        // is the CELL's own (eseq-4b5.14), never a next-free fallback. The
+        // rack's pads sit at 36/38 so the grid opens on page 3 (base note 36),
+        // where cell 5 (row 1, col 1) is note 45 and cell 6 is note 46.
         let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
@@ -48505,8 +48507,8 @@
             .expect("sample drop on an empty pad should evaluate");
         assert_eq!(
             rack_host_command_payload(&mut editor, "add-track-sample"),
-            vec![("group-id", 7.0), ("pad-note", 5.0)],
-            "an empty cell creates a member mapped to exactly that pad"
+            vec![("group-id", 7.0), ("pad-note", 45.0)],
+            "an empty cell creates a member mapped to exactly that cell's note"
         );
 
         editor
@@ -48522,30 +48524,39 @@
             .expect("instrument drop on an empty pad should evaluate");
         assert_eq!(
             rack_host_command_payload(&mut editor, "add-track-instrument"),
-            vec![("group-id", 7.0), ("pad-note", 6.0)],
+            vec![("group-id", 7.0), ("pad-note", 46.0)],
             "instrument drops behave like sample drops"
         );
 
-        // Banking shifts the derived note by sixteen per bank.
+        // Paging moves the cell's note by an octave, not by sixteen pads.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 4)")
+            .expect("paging should evaluate");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/pad-note-for-cell 0 (+ 16 2))")
-                .expect("banked pad note should evaluate"),
-            Some(Value::Number(18.0)),
-            "the derived note follows grid index plus bank"
+                .eval_str("(eseq.sequencer/%pad-cell-note 0 5)")
+                .expect("paged cell note should evaluate"),
+            Some(Value::Number(57.0)),
+            "the next page starts an octave up, so the same cell is note+12"
         );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 3)")
+            .expect("paging back should evaluate");
 
         // An occupied cell is the member track's own drop target: the meta it
         // hands the drop system is the member track, and the drop replaces that
         // track's sound instead of creating a second member.
+        // Pad 36 is the page's lowest note, so it renders bottom-left: cell 12.
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (eseq.sequencer/%pad-cell-drop-meta 0 0 (eseq.sequencer/%pad-at 0 0)) :track)")
+                .eval_str("(get (eseq.sequencer/%pad-cell-drop-meta 0 12 (eseq.sequencer/%pad-at 0 12)) :track)")
                 .expect("occupied pad drop meta should evaluate"),
             Some(Value::Number(1.0)),
-            "cell 0 addresses the member track behind pad 36"
+            "the bottom-left cell addresses the member track behind pad 36"
         );
         // The occupied path runs the ordinary track-row drop: focus the track,
         // then hand the event to the browser's single-track sample replacement.
@@ -48590,7 +48601,7 @@
                       :drag-type "sample"
                       :payload (dict :path "samples/hat.wav")
                       :target (dict :kind "track" :track 1))
-                    0 0)"#,
+                    0 12)"#,
             )
             .expect("sample drop on an occupied pad should evaluate");
         assert_eq!(
@@ -48605,6 +48616,152 @@
                     if name == "add-track-sample" || name == "add-track-instrument"
             )),
             "replacing a pad's sound must not create a second member"
+        );
+    }
+
+    /// eseq-4b5.14: the pad grid is note-positional. A cell IS a MIDI note —
+    /// derived from (page, row, col) alone — and it draws whichever pad answers
+    /// to that note, so a pad's label and its position can never disagree. Pads
+    /// on other notes leave their cells empty; nothing compacts.
+    #[test]
+    fn metal_seq_rack_pad_grid_cells_are_midi_note_positions() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let number = |editor: &mut eseqlisp::Editor, expr: &str| -> f64 {
+            match editor.runtime_mut().eval_str(expr).expect("expr evaluates") {
+                Some(Value::Number(n)) => n,
+                other => panic!("{expr} should be a number, got {other:?}"),
+            }
+        };
+
+        // The grid opens on the page holding the rack's lowest pad (36), not on
+        // page 0 — a kit that lives high up must not open onto empty octaves.
+        assert_eq!(number(&mut editor, "(eseq.sequencer/%pad-page 0)"), 3.0);
+
+        // Within a page: bottom-left is the lowest note, ascending left to
+        // right then bottom to top. Cell 12 is the bottom-left cell.
+        for (cell, note) in [(12, 36.0), (13, 37.0), (15, 39.0), (8, 40.0), (0, 48.0), (3, 51.0)] {
+            assert_eq!(
+                number(&mut editor, &format!("(eseq.sequencer/%pad-cell-note 0 {cell})")),
+                note,
+                "cell {cell} should name note {note}"
+            );
+        }
+
+        // Pages are octave-aligned, so the bottom-left cell of EVERY page is a
+        // C (they overlap by four notes, which is what buys that), and no cell
+        // ever names a note past 127.
+        let pages = number(&mut editor, "(eseq.drum-rack-v2/pad-page-count)") as i32;
+        for page in 0..pages {
+            let base = number(
+                &mut editor,
+                &format!("(eseq.drum-rack-v2/cell-note {page} 12)"),
+            );
+            assert_eq!(base % 12.0, 0.0, "page {page} should start on a C");
+            let top = number(
+                &mut editor,
+                &format!("(eseq.drum-rack-v2/cell-note {page} 3)"),
+            );
+            assert_eq!(top, base + 15.0, "a page spans sixteen notes");
+            assert!(top <= 127.0, "page {page} must not address a note past 127");
+        }
+
+        // Pads render sparsely AT their notes: 36 bottom-left, 38 two cells
+        // along, and the cell between them empty.
+        assert_eq!(
+            number(&mut editor, "(get (eseq.sequencer/%pad-at 0 12) :track)"),
+            1.0
+        );
+        assert_eq!(
+            number(&mut editor, "(get (eseq.sequencer/%pad-at 0 14) :track)"),
+            2.0
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(= (eseq.sequencer/%pad-at 0 13) nil)")
+                .expect("empty cell should evaluate"),
+            Some(Value::Bool(true)),
+            "the note between the two pads is an empty cell, not the next pad"
+        );
+
+        // Every occupied cell's label is its own note's name.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/%pad-cell-note 0 12))")
+                .expect("cell note label should evaluate"),
+            Some(Value::String("C7".to_string())),
+            "the bottom-left cell is the page's C, and pad 36 labels itself C7"
+        );
+
+        // Paging is over the note range, not the pad list, so it reaches any
+        // octave a pad could be placed on.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 99)")
+            .expect("paging past the top should evaluate");
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            (pages - 1) as f64,
+            "the page clamps at the top rather than addressing notes past 127"
+        );
+    }
+
+    /// eseq-4b5.14: the default page follows the kit. A rack whose pads live an
+    /// octave up opens there without manual paging, and page state is scoped to
+    /// the rack so another rack's page never leaks in.
+    #[test]
+    fn metal_seq_rack_pad_grid_opens_on_the_page_holding_the_kit() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        let mut group = rack_group_fixture(false);
+        let Some(rack) = group.rack.as_mut() else {
+            panic!("fixture should be a rack");
+        };
+        // Both pads an octave up: 48/50 instead of 36/38.
+        for pad in rack.pads.iter_mut() {
+            pad.pad_note += 12;
+        }
+        let groups = [group];
+        {
+            let rt = editor.runtime_mut();
+            rt.set_reactive("SEQ", "groups", build_groups_value(&groups));
+            rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(&groups));
+            rt.set_reactive("SEQ", "armed-rack-id", Value::Number(-1.0));
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/%pad-page 0)")
+                .expect("default page should evaluate"),
+            Some(Value::Number(4.0)),
+            "the grid opens on the page holding the kit's lowest pad"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (eseq.sequencer/%pad-at 0 12) :track)")
+                .expect("bottom-left pad should evaluate"),
+            Some(Value::Number(1.0)),
+            "the kit's lowest pad still renders bottom-left, one page up"
+        );
+        // Page state names the rack it belongs to: a page set for some other
+        // rack leaves this one on its own derived default.
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! eseq.sequencer/%pad-grid-page-group 999) (set! eseq.sequencer/%pad-grid-page 0))")
+            .expect("foreign page state should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/%pad-page 0)")
+                .expect("default page should evaluate"),
+            Some(Value::Number(4.0)),
+            "another rack's page must not leak into this rack's grid"
         );
     }
 
@@ -48687,8 +48844,8 @@
         // The kit has to fit the fx strip's fixed panel height like any other
         // panel, or it spills out of the buffer.
         assert_layout_inside(grid, pads, "rack pad grid");
-        // Sixteen cells, of which the first two are this rack's two pads; the
-        // rest are empty positions in the map, not sequencer lanes. This panel
+        // Sixteen cells — one per note of the visible page, two of which this
+        // rack's pads answer to; the rest are empty notes, not lanes. This panel
         // is the pad interface's only surface (eseq-4b5.11), so every cell —
         // occupied and empty alike — has to stay a drop target here.
         for cell in 0..16 {
