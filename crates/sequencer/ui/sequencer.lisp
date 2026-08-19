@@ -1598,6 +1598,14 @@
     )
   )
 
+;; Which sound payloads a track will accept as a replacement of what it already
+;; plays. Shared by the track row and the pad grid's occupied cells: dropping on
+;; a pad replaces that pad's sound on its member track, so the two must agree.
+(def %sound-drop-types (i)
+  (if (eseq.track-collapse/replaceable-instrument? i)
+    (list "sample" "instrument" "sound")
+    (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample"))))
+
 ;; One track's grid row. Rack members render through this exact path — a rack
 ;; member is an ordinary track, so its pattern length, timebase p-locks,
 ;; accumulator and expanded step editor all come along for free.
@@ -1617,9 +1625,7 @@
       :selected-border-color :mixer-strip-selected-border
       :muted-border-color :mixer-strip-border
       :drop-hover-border-color :mixer-strip-selected-border
-      :drop-types (if (eseq.track-collapse/replaceable-instrument? i)
-        (list "sample" "instrument" "sound")
-        (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample")))
+      :drop-types (%sound-drop-types i)
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :padding 0.0145
@@ -1759,17 +1765,23 @@
     (set! %pad-grid-open
       (if (%pad-grid-open? gidx) -1 (eseq.drum-rack-v2/group-id gidx)))))
 
+;; Banks always leave room for one more pad, so the next lazy pad is reachable
+;; even from a rack whose last bank is exactly full.
 (def %pad-grid-banks (gidx)
-  (max 1 (ceil (/ (len (eseq.drum-rack-v2/pads gidx)) 16.0))))
+  (max 1 (ceil (/ (+ (len (eseq.drum-rack-v2/pads gidx)) 1) 16.0))))
 
 (def %pad-grid-bank-clamped (gidx)
   (max 0 (min %pad-grid-bank (- (%pad-grid-banks gidx) 1))))
+
+;; Absolute pad index of a grid position in the visible bank.
+(def %pad-index (gidx cell)
+  (+ (* 16 (%pad-grid-bank-clamped gidx)) cell))
 
 ;; Pad at a grid position within the visible bank, or nil past the end of the
 ;; pad map.
 (def %pad-at (gidx cell)
   (let ((pads (eseq.drum-rack-v2/pads gidx))
-      (idx (+ (* 16 (%pad-grid-bank-clamped gidx)) cell)))
+      (idx (%pad-index gidx cell)))
     (if (< idx (len pads)) (nth pads idx) nil)))
 
 (def %pad-cell-name (pad)
@@ -1777,6 +1789,57 @@
     (if (and (>= track 0) (< track SEQ.num-tracks))
       (nth SEQ.track-names track)
       "")))
+
+;; Lazy pads (docs/drum-rack-v2-spec.md, "Track budget"): dropping a sound on an
+;; EMPTY cell is what makes that pad claim a track. The new member is mapped to
+;; exactly this cell's pad note, so it is playable by pad click and armed key
+;; the moment it lands.
+(def %drop-on-empty-pad (event gidx cell)
+  (let ((payload (get event :payload))
+      (group-id (eseq.drum-rack-v2/group-id gidx))
+      (note (eseq.drum-rack-v2/pad-note-for-cell gidx (%pad-index gidx cell))))
+    (let ((path (get payload :path))
+        (name (get payload :name)))
+      (if (< note 0)
+        (status "This drum rack has no free pad left")
+        (if (= (get event :drag-type) "instrument")
+          (if name
+            (do
+              (set! sbrowser-loading-instrument-name name)
+              (host-command "add-track-instrument"
+                (dict :name name :group-id group-id :pad-note note)))
+            (status "Drop an instrument, not a folder"))
+          (if path
+            (host-command "add-track-sample"
+              (dict :path path :group-id group-id :pad-note note
+                :preserve-browser-context true))
+            (status "Drop a sample file, not a folder")))))))
+
+;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
+;; same replacement a drop on the member's grid row does — so pad identity,
+;; pattern data, mixer settings and chokes all stay put.
+(def %pad-cell-track (pad)
+  (if (= pad nil) -1 (get pad :track)))
+
+(def %pad-cell-drop-types (pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (%sound-drop-types track)
+      (list "sample" "instrument"))))
+
+(def %pad-cell-drop-meta (gidx cell pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (dict :kind "track" :track track)
+      (dict :kind "rack-pad"
+        :group-id (eseq.drum-rack-v2/group-id gidx)
+        :cell cell))))
+
+(def %drop-on-pad-cell (event gidx cell)
+  (let ((track (%pad-cell-track (%pad-at gidx cell))))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (drop-on-track event)
+      (%drop-on-empty-pad event gidx cell))))
 
 (def %pad-cell (gidx cell)
   (let ((pad (%pad-at gidx cell)))
@@ -1788,7 +1851,12 @@
         '(rgba 0.18 0.22 0.23 1.0))
       :border-width 1
       :border-color '(rgba 0.30 0.31 0.32 1.0)
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-hover-background-color :mixer-control-bg
       :corner-radius 8
+      :drop-types (%pad-cell-drop-types pad)
+      :drop-meta (%pad-cell-drop-meta gidx cell pad)
+      :on-drop (lambda (event) (%drop-on-pad-cell event gidx cell))
       :on-click |x y r| (if (= pad nil) nil (eseq.drum-rack-v2/trigger-pad gidx pad))
       (v-stack :width :fill :height :fill :gap 0.05
         (label (if (= pad nil) "" (get pad :label))

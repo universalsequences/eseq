@@ -186,3 +186,26 @@
 (def save-kit (gidx)
   (host-command "save-rack-as-kit"
     (dict :group-id (group-id gidx) :name (group-name gidx) :overwrite true)))
+
+;; ── Lazy pads (docs/drum-rack-v2-spec.md, "Track budget") ───────────────
+;; "A pad only claims a track when a sound is dropped on it": an empty cell in
+;; the pad grid is a drop target, and the note it claims comes from its grid
+;; position. The pad map is dense — grid position IS the pad index — so an
+;; empty cell always sits past the end of the map and the note its index names
+;; is normally free. Pad notes are nudgeable though, so a taken candidate falls
+;; back to the lowest free note rather than handing the host a collision.
+
+(def %pad-note-free? (gidx note)
+  (= (len (filter (lambda (p) (= (get p :pad-note) note)) (pads gidx))) 0))
+
+;; Lowest note no pad answers to yet, or -1 for a full rack. Mirrors the host's
+;; `ProjectRackConfig::next_free_pad_note`.
+(def %next-free-pad-note (gidx)
+  (reduce |acc n| (if (>= acc 0) acc (if (%pad-note-free? gidx n) n acc))
+    -1
+    (range 0 128)))
+
+;; The pad note an empty grid cell at absolute pad index `idx` claims.
+(def pad-note-for-cell (gidx idx)
+  (let ((wanted (%clamp-pad-note idx)))
+    (if (%pad-note-free? gidx wanted) wanted (%next-free-pad-note gidx))))

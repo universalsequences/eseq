@@ -1428,7 +1428,7 @@ pub(crate) fn run_event_loop(
                     pending.run_mode,
                     result,
                 ) {
-                    Ok(SavedInstrumentLoadApply::Added { track, group_id }) => {
+                    Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
                         finish_added_instrument_track(
                             track,
                             AddTrackInstrumentCtx {
@@ -1443,6 +1443,7 @@ pub(crate) fn run_event_loop(
                                 accumulator_names: &shared.accumulator_names,
                                 cached_track_peak_levels: &meters.cached_track_peak_levels,
                                 group_id,
+                                pad_note,
                                 track_groups: &shared.track_groups,
                                 ui_epoch: &shared.ui_epoch,
                                 lg_raw: shared.lg_raw,

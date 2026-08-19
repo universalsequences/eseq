@@ -217,6 +217,10 @@ pub(super) struct PendingSavedInstrumentLoad {
 pub(super) enum SavedInstrumentLoadTarget {
     AddTrack {
         group_id: Option<u64>,
+        /// Set when the drop landed on an empty drum-rack pad: the new track
+        /// becomes that pad's member (docs/drum-rack-v2-spec.md, "Track
+        /// budget" — lazy pads).
+        pad_note: Option<i32>,
     },
     SwapTrack {
         track_id: TrackId,
@@ -224,7 +228,7 @@ pub(super) enum SavedInstrumentLoadTarget {
 }
 
 pub(super) enum SavedInstrumentLoadApply {
-    Added { track: usize, group_id: Option<u64> },
+    Added { track: usize, group_id: Option<u64>, pad_note: Option<i32> },
     Swapped { summary: InstrumentSlotResetSummary },
 }
 
@@ -280,9 +284,11 @@ pub(super) fn try_apply_cached_saved_instrument(
     run_mode: CustomInstrumentRunMode,
 ) -> Option<Result<SavedInstrumentLoadApply, String>> {
     match target {
-        SavedInstrumentLoadTarget::AddTrack { group_id } => app
+        SavedInstrumentLoadTarget::AddTrack { group_id, pad_note } => app
             .try_add_cached_saved_instrument_track_sync(name, source, run_mode)
-            .map(|result| result.map(|track| SavedInstrumentLoadApply::Added { track, group_id })),
+            .map(|result| {
+                result.map(|track| SavedInstrumentLoadApply::Added { track, group_id, pad_note })
+            }),
         SavedInstrumentLoadTarget::SwapTrack {
             track_id,
         } => {
@@ -305,9 +311,9 @@ pub(super) fn apply_compiled_saved_instrument(
     result: sequencer::lisp_host::CompileResult,
 ) -> Result<SavedInstrumentLoadApply, String> {
     match target {
-        SavedInstrumentLoadTarget::AddTrack { group_id } => app
+        SavedInstrumentLoadTarget::AddTrack { group_id, pad_note } => app
             .add_compiled_saved_instrument_track_sync(name, source, run_mode, result)
-            .map(|track| SavedInstrumentLoadApply::Added { track, group_id }),
+            .map(|track| SavedInstrumentLoadApply::Added { track, group_id, pad_note }),
         SavedInstrumentLoadTarget::SwapTrack {
             track_id,
         } => {

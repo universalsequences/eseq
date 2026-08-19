@@ -273,6 +273,9 @@ pub(crate) struct AddTrackInstrumentCtx<'a> {
     pub(crate) accumulator_names: &'a Arc<Mutex<Vec<String>>>,
     pub(crate) cached_track_peak_levels: &'a [f64],
     pub(crate) group_id: Option<u64>,
+    /// Pad note the new member claims when the drop landed on an empty
+    /// drum-rack pad cell (docs/drum-rack-v2-spec.md, "Track budget").
+    pub(crate) pad_note: Option<i32>,
     pub(crate) track_groups: &'a Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
     pub(crate) ui_epoch: &'a Arc<AtomicUsize>,
     pub(crate) lg_raw: *mut sequencer::audiograph::LiveGraph,
@@ -306,13 +309,14 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         accumulator_names,
         cached_track_peak_levels,
         group_id,
+        pad_note,
         track_groups,
         ui_epoch,
         lg_raw,
     } = ctx;
 
     let groups_before = app.groups.clone();
-    add_new_track_to_group(app, idx, group_id, None);
+    add_new_track_to_group(app, idx, group_id, pad_note);
     if let Err(error) = app.commit_created_track(idx, "Add instrument track") {
         app.groups = groups_before;
         *track_groups.lock().unwrap() = app.groups.clone();

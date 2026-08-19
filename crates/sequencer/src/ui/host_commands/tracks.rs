@@ -506,6 +506,10 @@ pub(super) fn handle(
                 SavedInstrumentLoadTarget::AddTrack {
                     group_id: extract_usize_from_payload(&payload, "group-id")
                         .map(|group_id| group_id as u64),
+                    // Dropping an instrument on an empty drum-rack pad: the new
+                    // track becomes that pad's member, exactly as the sample
+                    // path above (docs/drum-rack-v2-spec.md, "Track budget").
+                    pad_note: extract_i32_from_payload(&payload, "pad-note"),
                 }
             };
             let escaped = escape_lisp_string(&instrument_name);
@@ -550,7 +554,7 @@ pub(super) fn handle(
                     .runtime_mut()
                     .eval_str("(set! sbrowser-loading-instrument-name \"\")");
                 match cached_result {
-                    Ok(SavedInstrumentLoadApply::Added { track, group_id }) => {
+                    Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
                         finish_added_instrument_track(
                             track,
                             AddTrackInstrumentCtx {
@@ -565,6 +569,7 @@ pub(super) fn handle(
                                 accumulator_names: &accumulator_names,
                                 cached_track_peak_levels: &ctx.meters.cached_track_peak_levels,
                                 group_id,
+                                pad_note,
                                 track_groups: &track_groups,
                                 ui_epoch: &ui_epoch,
                                 lg_raw,

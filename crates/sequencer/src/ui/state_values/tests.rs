@@ -48474,6 +48474,166 @@
         );
     }
 
+    /// Lazy pads (`docs/drum-rack-v2-spec.md`, "Track budget"): a pad claims a
+    /// track only when a sound is dropped on it. An EMPTY cell creates a member
+    /// mapped to that cell's own pad note; an OCCUPIED cell replaces the sound
+    /// on the member the pad already has, so no second member appears and the
+    /// pad keeps its pattern, mixer and choke state.
+    #[test]
+    fn metal_seq_rack_pad_cells_are_lazy_pad_drop_targets() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%toggle-pad-grid 0)")
+            .expect("pad grid toggle should evaluate");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("open pad grid layout should build");
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
+            .expect("the pad grid should open");
+        // The affordance lives on the cell itself — occupied AND empty — so it
+        // travels with the pad interface wherever it renders.
+        for cell in [0, 5] {
+            let node =
+                find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
+                    .unwrap_or_else(|| panic!("pad cell {cell} should render"));
+            assert!(
+                node.props.contains_key("on-drop"),
+                "pad cell {cell} should accept drops"
+            );
+            assert!(
+                node.props.contains_key("drop-types"),
+                "pad cell {cell} should declare drop types"
+            );
+            assert!(
+                node.props.contains_key("drop-hover-border-color"),
+                "pad cell {cell} should highlight while hovered"
+            );
+        }
+
+        // An empty cell addresses the rack by (group id, pad note) derived from
+        // its grid position — cell 5 of bank 0 is pad note 5.
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/%drop-on-pad-cell
+                    (dict
+                      :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "rack-pad" :group-id 7 :cell 5))
+                    0 5)"#,
+            )
+            .expect("sample drop on an empty pad should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "add-track-sample"),
+            vec![("group-id", 7.0), ("pad-note", 5.0)],
+            "an empty cell creates a member mapped to exactly that pad"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/%drop-on-pad-cell
+                    (dict
+                      :drag-type "instrument"
+                      :payload (dict :kind "instrument" :name "core/drift")
+                      :target (dict :kind "rack-pad" :group-id 7 :cell 6))
+                    0 6)"#,
+            )
+            .expect("instrument drop on an empty pad should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "add-track-instrument"),
+            vec![("group-id", 7.0), ("pad-note", 6.0)],
+            "instrument drops behave like sample drops"
+        );
+
+        // Banking shifts the derived note by sixteen per bank.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/pad-note-for-cell 0 (+ 16 2))")
+                .expect("banked pad note should evaluate"),
+            Some(Value::Number(18.0)),
+            "the derived note follows grid index plus bank"
+        );
+
+        // An occupied cell is the member track's own drop target: the meta it
+        // hands the drop system is the member track, and the drop replaces that
+        // track's sound instead of creating a second member.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (eseq.sequencer/%pad-cell-drop-meta 0 0 (eseq.sequencer/%pad-at 0 0)) :track)")
+                .expect("occupied pad drop meta should evaluate"),
+            Some(Value::Number(1.0)),
+            "cell 0 addresses the member track behind pad 36"
+        );
+        // The occupied path runs the ordinary track-row drop: focus the track,
+        // then hand the event to the browser's single-track sample replacement.
+        // The perf editor loads neither, so stub both and record the target.
+        for native in ["seq-clear-selection", "seq-set-track"] {
+            editor
+                .runtime_mut()
+                .register_native(native, |_args, _ctx| Ok(Value::Bool(true)));
+        }
+        let replaced = Arc::new(Mutex::new(Vec::<f64>::new()));
+        {
+            let replaced = Arc::clone(&replaced);
+            editor.runtime_mut().register_native(
+                "eseq.browser/drop-sample-on-track",
+                move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Map(event)) => event
+                            .get("target")
+                            .map(|cell| cell.borrow().clone())
+                            .and_then(|target| match target {
+                                Value::Map(target) => target
+                                    .get("track")
+                                    .map(|cell| cell.borrow().clone())
+                                    .and_then(|track| match track {
+                                        Value::Number(track) => Some(track),
+                                        _ => None,
+                                    }),
+                                _ => None,
+                            }),
+                        _ => None,
+                    };
+                    replaced.lock().unwrap().push(track.unwrap_or(-1.0));
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/%drop-on-pad-cell
+                    (dict
+                      :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "track" :track 1))
+                    0 0)"#,
+            )
+            .expect("sample drop on an occupied pad should evaluate");
+        assert_eq!(
+            *replaced.lock().unwrap(),
+            vec![1.0],
+            "an occupied pad replaces the sound on its existing member track"
+        );
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. }
+                    if name == "add-track-sample" || name == "add-track-instrument"
+            )),
+            "replacing a pad's sound must not create a second member"
+        );
+    }
+
     /// Drains one host command and returns its numeric payload fields in the
     /// order the command declares them.
     fn rack_host_command_payload(
