@@ -1183,7 +1183,7 @@ pub struct Runtime {
     /// own root area.
     layout_frame_viewport: Option<crate::layout::Rect>,
     widget_id_offset: u64,
-    text_measurer: Option<Box<dyn TextMeasurer>>,
+    text_measurer: Option<Rc<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
     last_ui_invalidation_trace: Option<UiInvalidationTrace>,
 }
@@ -2637,6 +2637,10 @@ impl Runtime {
     /// Set the text measurer for proportional font layout (Metal backend).
     /// Also stores cell dimensions for pixel↔cell conversion.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasurer>, cell_w: f32, cell_h: f32) {
+        let measurer: Rc<dyn TextMeasurer> = Rc::from(measurer);
+        // Render-pass code (e.g. text-input caret metrics) needs a measurer to
+        // recover from measure-pass cache misses under subtree layout reuse.
+        crate::widget_render::set_render_text_measurer(Rc::clone(&measurer));
         self.text_measurer = Some(measurer);
         self.layout_cell_w = cell_w;
         self.layout_cell_h = cell_h;

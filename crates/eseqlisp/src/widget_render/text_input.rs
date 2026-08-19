@@ -551,6 +551,32 @@ fn move_cursor_vertically(text: &str, cursor_pos: usize, max_chars: usize, delta
     (target_start + col).min(next_start)
 }
 
+/// Populate CHAR_WIDTH_CACHE for `text` at render time if the measure pass
+/// skipped it. In-place subtree layout reuse can re-render a text-input with a
+/// new value without re-measuring it (its :width-driven size is unchanged), so
+/// the caret/selection metrics cannot rely on measure()-side caching alone.
+/// Only render paths call this — they pass the real viewport cell width, which
+/// keeps cached widths consistent with measure-pass entries.
+#[cfg(target_os = "macos")]
+fn ensure_char_widths_cached_at_render(text: &str, font_size: f32, cell_w: f32) {
+    if text.is_empty() || cell_w <= 0.0 {
+        return;
+    }
+    let key = (font_size.to_bits(), text.to_string());
+    if CHAR_WIDTH_CACHE.with(|c| c.borrow().contains_key(&key)) {
+        return;
+    }
+    super::with_render_text_measurer(|measurer| {
+        let widths: Vec<f32> = text
+            .chars()
+            .map(|ch| measurer.measure_text_px(&ch.to_string(), font_size) / cell_w)
+            .collect();
+        CHAR_WIDTH_CACHE.with(|c| {
+            c.borrow_mut().insert(key, widths);
+        });
+    });
+}
+
 /// Sum per-character widths up to cursor_pos from cache. Falls back to approximation.
 #[cfg(target_os = "macos")]
 pub(crate) fn cursor_x_from_char_cache(
@@ -559,6 +585,7 @@ pub(crate) fn cursor_x_from_char_cache(
     cursor_pos: usize,
     cell_w: f32,
 ) -> f32 {
+    ensure_char_widths_cached_at_render(text, font_size, cell_w);
     CHAR_WIDTH_CACHE.with(|c| {
         let key = (font_size.to_bits(), text.to_string());
         if let Some(widths) = c.borrow().get(&key) {
@@ -577,6 +604,7 @@ fn text_range_width_from_char_cache(
     end: usize,
     cell_w: f32,
 ) -> f32 {
+    ensure_char_widths_cached_at_render(text, font_size, cell_w);
     CHAR_WIDTH_CACHE.with(|c| {
         let key = (font_size.to_bits(), text.to_string());
         if let Some(widths) = c.borrow().get(&key) {
@@ -1526,6 +1554,43 @@ mod tests {
         let state = get_state(widget_id);
         assert_eq!(state.cursor_pos, 8);
         assert_eq!(selection_range(&state), Some((0, 8)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn render_pass_populates_char_cache_on_measure_miss() {
+        struct FixedMeasurer;
+        impl crate::layout::TextMeasurer for FixedMeasurer {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                text.chars().count() as f32 * font_size
+            }
+            fn line_height_px(&self, font_size: f32) -> f32 {
+                font_size
+            }
+        }
+        crate::widget_render::set_render_text_measurer(std::rc::Rc::new(FixedMeasurer));
+
+        // No measure() ran for this value (subtree layout reuse skips measure
+        // when the size is unchanged), so the render path must populate the
+        // cache itself instead of using the narrow 0.55*font_size fallback.
+        let text = "lush sound";
+        let font_size = 17.5;
+        let cell_w = 2.0;
+        let char_count = text.chars().count();
+        let expected_end = char_count as f32 * font_size / cell_w;
+
+        let cursor_x = cursor_x_from_char_cache(text, font_size, char_count, cell_w);
+        assert!(
+            (cursor_x - expected_end).abs() < 1e-4,
+            "caret must sit at the true end of text, got {cursor_x} expected {expected_end}"
+        );
+
+        // The select-all-on-focus highlight uses the same metrics source.
+        let sel_width = text_range_width_from_char_cache(text, font_size, 0, char_count, cell_w);
+        assert!(
+            (sel_width - expected_end).abs() < 1e-4,
+            "selection highlight must cover the full rendered text width"
+        );
     }
 
     #[test]

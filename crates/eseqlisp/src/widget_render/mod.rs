@@ -59,12 +59,15 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
-use crate::layout::{Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, get_map};
+use crate::layout::{
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, get_map,
+};
 use crate::theme;
 use crate::vm::Value;
 
@@ -82,6 +85,12 @@ static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+    /// Text measurer available to render-pass code. Widget metrics that are
+    /// normally cached as a side effect of measure() (e.g. text-input
+    /// per-character widths) can be recomputed on a cache miss instead of
+    /// falling back to approximations — measure() may be skipped entirely when
+    /// subtree layout reuse re-renders a widget whose size did not change.
+    static RENDER_TEXT_MEASURER: RefCell<Option<Rc<dyn TextMeasurer>>> = const { RefCell::new(None) };
 }
 
 pub fn bump_widget_state_generation() {
@@ -90,6 +99,14 @@ pub fn bump_widget_state_generation() {
 
 pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
+
+pub fn set_render_text_measurer(measurer: Rc<dyn TextMeasurer>) {
+    RENDER_TEXT_MEASURER.with(|m| *m.borrow_mut() = Some(measurer));
+}
+
+pub(crate) fn with_render_text_measurer<R>(f: impl FnOnce(&dyn TextMeasurer) -> R) -> Option<R> {
+    RENDER_TEXT_MEASURER.with(|m| m.borrow().as_ref().map(|measurer| f(measurer.as_ref())))
 }
 
 pub fn set_pointer_hover_widget(widget_id: Option<u64>) {
