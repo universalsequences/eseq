@@ -191,7 +191,7 @@ pub(super) fn apply_step_param_history_host_command(
         "Set step parameter",
         |app| {
             for step in &steps {
-                app.state.pattern.step_data[track].set(*step, param, value);
+                app.state.set_step_param_no_publish(track, *step, param, value);
             }
             Ok(())
         },

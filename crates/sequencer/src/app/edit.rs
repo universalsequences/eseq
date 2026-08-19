@@ -4750,12 +4750,12 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
             app.state.pattern.patterns[track].set_step_active(*step, *active);
         }
         ResolvedStepCommand::SetParam { step, param, value } => {
-            app.state.set_step_param_inner(track, *step, *param, *value);
+            app.state.set_step_param_no_publish(track, *step, *param, *value);
         }
         ResolvedStepCommand::AdjustParam { step, param, delta } => {
             let current = app.state.pattern.step_data[track].get(*step, *param);
             app.state
-                .set_step_param_inner(track, *step, *param, current + delta);
+                .set_step_param_no_publish(track, *step, *param, current + delta);
         }
         ResolvedStepCommand::Clear { steps } => {
             for step in steps {
@@ -4798,7 +4798,7 @@ fn execute_step_command_no_publish(app: &mut App, track: usize, cmd: &ResolvedSt
             let chord_count = pattern.chord_data[track].count(*step);
             if !is_active {
                 pattern.patterns[track].set_step_active(*step, true);
-                app.state.set_step_param_inner(
+                app.state.set_step_param_no_publish(
                     track,
                     *step,
                     crate::sequencer::StepParam::Transpose,

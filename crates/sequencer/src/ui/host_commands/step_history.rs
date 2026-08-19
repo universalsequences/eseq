@@ -2180,6 +2180,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn step_panel_edits_surviving_chord_backed_note_after_original_is_deleted() {
+        let mut harness = Harness::new();
+        let lanes = PianoRollLanes::live(&harness.state, TRACK);
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+
+        let add_second_note = map_value([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("lane", Value::Number(41.0)), // G4, transpose +7
+            ("start", Value::Number(STEP as f64)),
+            ("end", Value::Number(STEP as f64 + 2.0)),
+        ]);
+        apply_piano_roll_action(&lanes, &selection, &move_state, &add_second_note)
+            .expect("add the second piano-roll note");
+        let delete_original = map_value([
+            ("type", Value::Keyword("delete-items".to_string())),
+            (
+                "ids",
+                list_value([Value::Number(piano_roll_item_id(STEP, 0) as f64)]),
+            ),
+        ]);
+        apply_piano_roll_action(&lanes, &selection, &move_state, &delete_original)
+            .expect("delete the original piano-roll note");
+
+        assert_eq!(harness.state.pattern.chord_data[TRACK].count(STEP), 1);
+        assert_eq!(harness.state.pattern.chord_data[TRACK].get(STEP, 0), 7.0);
+        assert_eq!(
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Transpose),
+            7.0,
+            "the base transpose is only the chord's step-level anchor"
+        );
+
+        harness.set_step_param("transpose", 12.0);
+        assert_eq!(harness.state.pattern.chord_data[TRACK].get(STEP, 0), 12.0);
+        assert_eq!(harness.piano_roll_lanes(), vec![36.0]);
+        assert_eq!(harness.number("fx-step-value-transpose"), 12.0);
+
+        harness.set_step_param("duration", 3.5);
+        assert_eq!(
+            harness.state.pattern.chord_data[TRACK].get_duration(STEP, 0),
+            3.5
+        );
+        assert_eq!(harness.number("fx-step-value-duration"), 3.5);
+
+        harness.set_step_param("velocity", 0.375);
+        assert_eq!(
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Velocity),
+            0.375
+        );
+        assert_eq!(harness.number("fx-step-value-velocity"), 0.375);
+    }
+
     /// Duration additionally paints the compact grid's duration bar, which is
     /// a SEPARATE surface with a separate writer: the per-step
     /// `seq-track-step-duration-{track}-{step}` bools cover every cell the

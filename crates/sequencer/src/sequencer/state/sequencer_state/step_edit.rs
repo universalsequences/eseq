@@ -2134,7 +2134,11 @@ impl SequencerState {
         changed
     }
 
-    pub(crate) fn set_step_param_inner(
+    /// Set one step-level parameter while preserving the chord representation's
+    /// control anchors. A nonempty chord owns every sounding pitch and its
+    /// explicit note durations; Transpose and Duration therefore move those
+    /// values by the same delta as their mirrored/fallback step parameter.
+    pub fn set_step_param_no_publish(
         &self,
         track: usize,
         step: usize,
@@ -2144,7 +2148,7 @@ impl SequencerState {
         let previous = self.pattern.step_data[track].get(step, param);
         self.pattern.step_data[track].set(step, param, value);
 
-        if param != StepParam::Transpose {
+        if !matches!(param, StepParam::Transpose | StepParam::Duration) {
             return;
         }
 
@@ -2161,9 +2165,19 @@ impl SequencerState {
 
         let mut notes = Vec::with_capacity(chord_count);
         for note_idx in 0..chord_count {
+            let transpose = self.pattern.chord_data[track].get(step, note_idx);
+            let duration = self.pattern.chord_data[track].get_duration(step, note_idx);
             notes.push((
-                self.pattern.chord_data[track].get(step, note_idx) + delta,
-                self.pattern.chord_data[track].get_duration(step, note_idx),
+                if param == StepParam::Transpose {
+                    transpose + delta
+                } else {
+                    transpose
+                },
+                if param == StepParam::Duration && duration > 0.0 {
+                    (duration + delta).clamp(param.min(), param.max())
+                } else {
+                    duration
+                },
                 self.pattern.chord_data[track].get_delay(step, note_idx),
             ));
         }
@@ -2174,7 +2188,7 @@ impl SequencerState {
     }
 
     pub fn set_step_param(&self, track: usize, step: usize, param: StepParam, value: f32) {
-        self.set_step_param_inner(track, step, param, value);
+        self.set_step_param_no_publish(track, step, param, value);
         self.publish_scheduler_snapshot();
     }
 

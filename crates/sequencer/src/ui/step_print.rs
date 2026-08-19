@@ -194,7 +194,7 @@ pub(crate) fn print_pass(
             continue;
         }
         for (param, value) in &print.values {
-            state.pattern.step_data[track].set(step, *param, *value);
+            state.set_step_param_no_publish(track, step, *param, *value);
         }
         printed.push(step);
     }
@@ -374,6 +374,25 @@ mod step_print_tests {
             state.pattern.step_data[0].get(4, StepParam::Duration),
             duration_before
         );
+    }
+
+    #[test]
+    fn print_updates_chord_backed_sounding_params() {
+        let state = playing_state();
+        let step = 4;
+        state.pattern.patterns[0].toggle_step(step);
+        state.pattern.step_data[0].set(step, StepParam::Transpose, 7.0);
+        state.pattern.step_data[0].set(step, StepParam::Duration, 2.0);
+        state.pattern.chord_data[0].add_note_with_duration(step, 7.0, 2.0);
+        set_playhead(&state, step);
+
+        let mut print = StepPrintState::default();
+        print.latch(0, StepParam::Transpose, 12.0);
+        print.latch(0, StepParam::Duration, 3.5);
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![step]);
+
+        assert_eq!(state.pattern.chord_data[0].get(step, 0), 12.0);
+        assert_eq!(state.pattern.chord_data[0].get_duration(step, 0), 3.5);
     }
 
     #[test]
