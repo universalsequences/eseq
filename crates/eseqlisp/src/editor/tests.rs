@@ -130,6 +130,57 @@ fn focused_text_input_survives_on_change_rerender() {
 }
 
 #[test]
+fn remapped_focus_after_relayout_does_not_reselect_all() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def name (state "Track"))
+            (effect
+              (box :width 24 :height 3
+                (text-input
+                  :key "rename-input"
+                  :width 20
+                  :value name
+                  :select-all-on-focus true
+                  :on-change |v| (set! name v))))
+            "#,
+        )
+        .expect("build rename fixture");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    editor.widget_layout().expect("rename layout");
+    assert!(editor.focus_widget_by_stable_key("rename-input", Some("text-input")));
+
+    // Select-all-on-focus: the first keystroke replaces the whole name.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime_mut().eval_str("name"),
+        Ok(Some(Value::String("l".to_string())))
+    );
+
+    // A relayout can hand the focused input a fresh widget_id; the post-layout
+    // remap then re-focuses the same logical widget under the new id. That
+    // must not re-apply select-all (it would make the next keystroke replace
+    // what was just typed) and must carry the caret to the new id.
+    let layout = editor.widget_layout().expect("layout after first keystroke");
+    let mut remapped = super::find_layout_node_by_stable_key(layout.as_ref(), "rename-input")
+        .expect("rename input after keystroke")
+        .clone();
+    remapped.widget_id += 101;
+    editor.set_focused_widget(remapped);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime_mut().eval_str("name"),
+        Ok(Some(Value::String("lu".to_string()))),
+        "remapped focus must keep the caret at the end, not re-select the typed text"
+    );
+}
+
+#[test]
 fn text_input_auto_focus_submit_and_blur_callbacks_drive_inline_edit_lifecycle() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.runtime_mut().eval_str(

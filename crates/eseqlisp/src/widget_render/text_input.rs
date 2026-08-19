@@ -95,6 +95,21 @@ fn set_state(widget_id: u64, state: TextInputState) {
     }
 }
 
+/// Move a text-input's cursor/selection state to a new widget id. Used when a
+/// relayout reassigns the focused input's widget_id: the remapped node is the
+/// same logical widget, so the user's caret must survive the id change.
+pub(crate) fn transfer_state(old_widget_id: u64, new_widget_id: u64) {
+    if old_widget_id == new_widget_id {
+        return;
+    }
+    STATES.with(|s| {
+        let mut states = s.borrow_mut();
+        if let Some(state) = states.remove(&old_widget_id) {
+            states.insert(new_widget_id, state);
+        }
+    });
+}
+
 pub(crate) fn select_all(widget_id: u64, text: &str) {
     let char_count = text.chars().count();
     set_state(widget_id, TextInputState {

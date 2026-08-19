@@ -8,13 +8,28 @@ use super::{Editor, key_str};
 
 impl Editor {
     pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {
-        let newly_focused = self.active_leaf().focused_widget_id != Some(node.widget_id);
-        if newly_focused
-            && node.widget_type == "text-input"
-            && matches!(node.props.get("select-all-on-focus"), Some(Value::Bool(true)))
-        {
-            let text = crate::widget_render::text_input::get_text(&node.props);
-            crate::widget_render::text_input::select_all(node.widget_id, &text);
+        // A relayout can hand the same logical widget a fresh widget_id; the
+        // post-layout remap then re-focuses it here. That is not a new focus:
+        // re-applying select-all-on-focus would select what was just typed and
+        // make the next keystroke replace it.
+        let previous_id = self.active_leaf().focused_widget_id;
+        let remapped_same_widget = previous_id != Some(node.widget_id)
+            && self
+                .active_leaf()
+                .focused_widget_node
+                .as_ref()
+                .is_some_and(|previous| same_focus_identity(previous, &node));
+        let newly_focused = previous_id != Some(node.widget_id) && !remapped_same_widget;
+        if node.widget_type == "text-input" {
+            if newly_focused
+                && matches!(node.props.get("select-all-on-focus"), Some(Value::Bool(true)))
+            {
+                let text = crate::widget_render::text_input::get_text(&node.props);
+                crate::widget_render::text_input::select_all(node.widget_id, &text);
+            } else if remapped_same_widget && let Some(previous_id) = previous_id {
+                // Keep the caret/selection the user already has under the new id.
+                crate::widget_render::text_input::transfer_state(previous_id, node.widget_id);
+            }
         }
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = Some(node.widget_id);
