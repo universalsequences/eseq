@@ -6232,6 +6232,143 @@ mod tests {
         graph.process_block();
     }
 
+    /// Drum rack v2 slice 6: the pad-note badge moves a pad on the pad
+    /// keyboard without disturbing anything else about it, and refuses to
+    /// collide with a pad that is already there.
+    #[test]
+    fn rack_pad_notes_can_move_and_never_collide() {
+        let graph = TestLiveGraph::new("drum-rack-pad-note-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 38, snare).expect("snare pad");
+        app.set_rack_pad_choke_group_recorded(group_id, 38, Some(2))
+            .expect("snare choke");
+
+        app.set_rack_pad_note_recorded(group_id, 38, 40)
+            .expect("a free note accepts the pad");
+        let rack = |app: &App| app.groups[0].rack.clone().expect("rack config");
+        assert_eq!(rack(&app).pad_index_for_note(38), None);
+        let moved = rack(&app).pad_index_for_note(40).expect("pad moved to 40");
+        assert_eq!(
+            app.groups[0].members[rack(&app).pads[moved].member],
+            snare,
+            "the pad keeps its member track"
+        );
+        assert_eq!(
+            rack(&app).choke_group(moved),
+            Some(2),
+            "the pad keeps its choke group"
+        );
+        assert_eq!(app.groups[0].rack_pad_track(40), Some(snare));
+
+        assert!(
+            app.set_rack_pad_note_recorded(group_id, 40, 36).is_err(),
+            "pad notes stay unique within a rack",
+        );
+        assert!(
+            app.set_rack_pad_note_recorded(group_id, 40, 40).is_err(),
+            "a no-op is not an edit",
+        );
+        assert!(
+            app.set_rack_pad_note_recorded(group_id, 40, 200).is_err(),
+            "pad notes outside the drum rack range are rejected",
+        );
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.groups[0].rack_pad_track(38),
+            Some(snare),
+            "undo puts the pad back on its old note"
+        );
+        graph.process_block();
+    }
+
+    /// Drum rack v2 slice 6: a kit is the rack's config plus one Sound per
+    /// pad. Loading one rebuilds the whole kit — group, pad map, choke groups
+    /// and member instruments — beside whatever is already in the project, and
+    /// carries no patterns with it.
+    #[test]
+    fn a_drum_rack_round_trips_through_a_saved_kit() {
+        let graph = TestLiveGraph::new("drum-rack-kit-roundtrip-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Test Kit".to_string()))
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_track(sample).expect("kick track");
+        let hat = app.graph_controller().add_track(sample).expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        app.set_rack_pad_choke_group_recorded(group_id, 42, Some(3))
+            .expect("hat choke");
+        // A pattern on a member track is exactly what a kit must NOT carry.
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+
+        let kit = app
+            .capture_rack_as_kit(group_id, "Test Kit", Vec::new(), String::new())
+            .expect("rack should capture as a kit");
+        assert_eq!(kit.pads.len(), 2);
+        assert_eq!(kit.pads[0].pad_note, 36);
+        assert_eq!(kit.pads[1].pad_note, 42);
+        assert_eq!(kit.pads[1].choke_group, Some(3));
+
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-kit-roundtrip-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("kit test directory");
+        let path = directory.join("Test-Kit.kit");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&kit).expect("serialize kit"),
+        )
+        .expect("write kit");
+
+        let tracks_before = app.tracks.len();
+        let (loaded_id, failures) = app.load_kit_as_rack(&path).expect("kit should load");
+        assert!(failures.is_empty(), "kit pads should all load: {failures:?}");
+        assert_ne!(loaded_id, group_id, "a kit loads as a NEW rack");
+        assert_eq!(
+            app.tracks.len(),
+            tracks_before + 2,
+            "each pad claims its own member track"
+        );
+
+        let loaded = app
+            .groups
+            .iter()
+            .find(|group| group.id == loaded_id)
+            .expect("loaded rack");
+        assert_eq!(loaded.name, "Test Kit");
+        let loaded_rack = loaded.rack.as_ref().expect("loaded rack config");
+        assert_eq!(loaded_rack.pads.len(), 2);
+        let hat_pad = loaded_rack.pad_index_for_note(42).expect("hat pad");
+        assert_eq!(loaded_rack.choke_group(hat_pad), Some(3));
+        let loaded_kick = loaded.rack_pad_track(36).expect("loaded kick member");
+        assert_ne!(loaded_kick, kick, "the kit built its own member tracks");
+        assert_eq!(
+            app.state.runtime.rack_choke_keys[loaded.rack_pad_track(42).expect("loaded hat")]
+                .load(std::sync::atomic::Ordering::Acquire),
+            crate::sequencer::rack_choke_key(loaded_id, 3),
+            "the loaded kit's choke groups are live, not just stored"
+        );
+        assert!(
+            !app.state.pattern.patterns[loaded_kick].is_active(0),
+            "a kit carries instruments and fx, never patterns"
+        );
+
+        std::fs::remove_dir_all(&directory).expect("clean kit test directory");
+        graph.process_block();
+    }
+
     #[test]
     fn deleting_a_rack_member_track_drops_its_pad_and_reindexes_the_others() {
         let graph = TestLiveGraph::new("drum-rack-member-delete-test", 64, 44_100, 2);

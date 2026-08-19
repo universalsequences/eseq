@@ -513,12 +513,13 @@
 (def active-tree-key ()
   (if (= sbrowser-tab "samples") (%tree-key "samples-tab-tree")
     (if (= sbrowser-tab "sounds") (%tree-key "sounds-tab-tree")
+    (if (= sbrowser-tab "kits") (%tree-key "kits-tab-tree")
     (if (= sbrowser-tab "instruments") (%tree-key "instruments-tab-tree")
       (if (= sbrowser-tab "audio-fx") (%tree-key "audio-fx-tab-tree")
         (if (= sbrowser-tab "midi-fx") (%tree-key "midi-fx-tab-tree")
           (if (= sbrowser-tab "presets") (%tree-key "presets-tab-tree")
             (if (= sbrowser-tab "scripts") (%tree-key "scripts-tab-tree")
-              (%tree-key "projects-tab-tree")))))))))
+              (%tree-key "projects-tab-tree"))))))))))
 
 (def list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
@@ -908,6 +909,7 @@
   (list
     (dict :name "samples" :label "Samples" :icon :waveform)
     (dict :name "sounds" :label "Sounds" :icon :piano)
+    (dict :name "kits" :label "Kits" :icon :sampler)
     (dict :name "instruments" :label "Instruments" :icon :piano)
     (dict :name "audio-fx" :label "Audio FX" :icon :sliders)
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
@@ -940,6 +942,34 @@
                 :focusable true
                 :drag-type "sound"
                 :on-activate (lambda (item) (%load-sound item))))))))
+
+;; ── Kits (docs/drum-rack-v2-spec.md, "Polish") ──────────────────────────
+;; A kit is a drum rack saved as a browser object: group config + one Sound
+;; per pad, no patterns. Loading one builds a brand-new rack beside the
+;; existing tracks rather than replacing anything.
+
+(def %visible-kits ()
+  (if (= search-filter "") SEQ.kit-presets
+    (filter (lambda (item)
+      (string-contains? (lowercase (get item :label)) (lowercase search-filter)))
+      SEQ.kit-presets)))
+
+(def %load-kit (item)
+  (host-command "load-kit" (dict :path (get item :path))))
+
+(def %kits-panel ()
+  (let ((items (%visible-kits)))
+    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+      (if (= (len items) 0)
+        (%empty-message "No kits yet. Save a drum rack with the KIT button on its header row.")
+        (scroll :key "kits-tab-scroll" :width :fill :flex 1
+          (tree :key "kits-tab-tree"
+                :width :fill
+                :background-color :buffer-bg
+                :items items
+                :focusable true
+                :drag-type "kit"
+                :on-activate (lambda (item) (%load-kit item))))))))
 
 (def drop-preset-on-sounds (event)
   (if (= (get event :drag-type) "instrument-preset")
@@ -1303,12 +1333,13 @@
 (def active-tab-panel ()
   (if (= sbrowser-tab "samples") (%samples-panel)
     (if (= sbrowser-tab "sounds") (%sounds-panel)
+    (if (= sbrowser-tab "kits") (%kits-panel)
     (if (= sbrowser-tab "instruments") (%instruments-panel)
       (if (= sbrowser-tab "audio-fx") (%audio-fx-panel)
         (if (= sbrowser-tab "midi-fx") (%midi-fx-panel)
           (if (= sbrowser-tab "presets") (%presets-tab-panel)
             (if (= sbrowser-tab "scripts") (%scripts-tab-panel)
-              (%projects-tab-panel)))))))))
+              (%projects-tab-panel))))))))))
 
 (def tabbed-content ()
   (h-stack :key "tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch

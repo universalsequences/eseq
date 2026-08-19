@@ -64,13 +64,6 @@
     (lambda (m) (not (eseq.track-collapse/collapsed? m)))
     (members gidx)))
 
-;; Pad note backing a member track, or -1 when the member has no pad.
-(def pad-note-of-track (gidx track)
-  (reduce |acc pad|
-    (if (>= acc 0) acc (if (= (get pad :track) track) (get pad :pad-note) acc))
-    -1
-    (get (group-at gidx) :pads)))
-
 ;; Storage index of the group's backing bus in the SEQ.bus-* lists, or -1.
 (def bus-index (gidx)
   (let ((bid (get (group-at gidx) :bus-id)))
@@ -121,3 +114,74 @@
       (list)
       (range 0 SEQ.num-tracks))
     (%empty-rack-items)))
+
+;; ── Pad map (slice 6 polish) ────────────────────────────────────────────
+;; The pad map is the rack's whole curation layer: an ordered list of pads,
+;; each naming a MIDI note, the member track behind it and its choke group.
+;; Every pad-facing control below reads it and writes back through a host
+;; command keyed by (group id, pad note) — never by track index, which moves
+;; under track delete/reindex.
+
+(def pads (gidx)
+  (get (group-at gidx) :pads))
+
+;; The pad backing a member track, or nil when the member has no pad (a legal
+;; kit member that the pad keyboard cannot reach).
+(def pad-of-track (gidx track)
+  (reduce |acc pad|
+    (if (= acc nil) (if (= (get pad :track) track) pad acc) acc)
+    nil
+    (pads gidx)))
+
+;; Note-name badge for a member row ("" when the member has no pad).
+(def pad-label-of-track (gidx track)
+  (let ((pad (pad-of-track gidx track)))
+    (if (= pad nil) "" (get pad :label))))
+
+;; Choke group of a member's pad: -1 when unassigned or padless.
+(def choke-of-track (gidx track)
+  (let ((pad (pad-of-track gidx track)))
+    (if (= pad nil) -1 (get pad :choke))))
+
+(def %clamp-pad-note (note)
+  (max 0 (min 127 note)))
+
+;; Move a pad by a semitone. The host rejects a collision with another pad and
+;; leaves the map alone, so the badge simply does not move.
+(def nudge-pad-note (gidx pad delta)
+  (let ((note (%clamp-pad-note (+ (get pad :pad-note) delta))))
+    (if (= note (get pad :pad-note))
+      nil
+      (host-command "set-rack-pad-note"
+        (dict :group-id (group-id gidx)
+              :pad-note (get pad :pad-note)
+              :note note)))))
+
+(def choke-options ()
+  (list "Off" "1" "2" "3" "4" "5" "6" "7" "8" "9" "10" "11" "12" "13" "14" "15" "16"))
+
+;; Dropdown index for a pad's choke value: 0 = Off, otherwise the group number.
+(def choke-value-index (choke)
+  (if (< choke 0) 0 choke))
+
+(def %choke-value-from-label (label)
+  (let ((opts (choke-options)))
+    (reduce |acc i| (if (= (nth opts i) label) i acc) 0 (range 0 (len opts)))))
+
+(def set-pad-choke (gidx pad label)
+  (host-command "set-rack-pad-choke-group"
+    (dict :group-id (group-id gidx)
+          :pad-note (get pad :pad-note)
+          :value (%choke-value-from-label label))))
+
+;; A pad-grid hit takes the same live path a pad key takes: the pad's member
+;; track at base pitch, so choke groups and the member's fx chain apply.
+(def trigger-pad (gidx pad)
+  (host-command "trigger-rack-pad"
+    (dict :group-id (group-id gidx) :pad-note (get pad :pad-note))))
+
+;; Kit = group config + one Sound per pad, saved as a browser object. Patterns
+;; stay behind (docs/drum-rack-v2-spec.md, "Polish").
+(def save-kit (gidx)
+  (host-command "save-rack-as-kit"
+    (dict :group-id (group-id gidx) :name (group-name gidx) :overwrite true)))

@@ -2181,6 +2181,15 @@
                     ])]),
                 ),
                 (
+                    "kit-presets",
+                    test_list(vec![map_value([
+                        ("kind", Value::String("kit".to_string())),
+                        ("label", Value::String("House Kit".to_string())),
+                        ("name", Value::String("House Kit".to_string())),
+                        ("path", Value::String("kits/House-Kit.kit".to_string())),
+                    ])]),
+                ),
+                (
                     "sidebar-instrument-display-name",
                     Value::String(String::new()),
                 ),
@@ -2323,6 +2332,54 @@
             rendered.contains("Wide Plate"),
             "saved Sound label should be visible; rendered:\n{rendered}"
         );
+    }
+
+    /// Drum rack v2 slice 6: kits are browser objects, listed in their own tab
+    /// and loaded by activating one (docs/drum-rack-v2-spec.md, "Polish").
+    #[test]
+    fn metal_seq_browser_kits_tab_loads_a_kit_as_a_new_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"kits\")")
+            .expect("select Kits tab");
+        editor.refresh_runtime_side_effects();
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 24);
+        let layout = editor.widget_layout().expect("Kits browser layout");
+        assert_finite_layout_tree(&layout);
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/kits-tab-tree")
+            .expect("Kits tree should render");
+        assert!(tree.rect.width > 0.0 && tree.rect.height > 0.0);
+        let rendered = render_layout_cells(&layout, 72, 24);
+        assert!(
+            rendered.contains("House Kit"),
+            "saved kit label should be visible; rendered:\n{rendered}"
+        );
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/%load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
+            )
+            .expect("activate the kit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "load-kit");
+                let Value::Map(payload) = payload else {
+                    panic!("load-kit payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("kits/House-Kit.kit".to_string()))
+                );
+            }
+            other => panic!("expected load-kit host command, got {other:?}"),
+        }
     }
 
     /// Module spec §10 hazard (l): `sbrowser-active-tree-key` hands a widget key
@@ -49438,6 +49495,183 @@
             Some(Value::Bool(true)),
             "the header reads the armed rack by group id"
         );
+    }
+
+    /// Drum rack v2 slice 6 (`docs/drum-rack-v2-spec.md`, "UI"): member rows
+    /// stay the standard track row, with exactly two rack-specific additions —
+    /// the pad-note badge and the choke-group selector.
+    #[test]
+    fn metal_seq_rack_member_rows_carry_pad_badges_and_choke_selectors() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let layout = editor
+            .widget_layout()
+            .expect("rack sequencer layout should build");
+        // Pad 36 backs member track 1, pad 38 backs member track 2.
+        for key in [
+            "/rack-pad-note-7-36",
+            "/rack-pad-down-7-36",
+            "/rack-pad-up-7-36",
+            "/rack-pad-choke-7-36",
+            "/rack-pad-note-7-38",
+            "/rack-pad-choke-7-38",
+        ] {
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
+                "member row chrome should render {key}"
+            );
+        }
+        // The badge reads the pad map's own note name, so the row says which
+        // key plays it without the reader counting semitones.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/pad-label-of-track 0 1)")
+                .expect("pad label should evaluate"),
+            Some(Value::String("C7".to_string())),
+        );
+        // Choke is per pad, and the unassigned pad reads back as -1 (Off).
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/choke-of-track 0 1)")
+                .expect("choke should evaluate"),
+            Some(Value::Number(-1.0)),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/choke-of-track 0 2)")
+                .expect("choke should evaluate"),
+            Some(Value::Number(1.0)),
+        );
+    }
+
+    /// The pad grid is a VIEW over the pad map: it appears on demand, mirrors
+    /// the pads the rack already has, and holds no sequencing state of its own.
+    #[test]
+    fn metal_seq_rack_pad_grid_is_a_view_over_the_pad_map() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let layout = editor
+            .widget_layout()
+            .expect("rack sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-pads-toggle-7").is_some(),
+            "the header offers the pad grid"
+        );
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7").is_none(),
+            "the pad grid stays closed until it is asked for"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%toggle-pad-grid 0)")
+            .expect("pad grid toggle should evaluate");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("open pad grid layout should build");
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
+            .expect("the pad grid should open");
+        // Sixteen cells, of which the first two are this rack's two pads; the
+        // rest are empty positions in the map, not sequencer lanes.
+        for cell in 0..16 {
+            assert!(
+                find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
+                    .is_some(),
+                "the 4x4 grid should render cell {cell}"
+            );
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (eseq.drum-rack-v2/pads 0))")
+                .expect("pad count should evaluate"),
+            Some(Value::Number(2.0)),
+            "the grid adds no pads of its own"
+        );
+
+        // A pad hit is a live hit, addressed by (rack, pad note) — the same
+        // pair the armed keyboard resolves.
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.drum-rack-v2/trigger-pad 0 (nth (eseq.drum-rack-v2/pads 0) 0))")
+            .expect("pad hit should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "trigger-rack-pad"),
+            vec![("group-id", 7.0), ("pad-note", 36.0)],
+        );
+    }
+
+    /// Both member-row controls write back through (rack, pad note): never a
+    /// track index, which moves under track delete/reindex.
+    #[test]
+    fn metal_seq_rack_pad_controls_address_pads_by_rack_and_note() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+        let _ = editor.drain_host_commands();
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.drum-rack-v2/nudge-pad-note 0 (nth (eseq.drum-rack-v2/pads 0) 1) 1)")
+            .expect("pad nudge should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "set-rack-pad-note"),
+            vec![("group-id", 7.0), ("pad-note", 38.0), ("note", 39.0)],
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.drum-rack-v2/set-pad-choke 0 (nth (eseq.drum-rack-v2/pads 0) 0) "4")"#,
+            )
+            .expect("choke change should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "set-rack-pad-choke-group"),
+            vec![("group-id", 7.0), ("pad-note", 36.0), ("value", 4.0)],
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.drum-rack-v2/set-pad-choke 0 (nth (eseq.drum-rack-v2/pads 0) 1) "Off")"#,
+            )
+            .expect("choke clear should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "set-rack-pad-choke-group"),
+            vec![("group-id", 7.0), ("pad-note", 38.0), ("value", 0.0)],
+            "Off clears the pad's choke group"
+        );
+    }
+
+    /// Drains one host command and returns its numeric payload fields in the
+    /// order the command declares them.
+    fn rack_host_command_payload(
+        editor: &mut eseqlisp::Editor,
+        expected: &str,
+    ) -> Vec<(&'static str, f64)> {
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "{expected} should be the only command");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected a custom host command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, expected);
+        let Value::Map(payload) = payload else {
+            panic!("{expected} payload should be a dict: {payload:?}");
+        };
+        ["group-id", "pad-note", "note", "value"]
+            .into_iter()
+            .filter_map(|field| match payload.get(field).map(|cell| cell.borrow().clone()) {
+                Some(Value::Number(value)) => Some((field, value)),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

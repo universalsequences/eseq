@@ -227,8 +227,18 @@ The grid view renders the rack as a header row plus full member rows:
   `DrumLaneHistoryAction`) is deleted once v2 lands.
 - Mixer: reuse the track-groups render-order layer; a rack renders as its
   group (header strip + members, collapsible).
-- Pad grid (4×4 performance view) can stay as a *view* over the pad map for
-  finger drumming / slot browsing; it no longer owns any sequencing.
+- Pad grid (4×4 performance view) stays a *view* over the pad map for finger
+  drumming / slot browsing; it owns no sequencing. As shipped it is a per-rack
+  toggle (`PADS` on the header row) that draws the pad map sixteen cells at a
+  time — cell position = pad index, banked past sixteen pads — and a cell click
+  hits the pad down the live path (member track at base pitch), so choke groups
+  and the member's own fx chain apply exactly as from the keyboard.
+- The pad-note badge is a note name with −/+ nudges, and the choke selector is
+  an Off/1..16 dropdown; both address the pad by *(rack group id, pad note)*,
+  never by track index, and both are ordinary recorded edits.
+- `KIT` on the header row saves the rack as a kit; the browser's **Kits** tab
+  lists saved kits and loading one builds a new rack beside the existing
+  tracks.
 
 Follow the `each`-based widget generation convention (never `map`).
 
@@ -269,13 +279,34 @@ per-track p-locks).
    save/load as a browser object (a kit = group config + member instrument
    presets).
 
+## Kits
+
+A **kit** is a drum rack saved as a browser object (`kits/<name>.kit`). It
+carries:
+
+- kit identity — name, color, and the pad map (each pad's note, its choke
+  group, and the member track's name);
+- one **Sound** per pad, captured exactly as the Sounds browser captures a
+  track: the member's instrument (sampler buffer or custom engine), its
+  instrument params, and its insert fx chain.
+
+It deliberately does **not** carry patterns, and it does not carry the rack
+bus's own fx chain or fader. Loading a kit therefore never overwrites anything
+that is already sequenced: it creates a *new* rack group beside the existing
+tracks, one empty member track per pad, and re-applies the pad map and choke
+groups. Pads whose Sound fails to load (a missing sample, a missing instrument)
+are reported by name; the rest of the kit still lands. Every step a load takes
+is an ordinary recorded edit, so a kit load undoes like any other.
+
 ## Open questions
 
 - ~~Should the rack header's arm and a member arm be mutually exclusive, or
   can the rack stay armed while one member is "focus-armed" for chromatic
   play?~~ Resolved: exclusive, scoped to the rack's own members (see "Arming &
   live play").
-- Kit-as-preset: what exactly serializes when saving a drum rack to the
-  browser (member instruments + fx + pad map, but presumably not patterns?).
+- ~~Kit-as-preset: what exactly serializes when saving a drum rack to the
+  browser (member instruments + fx + pad map, but presumably not patterns?).~~
+  Resolved: pad map + choke groups + kit identity + one Sound per pad; no
+  patterns, no rack bus chain. See "Kits".
 - Does the Instrument Rack eventually migrate onto this model (a group with
   `Broadcast` routing), or stay a slot container? Not needed for v1.

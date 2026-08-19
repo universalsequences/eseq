@@ -25,6 +25,7 @@ use crate::track_color::TrackColor;
 const PROJECTS_DIR: &str = "projects";
 const SOUNDS_DIR: &str = "sounds";
 const RACK_PRESETS_DIR: &str = "presets/racks";
+const KITS_DIR: &str = "kits";
 // Version history:
 //   1 — original format; dgenlisp node-state header was 6 slots, so saved
 //       `param_node_indices` for dgen slots are `6 + cell_id`.
@@ -69,6 +70,37 @@ pub struct ProjectSoundPreset {
     pub metadata: ProjectSoundMetadata,
     pub track: ProjectTrack,
     pub rack: ProjectRackTrackPattern,
+}
+
+/// A drum-rack **kit** (`docs/drum-rack-v2-spec.md`, "Polish"): the rack's own
+/// identity plus one Sound per pad. A kit is deliberately *not* a project
+/// fragment — it carries the kit config (name, color, pad notes, choke groups)
+/// and each pad's instrument + fx chain, and no patterns: the member tracks a
+/// kit rebuilds are born empty, so dropping a kit into a session never
+/// overwrites what is already sequenced there.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectKitPreset {
+    pub version: u32,
+    pub metadata: ProjectSoundMetadata,
+    /// The rack group's color, so a loaded kit looks like the saved one.
+    #[serde(default)]
+    pub color: [f32; 3],
+    /// Ordered pads, in the rack's own pad order (the pad grid position).
+    pub pads: Vec<ProjectKitPad>,
+}
+
+/// One kit pad: where it sits on the pad keyboard, what it chokes, and the
+/// Sound that rebuilds its member track.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectKitPad {
+    pub pad_note: i32,
+    #[serde(default)]
+    pub choke_group: Option<u8>,
+    /// Member track name at save time; the rebuilt track is renamed to it.
+    #[serde(default)]
+    pub name: String,
+    /// The member track captured exactly as the Sounds browser captures one.
+    pub sound: ProjectSoundPreset,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -2539,6 +2571,44 @@ pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
         .collect::<Vec<_>>();
     names.sort();
     Ok(names)
+}
+
+pub fn kit_preset_path(name: &str) -> PathBuf {
+    Path::new(KITS_DIR).join(format!("{}.kit", sanitize_project_name(name)))
+}
+
+pub fn save_kit_preset(name: &str, kit: &ProjectKitPreset) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(KITS_DIR)?;
+    let path = kit_preset_path(name);
+    let json = serde_json::to_string(kit).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to serialize kit '{}': {error}", path.display()),
+        )
+    })?;
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
+    let src = std::fs::read_to_string(path)?;
+    serde_json::from_str(&src).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Failed to parse kit '{}': {error}", path.display()),
+        )
+    })
+}
+
+pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(KITS_DIR)?;
+    let mut paths = std::fs::read_dir(KITS_DIR)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("kit"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
 }
 
 pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
@@ -5058,6 +5128,83 @@ mod tests {
         assert_eq!(
             restored.rack.slots[0].custom_effects[0].as_deref(),
             Some("builtin:OTT")
+        );
+    }
+
+    #[test]
+    fn kit_preset_roundtrips_pad_map_choke_groups_and_per_pad_sounds() {
+        let pad_sound = |name: &str, sample: &str| ProjectSoundPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: name.to_string(),
+                tags: Vec::new(),
+                author: String::new(),
+            },
+            track: ProjectTrack {
+                id: TrackId(1),
+                color: None,
+                collapsed: false,
+                kind: ProjectTrackKind::Rack {
+                    routing: ProjectRackRouting::Broadcast,
+                    slots: vec![ProjectRackTrackSlot {
+                        instrument_type: ProjectInstrumentType::Sampler,
+                        sample_path: Some(sample.to_string()),
+                        sample_name: Some(name.to_string()),
+                        instrument_name: None,
+                    }],
+                },
+            },
+            rack: ProjectRackTrackPattern {
+                macros: default_project_rack_macros(),
+                routing: ProjectRackRouting::Broadcast,
+                slots: Vec::new(),
+            },
+        };
+        let kit = ProjectKitPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: "House Kit".to_string(),
+                tags: vec!["house".to_string()],
+                author: "Test".to_string(),
+            },
+            color: [0.9, 0.45, 0.15],
+            pads: vec![
+                ProjectKitPad {
+                    pad_note: 36,
+                    choke_group: None,
+                    name: "Kick".to_string(),
+                    sound: pad_sound("Kick", "samples/kick.wav"),
+                },
+                ProjectKitPad {
+                    pad_note: 42,
+                    choke_group: Some(1),
+                    name: "Hat".to_string(),
+                    sound: pad_sound("Hat", "samples/hat.wav"),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&kit).expect("serialize kit");
+        let restored: ProjectKitPreset = serde_json::from_str(&json).expect("deserialize kit");
+        assert_eq!(restored.metadata.name, "House Kit");
+        assert_eq!(restored.color, [0.9, 0.45, 0.15]);
+        assert_eq!(restored.pads.len(), 2);
+        assert_eq!(restored.pads[1].pad_note, 42);
+        assert_eq!(restored.pads[1].choke_group, Some(1));
+        assert_eq!(restored.pads[1].name, "Hat");
+        match &restored.pads[1].sound.track.kind {
+            ProjectTrackKind::Rack { slots, .. } => {
+                assert_eq!(slots[0].sample_path.as_deref(), Some("samples/hat.wav"));
+            }
+            _ => panic!("kit pads carry container Sounds"),
+        }
+        // Kits are files in their own browser directory, named like every
+        // other saved object.
+        assert_eq!(
+            kit_preset_path("House Kit")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("House-Kit.kit"),
         );
     }
 

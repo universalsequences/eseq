@@ -2631,6 +2631,37 @@ impl App {
         })
     }
 
+    /// Moves a pad to a different note on the pad keyboard. The pad keeps its
+    /// grid position, member track and choke group — only the note the live
+    /// keyboard answers with changes (docs/drum-rack-v2-spec.md, "UI": the
+    /// pad-note badge on a member row).
+    pub fn set_rack_pad_note_recorded(
+        &mut self,
+        group_id: u64,
+        pad_note: i32,
+        new_note: i32,
+    ) -> Result<(), String> {
+        if !(DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&new_note) {
+            return Err(format!("Unsupported drum rack pad note {new_note}"));
+        }
+        self.apply_recorded_bus_group_structure_mutation("Set drum rack pad note", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let rack = group.rack.as_mut()
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let pad_index = rack.pad_index_for_note(pad_note)
+                .ok_or_else(|| format!("Drum rack has no pad {pad_note}"))?;
+            if new_note == pad_note {
+                return Err("Pad note is unchanged".to_string());
+            }
+            if rack.pad_index_for_note(new_note).is_some() {
+                return Err(format!("Drum rack pad {new_note} is already occupied"));
+            }
+            rack.pads[pad_index].pad_note = new_note;
+            Ok(())
+        })
+    }
+
     pub fn rename_group_recorded(&mut self, group_id: u64, name: String) -> Result<(), String> {
         let name = name.trim().to_string();
         self.apply_recorded_bus_group_structure_mutation("Rename track group", |app| {

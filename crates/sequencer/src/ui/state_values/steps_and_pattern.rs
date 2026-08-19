@@ -531,8 +531,9 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
     }))
 }
 
-/// Builds a rack group's `pads` entry: one map per pad with its note, member
-/// position, resolved track index and choke group (`-1` when unassigned).
+/// Builds a rack group's `pads` entry: one map per pad with its note, its note
+/// name (the pad badge's label), member position, resolved track index and
+/// choke group (`-1` when unassigned).
 /// Empty for a plain group.
 fn build_rack_pads_value(group: &sequencer::project::ProjectTrackGroup) -> Value {
     let Some(rack) = group.rack.as_ref() else {
@@ -549,6 +550,10 @@ fn build_rack_pads_value(group: &sequencer::project::ProjectTrackGroup) -> Value
             .unwrap_or(-1.0);
         map_value([
             ("pad-note", Value::Number(pad.pad_note as f64)),
+            (
+                "label",
+                Value::String(super::drum_rack::drum_rack_pad_label(pad.pad_note)),
+            ),
             ("member", Value::Number(pad.member as f64)),
             (
                 "track",

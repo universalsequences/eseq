@@ -1537,6 +1537,17 @@ impl App {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
+        self.add_track_from_sound_preset(sound, fallback_name)
+    }
+
+    /// Track-creating half of [`App::add_track_from_sound`], for callers that
+    /// already hold the parsed Sound (a kit rebuilds one member track per pad
+    /// from Sounds it carries inline rather than from files).
+    pub fn add_track_from_sound_preset(
+        &mut self,
+        sound: crate::project::ProjectSoundPreset,
+        fallback_name: &str,
+    ) -> Result<usize, String> {
         let track = self.graph_controller().add_blank_sampler_track()?;
         if let Err(error) = self.load_container_preset_onto_track(track, sound, fallback_name) {
             let rollback = self.graph_controller().delete_track(track);
@@ -1711,6 +1722,148 @@ impl App {
             crate::project::save_rack_preset(name, &preset).map_err(|error| error.to_string())?;
         self.set_track_sound_state(track, None, Some(name.to_string()), false);
         Ok(path)
+    }
+
+    /// Captures a drum rack as a **kit** (`docs/drum-rack-v2-spec.md`,
+    /// "Polish"): the rack's identity plus one Sound per pad, in pad order.
+    /// Patterns are deliberately left behind — see [`ProjectKitPreset`].
+    ///
+    /// [`ProjectKitPreset`]: crate::project::ProjectKitPreset
+    pub fn capture_rack_as_kit(
+        &mut self,
+        group_id: u64,
+        name: &str,
+        tags: Vec<String>,
+        author: String,
+    ) -> Result<crate::project::ProjectKitPreset, String> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let rack = group
+            .rack
+            .as_ref()
+            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+        let color = group.color;
+        // Resolve every pad against the member list up front: capturing a pad
+        // borrows `self` mutably, and a capture must not see a half-built kit.
+        let pads: Vec<(i32, Option<u8>, usize)> = rack
+            .pads
+            .iter()
+            .enumerate()
+            .filter_map(|(pad_index, pad)| {
+                let track = group.members.get(pad.member).copied()?;
+                Some((pad.pad_note, rack.choke_group(pad_index), track))
+            })
+            .collect();
+        if pads.is_empty() {
+            return Err("A kit needs at least one pad with a sound on it".to_string());
+        }
+        let mut kit_pads = Vec::with_capacity(pads.len());
+        for (pad_note, choke_group, track) in pads {
+            let track_name = self
+                .tracks
+                .get(track)
+                .cloned()
+                .ok_or_else(|| format!("Kit pad {pad_note} has no member track"))?;
+            let sound = self.capture_track_as_container_preset(
+                track,
+                &track_name,
+                Vec::new(),
+                String::new(),
+            )?;
+            kit_pads.push(crate::project::ProjectKitPad {
+                pad_note,
+                choke_group,
+                name: track_name,
+                sound,
+            });
+        }
+        Ok(crate::project::ProjectKitPreset {
+            version: crate::project::project_file_version(),
+            metadata: crate::project::ProjectSoundMetadata {
+                name: name.trim().to_string(),
+                tags,
+                author,
+            },
+            color,
+            pads: kit_pads,
+        })
+    }
+
+    /// Saves a drum rack to the kit browser. `overwrite` guards an existing
+    /// kit of the same name.
+    pub fn save_rack_as_kit(
+        &mut self,
+        group_id: u64,
+        name: &str,
+        overwrite: bool,
+    ) -> Result<PathBuf, String> {
+        if name.trim().is_empty() {
+            return Err("A kit needs a name".to_string());
+        }
+        if crate::project::kit_preset_path(name).exists() && !overwrite {
+            return Err(format!("Kit '{name}' already exists"));
+        }
+        let kit = self.capture_rack_as_kit(group_id, name, Vec::new(), String::new())?;
+        crate::project::save_kit_preset(name, &kit).map_err(|error| error.to_string())
+    }
+
+    /// Rebuilds a saved kit as a fresh drum rack: the group and its bus, then
+    /// one member track per pad loaded from the pad's Sound, then the pad map
+    /// and choke groups. Returns the new group id along with a message per pad
+    /// that failed to load — a kit missing one sample still loads the rest, and
+    /// every step it took is an ordinary undo entry.
+    pub fn load_kit_as_rack(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
+        let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Kit");
+        let kit_name = if kit.metadata.name.trim().is_empty() {
+            fallback_name.to_string()
+        } else {
+            kit.metadata.name.trim().to_string()
+        };
+        let (group_id, _) = self.create_drum_rack_recorded(Some(kit_name))?;
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+            group.color = kit.color;
+        }
+        let mut failures = Vec::new();
+        for pad in kit.pads {
+            let pad_name = if pad.name.trim().is_empty() {
+                format!("Pad {}", pad.pad_note)
+            } else {
+                pad.name.trim().to_string()
+            };
+            let track = match self.add_track_from_sound_preset(pad.sound, &pad_name) {
+                Ok(track) => track,
+                Err(error) => {
+                    failures.push(format!("{pad_name}: {error}"));
+                    continue;
+                }
+            };
+            if let Err(error) = self.attach_track_to_group(track, group_id, Some(pad.pad_note)) {
+                // The track exists but has no pad; drop it rather than leave a
+                // loose member of nothing.
+                let _ = self.graph_controller().delete_track(track);
+                failures.push(format!("{pad_name}: {error}"));
+                continue;
+            }
+            if let Err(error) = self.commit_created_track(track, "Load kit pad") {
+                failures.push(format!("{pad_name}: {error}"));
+                continue;
+            }
+            if let Some(choke) = pad.choke_group {
+                if let Err(error) =
+                    self.set_rack_pad_choke_group_recorded(group_id, pad.pad_note, Some(choke))
+                {
+                    failures.push(format!("{pad_name}: {error}"));
+                }
+            }
+        }
+        Ok((group_id, failures))
     }
 
     pub fn load_rack_preset_onto_track(&mut self, track: usize, name: &str) -> Result<(), String> {

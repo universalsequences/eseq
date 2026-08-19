@@ -16,6 +16,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::scenes::COMMANDS.contains(&n) => super::scenes::handle(name, payload, app, editor, ctx),
         n if super::song::COMMANDS.contains(&n) => super::song::handle(name, payload, app, editor, ctx),
         n if super::rack::COMMANDS.contains(&n) => super::rack::handle(name, payload, app, editor, ctx),
+        n if super::drum_rack_v2::COMMANDS.contains(&n) => super::drum_rack_v2::handle(name, payload, app, editor, ctx),
         n if super::instrument_params::COMMANDS.contains(&n) => super::instrument_params::handle(name, payload, app, editor, ctx),
         n if super::learn::COMMANDS.contains(&n) => super::learn::handle(name, payload, app, editor, ctx),
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),

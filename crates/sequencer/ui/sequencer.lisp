@@ -2020,6 +2020,165 @@
       (set! eseq.seq-core-state/selected-bus bus-idx)
       false)))
 
+;; ── Rack-specific member chrome (docs/drum-rack-v2-spec.md, "UI") ───────
+;; Member rows are exactly the normal track UI; the ONLY rack additions are
+;; the pad-note badge and the choke-group selector rendered beside the row.
+
+(def %rack-pad-badge (gidx pad)
+  (h-stack :gap 0.08 :align :center
+    (button "-"
+      :key (str "rack-pad-down-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+      :width 1.0 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent
+      :color :dim
+      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad -1))
+    (badge (get pad :label)
+      :key (str "rack-pad-note-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+      :font-size 9 :width 2.6 :height 0.9 :padding 0
+      :h-align :center
+      :background-color '(rgba 0.18 0.22 0.23 1.0)
+      :border-color :transparent
+      :highlight-color :transparent
+      :shadow-color :transparent
+      :color :white)
+    (button "+"
+      :key (str "rack-pad-up-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+      :width 1.0 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent
+      :color :dim
+      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad 1))))
+
+(def %rack-member-chrome (gidx i)
+  (let ((pad (eseq.drum-rack-v2/pad-of-track gidx i)))
+    (v-stack :key (str "rack-member-chrome-" (eseq.drum-rack-v2/group-id gidx) "-" i)
+      :width 4.8 :gap 0.12 :align :center :padding 0.15
+      (if (= pad nil)
+        ;; A member with no pad is legal (an fx-return-ish kit track); it just
+        ;; has nothing for the pad keyboard to answer with.
+        (badge "—"
+          :key (str "rack-pad-none-" (eseq.drum-rack-v2/group-id gidx) "-" i)
+          :font-size 9 :width 4.6 :height 0.9 :padding 0
+          :h-align :center
+          :background-color :transparent
+          :border-color :transparent
+          :highlight-color :transparent
+          :shadow-color :transparent
+          :color :dim)
+        (%rack-pad-badge gidx pad))
+      (if (= pad nil)
+        (box :width 4.6 :height 0.9 :bg :transparent)
+        (dropdown
+          :key (str "rack-pad-choke-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+          :value-index (eseq.drum-rack-v2/choke-value-index (get pad :choke))
+          :options (eseq.drum-rack-v2/choke-options)
+          :width 4.6 :height 0.9 :font-size 7
+          :on-change (lambda (v) (eseq.drum-rack-v2/set-pad-choke gidx pad v)))))))
+
+(def %rack-member-row (gidx i)
+  (h-stack :width :fill :gap 0.15 :align :start
+    (%rack-member-chrome gidx i)
+    (box :width 0 :flex 1 (%track-row i))))
+
+;; ── Pad grid performance view ───────────────────────────────────────────
+;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
+;; owns no sequencing state: a cell reads its pad from SEQ.groups and a hit
+;; goes straight down the live pad path.
+
+;; Group id whose pad grid is open (-1 = none). One at a time keeps the grid
+;; a performance surface rather than a permanent row of empty squares.
+(defstate %pad-grid-open -1)
+(defstate %pad-grid-bank 0)
+
+(def %pad-grid-open? (gidx)
+  (= %pad-grid-open (eseq.drum-rack-v2/group-id gidx)))
+
+(def %toggle-pad-grid (gidx)
+  (do
+    (set! %pad-grid-bank 0)
+    (set! %pad-grid-open
+      (if (%pad-grid-open? gidx) -1 (eseq.drum-rack-v2/group-id gidx)))))
+
+(def %pad-grid-banks (gidx)
+  (max 1 (ceil (/ (len (eseq.drum-rack-v2/pads gidx)) 16.0))))
+
+(def %pad-grid-bank-clamped (gidx)
+  (max 0 (min %pad-grid-bank (- (%pad-grid-banks gidx) 1))))
+
+;; Pad at a grid position within the visible bank, or nil past the end of the
+;; pad map.
+(def %pad-at (gidx cell)
+  (let ((pads (eseq.drum-rack-v2/pads gidx))
+      (idx (+ (* 16 (%pad-grid-bank-clamped gidx)) cell)))
+    (if (< idx (len pads)) (nth pads idx) nil)))
+
+(def %pad-cell-name (pad)
+  (let ((track (get pad :track)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (nth SEQ.track-names track)
+      "")))
+
+(def %pad-cell (gidx cell)
+  (let ((pad (%pad-at gidx cell)))
+    (box
+      :key (str "rack-pad-cell-" (eseq.drum-rack-v2/group-id gidx) "-" cell)
+      :width 6.4 :height 2.2 :padding 0.15
+      :background-color (if (= pad nil)
+        '(rgba 0.12 0.13 0.14 1.0)
+        '(rgba 0.18 0.22 0.23 1.0))
+      :border-width 1
+      :border-color '(rgba 0.30 0.31 0.32 1.0)
+      :corner-radius 8
+      :on-click |x y r| (if (= pad nil) nil (eseq.drum-rack-v2/trigger-pad gidx pad))
+      (v-stack :width :fill :height :fill :gap 0.05
+        (label (if (= pad nil) "" (get pad :label))
+          :font-size 8 :color :dim :bg :transparent
+          :width :fill :text-align :center)
+        (label (if (= pad nil) "" (substring (%pad-cell-name pad) 0 12))
+          :font-size 6.8 :color :white :bg :transparent
+          :width :fill :text-align :center)
+        (label (if (= pad nil)
+            ""
+            (if (< (get pad :choke) 0) "" (str "choke " (get pad :choke))))
+          :font-size 6.2 :color :dim :bg :transparent
+          :width :fill :text-align :center)))))
+
+(def %pad-grid-row (gidx row)
+  (h-stack :gap 0.15 :align :center
+    (each (range 0 4) |col|
+      (%pad-cell gidx (+ (* row 4) col)))))
+
+(def %pad-grid-bank-selector (gidx)
+  (if (< (%pad-grid-banks gidx) 2)
+    (box :width 0.0 :height 0.0 :bg :transparent)
+    (h-stack :gap 0.15 :align :center
+      (button "◂"
+        :key (str "rack-pad-bank-prev-" (eseq.drum-rack-v2/group-id gidx))
+        :width 1.4 :height 0.9 :padding 0 :font-size 8
+        :background-color '(rgba 0.1 0.1 0.1 1.0)
+        :border-color :transparent :color :dim
+        :on-click |x y r| (set! %pad-grid-bank (max 0 (- (%pad-grid-bank-clamped gidx) 1))))
+      (label (str (+ (%pad-grid-bank-clamped gidx) 1) "/" (%pad-grid-banks gidx))
+        :font-size 8 :color :dim :bg :transparent)
+      (button "▸"
+        :key (str "rack-pad-bank-next-" (eseq.drum-rack-v2/group-id gidx))
+        :width 1.4 :height 0.9 :padding 0 :font-size 8
+        :background-color '(rgba 0.1 0.1 0.1 1.0)
+        :border-color :transparent :color :dim
+        :on-click |x y r| (set! %pad-grid-bank
+          (min (- (%pad-grid-banks gidx) 1) (+ (%pad-grid-bank-clamped gidx) 1)))))))
+
+(def %rack-pad-grid (gidx)
+  (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
+    :width :fill :padding 0.2
+    :background-color '(rgba 0.09 0.10 0.11 1.0)
+    :corner-radius 8
+    (v-stack :gap 0.1 :align :start
+      (%pad-grid-bank-selector gidx)
+      (each (range 0 4) |row|
+        (%pad-grid-row gidx row)))))
+
 (def %rack-header-body (gidx)
   (let ((c (eseq.drum-rack-v2/color gidx))
       (bus-idx (eseq.drum-rack-v2/bus-index gidx))
@@ -2087,6 +2246,24 @@
             :shadow-color :transparent
             :color (if muted (rgba 0.4 0.4 0.4 0.6) :dim)
             :bg :transparent))
+        ;; Pad grid = performance view over the pad map; KIT saves the rack as
+        ;; a browser kit (docs/drum-rack-v2-spec.md, "Polish").
+        (button "PADS"
+          :key (str "rack-pads-toggle-" (eseq.drum-rack-v2/group-id gidx))
+          :width 3.2 :height 1.2 :padding 0 :font-size 8
+          :background-color (if (%pad-grid-open? gidx)
+            '(rgba 0.30 0.37 0.39 1.0)
+            '(rgba 0.1 0.1 0.1 1.0))
+          :border-color :transparent
+          :color (if (%pad-grid-open? gidx) :white :dim)
+          :on-click |x y r| (%toggle-pad-grid gidx))
+        (button "KIT"
+          :key (str "rack-save-kit-" (eseq.drum-rack-v2/group-id gidx))
+          :width 2.6 :height 1.2 :padding 0 :font-size 8
+          :background-color '(rgba 0.1 0.1 0.1 1.0)
+          :border-color :transparent
+          :color :dim
+          :on-click |x y r| (eseq.drum-rack-v2/save-kit gidx))
         (%rack-volume-control gidx bus-idx)))))
 
 (def %rack-header-row (gidx)
@@ -2104,12 +2281,17 @@
       :padding 0.0145
       (v-stack :width :fill :gap 0.1
         (%rack-header-row gidx)
+        ;; The pad grid belongs to the header, not to the member rows, so a
+        ;; collapsed rack can still be finger-drummed.
+        (if (%pad-grid-open? gidx)
+          (%rack-pad-grid gidx)
+          (box :width 0.0 :height 0.0 :bg :transparent))
         (if (eseq.drum-rack-v2/collapsed? gidx)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :width :fill :gap 0.0
             (each (eseq.drum-rack-v2/visible-members gidx) |m|
               (subtree :key (str "sequencer-track-" (nth SEQ.track-ids m))
-                (%track-row m)))))))))
+                (%rack-member-row gidx m)))))))))
 
 (def %grid-render-item (item)
   (if (= (get item :kind) "rack")
