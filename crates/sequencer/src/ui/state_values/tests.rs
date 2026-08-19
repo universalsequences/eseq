@@ -49243,6 +49243,7 @@
                 ],
                 choke_groups: vec![None, Some(1)],
             }),
+            rack_members: Vec::new(),
         }
     }
 
@@ -49299,6 +49300,48 @@
                 "pad field {field} should resolve"
             );
         }
+    }
+
+    /// Slice 5 of docs/drum-rack-v2-spec.md: the mixer draws a nested rack
+    /// inside its parent's block, which it can only do if the bindings carry
+    /// the nesting in both directions.
+    #[test]
+    fn metal_seq_groups_value_carries_rack_nesting_in_both_directions() {
+        let mut parent = rack_group_fixture(false);
+        parent.id = 3;
+        parent.rack = None;
+        parent.members = vec![0, 3];
+        parent.rack_members = vec![7];
+        let groups = [parent, rack_group_fixture(false)];
+        let Value::List(items) = build_groups_value(&groups) else {
+            panic!("groups value should be a list");
+        };
+        let field = |index: usize, key: &str| {
+            let Some(Value::Map(group)) = items.get(index).map(|cell| cell.borrow().clone()) else {
+                panic!("group {index} should be a map");
+            };
+            group.get(key).map(|cell| cell.borrow().clone())
+        };
+        assert_eq!(
+            field(0, "rack-members"),
+            Some(test_list(vec![Value::Number(7.0)])),
+            "the parent lists the rack it contains",
+        );
+        assert_eq!(
+            field(0, "parent"),
+            Some(Value::Number(-1.0)),
+            "a top-level group has no parent",
+        );
+        assert_eq!(
+            field(1, "parent"),
+            Some(Value::Number(3.0)),
+            "the nested rack points back at the group drawing it",
+        );
+        assert_eq!(
+            field(1, "rack-members"),
+            Some(test_list(vec![])),
+            "racks contain only member tracks",
+        );
     }
 
     #[test]

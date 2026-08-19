@@ -878,11 +878,36 @@ pub(super) fn handle(
                 v.sort_unstable();
                 v
             };
-            let already_grouped = members
+            // A selected rack member stands in for its whole rack: the rack
+            // joins as one unit (docs/drum-rack-v2-spec.md, "Racks inside
+            // track groups") instead of being torn apart track by track.
+            let mut racks: Vec<u64> = Vec::new();
+            let mut loose: Vec<usize> = Vec::new();
+            for track in &members {
+                match app
+                    .groups
+                    .iter()
+                    .find(|group| group.members.contains(track))
+                {
+                    Some(group) if group.is_rack() => {
+                        if !racks.contains(&group.id) {
+                            racks.push(group.id);
+                        }
+                    }
+                    // A track in a plain group is already grouped; leave it.
+                    Some(_) => loose.push(*track),
+                    None => loose.push(*track),
+                }
+            }
+            let already_grouped = loose
                 .iter()
-                .any(|m| app.groups.iter().any(|g| g.members.contains(m)));
-            if members.len() >= 2 && !already_grouped {
-                let Ok(bus) = app.group_tracks_recorded(members.clone()) else {
+                .any(|m| app.groups.iter().any(|g| g.members.contains(m)))
+                || racks
+                    .iter()
+                    .any(|rack| app.rack_parent_group(*rack).is_some());
+            if loose.len() + racks.len() >= 2 && !already_grouped {
+                let Ok(bus) = app.group_tracks_and_racks_recorded(loose.clone(), racks.clone())
+                else {
                     editor.handle_host_event(HostEvent::Status(
                         "Could not group the selected tracks".to_string(),
                     ));
@@ -913,6 +938,45 @@ pub(super) fn handle(
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 ui_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        "move-rack-to-group" => {
+            // Drag-drop a rack (by GroupId) onto the plain group at `gidx`. The
+            // rack joins as one unit and its bus chains into the parent's.
+            let rack = extract_usize_from_payload(&payload, "rack").map(|id| id as u64);
+            let gidx = extract_usize_from_payload(&payload, "gidx");
+            if let (Some(rack), Some(gidx)) = (rack, gidx) {
+                if app.move_rack_to_group_recorded(rack, gidx).is_ok() {
+                    *bus_state.lock().unwrap() = app.buses.clone();
+                    *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                    *track_groups.lock().unwrap() = app.groups.clone();
+                    let rt = editor.runtime_mut();
+                    sync_track_mixer_state(rt, &app, &state);
+                    sync_bus_mixer_state(rt, &app);
+                    sync_groups_bindings(rt, &app.groups);
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        "remove-rack-from-group" => {
+            // Pull a rack back out of its parent group; its bus returns to the
+            // master mix and the parent dissolves if it drops below two units.
+            let rack = extract_usize_from_payload(&payload, "rack").map(|id| id as u64);
+            if let Some(rack) = rack {
+                if app.remove_rack_from_group_recorded(rack).is_ok() {
+                    *bus_state.lock().unwrap() = app.buses.clone();
+                    *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                    *track_groups.lock().unwrap() = app.groups.clone();
+                    let rt = editor.runtime_mut();
+                    sync_track_mixer_state(rt, &app, &state);
+                    sync_bus_mixer_state(rt, &app);
+                    sync_groups_bindings(rt, &app.groups);
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         "move-track-to-group" => {

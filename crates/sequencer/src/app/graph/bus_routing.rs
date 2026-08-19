@@ -146,7 +146,132 @@ impl GraphController<'_> {
             meter_id,
             mod_in_clip_ids,
         });
+        self.apply_bus_output_routing(id);
         self.app.publish_bus_gate_runtime();
+    }
+
+    /// Disconnects a bus's post-fader tail from every destination it could be
+    /// feeding: the master mix, or another bus's input pair. Mirrors
+    /// `disconnect_delay_output_from_all` for tracks — the destination stored
+    /// in the project may already have been rewritten, so this never trusts it.
+    fn disconnect_bus_output_from_all(&self, pdc_id: i32) {
+        unsafe {
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                pdc_id,
+                0,
+                self.app.graph.bus_l_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                pdc_id,
+                1,
+                self.app.graph.bus_r_id,
+                0,
+            );
+        }
+        for bus in &self.app.graph.bus_node_ids {
+            if bus.pdc_id == pdc_id {
+                continue;
+            }
+            unsafe {
+                crate::audiograph::graph_disconnect(self.app.graph.lg.0, pdc_id, 0, bus.left_id, 0);
+                crate::audiograph::graph_disconnect(self.app.graph.lg.0, pdc_id, 1, bus.right_id, 0);
+            }
+        }
+    }
+
+    /// Points a bus's output at whatever `BusChannelState::output` says: the
+    /// master mix, or another bus's left/right inputs (a rack bus chained into
+    /// its parent group's bus, docs/drum-rack-v2-spec.md). A destination that
+    /// does not resolve — or that is the bus itself — falls back to the mix, so
+    /// a bus is never left feeding nothing.
+    pub fn apply_bus_output_routing(&mut self, id: BusId) {
+        // The mix is the terminus; and a headless app (tests, project probes)
+        // has no live graph to re-wire.
+        if id == BusId::MIX || self.app.graph.lg.0.is_null() {
+            return;
+        }
+        let Some(nodes) = self
+            .app
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let destination = self
+            .app
+            .buses
+            .iter()
+            .find(|bus| bus.id == id)
+            .and_then(|bus| bus.output.destination())
+            .map(BusId)
+            .filter(|target| *target != id && *target != BusId::MIX)
+            .and_then(|target| {
+                self.app
+                    .graph
+                    .bus_node_ids
+                    .iter()
+                    .find(|nodes| nodes.id == target)
+                    .cloned()
+            });
+
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        self.disconnect_bus_output_from_all(nodes.pdc_id);
+        match destination {
+            Some(target) => unsafe {
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    nodes.pdc_id,
+                    0,
+                    target.left_id,
+                    0,
+                );
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    nodes.pdc_id,
+                    1,
+                    target.right_id,
+                    0,
+                );
+            },
+            None => unsafe {
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    nodes.pdc_id,
+                    0,
+                    self.app.graph.bus_l_id,
+                    0,
+                );
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    nodes.pdc_id,
+                    1,
+                    self.app.graph.bus_r_id,
+                    0,
+                );
+            },
+        }
+        self.app.refresh_latency_compensation();
+    }
+
+    /// Re-applies every bus's output destination. Needed wherever the bus set
+    /// is rebuilt wholesale (project load, history replay): a chained bus can
+    /// only be wired once its destination's nodes exist.
+    pub fn apply_all_bus_output_routing(&mut self) {
+        let ids = self
+            .app
+            .buses
+            .iter()
+            .map(|bus| bus.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.apply_bus_output_routing(id);
+        }
     }
 
     /// Makes the graph bus registry exactly mirror the current project bus
@@ -195,6 +320,7 @@ impl GraphController<'_> {
                 .position(|(id, _)| *id == nodes.id)
                 .expect("graph bus membership was validated before sorting")
         });
+        self.apply_all_bus_output_routing();
         self.app.publish_bus_gate_runtime();
         self.app.refresh_latency_compensation();
         Ok(())
@@ -211,6 +337,9 @@ impl GraphController<'_> {
             return;
         };
         let bus = self.app.graph.bus_node_ids.remove(pos);
+        // The tail may feed the mix or a parent bus; `bus` is already out of
+        // the registry, so this only tears down its own outgoing edges.
+        self.disconnect_bus_output_from_all(bus.pdc_id);
         unsafe {
             crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.meter_id);
             crate::audiograph::graph_disconnect(
@@ -226,20 +355,6 @@ impl GraphController<'_> {
                 1,
                 bus.meter_id,
                 1,
-            );
-            crate::audiograph::graph_disconnect(
-                self.app.graph.lg.0,
-                bus.pdc_id,
-                0,
-                self.app.graph.bus_l_id,
-                0,
-            );
-            crate::audiograph::graph_disconnect(
-                self.app.graph.lg.0,
-                bus.pdc_id,
-                1,
-                self.app.graph.bus_r_id,
-                0,
             );
             crate::audiograph::graph_disconnect(self.app.graph.lg.0, bus.volume_id, 0, bus.pdc_id, 0);
             crate::audiograph::graph_disconnect(self.app.graph.lg.0, bus.volume_id, 1, bus.pdc_id, 1);

@@ -176,6 +176,15 @@ pub enum GroupMember {
 }
 ```
 
+As built, the two kinds are stored in two fields rather than one heterogeneous
+`Vec` — `members: Vec<usize>` (unchanged, and still what rack pads index into)
+plus `rack_members: Vec<u64>` — and `group_members_ordered(group, groups)`
+interleaves them into `Vec<GroupMember>` for render order. A rack sits at its
+own lowest member track, so it occupies exactly one slot in the parent's block;
+racks that have claimed no track yet sort last. Keeping `members` a plain track
+list is what lets `ProjectRackPad::member` stay a position in it, and keeps old
+files parsing with no custom deserializer.
+
 Nesting rule (keeps the track-groups "one level deep" spirit): plain groups
 may contain tracks and racks; racks contain only member tracks; plain groups
 never contain plain groups. A rack belongs to at most one parent group.

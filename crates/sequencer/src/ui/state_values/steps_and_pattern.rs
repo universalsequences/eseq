@@ -492,6 +492,15 @@ pub(crate) fn sync_selected_tracks_bindings(
 pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup]) -> Value {
     list_value(groups.iter().map(|group| {
         let anchor = group.members.iter().copied().min().unwrap_or(0);
+        // Nesting, both ways: `rack-members` are the child racks this group
+        // draws inside its own block, `parent` is the group id drawing this
+        // one (-1 when it is top level). See docs/drum-rack-v2-spec.md,
+        // "Racks inside track groups".
+        let parent = groups
+            .iter()
+            .find(|candidate| candidate.rack_members.contains(&group.id))
+            .map(|candidate| candidate.id as f64)
+            .unwrap_or(-1.0);
         map_value([
             ("id", Value::Number(group.id as f64)),
             ("name", Value::String(group.name.clone().into())),
@@ -508,6 +517,16 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
             ),
             ("rack", Value::Bool(group.is_rack())),
             ("pads", build_rack_pads_value(group)),
+            (
+                "rack-members",
+                list_value(
+                    group
+                        .rack_members
+                        .iter()
+                        .map(|id| Value::Number(*id as f64)),
+                ),
+            ),
+            ("parent", Value::Number(parent)),
         ])
     }))
 }

@@ -870,6 +870,132 @@ pub struct ProjectTrackGroup {
     /// members. See `docs/drum-rack-v2-spec.md`.
     #[serde(default)]
     pub rack: Option<ProjectRackConfig>,
+    /// Child racks this (plain) group contains, by stable `GroupId` — the
+    /// `GroupMember::Rack` half of group membership
+    /// (docs/drum-rack-v2-spec.md, "Racks inside track groups"). Ids rather
+    /// than indices, so nesting survives track reindex-on-delete. The nesting
+    /// rule keeps this empty on racks: racks contain only member tracks, and
+    /// plain groups never contain plain groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_members: Vec<u64>,
+}
+
+/// One entry of a group's ordered membership. Track members live in
+/// `ProjectTrackGroup::members` and rack members in
+/// `ProjectTrackGroup::rack_members`; `group_members_ordered` interleaves them
+/// into the order the mixer draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupMember {
+    /// A member track, by index (as `members` stores it).
+    Track(usize),
+    /// A child rack, by stable `GroupId` (as `rack_members` stores it).
+    Rack(u64),
+}
+
+/// A group's membership in render order: track members sit at their track
+/// index and each child rack sits at its own lowest member track, so a rack
+/// occupies exactly one slot in the parent's block. Racks that have claimed no
+/// track yet (lazy pads) sort last, mirroring the grid's empty-rack handling.
+pub fn group_members_ordered(
+    group: &ProjectTrackGroup,
+    groups: &[ProjectTrackGroup],
+) -> Vec<GroupMember> {
+    let mut entries: Vec<(usize, GroupMember)> = group
+        .members
+        .iter()
+        .map(|&track| (track, GroupMember::Track(track)))
+        .collect();
+    for &rack_id in &group.rack_members {
+        let Some(rack) = groups.iter().find(|group| group.id == rack_id) else {
+            continue;
+        };
+        let anchor = rack.members.iter().copied().min().unwrap_or(usize::MAX);
+        entries.push((anchor, GroupMember::Rack(rack_id)));
+    }
+    entries.sort_by_key(|(anchor, _)| *anchor);
+    entries.into_iter().map(|(_, member)| member).collect()
+}
+
+/// Drops nesting that breaks the rule "plain groups may contain tracks and
+/// racks; racks contain only member tracks; plain groups never contain plain
+/// groups; a rack belongs to at most one parent group". Returns true when
+/// anything had to be repaired. Called on load, where a hand-edited or
+/// future-versioned file can carry anything.
+pub fn sanitize_group_nesting(groups: &mut [ProjectTrackGroup]) -> bool {
+    let rack_ids: Vec<u64> = groups
+        .iter()
+        .filter(|group| group.is_rack())
+        .map(|group| group.id)
+        .collect();
+    let mut claimed: Vec<u64> = Vec::new();
+    let mut repaired = false;
+    for index in 0..groups.len() {
+        if groups[index].rack_members.is_empty() {
+            continue;
+        }
+        // Racks hold only tracks, so any child on a rack is bogus.
+        if groups[index].is_rack() {
+            groups[index].rack_members.clear();
+            repaired = true;
+            continue;
+        }
+        let own_id = groups[index].id;
+        let before = groups[index].rack_members.len();
+        let mut kept = Vec::with_capacity(before);
+        for child in std::mem::take(&mut groups[index].rack_members) {
+            // A child must be a real rack, not this group, and unclaimed.
+            if child != own_id && rack_ids.contains(&child) && !claimed.contains(&child) {
+                claimed.push(child);
+                kept.push(child);
+            }
+        }
+        repaired |= kept.len() != before;
+        groups[index].rack_members = kept;
+    }
+    repaired
+}
+
+/// Resets any bus output that dangles, points at itself, or closes a cycle
+/// back to `Mix`. The nesting rule already bounds the chain at rack bus →
+/// group bus → mix, but a file is not a proof, so load validates anyway
+/// (docs/drum-rack-v2-spec.md, "Racks inside track groups"). Returns true when
+/// anything had to be repaired.
+pub fn sanitize_bus_outputs(buses: &mut [ProjectBusChannel]) -> bool {
+    let ids: Vec<u64> = buses.iter().map(|bus| bus.id).collect();
+    let mut repaired = false;
+    for index in 0..buses.len() {
+        let Some(destination) = buses[index].output.destination() else {
+            continue;
+        };
+        let dangling = !ids.contains(&destination);
+        if dangling || destination == buses[index].id {
+            buses[index].output = BusOutput::Mix;
+            repaired = true;
+            continue;
+        }
+        // Walk the chain from this bus; a revisit means the edge closes a loop.
+        let mut seen = vec![buses[index].id];
+        let mut cursor = destination;
+        let cyclic = loop {
+            if seen.contains(&cursor) {
+                break true;
+            }
+            seen.push(cursor);
+            let Some(next) = buses
+                .iter()
+                .find(|bus| bus.id == cursor)
+                .and_then(|bus| bus.output.destination())
+            else {
+                break false;
+            };
+            cursor = next;
+        };
+        if cyclic {
+            buses[index].output = BusOutput::Mix;
+            repaired = true;
+        }
+    }
+    repaired
 }
 
 impl ProjectTrackGroup {
@@ -1017,6 +1143,28 @@ pub struct ProjectReverbState {
     pub replace: f32,
 }
 
+/// Where a bus's post-fader output lands. `Mix` is the historical (and only
+/// pre-rack-v2) behaviour: straight to the master mix. `Bus(id)` chains this
+/// bus into another one, which is how a drum rack joins a plain track group
+/// (docs/drum-rack-v2-spec.md, "Racks inside track groups"). The output graph
+/// must stay acyclic; `sanitize_bus_outputs` enforces that on load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BusOutput {
+    #[default]
+    Mix,
+    Bus(u64),
+}
+
+impl BusOutput {
+    /// The bus this one feeds, or `None` when it feeds the master mix.
+    pub fn destination(&self) -> Option<u64> {
+        match self {
+            BusOutput::Mix => None,
+            BusOutput::Bus(id) => Some(*id),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectBusChannel {
     pub id: u64,
@@ -1033,6 +1181,10 @@ pub struct ProjectBusChannel {
     pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
+    /// Output destination. Absent in pre-rack-v2 files, which load as `Mix`
+    /// and therefore route exactly as they did before.
+    #[serde(default)]
+    pub output: BusOutput,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1102,6 +1254,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
+            output: BusOutput::Mix,
         },
         ProjectBusChannel {
             id: crate::sequencer::DEFAULT_BUS_A_ID,
@@ -1112,6 +1265,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
+            output: BusOutput::Mix,
         },
         ProjectBusChannel {
             id: crate::sequencer::DEFAULT_BUS_B_ID,
@@ -1122,6 +1276,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
+            output: BusOutput::Mix,
         },
     ]
 }
@@ -3023,6 +3178,113 @@ pub fn chord_snapshot_from_steps_and_durations(
 mod tests {
     use super::*;
 
+    fn test_bus(id: u64, output: BusOutput) -> ProjectBusChannel {
+        ProjectBusChannel {
+            id,
+            name: format!("Bus {id}"),
+            volume: crate::mixer_volume::default_fader(),
+            mute: false,
+            solo: false,
+            gate_sequence: ProjectBusGateSequence::default(),
+            custom_effects: Vec::new(),
+            effect_slots: Vec::new(),
+            output,
+        }
+    }
+
+    fn test_group(id: u64, members: Vec<usize>, rack: bool, rack_members: Vec<u64>) -> ProjectTrackGroup {
+        ProjectTrackGroup {
+            id,
+            name: format!("Group {id}"),
+            color: [0.5, 0.5, 0.5],
+            collapsed: false,
+            members,
+            bus_id: 100 + id,
+            rack: rack.then(ProjectRackConfig::default),
+            rack_members,
+        }
+    }
+
+    #[test]
+    fn bus_output_defaults_to_mix_for_files_written_before_bus_chaining() {
+        let legacy = r#"{"id":7,"name":"Bus A","volume":0.8}"#;
+        let bus: ProjectBusChannel =
+            serde_json::from_str(legacy).expect("legacy bus channels still parse");
+        assert_eq!(bus.output, BusOutput::Mix);
+        assert_eq!(bus.output.destination(), None);
+
+        let chained = test_bus(7, BusOutput::Bus(9));
+        let round_trip: ProjectBusChannel =
+            serde_json::from_str(&serde_json::to_string(&chained).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(round_trip.output, BusOutput::Bus(9));
+    }
+
+    #[test]
+    fn sanitize_bus_outputs_resets_dangling_self_and_cyclic_chains() {
+        let mut buses = vec![
+            test_bus(1, BusOutput::Bus(404)),
+            test_bus(2, BusOutput::Bus(2)),
+            test_bus(3, BusOutput::Bus(4)),
+            test_bus(4, BusOutput::Bus(3)),
+            test_bus(5, BusOutput::Bus(6)),
+            test_bus(6, BusOutput::Mix),
+        ];
+        assert!(sanitize_bus_outputs(&mut buses));
+        assert_eq!(buses[0].output, BusOutput::Mix, "dangling destination");
+        assert_eq!(buses[1].output, BusOutput::Mix, "self reference");
+        // One of the two edges in the 3<->4 loop is enough to break it.
+        assert!(
+            buses[2].output == BusOutput::Mix || buses[3].output == BusOutput::Mix,
+            "a cycle must be broken",
+        );
+        assert_eq!(buses[4].output, BusOutput::Bus(6), "a legal chain survives");
+        assert!(!sanitize_bus_outputs(&mut buses), "sanitizing is idempotent");
+    }
+
+    #[test]
+    fn sanitize_group_nesting_enforces_the_rack_nesting_rule() {
+        let mut groups = vec![
+            // A plain group holding a real rack, a plain group, an unknown id,
+            // and itself.
+            test_group(1, vec![0], false, vec![2, 3, 404, 1]),
+            test_group(2, vec![1], true, Vec::new()),
+            test_group(3, vec![2], false, Vec::new()),
+            // A rack may not contain anything but tracks.
+            test_group(4, vec![3], true, vec![2]),
+            // A rack belongs to at most one parent.
+            test_group(5, vec![4], false, vec![2]),
+        ];
+        assert!(sanitize_group_nesting(&mut groups));
+        assert_eq!(groups[0].rack_members, vec![2], "only the real rack survives");
+        assert!(groups[3].rack_members.is_empty(), "racks contain no racks");
+        assert!(groups[4].rack_members.is_empty(), "a rack has one parent");
+        assert!(!sanitize_group_nesting(&mut groups), "sanitizing is idempotent");
+    }
+
+    #[test]
+    fn group_members_ordered_seats_a_rack_at_its_lowest_member_track() {
+        let groups = vec![
+            test_group(1, vec![0, 5], false, vec![2, 3]),
+            test_group(2, vec![2, 3], true, Vec::new()),
+            // An empty rack has claimed no track yet, so it sorts last.
+            test_group(3, Vec::new(), true, Vec::new()),
+        ];
+        assert_eq!(
+            group_members_ordered(&groups[0], &groups),
+            vec![
+                GroupMember::Track(0),
+                GroupMember::Rack(2),
+                GroupMember::Track(5),
+                GroupMember::Rack(3),
+            ],
+        );
+        assert_eq!(
+            group_members_ordered(&groups[1], &groups),
+            vec![GroupMember::Track(2), GroupMember::Track(3)],
+        );
+    }
+
     fn sample_project() -> ProjectFile {
         ProjectFile {
             version: project_file_version(),
@@ -3762,6 +4024,7 @@ mod tests {
                 ],
                 choke_groups: vec![None, Some(1)],
             }),
+            rack_members: Vec::new(),
         }];
         let json = serde_json::to_string(&project).expect("serialize project");
         let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");

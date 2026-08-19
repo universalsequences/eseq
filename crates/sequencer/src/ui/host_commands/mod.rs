@@ -537,6 +537,7 @@ mod tests {
             members,
             bus_id,
             rack: None,
+            rack_members: Vec::new(),
         }
     }
 

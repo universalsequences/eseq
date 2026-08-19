@@ -279,8 +279,49 @@ impl App {
         }
     }
 
+    /// Buses that must stay open while something is soloed. Chained buses
+    /// (docs/drum-rack-v2-spec.md, "Racks inside track groups") make this a
+    /// graph question rather than a flag test: soloing a parent group has to
+    /// keep its upstream rack buses audible, and soloing a rack has to keep the
+    /// downstream parent bus open or the rack's own audio never reaches the
+    /// mix. So the audible set is every soloed bus plus everything reachable
+    /// from it along `BusOutput::Bus` edges in *either* direction.
+    pub(crate) fn solo_audible_buses(&self) -> Vec<crate::sequencer::BusId> {
+        let mut audible: Vec<crate::sequencer::BusId> =
+            self.buses.iter().filter(|bus| bus.solo).map(|bus| bus.id).collect();
+        let mut cursor = 0;
+        while cursor < audible.len() {
+            let current = audible[cursor];
+            cursor += 1;
+            // Downstream: the bus this one feeds.
+            let downstream = self
+                .buses
+                .iter()
+                .find(|bus| bus.id == current)
+                .and_then(|bus| bus.output.destination())
+                .map(crate::sequencer::BusId);
+            // Upstream: every bus feeding this one.
+            let upstream = self
+                .buses
+                .iter()
+                .filter(|bus| bus.output.destination() == Some(current.0))
+                .map(|bus| bus.id);
+            for id in downstream.into_iter().chain(upstream) {
+                if !audible.contains(&id) {
+                    audible.push(id);
+                }
+            }
+        }
+        audible
+    }
+
     pub(super) fn push_bus_solo_mutes(&self) {
         let has_solo = self.buses.iter().any(|bus| bus.solo);
+        let audible = if has_solo {
+            self.solo_audible_buses()
+        } else {
+            Vec::new()
+        };
         for channel in &self.buses {
             let Some(nodes) = self
                 .graph
@@ -290,7 +331,7 @@ impl App {
             else {
                 continue;
             };
-            let muted_by_solo = has_solo && !channel.solo;
+            let muted_by_solo = has_solo && !audible.contains(&channel.id);
             unsafe {
                 crate::audiograph::params_push_wrapper(
                     self.graph.lg.0,

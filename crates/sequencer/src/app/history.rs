@@ -90,6 +90,7 @@ pub struct BusStructureState {
     pub solo: bool,
     pub gate_sequence: crate::sequencer::BusGateSequence,
     pub effects: BusEffectChainState,
+    pub output: crate::project::BusOutput,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +109,9 @@ pub struct GroupStructureState {
     pub members: Vec<TrackId>,
     pub bus_id: BusId,
     pub rack: Option<crate::project::ProjectRackConfig>,
+    /// Child racks, by stable `GroupId` — nesting survives undo unchanged
+    /// because group ids, unlike track indices, never shift.
+    pub rack_members: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]

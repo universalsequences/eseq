@@ -2019,6 +2019,7 @@ impl App {
                 solo,
                 gate_sequence,
                 effects,
+                output: self.buses[bus_idx].output,
             });
         }
         let groups = self.groups.iter().map(|group| {
@@ -2034,6 +2035,7 @@ impl App {
                 members,
                 bus_id: BusId(group.bus_id),
                 rack: group.rack.clone(),
+                rack_members: group.rack_members.clone(),
             })
         }).collect::<Result<Vec<_>, String>>()?;
         Ok(BusGroupStructureState {
@@ -2070,6 +2072,7 @@ impl App {
                 members,
                 bus_id: group.bus_id.0,
                 rack: group.rack.clone(),
+                rack_members: group.rack_members.clone(),
             })
         }).collect::<Result<Vec<_>, String>>()?;
 
@@ -2106,8 +2109,12 @@ impl App {
             bus.mute = target_bus.mute;
             bus.solo = target_bus.solo;
             bus.gate_sequence.clone_from(&target_bus.gate_sequence);
+            bus.output = target_bus.output;
         }
         self.groups = groups;
+        // Chained bus outputs are replayed as part of the topology: the
+        // destination bus may only have just been recreated above.
+        self.graph_controller().apply_all_bus_output_routing();
         self.restore_scene_structure_state(&target.scenes)?;
         for track in 0..self.tracks.len() {
             let mut graph = self.graph_controller();
@@ -2205,15 +2212,32 @@ impl App {
         })
     }
 
-    pub fn group_tracks_recorded(&mut self, mut members: Vec<usize>) -> Result<BusId, String> {
+    pub fn group_tracks_recorded(&mut self, members: Vec<usize>) -> Result<BusId, String> {
+        self.group_tracks_and_racks_recorded(members, Vec::new())
+    }
+
+    /// Groups loose tracks and whole racks into one new plain group. A rack
+    /// joins as a single unit: it keeps its own group and bus, and that bus
+    /// chains into the new parent's bus, so parent volume/fx/mute reach the
+    /// rack through the audio chain (docs/drum-rack-v2-spec.md, "Racks inside
+    /// track groups"). Two members of any kind are required.
+    pub fn group_tracks_and_racks_recorded(
+        &mut self,
+        mut members: Vec<usize>,
+        mut racks: Vec<u64>,
+    ) -> Result<BusId, String> {
         members.sort_unstable();
         members.dedup();
+        racks.dedup();
         self.apply_recorded_bus_group_structure_mutation("Group tracks", |app| {
-            if members.len() < 2
+            if members.len() + racks.len() < 2
                 || members.iter().any(|track| *track >= app.tracks.len())
                 || members.iter().any(|track| app.groups.iter().any(|group| group.members.contains(track)))
             {
                 return Err("At least two ungrouped tracks are required".to_string());
+            }
+            for rack in &racks {
+                app.check_rack_is_groupable(*rack)?;
             }
             let group_index = app.groups.len() + 1;
             let bus = app.add_bus_channel(format!("Group {group_index}"));
@@ -2232,9 +2256,161 @@ impl App {
                 members,
                 bus_id: bus.0,
                 rack: None,
+                rack_members: racks.clone(),
             });
+            for rack in &racks {
+                app.set_rack_bus_output(*rack, Some(bus))?;
+            }
             Ok(bus)
         })
+    }
+
+    /// Rejects a group id that cannot join a plain group as a rack unit. The
+    /// nesting rule (docs/drum-rack-v2-spec.md): only racks nest, and only into
+    /// one parent — plain groups never contain plain groups, and racks never
+    /// contain racks.
+    fn check_rack_is_groupable(&self, rack_id: u64) -> Result<(), String> {
+        let rack = self.groups.iter().find(|group| group.id == rack_id)
+            .ok_or_else(|| format!("Track group {rack_id} does not exist"))?;
+        if !rack.is_rack() {
+            return Err("Only drum racks can be grouped as a unit".to_string());
+        }
+        if self.rack_parent_group(rack_id).is_some() {
+            return Err("This rack already belongs to a group".to_string());
+        }
+        Ok(())
+    }
+
+    /// Index (in `groups`) of the plain group holding this rack, if any.
+    pub fn rack_parent_group(&self, rack_id: u64) -> Option<usize> {
+        self.groups
+            .iter()
+            .position(|group| group.rack_members.contains(&rack_id))
+    }
+
+    /// Points a rack's backing bus at `parent` (or back at the master mix with
+    /// `None`) and re-wires the graph to match.
+    fn set_rack_bus_output(&mut self, rack_id: u64, parent: Option<BusId>) -> Result<(), String> {
+        let rack_bus = self.groups.iter().find(|group| group.id == rack_id)
+            .map(|group| BusId(group.bus_id))
+            .ok_or_else(|| format!("Track group {rack_id} does not exist"))?;
+        let output = match parent {
+            Some(parent) if parent != rack_bus => crate::project::BusOutput::Bus(parent.0),
+            _ => crate::project::BusOutput::Mix,
+        };
+        let bus = self.buses.iter_mut().find(|bus| bus.id == rack_bus)
+            .ok_or_else(|| format!("Track group {rack_id} has no backing bus"))?;
+        bus.output = output;
+        self.graph_controller().apply_bus_output_routing(rack_bus);
+        // The audible set under solo follows the chain, so re-derive it.
+        self.push_bus_solo_mutes();
+        Ok(())
+    }
+
+    /// Makes every rack bus's output agree with the group nesting, which is the
+    /// source of truth. Used on load, where the two are deserialized
+    /// independently and can disagree.
+    pub(crate) fn reconcile_rack_group_bus_outputs(&mut self) {
+        let desired = self.groups.iter()
+            .filter(|group| group.is_rack())
+            .map(|group| (group.id, self.rack_parent_group(group.id)
+                .map(|parent| BusId(self.groups[parent].bus_id))))
+            .collect::<Vec<_>>();
+        for (rack_id, parent) in desired {
+            let _ = self.set_rack_bus_output(rack_id, parent);
+        }
+    }
+
+    /// Number of membership units in a group: tracks plus child racks. A plain
+    /// group dissolves below two, exactly as it did when tracks were the only
+    /// kind of member.
+    fn group_unit_count(&self, group_index: usize) -> usize {
+        let group = &self.groups[group_index];
+        group.members.len() + group.rack_members.len()
+    }
+
+    /// Moves a rack into a plain group as one unit, chaining its bus into the
+    /// parent's. Leaving a previous parent dissolves that parent if it drops
+    /// below two units, mirroring `move_track_to_group_recorded`.
+    pub fn move_rack_to_group_recorded(
+        &mut self,
+        rack_id: u64,
+        target_group: usize,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Move rack to group", |app| {
+            let target_id = app.groups.get(target_group)
+                .map(|group| group.id)
+                .ok_or_else(|| "Group is out of range".to_string())?;
+            if !app.groups.iter().any(|group| group.id == rack_id && group.is_rack()) {
+                return Err("Only drum racks can be grouped as a unit".to_string());
+            }
+            if app.groups[target_group].is_rack() {
+                return Err("A drum rack cannot contain another rack".to_string());
+            }
+            if app.groups[target_group].rack_members.contains(&rack_id) {
+                return Err("Rack is already in this group".to_string());
+            }
+            let source_id = app.rack_parent_group(rack_id).map(|index| app.groups[index].id);
+            if source_id.is_some() {
+                app.detach_rack_member(rack_id);
+            }
+            let target = app.groups.iter().position(|group| group.id == target_id)
+                .expect("target group was resolved above");
+            app.groups[target].rack_members.push(rack_id);
+            let parent_bus = BusId(app.groups[target].bus_id);
+            app.set_rack_bus_output(rack_id, Some(parent_bus))?;
+            if let Some(source_id) = source_id {
+                app.dissolve_group_if_undersized(source_id)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Takes a rack back out of its parent group; its bus returns to the mix.
+    pub fn remove_rack_from_group_recorded(&mut self, rack_id: u64) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Remove rack from group", |app| {
+            let parent = app.rack_parent_group(rack_id)
+                .ok_or_else(|| "Rack is not grouped".to_string())?;
+            let parent_id = app.groups[parent].id;
+            app.detach_rack_member(rack_id);
+            app.set_rack_bus_output(rack_id, None)?;
+            app.dissolve_group_if_undersized(parent_id)
+        })
+    }
+
+    /// Removes `rack_id` from whatever plain group holds it. Bus routing is the
+    /// caller's business, as with `detach_group_member`.
+    fn detach_rack_member(&mut self, rack_id: u64) -> Option<usize> {
+        let parent = self.rack_parent_group(rack_id)?;
+        let position = self.groups[parent].rack_members.iter()
+            .position(|member| *member == rack_id)?;
+        self.groups[parent].rack_members.remove(position);
+        Some(parent)
+    }
+
+    /// Dissolves a plain group (and its bus) once it holds fewer than two
+    /// units. Racks never dissolve: their pads are lazy, so an empty rack is a
+    /// legal kit waiting for sounds.
+    fn dissolve_group_if_undersized(&mut self, group_id: u64) -> Result<(), String> {
+        let Some(index) = self.groups.iter().position(|group| group.id == group_id) else {
+            return Ok(());
+        };
+        if self.groups[index].is_rack() || self.group_unit_count(index) >= 2 {
+            return Ok(());
+        }
+        let orphans = self.groups[index].rack_members.clone();
+        for rack in orphans {
+            self.detach_rack_member(rack);
+            self.set_rack_bus_output(rack, None)?;
+        }
+        let bus = BusId(self.groups[index].bus_id);
+        if !self.delete_bus_channel(bus) {
+            return Err("Could not dissolve the group bus".to_string());
+        }
+        let index = self.groups.iter().position(|group| group.id == group_id)
+            .expect("group was resolved above");
+        self.groups.remove(index);
+        Ok(())
     }
 
     /// Removes `track` from whatever group holds it, dropping the pad it backed
@@ -2277,15 +2453,7 @@ impl App {
             }
             app.attach_track_to_group(track, target_id, None)?;
             if let Some(source_id) = source_id {
-                let source = app.groups.iter().position(|group| group.id == source_id)
-                    .expect("source group was resolved above");
-                if !app.groups[source].is_rack() && app.groups[source].members.len() < 2 {
-                    let bus = BusId(app.groups[source].bus_id);
-                    if !app.delete_bus_channel(bus) {
-                        return Err("Could not dissolve the source group bus".to_string());
-                    }
-                    app.groups.remove(source);
-                }
+                app.dissolve_group_if_undersized(source_id)?;
             }
             Ok(())
         })
@@ -2295,15 +2463,10 @@ impl App {
         self.apply_recorded_bus_group_structure_mutation("Remove track from group", |app| {
             let group = app.detach_group_member(track)
                 .ok_or_else(|| "Track is not grouped".to_string())?;
+            let group_id = app.groups[group].id;
             app.set_track_output_all_scenes_unrecorded(track, crate::sequencer::TrackOutput::Mix);
             // A rack keeps existing with zero members: its pads are lazy.
-            if !app.groups[group].is_rack() && app.groups[group].members.len() < 2 {
-                let bus = BusId(app.groups[group].bus_id);
-                if !app.delete_bus_channel(bus) {
-                    return Err("Could not dissolve the group bus".to_string());
-                }
-                app.groups.remove(group);
-            }
+            app.dissolve_group_if_undersized(group_id)?;
             Ok(())
         })
     }
@@ -2319,11 +2482,29 @@ impl App {
                     crate::sequencer::TrackOutput::Mix,
                 );
             }
+            // Child racks outlive their parent as free racks routed to the mix.
+            let child_racks = app.groups[group].rack_members.clone();
+            for rack in child_racks {
+                app.detach_rack_member(rack);
+                app.set_rack_bus_output(rack, None)?;
+            }
+            // Deleting a rack that sits inside a group vacates that slot, which
+            // can leave the parent below two units.
+            let parent_id = app.rack_parent_group(group_id)
+                .map(|parent| app.groups[parent].id);
+            if parent_id.is_some() {
+                app.detach_rack_member(group_id);
+            }
+            let group = app.groups.iter().position(|group| group.id == group_id)
+                .expect("group was resolved above");
             let bus = BusId(app.groups[group].bus_id);
             if !app.delete_bus_channel(bus) {
                 return Err("Could not delete the track group's backing bus".to_string());
             }
             app.groups.remove(group);
+            if let Some(parent_id) = parent_id {
+                app.dissolve_group_if_undersized(parent_id)?;
+            }
             Ok(())
         })
     }
@@ -2347,6 +2528,7 @@ impl App {
                 members: Vec::new(),
                 bus_id: bus.0,
                 rack: Some(crate::project::ProjectRackConfig::default()),
+                rack_members: Vec::new(),
             });
             Ok((group_id, bus))
         })

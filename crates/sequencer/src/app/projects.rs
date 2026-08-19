@@ -918,6 +918,7 @@ impl From<BusChannelState> for ProjectBusChannel {
                 .iter()
                 .map(crate::project::ProjectEffectSlot::from)
                 .collect(),
+            output: value.output,
         }
     }
 }
@@ -929,6 +930,7 @@ impl From<ProjectBusChannel> for BusChannelState {
         bus.mute = value.mute;
         bus.solo = value.solo;
         bus.gate_sequence = project_bus_gate_sequence_to_ui(value.gate_sequence);
+        bus.output = value.output;
         for (idx, name) in value.custom_effects.into_iter().enumerate() {
             if idx < bus.custom_effect_names.len() {
                 bus.custom_effect_names[idx] = name;
@@ -1155,6 +1157,22 @@ impl App {
         }
 
         self.buses.remove(bus_idx);
+
+        // Anything chained into this bus loses its destination; drop those
+        // back to the master mix before the node pair disappears, or their
+        // audio would vanish with it (docs/drum-rack-v2-spec.md).
+        let orphans = self
+            .buses
+            .iter_mut()
+            .filter(|bus| bus.output.destination() == Some(id.0))
+            .map(|bus| {
+                bus.output = crate::project::BusOutput::Mix;
+                bus.id
+            })
+            .collect::<Vec<_>>();
+        for orphan in orphans {
+            self.graph_controller().apply_bus_output_routing(orphan);
+        }
 
         self.remove_bus_references_from_live_pattern(id);
         {
@@ -3464,11 +3482,21 @@ impl App {
             .transport
             .master_volume
             .store(master_volume.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+        let mut buses = buses;
+        // Bus chaining is only structurally acyclic while the nesting rule
+        // holds; a file is not a proof, so repair dangling/cyclic outputs
+        // before they reach the graph (docs/drum-rack-v2-spec.md).
+        if crate::project::sanitize_bus_outputs(&mut buses) {
+            eprintln!("Project load: reset an invalid bus output chain to the master mix");
+        }
         self.buses = if buses.is_empty() {
             BusChannelState::default_buses()
         } else {
             buses.into_iter().map(BusChannelState::from).collect()
         };
+        if let Some(mix) = self.buses.iter_mut().find(|bus| bus.id == BusId::MIX) {
+            mix.output = crate::project::BusOutput::Mix;
+        }
         if !self.buses.iter().any(|bus| bus.id == BusId::MIX) {
             self.buses
                 .insert(0, BusChannelState::new(BusId::MIX, "Mix"));
@@ -3481,8 +3509,11 @@ impl App {
             .into_iter()
             .filter(|group| {
                 self.buses.iter().any(|bus| bus.id.0 == group.bus_id)
-                    // A drum rack with zero members is legal: its pads are lazy.
-                    && (group.is_rack() || !group.members.is_empty())
+                    // A drum rack with zero members is legal: its pads are
+                    // lazy, and a plain group is legal while it holds a rack.
+                    && (group.is_rack()
+                        || !group.members.is_empty()
+                        || !group.rack_members.is_empty())
                     && group.members.iter().all(|&m| m < group_track_count)
             })
             .map(|mut group| {
@@ -3495,6 +3526,12 @@ impl App {
                 group
             })
             .collect();
+        // Nesting can only be judged once the surviving group set is known: a
+        // child rack dropped above must not leave a stale parent reference.
+        if crate::project::sanitize_group_nesting(&mut self.groups) {
+            eprintln!("Project load: dropped group nesting that breaks the rack nesting rule");
+        }
+        self.reconcile_rack_group_bus_outputs();
         self.publish_rack_choke_runtime();
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any

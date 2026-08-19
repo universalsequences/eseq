@@ -6296,6 +6296,128 @@ mod tests {
         graph.process_block();
     }
 
+    /// Slice 5 of docs/drum-rack-v2-spec.md: a rack joins a plain group as one
+    /// unit, its bus chaining into the parent's instead of the master mix.
+    #[test]
+    fn grouping_a_rack_with_loose_tracks_chains_the_rack_bus_into_the_parent() {
+        let graph = TestLiveGraph::new("rack-in-group-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, rack_bus) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.assign_rack_pad_track_recorded(rack_id, 36, kick).expect("kick pad");
+        let bass = app.graph_controller().add_blank_sampler_track().expect("bass track");
+        let lead = app.graph_controller().add_blank_sampler_track().expect("lead track");
+
+        let bus_output = |app: &App, bus: crate::app::BusId| {
+            app.buses.iter().find(|channel| channel.id == bus).expect("bus").output
+        };
+        assert_eq!(bus_output(&app, rack_bus), crate::project::BusOutput::Mix);
+
+        let parent_bus = app
+            .group_tracks_and_racks_recorded(vec![bass, lead], vec![rack_id])
+            .expect("a rack groups with loose tracks");
+        let parent = app.groups.iter().find(|group| group.bus_id == parent_bus.0)
+            .expect("parent group");
+        assert_eq!(parent.rack_members, vec![rack_id], "the rack joined as one unit");
+        assert_eq!(parent.members, vec![bass, lead]);
+        assert_eq!(
+            bus_output(&app, rack_bus),
+            crate::project::BusOutput::Bus(parent_bus.0),
+            "the rack bus feeds the parent bus, so parent volume/fx/mute reach it",
+        );
+        // The rack's own member tracks still route into the rack bus: the
+        // parent's chain sits downstream, with no per-track special casing.
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, kick, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Bus(rack_bus)),
+        );
+
+        // Nesting rule: no second parent, no rack-in-rack, no group-in-group.
+        assert!(
+            app.group_tracks_and_racks_recorded(vec![], vec![rack_id]).is_err(),
+            "a rack belongs to at most one parent group",
+        );
+        let rack_index = app.groups.iter().position(|group| group.id == rack_id).unwrap();
+        let parent_id = app.groups.iter().find(|group| group.bus_id == parent_bus.0)
+            .expect("parent group").id;
+        assert!(
+            app.move_rack_to_group_recorded(parent_id, rack_index).is_err(),
+            "a plain group is not a rack and cannot nest",
+        );
+
+        app.remove_rack_from_group_recorded(rack_id)
+            .expect("a rack leaves its parent group");
+        assert_eq!(
+            bus_output(&app, rack_bus),
+            crate::project::BusOutput::Mix,
+            "ungrouping restores the master-mix wiring",
+        );
+        assert!(app.groups.iter().all(|group| group.rack_members.is_empty()));
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            bus_output(&app, rack_bus),
+            crate::project::BusOutput::Bus(parent_bus.0),
+            "undo replays the chained wiring",
+        );
+        graph.process_block();
+    }
+
+    /// Solo has to follow `BusOutput::Bus` edges in both directions, or a
+    /// chained rack is silent when its parent is soloed (and inaudible when it
+    /// is soloed itself, because the parent gates its only path to the mix).
+    #[test]
+    fn chained_bus_solo_keeps_both_ends_of_the_chain_audible() {
+        let graph = TestLiveGraph::new("rack-in-group-solo-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, rack_bus) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.assign_rack_pad_track_recorded(rack_id, 36, kick).expect("kick pad");
+        let bass = app.graph_controller().add_blank_sampler_track().expect("bass track");
+        let lead = app.graph_controller().add_blank_sampler_track().expect("lead track");
+        let parent_bus = app
+            .group_tracks_and_racks_recorded(vec![bass, lead], vec![rack_id])
+            .expect("a rack groups with loose tracks");
+        let other_bus = app.add_bus_channel("Unrelated");
+
+        let set_solo = |app: &mut App, bus: crate::app::BusId, solo: bool| {
+            let index = app.buses.iter().position(|channel| channel.id == bus).expect("bus");
+            app.buses[index].solo = solo;
+            app.push_bus_solo_mutes();
+        };
+
+        set_solo(&mut app, parent_bus, true);
+        let audible = app.solo_audible_buses();
+        assert!(audible.contains(&parent_bus));
+        assert!(audible.contains(&rack_bus), "soloing the parent keeps its rack audible");
+        assert!(!audible.contains(&other_bus));
+        set_solo(&mut app, parent_bus, false);
+
+        set_solo(&mut app, rack_bus, true);
+        let audible = app.solo_audible_buses();
+        assert!(audible.contains(&rack_bus));
+        assert!(
+            audible.contains(&parent_bus),
+            "soloing the rack keeps the downstream parent bus open",
+        );
+        assert!(!audible.contains(&other_bus));
+        set_solo(&mut app, rack_bus, false);
+
+        set_solo(&mut app, other_bus, true);
+        let audible = app.solo_audible_buses();
+        assert_eq!(audible, vec![other_bus], "an unchained solo mutes the chain");
+        graph.process_block();
+    }
+
     #[test]
     fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
         let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);

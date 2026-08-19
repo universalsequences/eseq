@@ -2142,6 +2142,7 @@ mod live_keyboard_tests {
                 ],
                 choke_groups: vec![None, None],
             }),
+            rack_members: Vec::new(),
         }
     }
 

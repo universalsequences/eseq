@@ -745,6 +745,10 @@ pub struct BusChannelState {
     pub effect_descriptors: Vec<EffectDescriptor>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub custom_effect_names: Vec<Option<String>>,
+    /// Where this bus's post-fader signal goes: the master mix, or another bus
+    /// (a rack bus chained into its parent group's bus). See
+    /// `docs/drum-rack-v2-spec.md`, "Racks inside track groups".
+    pub output: crate::project::BusOutput,
 }
 
 impl BusChannelState {
@@ -759,6 +763,7 @@ impl BusChannelState {
             effect_descriptors: Self::default_effect_descriptors(),
             effect_slots: Self::default_effect_slots(),
             custom_effect_names: vec![None; crate::lisp_host::MAX_CUSTOM_FX],
+            output: crate::project::BusOutput::Mix,
         }
     }
 

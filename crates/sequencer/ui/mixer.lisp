@@ -1057,12 +1057,32 @@
 (def %list-contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
 
-;; Index (in SEQ.groups) of the group anchored at track i (lowest member), else -1.
+;; A group drawn inside another group's block (a rack in a plain group,
+;; docs/drum-rack-v2-spec.md) is not a top-level render item: its parent draws
+;; it. `:parent` is the containing group's id, or -1.
+(def %group-nested? (gidx)
+  (let ((p (get (nth SEQ.groups gidx) :parent)))
+    (if p (>= p 0) false)))
+
+;; Index (in SEQ.groups) of the group with the given id, else -1.
+(def %group-index-by-id (gid)
+  (reduce |acc gidx|
+    (if (>= acc 0) acc (if (= (get (nth SEQ.groups gidx) :id) gid) gidx acc))
+    -1
+    (range 0 (len SEQ.groups))))
+
+;; Index (in SEQ.groups) of the TOP-LEVEL group anchored at track i (lowest
+;; member), else -1. A nested rack is skipped here and drawn by its parent; the
+;; parent itself anchors at the lowest track of any of its units, so a nested
+;; rack's tracks still land inside the parent's block.
 (def %group-anchored-at (i)
   (reduce |acc gidx|
     (if (>= acc 0)
       acc
-      (if (= (get (nth SEQ.groups gidx) :anchor) i) gidx acc))
+      (if (and (not (%group-nested? gidx))
+            (= (%group-anchor gidx) i))
+        gidx
+        acc))
     -1
     (range 0 (len SEQ.groups))))
 
@@ -1074,6 +1094,26 @@
       (if (%list-contains? (get (nth SEQ.groups gidx) :members) i) gidx acc))
     -1
     (range 0 (len SEQ.groups))))
+
+;; Child rack indices (in SEQ.groups) of a group, in id order.
+(def %child-racks (gidx)
+  (filter (lambda (c) (>= c 0))
+    (map (lambda (gid) (%group-index-by-id gid))
+      (or (get (nth SEQ.groups gidx) :rack-members) (list)))))
+
+;; Where a group sits in the flat track order: the lowest member track of the
+;; group itself or of any rack nested inside it. -1 when nothing is claimed yet.
+(def %group-anchor (gidx)
+  (let ((own (if (= (len (get (nth SEQ.groups gidx) :members)) 0)
+            -1
+            (get (nth SEQ.groups gidx) :anchor))))
+    (reduce |acc child|
+      (let ((a (if (= (len (get (nth SEQ.groups child) :members)) 0)
+              -1
+              (get (nth SEQ.groups child) :anchor))))
+        (if (< acc 0) a (if (< a 0) acc (if (< a acc) a acc))))
+      own
+      (%child-racks gidx))))
 
 (def %track-grouped? (i)
   (>= (%group-of-track i) 0))
@@ -1101,16 +1141,28 @@
 ;; Build the flat mixer render-item list: loose tracks and group containers,
 ;; each group anchored at its lowest member index (visual contiguity without
 ;; reindexing the track Vec).
-(def %render-order ()
-  (reduce |acc i|
-    (let ((ganch (%group-anchored-at i)))
-      (if (>= ganch 0)
-        (append acc (list (dict :kind "group" :gidx ganch)))
-        (if (%track-grouped? i)
-          acc
-          (append acc (list (dict :kind "loose" :track i))))))
+;; Top-level groups that have claimed no track yet (an empty rack: its pads are
+;; lazy) have no anchor, so they follow the tracks — the grid does the same.
+(def %unanchored-groups ()
+  (reduce |acc gidx|
+    (if (and (not (%group-nested? gidx)) (< (%group-anchor gidx) 0))
+      (append acc (list (dict :kind "group" :gidx gidx)))
+      acc)
     (list)
-    (range 0 SEQ.num-tracks)))
+    (range 0 (len SEQ.groups))))
+
+(def %render-order ()
+  (append
+    (reduce |acc i|
+      (let ((ganch (%group-anchored-at i)))
+        (if (>= ganch 0)
+          (append acc (list (dict :kind "group" :gidx ganch)))
+          (if (%track-grouped? i)
+            acc
+            (append acc (list (dict :kind "loose" :track i))))))
+      (list)
+      (range 0 SEQ.num-tracks))
+    (%unanchored-groups)))
 
 (def %toggle-group-collapsed (gid)
   (seq-toggle-group-collapsed gid))
@@ -1229,7 +1281,13 @@
             (h-stack :gap 0.1
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)
-                  (%group-member-strip m))))
+                  (%group-member-strip m)))
+              ;; Child racks draw as their own container inside this block —
+              ;; collapsed, that is a single header strip; expanded, the rack
+              ;; header plus its members (docs/drum-rack-v2-spec.md).
+              (each (%child-racks gidx) |child|
+                (subtree :key (str "mixer-v2-group-" (get (nth SEQ.groups child) :id))
+                  (%group-container child))))
             ))))))
 
 (def %render-item (item)

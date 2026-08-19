@@ -7574,6 +7574,7 @@ mod tests {
             members: vec![1, 2],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
         }
     }
 
