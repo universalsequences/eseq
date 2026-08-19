@@ -85,6 +85,7 @@ pub(crate) fn run_event_loop(
         prev_master_recording: false,
         prev_roll_mode: false,
         prev_roll_rate: u32::MAX,
+        prev_sequence_rolling: false,
         prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
@@ -808,6 +809,29 @@ pub(crate) fn run_event_loop(
                         &shared.expanded_step_projection,
                         &mut soft_step_param_edit,
                     ) {
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
+                    }
+                    // Regular roll-mode toggle is also a semantic binding in
+                    // the *sequencer* keymap, so comma remains rebindable and
+                    // works after another tile receives focus. Focused input
+                    // widgets keep precedence.
+                    let roll_mode_toggle_binding = key.kind
+                        == crossterm::event::KeyEventKind::Press
+                        && editor.buffer_mode_keybinding("*sequencer*", key)
+                            == Some("eseq.seq-grid-mode/roll-mode-toggle");
+                    if roll_mode_toggle_binding
+                        && should_route_to_live_keyboard(
+                            &editor,
+                            &key,
+                            &shared.held_notes,
+                            true,
+                        )
+                    {
+                        let _ = editor
+                            .runtime_mut()
+                            .eval_str("(host-command \"toggle-roll-mode\")");
+                        editor.refresh_runtime_side_effects();
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }

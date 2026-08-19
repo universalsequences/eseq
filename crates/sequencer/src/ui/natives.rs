@@ -2182,6 +2182,7 @@ pub(crate) fn init_runtime(
                 // Roll mode (docs/rolling-core-spec.md 8): toggle + rate label.
                 ("roll-mode", Value::Bool(false)),
                 ("roll-rate", Value::String("16".to_string())),
+                ("sequence-rolling", Value::Bool(false)),
                 // Per-track false or (start_beats len_beats), published by
                 // the scheduler for the sequence-roll bracket/playhead UI.
                 ("roll-window", Value::List(vec![])),

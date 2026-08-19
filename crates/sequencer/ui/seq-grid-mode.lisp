@@ -84,6 +84,8 @@
 ;; sequence-roll gesture without changing host code.
 (def sequence-roll-hold () true)
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "`" "sequence-roll-hold")
+(def roll-mode-toggle () (host-command "toggle-roll-mode"))
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "," "roll-mode-toggle")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "LEFT" "cursor-left")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RIGHT" "cursor-right")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-a" "select-all-steps")

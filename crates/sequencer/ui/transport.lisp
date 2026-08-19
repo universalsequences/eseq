@@ -830,7 +830,9 @@
             (subtree :key "transport-roll-toggle"
               (box :debug-name "transport-roll-toggle"
                 :width 5.0 :height 1.1
-                :background "pattern-pill-bg"
+                :background (if SEQ.sequence-rolling
+                  '(rgba 0.72 0.10 0.12 1)
+                  "pattern-pill-bg")
                 :on-click |x y r| (host-command "toggle-roll-mode")
                 (h-stack :align :baseline :gap 0.3
             (box :width 0.2)

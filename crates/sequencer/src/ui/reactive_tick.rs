@@ -581,6 +581,19 @@ pub(crate) fn reactive_tick_and_render(
             }
             ctx.frame.prev_roll_rate = roll_rate_raw;
         }
+        let sequence_rolling = ctx
+            .shared
+            .state
+            .transport
+            .sequence_rolling
+            .load(Ordering::Relaxed);
+        if sequence_rolling != ctx.frame.prev_sequence_rolling {
+            needs_reactive_cycle |= editor
+                .runtime_mut()
+                .set_reactive("SEQ", "sequence-rolling", Value::Bool(sequence_rolling))
+                .effects_dirty;
+            ctx.frame.prev_sequence_rolling = sequence_rolling;
+        }
         let roll_window_bits: Vec<(u64, u64)> = (0..app.tracks.len().min(
             ctx.shared.state.transport.roll_window_starts.len(),
         ))

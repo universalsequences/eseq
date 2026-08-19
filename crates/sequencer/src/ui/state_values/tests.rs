@@ -14426,7 +14426,7 @@
     }
 
     #[test]
-    fn full_grid_default_backquote_resolves_sequence_roll_hold_binding() {
+    fn full_grid_default_roll_bindings_survive_transport_focus() {
         let mut editor = full_grid_editor_for_scroll_tests();
         assert!(editor.switch_active_tile_to_buffer_named("*transport*"));
         let key = crossterm::event::KeyEvent::new(
@@ -14438,6 +14438,31 @@
             Some("eseq.seq-grid-mode/sequence-roll-hold"),
             "the production *sequencer* keymap must remain available after transport focus",
         );
+        let comma = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(','),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(
+            editor.buffer_mode_keybinding("*sequencer*", comma),
+            Some("eseq.seq-grid-mode/roll-mode-toggle"),
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sequence-rolling", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*transport*");
+        let layout = editor.widget_layout().expect("transport layout while rolling");
+        let roll = find_layout_node_by_debug_name(&layout, "transport-roll-toggle")
+            .expect("roll resolution control");
+        assert!(roll.rect.width.is_finite() && roll.rect.width > 0.0);
+        assert!(roll.rect.height.is_finite() && roll.rect.height > 0.0);
+        let Value::List(rgba) = roll.props.get("background").expect("roll background") else {
+            panic!("rolling background must be an rgba color: {:?}", roll.props.get("background"));
+        };
+        let red = rgba[1].borrow();
+        assert!(matches!(&*red, Value::Number(value) if *value > 0.7));
     }
 
     #[test]
