@@ -330,15 +330,20 @@
 (def %step-set-sound (label)
   (%step-set-param 3 (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label SEQ.current-track label)))
 
+(def %step-duration-print-context? (mode)
+  (and (= mode 1) SEQ.playing SEQ.recording))
+
 (def %step-param-min (mode)
-  (if (= mode 3) -48
-    (if (= mode 1) 0
-      (eseq.seqv-track-params/seqv-param-min mode))))
+  (if (%step-duration-print-context? mode) 0.125
+    (if (= mode 3) -48
+      (if (= mode 1) 0
+        (eseq.seqv-track-params/seqv-param-min mode)))))
 
 (def %step-param-max (mode)
-  (if (= mode 3) 48
-    (if (= mode 1) 128
-      (eseq.seqv-track-params/seqv-param-max mode))))
+  (if (%step-duration-print-context? mode) 2
+    (if (= mode 3) 48
+      (if (= mode 1) 128
+        (eseq.seqv-track-params/seqv-param-max mode)))))
 
 (def %step-param-picker (mode key width)
   (v-stack :align :center :gap 0.24

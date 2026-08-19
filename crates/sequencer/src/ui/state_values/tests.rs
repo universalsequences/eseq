@@ -18822,6 +18822,87 @@
     }
 
     #[test]
+    fn metal_seq_step_duration_picker_restricts_only_its_print_context_range() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut durations = [1.0; 16];
+        durations[0] = 12.0;
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "durations", test_number_list(&durations));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "fx-step-value-duration",
+            Value::Number(12.0),
+        );
+
+        let step_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*step*")
+            .expect("step buffer should exist")
+            .id;
+        editor.set_active_buffer(step_id);
+        editor.set_layout_viewport(80, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*step*");
+
+        let layout = editor.widget_layout().expect("stopped step panel layout");
+        let duration = find_layout_node_by_stable_key_suffix(&layout, "/step-param-duration")
+            .expect("stopped duration picker");
+        assert_eq!(layout_prop_number(duration, "min"), Some(0.0));
+        assert_eq!(layout_prop_number(duration, "max"), Some(128.0));
+        assert_eq!(layout_prop_number(duration, "value"), Some(12.0));
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "recording", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*step*");
+
+        let layout = editor.widget_layout().expect("printing step panel layout");
+        let duration = find_layout_node_by_stable_key_suffix(&layout, "/step-param-duration")
+            .expect("printing duration picker");
+        assert_eq!(layout_prop_number(duration, "min"), Some(0.125));
+        assert_eq!(layout_prop_number(duration, "max"), Some(2.0));
+        assert_eq!(
+            layout_prop_number(duration, "value"),
+            Some(12.0),
+            "entering print context must not clamp the retained duration"
+        );
+        let velocity = find_layout_node_by_stable_key_suffix(&layout, "/step-param-velocity")
+            .expect("printing velocity picker");
+        assert_eq!(layout_prop_number(velocity, "min"), Some(0.0));
+        assert_eq!(layout_prop_number(velocity, "max"), Some(1.0));
+        let transpose = find_layout_node_by_stable_key_suffix(&layout, "/step-param-transpose")
+            .expect("printing transpose picker");
+        assert_eq!(layout_prop_number(transpose, "min"), Some(-48.0));
+        assert_eq!(layout_prop_number(transpose, "max"), Some(48.0));
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(false));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*step*");
+
+        let layout = editor.widget_layout().expect("paused step panel layout");
+        let duration = find_layout_node_by_stable_key_suffix(&layout, "/step-param-duration")
+            .expect("paused duration picker");
+        assert_eq!(layout_prop_number(duration, "min"), Some(0.0));
+        assert_eq!(layout_prop_number(duration, "max"), Some(128.0));
+        assert_eq!(
+            layout_prop_number(duration, "value"),
+            Some(12.0),
+            "leaving print context must preserve the retained duration"
+        );
+    }
+
+    #[test]
     fn metal_seq_drum_rack_sound_controls_use_named_pads_and_only_write_pad_notes() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.runtime_mut().set_reactive(
