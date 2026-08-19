@@ -1354,6 +1354,8 @@ pub struct ProjectTrack {
     pub id: TrackId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name_user_authored: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<TrackColor>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1387,6 +1389,8 @@ struct ProjectTrackWire {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    name_user_authored: bool,
+    #[serde(default)]
     color: Option<TrackColor>,
     #[serde(default)]
     collapsed: bool,
@@ -1407,6 +1411,7 @@ impl<'de> Deserialize<'de> for ProjectTrack {
         Ok(Self {
             id,
             name: wire.name,
+            name_user_authored: wire.name_user_authored,
             color: wire.color,
             collapsed: wire.collapsed,
             kind: wire.kind,
@@ -1427,6 +1432,7 @@ fn migrate_project_tracks(
             .map(|(track, id)| ProjectTrack {
                 id,
                 name: track.name,
+                name_user_authored: track.name_user_authored,
                 color: track.color,
                 collapsed: track.collapsed,
                 kind: track.kind,
@@ -1466,6 +1472,7 @@ fn migrate_project_tracks(
         migrated.push(ProjectTrack {
             id,
             name: track.name,
+            name_user_authored: track.name_user_authored,
             color: track.color,
             collapsed: track.collapsed,
             kind: track.kind,
@@ -3401,6 +3408,7 @@ mod tests {
                 ProjectTrack {
                     id: TrackId(1),
                     name: Some("Warm Prophet".to_string()),
+                    name_user_authored: false,
                     color: Some(TrackColor::new(0.96, 0.28, 0.52)),
                     collapsed: true,
                     kind: ProjectTrackKind::Custom {
@@ -3410,6 +3418,7 @@ mod tests {
                 ProjectTrack {
                     id: TrackId(2),
                     name: Some("Studio Kick".to_string()),
+                    name_user_authored: false,
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
                     collapsed: false,
                     kind: ProjectTrackKind::Sampler {
@@ -5240,6 +5249,7 @@ mod tests {
             track: ProjectTrack {
                 id: TrackId(1),
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {
@@ -5302,6 +5312,7 @@ mod tests {
             track: ProjectTrack {
                 id: TrackId(1),
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {
@@ -5385,6 +5396,7 @@ mod tests {
             track: ProjectTrack {
                 id: TrackId(1),
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {

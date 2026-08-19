@@ -386,7 +386,7 @@ impl GraphController<'_> {
             self.apply_free_patch_idle_voice(track)
                 .expect("free-patch engine runtime was validated before graph mutation");
         }
-        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
     }
@@ -571,7 +571,7 @@ impl GraphController<'_> {
             self.apply_free_patch_idle_voice(track)
                 .expect("free-patch engine runtime was validated before graph mutation");
         }
-        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.app.publish_sampler_analysis_runtime(track);
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
@@ -701,7 +701,7 @@ impl GraphController<'_> {
                 lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
             }
         }
-        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.app.device_registry.clear_rack_track(track_id);
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
@@ -827,7 +827,7 @@ impl GraphController<'_> {
                 (buffer_id, sample_name.to_string(), sample_rate),
             )
             .expect("sampler reset target was validated before graph mutation");
-        self.app.tracks[track] = sample_name.to_string();
+        self.app.set_automatic_track_name(track, sample_name.to_string());
         self.app.reset_sampler_bpm_for_analysis(track);
         self.app.publish_sampler_analysis_runtime(track);
         self.finish_track_instrument_source_change(track);
@@ -1273,7 +1273,7 @@ impl GraphController<'_> {
             .editor
             .effect_chain_leases
             .move_host(FxChainLocator::Track(track), rack_locator)?;
-        self.app.tracks[track] = format!("Rack {track_name}");
+        self.app.set_automatic_track_name(track, format!("Rack {track_name}"));
         self.app.set_rack_selected_slot(track, 0);
         self.publish_rack_slot_panner_runtime(track);
         self.app.state.schedule_mod_resync();
@@ -1369,7 +1369,7 @@ impl GraphController<'_> {
                 self.delete_engine_runtime(engine_id);
             }
         }
-        self.app.tracks[track] = display_name.to_string();
+        self.app.set_automatic_track_name(track, display_name.to_string());
         self.app.set_rack_selected_slot(track, 0);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
@@ -1470,7 +1470,7 @@ impl GraphController<'_> {
                 lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
             }
         }
-        self.app.tracks[track] = sample_name.to_string();
+        self.app.set_automatic_track_name(track, sample_name.to_string());
         self.app.reset_sampler_bpm_for_analysis(track);
         self.app.publish_sampler_analysis_runtime(track);
         self.app.device_registry.clear_rack_track(track_id);

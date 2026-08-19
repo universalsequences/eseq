@@ -473,6 +473,7 @@
                     .expect("old engine route should connect");
             }
             app.tracks.push(format!("Track {}", track + 1));
+            app.track_name_user_authored.push(false);
             app.track_registry
                 .allocate()
                 .expect("allocate fixture track id");
@@ -934,7 +935,8 @@
         app.graph_controller()
             .add_empty_layer_rack_track()
             .expect("add rack track");
-        app.tracks[0] = "Aurora Layers".to_string();
+        app.apply_recorded_track_name(0, "Aurora Layers")
+            .expect("rack rename should be recorded");
 
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -948,6 +950,7 @@
             .capture_project(&project_name)
             .expect("rack project should capture");
         assert_eq!(project.tracks[0].name.as_deref(), Some("Aurora Layers"));
+        assert!(project.tracks[0].name_user_authored);
         let project_path = crate::project::save_project(&project_name, &project)
             .expect("rack project should save");
         let _cleanup = TestProjectFile(project_path);
@@ -960,6 +963,7 @@
             .expect("rack project track should load");
 
         assert_eq!(app.tracks, vec!["Aurora Layers"]);
+        assert_eq!(app.track_name_user_authored, vec![true]);
         app.editor.pending_project_load = None;
 
         let legacy_project_name = format!("{project_name}-without-name");
@@ -1704,6 +1708,8 @@
             0
         );
 
+        app.apply_recorded_track_name(1, "Pinned Lead")
+            .expect("rename should be recorded");
         app.graph_controller()
             .swap_custom_track_instrument(
                 1,
@@ -1715,6 +1721,7 @@
             )
             .expect("second track should swap to the already materialized engine");
         assert_eq!(app.graph.track_engine_ids, vec![Some(1), Some(1)]);
+        assert_eq!(app.tracks[1], "Pinned Lead");
         assert!(
             app.graph.engine_node_ids[0].is_none(),
             "unreferenced old graph runtime should be collected"
@@ -3166,6 +3173,7 @@
             track: crate::project::ProjectTrack {
                 id: crate::sequencer::TrackId(1),
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3297,6 +3305,7 @@
             track: crate::project::ProjectTrack {
                 id: crate::sequencer::TrackId(1),
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3414,6 +3423,7 @@
             track: crate::project::ProjectTrack {
                 id: track_id,
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {

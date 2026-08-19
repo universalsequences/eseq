@@ -2,6 +2,7 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "reveal-sequencer-track",
+    "rename-track",
     "add-track-sampler",
     "add-track-rack",
     "add-track-layer-rack",
@@ -100,6 +101,38 @@ pub(super) fn handle(
                 if track < app.tracks.len() {
                     reveal_sequencer_current_track(&mut editor, &app, track);
                 }
+            }
+        }
+        "rename-track" => {
+            let track = extract_usize_from_payload(&payload, "track");
+            let requested_name = extract_string_from_payload(&payload, "name");
+            match (track, requested_name) {
+                (Some(track), Some(requested_name)) => {
+                    match app.apply_recorded_track_name(track, &requested_name) {
+                        Ok(app::edit::EditOutcome::Applied(result)) => {
+                            *ctx.track_names = app.tracks.clone();
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "track-names",
+                                build_track_names(&ctx.track_names),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.show_transient_message(result.label);
+                        }
+                        Ok(app::edit::EditOutcome::NoOp) => {}
+                        Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
+                            editor.handle_host_event(HostEvent::Error(
+                                "Track rename was applied without history".to_string(),
+                            ));
+                        }
+                        Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                    }
+                }
+                _ => editor.handle_host_event(HostEvent::Error(
+                    "Track rename requires a track and name".to_string(),
+                )),
             }
         }
         "add-track-sampler" => match app.graph_controller().add_blank_sampler_track()

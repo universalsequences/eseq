@@ -1381,6 +1381,7 @@ impl App {
         let ProjectTrack {
             id,
             name: track_name,
+            name_user_authored,
             color,
             collapsed,
             kind,
@@ -1429,6 +1430,7 @@ impl App {
                     ProjectTrack {
                         id,
                         name: track_name,
+                        name_user_authored,
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
@@ -1480,6 +1482,7 @@ impl App {
                     ProjectTrack {
                         id,
                         name: track_name,
+                        name_user_authored,
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
@@ -2724,6 +2727,10 @@ impl App {
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
+                        name_user_authored: self.track_name_user_authored
+                            .get(track_idx)
+                            .copied()
+                            .unwrap_or(false),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Rack {
@@ -2741,6 +2748,10 @@ impl App {
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
+                        name_user_authored: self.track_name_user_authored
+                            .get(track_idx)
+                            .copied()
+                            .unwrap_or(false),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Sampler {
@@ -2753,6 +2764,10 @@ impl App {
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
+                        name_user_authored: self.track_name_user_authored
+                            .get(track_idx)
+                            .copied()
+                            .unwrap_or(false),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Modulator,
@@ -2769,6 +2784,10 @@ impl App {
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
+                        name_user_authored: self.track_name_user_authored
+                            .get(track_idx)
+                            .copied()
+                            .unwrap_or(false),
                         color,
                         collapsed,
                         kind: ProjectTrackKind::Custom { instrument_name },
@@ -3264,6 +3283,8 @@ impl App {
                         .as_ref()
                         .filter(|name| !name.trim().is_empty())
                         .cloned();
+                    let saved_name_user_authored =
+                        pending.project.tracks[track_idx].name_user_authored && saved_name.is_some();
                     let saved_color = pending.project.tracks[track_idx].color();
                     let saved_collapsed = pending.project.tracks[track_idx].collapsed();
                     match &pending.project.tracks[track_idx].kind {
@@ -3573,6 +3594,8 @@ impl App {
                     if let Some(name) = saved_name {
                         self.tracks[track_idx] = name;
                     }
+                    self.normalize_track_name_authorship();
+                    self.track_name_user_authored[track_idx] = saved_name_user_authored;
                     if let Some(color) = saved_color {
                         self.set_track_color(track_idx, color);
                     }
@@ -5241,6 +5264,7 @@ mod tests {
             tracks: vec![ProjectTrack {
                 id: crate::sequencer::TrackId(1),
                 name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Sampler {

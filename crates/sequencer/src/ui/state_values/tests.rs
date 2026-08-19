@@ -26993,6 +26993,13 @@
             Some(&Value::Keyword("piano".to_string())),
             "collapsed instrument badges should reuse the sidebar piano icon"
         );
+        let sampler_badge =
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-0")
+                .expect("expanded sampler badge should render");
+        assert!(
+            sampler_badge.props.contains_key("on-right-click"),
+            "the mixer badge must expose the track context-menu gesture",
+        );
         let sampler_badge_content =
             find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-0")
                 .expect("expanded sampler badge content should render");
@@ -27022,6 +27029,25 @@
             find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-1").is_none(),
             "collapsed mixer track should not render the full-width label"
         );
+
+        editor.runtime_mut()
+            .eval_str("(eseq.mixer/%begin-track-rename 0)")
+            .expect("begin inline track rename");
+        editor.refresh_runtime_side_effects();
+        let rename_layout = editor.widget_layout()
+            .expect("inline track rename layout should build");
+        let rename_input = find_layout_node_by_stable_key_suffix(
+            &rename_layout,
+            "/track-rename-input-0",
+        ).expect("expanded mixer badge should become a text input");
+        assert_eq!(rename_input.widget_type, "text-input");
+        assert_finite_nonzero_rect(rename_input, "mixer inline track rename input");
+        assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
+        assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
+        editor.runtime_mut()
+            .eval_str("(eseq.mixer/%finish-track-rename 0 false)")
+            .expect("cancel inline track rename");
+        editor.refresh_runtime_side_effects();
 
         let sequencer_id = editor
             .buffers

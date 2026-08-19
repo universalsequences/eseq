@@ -906,6 +906,9 @@ pub struct App {
     pub(crate) macro_base_shadow:
         std::sync::Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
     pub tracks: Vec<String>,
+    /// True after an explicit user rename. Automatic instrument/sample names
+    /// may update only unpinned tracks.
+    pub track_name_user_authored: Vec<bool>,
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
@@ -1914,6 +1917,20 @@ impl App {
         }
     }
 
+    pub fn normalize_track_name_authorship(&mut self) {
+        self.track_name_user_authored.truncate(self.tracks.len());
+        self.track_name_user_authored.resize(self.tracks.len(), false);
+    }
+
+    pub fn set_automatic_track_name(&mut self, track: usize, name: String) {
+        self.normalize_track_name_authorship();
+        if !self.track_name_user_authored.get(track).copied().unwrap_or(false) {
+            if let Some(current) = self.tracks.get_mut(track) {
+                *current = name;
+            }
+        }
+    }
+
     pub fn normalize_track_colors(&mut self) {
         self.track_colors.truncate(self.tracks.len());
         while self.track_colors.len() < self.tracks.len() {
@@ -2308,6 +2325,7 @@ impl App {
             macro_base_shadow: std::sync::Mutex::new(HashMap::new()),
             scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),
+            track_name_user_authored: Vec::new(),
             track_colors: Vec::new(),
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),

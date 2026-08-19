@@ -1067,6 +1067,9 @@ impl GraphController<'_> {
             .ok_or_else(|| format!("Missing stable id for track {}", track_idx + 1))?;
         self.app.track_registry.remove(track_id);
         self.app.tracks.remove(track_idx);
+        if track_idx < self.app.track_name_user_authored.len() {
+            self.app.track_name_user_authored.remove(track_idx);
+        }
         if track_idx < self.app.track_colors.len() {
             self.app.track_colors.remove(track_idx);
         }

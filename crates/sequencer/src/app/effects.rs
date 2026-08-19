@@ -642,7 +642,7 @@ impl App {
             },
         );
 
-        self.tracks[track] = instrument_display_name(name);
+        self.set_automatic_track_name(track, instrument_display_name(name));
         if let Some(sound) = self
             .state
             .pattern
@@ -716,7 +716,7 @@ impl App {
         for bound_track in 0..self.graph.track_engine_ids.len() {
             if self.graph.track_engine_ids[bound_track] == Some(engine_id) {
                 self.push_instrument_defaults_for_track(bound_track);
-                self.tracks[bound_track] = instrument_display_name(name);
+                self.set_automatic_track_name(bound_track, instrument_display_name(name));
                 if let Some(sound) = self
                     .state
                     .pattern

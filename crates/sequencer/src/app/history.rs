@@ -136,6 +136,8 @@ impl BusGroupStructurePatch {
 
 #[derive(Clone, Debug)]
 pub struct TrackPresentationState {
+    pub name: String,
+    pub name_user_authored: bool,
     pub color: crate::track_color::TrackColor,
     pub collapsed: bool,
 }
@@ -156,6 +158,9 @@ impl TrackPresentationPatch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.changes.capacity() * std::mem::size_of::<TrackPresentationChange>()
+            + self.changes.iter()
+                .map(|change| change.before.name.capacity() + change.after.name.capacity())
+                .sum::<usize>()
     }
 }
 
@@ -471,6 +476,7 @@ pub struct RackContainerSlotState {
 pub struct TrackInstrumentState {
     pub source: TrackInstrumentSource,
     pub display_name: String,
+    pub display_name_user_authored: bool,
     pub patterns: TrackInstrumentPatternStateSnapshot,
     pub macro_mappings: TrackInstrumentMacroMappings,
 }

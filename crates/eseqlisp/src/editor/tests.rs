@@ -130,6 +130,59 @@ fn focused_text_input_survives_on_change_rerender() {
 }
 
 #[test]
+fn text_input_auto_focus_submit_and_blur_callbacks_drive_inline_edit_lifecycle() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.runtime_mut().eval_str(
+        r#"
+        (def editing (state true))
+        (def submitted (state false))
+        (def cancelled (state false))
+        (def blurred (state false))
+        (effect
+          (box :width 24 :height 4
+            (if editing
+              (text-input :key "rename-input" :width 20 :value "Track"
+                :auto-focus true :select-all-on-focus true
+                :on-submit (lambda () (do (set! submitted true) (set! editing false)))
+                :on-cancel (lambda () (do (set! cancelled true) (set! editing false)))
+                :on-blur (lambda () (set! blurred true)))
+              (label "done"))))
+        "#,
+    ).expect("build inline edit fixture");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    editor.widget_layout().expect("inline edit layout");
+    assert!(editor.focused_widget_id().is_some(), "auto-focus should focus the input");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(editor.runtime_mut().eval_str("cancelled"), Ok(Some(Value::Bool(true))));
+
+    editor.runtime_mut().eval_str("(set! editing true)").unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.widget_layout().expect("submit edit layout");
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(editor.runtime_mut().eval_str("submitted"), Ok(Some(Value::Bool(true))));
+
+    editor.runtime_mut().eval_str("(set! editing true)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let layout = editor.widget_layout().expect("rebuilt inline edit layout");
+    let input = super::find_layout_node_by_stable_key(layout.as_ref(), "rename-input")
+        .expect("rebuilt rename input");
+    editor.focus_widget_by_stable_key("rename-input", Some("text-input"));
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 25, 3),
+        0,
+        0,
+        30,
+        8,
+        input.rect.col + input.rect.width + 2.0,
+        input.rect.row + input.rect.height + 1.0,
+    );
+    assert_eq!(editor.runtime_mut().eval_str("blurred"), Ok(Some(Value::Bool(true))));
+}
+
+#[test]
 fn default_window_split_bindings_survive_runtime_sync() {
     let runtime = Runtime::with_init_source("(bind-key \"C-c C-c\" \"ignore\")");
     let mut editor = Editor::new(runtime, EditorConfig::default());

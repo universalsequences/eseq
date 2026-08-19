@@ -95,6 +95,15 @@ fn set_state(widget_id: u64, state: TextInputState) {
     }
 }
 
+pub(crate) fn select_all(widget_id: u64, text: &str) {
+    let char_count = text.chars().count();
+    set_state(widget_id, TextInputState {
+        cursor_pos: char_count,
+        selection_anchor: (char_count > 0).then_some(0),
+        selecting: false,
+    });
+}
+
 pub(crate) fn selection_range(state: &TextInputState) -> Option<(usize, usize)> {
     let anchor = state.selection_anchor?;
     if anchor == state.cursor_pos {
@@ -348,7 +357,7 @@ fn read_system_clipboard() -> Result<String, String> {
         .map_err(|error| format!("clipboard did not contain UTF-8 text: {error}"))
 }
 
-fn get_text(props: &HashMap<String, Value>) -> String {
+pub(crate) fn get_text(props: &HashMap<String, Value>) -> String {
     match props.get("value") {
         Some(Value::String(s)) => s.clone(),
         _ => String::new(),
@@ -715,6 +724,7 @@ impl WidgetDefinition for TextInputWidget {
         &[
             "value", "placeholder", "width", "height", "font-size", "text-color",
             "placeholder-color", "bg", "bg-color", "cursor-color", "ring-color", "on-change",
+            "on-submit", "on-cancel", "on-blur", "auto-focus", "select-all-on-focus",
         ]
     }
 
@@ -831,7 +841,15 @@ impl WidgetDefinition for TextInputWidget {
     }
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
-        text_entry_key_event(node, key, false, None)
+        match key.code {
+            KeyCode::Enter if node.props.contains_key("on-submit") => {
+                Some(WidgetEvent::Custom(Value::Keyword("submit".to_string())))
+            }
+            KeyCode::Esc if node.props.contains_key("on-cancel") => {
+                Some(WidgetEvent::Custom(Value::Keyword("cancel".to_string())))
+            }
+            _ => text_entry_key_event(node, key, false, None),
+        }
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
@@ -841,18 +859,18 @@ impl WidgetDefinition for TextInputWidget {
         if matches!(value, Value::Nil) {
             return None;
         }
-        let Value::String(new_text) = value else {
-            return None;
+        let (prop, args) = match value {
+            Value::String(new_text) => ("on-change", vec![Value::String(new_text.clone())]),
+            Value::Keyword(action) if action == "submit" => ("on-submit", Vec::new()),
+            Value::Keyword(action) if action == "cancel" => ("on-cancel", Vec::new()),
+            _ => return None,
         };
         let callback = node
             .props
-            .get("on-change")
+            .get(prop)
             .filter(|v| !matches!(v, Value::Nil | Value::Bool(false)))
             .cloned()?;
-        Some(EventOutput {
-            callback,
-            args: vec![Value::String(new_text.clone())],
-        })
+        Some(EventOutput { callback, args })
     }
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -1500,6 +1518,15 @@ impl WidgetDefinition for TextboxWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_all_on_focus_selects_the_full_unicode_value() {
+        let widget_id = u64::MAX - 41;
+        select_all(widget_id, "Aurora ✨");
+        let state = get_state(widget_id);
+        assert_eq!(state.cursor_pos, 8);
+        assert_eq!(selection_range(&state), Some((0, 8)));
+    }
 
     #[test]
     fn textbox_wraps_long_words_and_keeps_explicit_breaks() {

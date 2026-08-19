@@ -1602,6 +1602,10 @@ impl App {
         Ok(TrackInstrumentState {
             source,
             display_name: self.tracks[track].clone(),
+            display_name_user_authored: self.track_name_user_authored
+                .get(track)
+                .copied()
+                .unwrap_or(false),
             patterns: self.state.capture_track_instrument_pattern_state(track)?,
             macro_mappings: self
                 .macro_engine
@@ -1909,6 +1913,50 @@ impl App {
         ))
     }
 
+    pub fn apply_recorded_track_name(
+        &mut self,
+        track: usize,
+        name: &str,
+    ) -> Result<EditOutcome, String> {
+        finish_active_gesture(self);
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(EditOutcome::NoOp);
+        }
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
+        self.normalize_track_name_authorship();
+        if self.tracks[track] == name && self.track_name_user_authored[track] {
+            return Ok(EditOutcome::NoOp);
+        }
+        self.normalize_track_colors();
+        self.normalize_track_collapsed();
+        let before = TrackPresentationState {
+            name: self.tracks[track].clone(),
+            name_user_authored: self.track_name_user_authored[track],
+            color: self.track_colors[track],
+            collapsed: self.track_collapsed[track],
+        };
+        let after = TrackPresentationState {
+            name: name.to_string(),
+            name_user_authored: true,
+            color: before.color,
+            collapsed: before.collapsed,
+        };
+        self.tracks[track] = after.name.clone();
+        self.track_name_user_authored[track] = true;
+        let patch = TrackPresentationPatch {
+            changes: vec![TrackPresentationChange { track: track_id, before, after }],
+        };
+        let retained_bytes = patch.retained_bytes();
+        Ok(EditOutcome::Applied(self.history.commit(
+            "Rename track",
+            None,
+            EditPatch::TrackPresentation(patch),
+            retained_bytes,
+        )))
+    }
+
     pub fn apply_recorded_track_collapsed(
         &mut self,
         collapsed: Vec<bool>,
@@ -1921,6 +1969,11 @@ impl App {
         }
         let changes = collapsed.iter().enumerate().filter_map(|(track, target)| {
             let before = TrackPresentationState {
+                name: self.tracks[track].clone(),
+                name_user_authored: self.track_name_user_authored
+                    .get(track)
+                    .copied()
+                    .unwrap_or(false),
                 color: self.track_colors[track],
                 collapsed: self.track_collapsed[track],
             };
@@ -1928,6 +1981,8 @@ impl App {
                 return None;
             }
             let after = TrackPresentationState {
+                name: before.name.clone(),
+                name_user_authored: before.name_user_authored,
                 color: before.color,
                 collapsed: *target,
             };
@@ -1969,7 +2024,10 @@ impl App {
                 }
             }));
         }
+        self.normalize_track_name_authorship();
         for (track, target) in resolved {
+            self.tracks[track] = target.name.clone();
+            self.track_name_user_authored[track] = target.name_user_authored;
             self.track_colors[track] = target.color;
             self.track_collapsed[track] = target.collapsed;
         }
@@ -3002,6 +3060,8 @@ impl App {
             }
         }
         self.tracks[track] = target.display_name.clone();
+        self.normalize_track_name_authorship();
+        self.track_name_user_authored[track] = target.display_name_user_authored;
         let descriptor = self.graph.instrument_descriptors[track].clone();
         let (node_id, modulator_node_id) = match self.graph.track_instrument_types[track] {
             crate::sequencer::InstrumentType::Custom => {
@@ -3083,6 +3143,8 @@ impl App {
             self.restore_track_instrument_state(track, &patch.state)?;
         } else {
             self.tracks[track] = patch.state.display_name.clone();
+            self.normalize_track_name_authorship();
+            self.track_name_user_authored[track] = patch.state.display_name_user_authored;
             let descriptor = self.graph.instrument_descriptors[track].clone();
             let node_id = self.graph.track_node_ids[track].mod_env_id as u32;
             self.state.restore_track_instrument_pattern_state(
@@ -3304,6 +3366,8 @@ impl App {
             self.restore_rack_effect_chain_state(track, slot_index, &current, &slot.effects)?;
         }
         self.tracks[track] = target.display_name.clone();
+        self.normalize_track_name_authorship();
+        self.track_name_user_authored[track] = target.display_name_user_authored;
         self.macro_engine
             .restore_instrument_mappings_for_track(track, &target.macro_mappings)
             .map_err(|error| format!("{error:?}"))?;
@@ -9552,6 +9616,32 @@ mod tests {
         );
         assert_eq!(app.graph.track_buffer_ids[0], 9);
         assert_eq!(app.tracks[0], "sample-two");
+    }
+
+    #[test]
+    fn recorded_track_rename_trims_rejects_empty_and_round_trips_authorship() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.normalize_track_name_authorship();
+        let original = app.tracks[0].clone();
+
+        assert!(matches!(
+            app.apply_recorded_track_name(0, "  Aurora Layers  "),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.tracks[0], "Aurora Layers");
+        assert!(app.track_name_user_authored[0]);
+        assert_eq!(app.apply_recorded_track_name(0, "   "), Ok(EditOutcome::NoOp));
+        assert_eq!(app.tracks[0], "Aurora Layers");
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.tracks[0], original);
+        assert!(!app.track_name_user_authored[0]);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.tracks[0], "Aurora Layers");
+        assert!(app.track_name_user_authored[0]);
     }
 
     #[test]

@@ -17,7 +17,7 @@ impl GraphController<'_> {
             if let Some(track_sample_rate) = self.app.graph.track_sample_rates.get_mut(track) {
                 *track_sample_rate = *sample_rate;
             }
-            self.app.tracks[track] = name.clone();
+            self.app.set_automatic_track_name(track, name.clone());
             self.app
                 .sync_sampler_path_from_sample(track, *buffer_id, name);
             self.app.publish_sampler_analysis_runtime(track);
@@ -215,6 +215,7 @@ impl GraphController<'_> {
         }
 
         self.app.tracks.clear();
+        self.app.track_name_user_authored.clear();
         self.app.track_registry = crate::sequencer::TrackRegistry::default();
         self.app.track_colors.clear();
         self.app.track_collapsed.clear();

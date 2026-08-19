@@ -8,6 +8,14 @@ use super::{Editor, key_str};
 
 impl Editor {
     pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {
+        let newly_focused = self.active_leaf().focused_widget_id != Some(node.widget_id);
+        if newly_focused
+            && node.widget_type == "text-input"
+            && matches!(node.props.get("select-all-on-focus"), Some(Value::Bool(true)))
+        {
+            let text = crate::widget_render::text_input::get_text(&node.props);
+            crate::widget_render::text_input::select_all(node.widget_id, &text);
+        }
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = Some(node.widget_id);
         leaf.focused_widget_node = Some(node);
@@ -17,6 +25,21 @@ impl Editor {
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = None;
         leaf.focused_widget_node = None;
+    }
+
+    fn blur_focused_widget(&mut self) {
+        let callback = self.focused_widget_node()
+            .and_then(|node| node.props.get("on-blur").cloned())
+            .filter(|value| !matches!(value, Value::Nil | Value::Bool(false)));
+        self.clear_focused_widget();
+        if let Some(callback) = callback {
+            self.sync_runtime_source_context();
+            if let Err(error) = self.runtime.invoke(callback, Vec::new()) {
+                self.minibuffer = Some(format!("Error: {error:?}"));
+            }
+            self.refresh_runtime_side_effects();
+            self.sync_runtime_context();
+        }
     }
 
     pub fn focused_widget_node(&self) -> Option<LayoutNode> {
@@ -66,11 +89,16 @@ impl Editor {
 
     pub(super) fn remap_focused_widget_after_layout_change(&mut self) {
         self.sync_modal_focus_state();
-        let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
-            return;
-        };
         let Some(layout) = self.runtime.current_layout.clone() else {
             self.clear_focused_widget();
+            return;
+        };
+        let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
+            if let Some(node) = find_auto_focus_node(&layout) {
+                self.set_focused_widget(node);
+                self.clear_focus_on_other_tiles();
+                self.mark_needs_redraw();
+            }
             return;
         };
         let remapped = previous
@@ -100,7 +128,7 @@ impl Editor {
                     .and_then(|id| find_node_by_id(&layout, id))
                     .filter(|node| same_focus_identity(&previous, node))
             });
-        if let Some(node) = remapped {
+        if let Some(node) = remapped.or_else(|| find_auto_focus_node(&layout)) {
             self.set_focused_widget(node);
         } else {
             self.clear_focused_widget();
@@ -288,6 +316,9 @@ impl Editor {
         if let Some(node) =
             crate::ui::layout::hit_test_focusable(&layout, local_row, local_col).cloned()
         {
+            if self.active_leaf().focused_widget_id != Some(node.widget_id) {
+                self.blur_focused_widget();
+            }
             self.set_focused_widget(node);
             self.clear_focus_on_other_tiles();
             self.mark_needs_redraw();
@@ -295,7 +326,7 @@ impl Editor {
         }
         // Click landed outside any focusable widget → blur
         if self.active_leaf().focused_widget_id.is_some() {
-            self.clear_focused_widget();
+            self.blur_focused_widget();
             self.mark_needs_redraw();
         }
         false
@@ -905,6 +936,15 @@ pub(super) fn collect_focusable_nodes(node: &LayoutNode, out: &mut Vec<(u64, f32
     for child in &node.children {
         collect_focusable_nodes(child, out);
     }
+}
+
+fn find_auto_focus_node(node: &LayoutNode) -> Option<LayoutNode> {
+    if node.focusable
+        && matches!(node.props.get("auto-focus"), Some(Value::Bool(true)))
+    {
+        return Some(node.clone());
+    }
+    node.children.iter().find_map(find_auto_focus_node)
 }
 
 pub(super) fn find_node_by_id(node: &LayoutNode, id: u64) -> Option<LayoutNode> {

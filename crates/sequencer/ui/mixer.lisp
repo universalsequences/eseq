@@ -15,6 +15,18 @@
 
 (import eseq.track-collapse)
 
+(defstate %track-menu-open false)
+(defstate %track-menu-col 0)
+(defstate %track-menu-row 0)
+(defstate %track-menu-track -1)
+(defstate %track-renaming -1)
+(defstate %track-rename-draft "")
+
+;; Data, rather than menu-specific control flow, is the extension seam for
+;; Duplicate/Delete/Group/color actions added later.
+(def %track-menu-actions
+  (list (dict :id :rename :label "Rename")))
+
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))
 
@@ -840,6 +852,56 @@
         :color (if (nth SEQ.record-armed i) :black :dim)
         :on-click (lambda (event) (do (%activate-track-control i) (seq-toggle-record-arm i)))))))
 
+(def %open-track-menu (event i)
+  (do
+    (set! %track-menu-track i)
+    (set! %track-menu-col (get event :col))
+    (set! %track-menu-row (get event :row))
+    (set! %track-menu-open true)))
+
+(def %begin-track-rename (i)
+  (do
+    (set! %track-menu-open false)
+    (set! %track-renaming i)
+    (set! %track-rename-draft (nth SEQ.track-names i))))
+
+(def %finish-track-rename (i commit)
+  (if (= %track-renaming i)
+    (do
+      (if commit
+        (host-command "rename-track" (dict :track i :name %track-rename-draft))
+        nil)
+      (set! %track-renaming -1)
+      (set! %track-rename-draft ""))
+    nil))
+
+(def %select-track-menu-action (action)
+  (if (= (get action :id) :rename)
+    (%begin-track-rename %track-menu-track)
+    nil))
+
+(def %track-context-menu ()
+  (context-menu :is-open %track-menu-open
+    :anchor-col %track-menu-col
+    :anchor-row %track-menu-row
+    :on-close (lambda () (set! %track-menu-open false))
+    (each %track-menu-actions |action|
+      (menu-item (get action :label)
+        :key (str "track-menu-" (get action :id))
+        :on-select (lambda (event) (%select-track-menu-action action))))))
+
+(def %track-rename-input (i key-prefix width font-size)
+  (text-input
+    :key (str key-prefix i)
+    :width width :height 1.0 :font-size font-size
+    :value %track-rename-draft
+    :auto-focus true
+    :select-all-on-focus true
+    :on-change (lambda (name) (set! %track-rename-draft name))
+    :on-submit (lambda () (%finish-track-rename i true))
+    :on-cancel (lambda () (%finish-track-rename i false))
+    :on-blur (lambda () (%finish-track-rename i true))))
+
 ;; Name label in its own subtree: rename/mute changes rerun just the label.
 (def %strip-label (i)
   (let ((muted (muted? i)))
@@ -858,23 +920,26 @@
         1.0)
       :selected-background-color :fx-panel-header-selected-bg
       :on-click (lambda (event) (%track-label-click event i))
+      :on-right-click (lambda (event) (%open-track-menu event i))
       :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
-      (badge (substring (nth SEQ.track-names i) 0 10)
-        :key (str "track-label-content-" i)
-        :icon (eseq.track-collapse/type-icon i)
-        :width 9.8
-        :height 1.0
-        :padding 0
-        :font-size 10
-        :h-align :center
-        :background-color :transparent
-        :border-color :transparent
-        :highlight-color :transparent
-        :shadow-color :transparent
-        :color (if muted :dim :black)
-        :active (%track-delete-target-binding i)
-        :active-color :white
-        :bg :transparent))))
+      (if (= %track-renaming i)
+        (%track-rename-input i "track-rename-input-" 9.8 10)
+        (badge (substring (nth SEQ.track-names i) 0 10)
+          :key (str "track-label-content-" i)
+          :icon (eseq.track-collapse/type-icon i)
+          :width 9.8
+          :height 1.0
+          :padding 0
+          :font-size 10
+          :h-align :center
+          :background-color :transparent
+          :border-color :transparent
+          :highlight-color :transparent
+          :shadow-color :transparent
+          :color (if muted :dim :black)
+          :active (%track-delete-target-binding i)
+          :active-color :white
+          :bg :transparent)))))
 
 (def track-collapsed-label (i)
   (str (+ i 1) " " (substring (nth SEQ.track-names i) 0 3)))
@@ -919,23 +984,26 @@
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (%track-label-click event i))
+          :on-right-click (lambda (event) (%open-track-menu event i))
           :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
-          (badge (track-collapsed-label i)
-            :key (str "track-collapsed-label-content-" i)
-            :icon (eseq.track-collapse/type-icon i)
-            :width 3.65
-            :height 1.0
-            :padding 0
-            :font-size 9
-            :h-align :center
-            :background-color :transparent
-            :border-color :transparent
-            :highlight-color :transparent
-            :shadow-color :transparent
-            :color (if muted :dim :black)
-            :active (%track-delete-target-binding i)
-            :active-color :white
-            :bg :transparent))))))
+          (if (= %track-renaming i)
+            (%track-rename-input i "track-collapsed-rename-input-" 3.65 9)
+            (badge (track-collapsed-label i)
+              :key (str "track-collapsed-label-content-" i)
+              :icon (eseq.track-collapse/type-icon i)
+              :width 3.65
+              :height 1.0
+              :padding 0
+              :font-size 9
+              :h-align :center
+              :background-color :transparent
+              :border-color :transparent
+              :highlight-color :transparent
+              :shadow-color :transparent
+              :color (if muted :dim :black)
+              :active (%track-delete-target-binding i)
+              :active-color :white
+              :bg :transparent)))))))
 
 (def %bus-label (i)
   (if (= i 0) "Main" (nth SEQ.bus-names i)))
@@ -1452,7 +1520,8 @@
 (effect-buffer "*patch-mixer*"
   (box :padding 0.2
     (subtree :key (str "patch-mixer-track-" SEQ.current-track)
-      (patch-mixer-strip SEQ.current-track))))
+      (patch-mixer-strip SEQ.current-track))
+    (%track-context-menu)))
 
 (effect-buffer "*mixer*"
   (h-stack :padding 0.2 :gap 0.3
@@ -1466,7 +1535,8 @@
         (subtree :key (str "mixer-v2-bus-" i)
           (if (%group-bus-id? (nth SEQ.bus-ids i))
             (box :width 0.0 :height 0.0)
-            (%bus-strip i)))))))
+            (%bus-strip i)))))
+    (%track-context-menu)))
 
 ;; C-g — fold the multi-selected tracks into a new group.
 (def %group-selected ()
