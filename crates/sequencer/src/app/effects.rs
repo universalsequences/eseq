@@ -6092,6 +6092,143 @@ mod tests {
         graph.process_block();
     }
 
+    /// Drum rack v2 slice 1: a rack is a track group carrying a pad map. It is
+    /// born empty — pads claim tracks lazily, when a sound lands on them.
+    #[test]
+    fn drum_rack_starts_empty_and_pads_claim_member_tracks_routed_to_the_rack_bus() {
+        let graph = TestLiveGraph::new("drum-rack-create-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, bus_id) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack should be created");
+        assert!(app.buses.iter().any(|bus| bus.id == bus_id));
+        assert!(app.groups[0].is_rack());
+        assert!(app.groups[0].members.is_empty(), "pads are lazy");
+        assert!(app.groups[0].rack.as_ref().expect("rack config").pads.is_empty());
+
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick)
+            .expect("empty pad should claim the new track");
+
+        let group = &app.groups[0];
+        assert_eq!(group.members, vec![kick]);
+        let rack = group.rack.as_ref().expect("rack config");
+        assert_eq!(rack.pads.len(), 1);
+        assert_eq!(rack.pads[0].pad_note, 36);
+        assert_eq!(group.members[rack.pads[0].member], kick);
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, kick, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Bus(bus_id)),
+        );
+        // Members are ordinary tracks — no rack container, so sequenced
+        // playback needs no transpose->slot matching.
+        assert!(!matches!(
+            app.graph.track_instrument_types[kick],
+            crate::sequencer::InstrumentType::Rack
+        ));
+
+        // Deleting the group takes the rack config and its bus with it.
+        app.delete_group_recorded(group_id).expect("rack deletion should record");
+        assert!(app.groups.is_empty());
+        assert!(app.buses.iter().all(|bus| bus.id != bus_id));
+        graph.process_block();
+    }
+
+    #[test]
+    fn drum_rack_rejects_duplicate_pad_notes_and_double_booked_members() {
+        let graph = TestLiveGraph::new("drum-rack-invariant-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("first pad");
+
+        assert!(
+            app.assign_rack_pad_track_recorded(group_id, 36, snare).is_err(),
+            "pad notes are unique within a rack",
+        );
+        assert!(
+            app.assign_rack_pad_track_recorded(group_id, 38, kick).is_err(),
+            "a member backs at most one pad",
+        );
+        assert!(
+            app.assign_rack_pad_track_recorded(group_id, 200, snare).is_err(),
+            "pad notes outside the drum rack range are rejected",
+        );
+        let rack = app.groups[0].rack.as_ref().expect("rack config");
+        assert_eq!(rack.pads.len(), 1);
+        assert_eq!(app.groups[0].members, vec![kick]);
+        graph.process_block();
+    }
+
+    #[test]
+    fn deleting_a_rack_member_track_drops_its_pad_and_reindexes_the_others() {
+        let graph = TestLiveGraph::new("drum-rack-member-delete-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, bus_id) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 38, snare).expect("snare pad");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        let hat_id = app.track_registry.id_at(hat).expect("hat identity");
+
+        app.delete_track_recorded(snare).expect("delete the snare member");
+
+        let group = &app.groups[0];
+        // The rack survives, minus the deleted member's pad; the hat's pad
+        // still points at the hat after the track vec was compacted.
+        assert!(group.is_rack());
+        let rack = group.rack.as_ref().expect("rack config");
+        assert_eq!(rack.pads.len(), 2);
+        assert_eq!(rack.pad_index_for_note(38), None);
+        let hat_index = app.track_registry.index_of(hat_id).expect("hat still exists");
+        let hat_pad = rack.pad_index_for_note(42).expect("hat pad survives");
+        assert_eq!(group.members[rack.pads[hat_pad].member], hat_index);
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, hat_index, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Bus(bus_id)),
+        );
+        graph.process_block();
+    }
+
+    /// Racks are born with zero members and stay alive when emptied — the
+    /// "dissolve below two members" rule is for plain groups only.
+    #[test]
+    fn emptying_a_drum_rack_keeps_the_rack_but_drops_the_pad() {
+        let graph = TestLiveGraph::new("drum-rack-empty-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        app.graph_controller().add_blank_sampler_track().expect("spare track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+
+        app.remove_track_from_group_recorded(kick).expect("pad member leaves the rack");
+
+        assert_eq!(app.groups.len(), 1);
+        assert!(app.groups[0].is_rack());
+        assert!(app.groups[0].members.is_empty());
+        assert!(app.groups[0].rack.as_ref().expect("rack config").pads.is_empty());
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, kick, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Mix),
+        );
+        graph.process_block();
+    }
+
     #[test]
     fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
         let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);

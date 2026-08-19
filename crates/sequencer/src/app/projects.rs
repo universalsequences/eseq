@@ -3480,8 +3480,18 @@ impl App {
             .into_iter()
             .filter(|group| {
                 self.buses.iter().any(|bus| bus.id.0 == group.bus_id)
-                    && !group.members.is_empty()
+                    // A drum rack with zero members is legal: its pads are lazy.
+                    && (group.is_rack() || !group.members.is_empty())
                     && group.members.iter().all(|&m| m < group_track_count)
+            })
+            .map(|mut group| {
+                // Enforce the rack invariants on load: pads point at live
+                // members, pad notes are unique, one pad per member.
+                let member_count = group.members.len();
+                if let Some(rack) = group.rack.as_mut() {
+                    rack.sanitize(member_count);
+                }
+                group
             })
             .collect();
         // Reconcile group routing: a group's members must reach its backing bus

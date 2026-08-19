@@ -866,6 +866,128 @@ pub struct ProjectTrackGroup {
     pub members: Vec<usize>,
     /// Backing `ProjectBusChannel` this group routes to.
     pub bus_id: u64,
+    /// `Some(_)` turns this group into a drum rack: a pad-routing map over its
+    /// members. See `docs/drum-rack-v2-spec.md`.
+    #[serde(default)]
+    pub rack: Option<ProjectRackConfig>,
+}
+
+impl ProjectTrackGroup {
+    /// A rack group is a drum rack; a plain group is an ordinary mixer group.
+    pub fn is_rack(&self) -> bool {
+        self.rack.is_some()
+    }
+}
+
+/// The drum-rack layer over a track group: an ordered pad map plus per-pad
+/// choke groups. Pads address members by *position in `group.members`*, which
+/// is why they survive track reindex-on-delete without carrying track ids.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectRackConfig {
+    /// Ordered pads; the pad grid position is the index.
+    pub pads: Vec<ProjectRackPad>,
+    /// Parallel to `pads`: the choke group each pad belongs to, if any.
+    #[serde(default)]
+    pub choke_groups: Vec<Option<u8>>,
+}
+
+/// One pad: the MIDI note it answers to and the member track backing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRackPad {
+    /// MIDI note this pad answers to. Unique within a rack.
+    pub pad_note: i32,
+    /// Index into `ProjectTrackGroup::members`. A member backs at most one pad.
+    pub member: usize,
+}
+
+impl ProjectRackConfig {
+    pub fn pad_index_for_note(&self, pad_note: i32) -> Option<usize> {
+        self.pads.iter().position(|pad| pad.pad_note == pad_note)
+    }
+
+    pub fn pad_index_for_member(&self, member: usize) -> Option<usize> {
+        self.pads.iter().position(|pad| pad.member == member)
+    }
+
+    /// Choke group of the pad at `pad_index`, if it has one.
+    pub fn choke_group(&self, pad_index: usize) -> Option<u8> {
+        self.choke_groups.get(pad_index).copied().flatten()
+    }
+
+    /// Sets (or clears) a pad's choke group, growing the parallel vec as needed.
+    pub fn set_choke_group(&mut self, pad_index: usize, choke: Option<u8>) {
+        if pad_index >= self.pads.len() {
+            return;
+        }
+        if self.choke_groups.len() < self.pads.len() {
+            self.choke_groups.resize(self.pads.len(), None);
+        }
+        self.choke_groups[pad_index] = choke;
+    }
+
+    /// Appends a pad. Callers must have checked the invariants first
+    /// (`sanitize` is the safety net, not the gate).
+    pub fn push_pad(&mut self, pad: ProjectRackPad) {
+        self.pads.push(pad);
+        self.choke_groups.resize(self.pads.len(), None);
+    }
+
+    /// Drops the pad at `pad_index` along with its choke entry.
+    pub fn remove_pad(&mut self, pad_index: usize) -> Option<ProjectRackPad> {
+        if pad_index >= self.pads.len() {
+            return None;
+        }
+        if pad_index < self.choke_groups.len() {
+            self.choke_groups.remove(pad_index);
+        }
+        Some(self.pads.remove(pad_index))
+    }
+
+    /// A member left `group.members` at `member_position`: drop its pad (if it
+    /// had one) and shift every later pad's member index down to match the
+    /// compacted `members` vec.
+    pub fn remap_after_member_removed(&mut self, member_position: usize) {
+        if let Some(pad_index) = self.pad_index_for_member(member_position) {
+            self.remove_pad(pad_index);
+        }
+        for pad in &mut self.pads {
+            if pad.member > member_position {
+                pad.member -= 1;
+            }
+        }
+    }
+
+    /// Enforces the rack invariants against a member count: pads point at live
+    /// members, `pad_note` is unique, and a member backs at most one pad.
+    /// Choke groups stay parallel to the surviving pads.
+    pub fn sanitize(&mut self, member_count: usize) {
+        self.choke_groups.resize(self.pads.len(), None);
+        let mut seen_notes: Vec<i32> = Vec::with_capacity(self.pads.len());
+        let mut seen_members: Vec<usize> = Vec::with_capacity(self.pads.len());
+        let mut keep: Vec<bool> = Vec::with_capacity(self.pads.len());
+        for pad in &self.pads {
+            let valid = pad.member < member_count
+                && !seen_notes.contains(&pad.pad_note)
+                && !seen_members.contains(&pad.member);
+            if valid {
+                seen_notes.push(pad.pad_note);
+                seen_members.push(pad.member);
+            }
+            keep.push(valid);
+        }
+        let mut index = 0;
+        self.pads.retain(|_| {
+            let keep_this = keep[index];
+            index += 1;
+            keep_this
+        });
+        let mut index = 0;
+        self.choke_groups.retain(|_| {
+            let keep_this = keep[index];
+            index += 1;
+            keep_this
+        });
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -3611,6 +3733,92 @@ mod tests {
         bare.track_sounds = vec![ProjectTrackSounds::default()];
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("patch_meta"), "empty metadata is skipped");
+    }
+
+    #[test]
+    fn rack_config_round_trips_and_defaults_none() {
+        let mut project = sample_project();
+        project.groups = vec![ProjectTrackGroup {
+            id: 3,
+            name: "Kit".to_string(),
+            color: [0.4, 0.2, 0.6],
+            collapsed: false,
+            members: vec![0, 1],
+            bus_id: 7,
+            rack: Some(ProjectRackConfig {
+                pads: vec![
+                    ProjectRackPad { pad_note: 36, member: 0 },
+                    ProjectRackPad { pad_note: 38, member: 1 },
+                ],
+                choke_groups: vec![None, Some(1)],
+            }),
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let rack = restored.groups[0].rack.as_ref().expect("rack survives the round trip");
+        assert_eq!(rack.pads[0], ProjectRackPad { pad_note: 36, member: 0 });
+        assert_eq!(rack.pads[1], ProjectRackPad { pad_note: 38, member: 1 });
+        assert_eq!(rack.choke_groups, vec![None, Some(1)]);
+
+        // A project written before drum rack v2 has no `rack` key at all.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value["groups"][0]
+            .as_object_mut()
+            .expect("group is a json object")
+            .remove("rack");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-rack project");
+        assert!(restored.groups[0].rack.is_none());
+        assert!(!restored.groups[0].is_rack());
+    }
+
+    #[test]
+    fn rack_sanitize_enforces_pad_invariants() {
+        let mut rack = ProjectRackConfig {
+            pads: vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                // Duplicate pad note.
+                ProjectRackPad { pad_note: 36, member: 1 },
+                // Member already backs pad 0.
+                ProjectRackPad { pad_note: 40, member: 0 },
+                // Member is out of range.
+                ProjectRackPad { pad_note: 42, member: 9 },
+                ProjectRackPad { pad_note: 44, member: 2 },
+            ],
+            choke_groups: vec![Some(1), Some(2), Some(3), Some(4), Some(5)],
+        };
+        rack.sanitize(3);
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad { pad_note: 44, member: 2 },
+            ],
+        );
+        assert_eq!(rack.choke_groups, vec![Some(1), Some(5)]);
+    }
+
+    #[test]
+    fn rack_remap_after_member_removed_drops_its_pad_and_shifts_the_rest() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad { pad_note: 36, member: 0 });
+        rack.push_pad(ProjectRackPad { pad_note: 38, member: 1 });
+        rack.push_pad(ProjectRackPad { pad_note: 40, member: 2 });
+        rack.set_choke_group(2, Some(4));
+
+        rack.remap_after_member_removed(1);
+
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad { pad_note: 40, member: 1 },
+            ],
+        );
+        assert_eq!(rack.choke_groups, vec![None, Some(4)]);
+        assert_eq!(rack.pad_index_for_note(38), None);
+        assert_eq!(rack.pad_index_for_member(1), Some(1));
+        assert_eq!(rack.choke_group(1), Some(4));
     }
 
     #[test]

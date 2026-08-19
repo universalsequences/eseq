@@ -362,6 +362,9 @@ pub(super) fn handle(
             let path_str = extract_path_from_payload(&payload);
             let group_id = extract_usize_from_payload(&payload, "group-id")
                 .map(|group_id| group_id as u64);
+            // Dropping a sound on an empty drum-rack pad: the new track becomes
+            // that pad's member (docs/drum-rack-v2-spec.md, "Track budget").
+            let rack_pad_note = extract_i32_from_payload(&payload, "pad-note");
             let preserve_browser_context =
                 extract_bool_from_payload(&payload, "preserve-browser-context");
             eprintln!(
@@ -378,7 +381,12 @@ pub(super) fn handle(
                 let groups_before = app.groups.clone();
                 match app.graph_controller().add_track(path) {
                     Ok(idx) => {
-                        host_commands::add_new_track_to_group(&mut app, idx, group_id);
+                        host_commands::add_new_track_to_group(
+                            &mut app,
+                            idx,
+                            group_id,
+                            rack_pad_note,
+                        );
                         if let Err(error) = app.commit_created_track(idx, "Add sample track") {
                             app.groups = groups_before;
                             *track_groups.lock().unwrap() = app.groups.clone();

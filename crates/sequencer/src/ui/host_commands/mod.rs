@@ -311,7 +311,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     } = ctx;
 
     let groups_before = app.groups.clone();
-    add_new_track_to_group(app, idx, group_id);
+    add_new_track_to_group(app, idx, group_id, None);
     if let Err(error) = app.commit_created_track(idx, "Add instrument track") {
         app.groups = groups_before;
         *track_groups.lock().unwrap() = app.groups.clone();
@@ -481,27 +481,22 @@ pub(crate) fn instrument_swap_status(
     }
 }
 
+/// Adds a freshly created track to `group_id`. With `pad_note`, the group must
+/// be a drum rack and the track becomes the member backing that pad — this is
+/// the lazy-pad path: a pad claims a track only when a sound lands on it.
 pub(crate) fn add_new_track_to_group(
     app: &mut app::App,
     track: usize,
     group_id: Option<u64>,
+    pad_note: Option<i32>,
 ) -> bool {
-    let Some((group_index, bus_id)) = new_track_group_target(&app.groups, track, group_id) else {
-        return false;
-    };
-    if track >= app.tracks.len() {
+    if new_track_group_target(&app.groups, track, group_id).is_none() {
         return false;
     }
-
-    app.set_track_output_all_scenes_unrecorded(
-        track,
-        sequencer::sequencer::TrackOutput::Bus(sequencer::sequencer::BusId(bus_id)),
-    );
-    let members = &mut app.groups[group_index].members;
-    members.push(track);
-    members.sort_unstable();
-    members.dedup();
-    true
+    let Some(group_id) = group_id else {
+        return false;
+    };
+    app.attach_track_to_group(track, group_id, pad_note).is_ok()
 }
 
 fn new_track_group_target(
@@ -541,6 +536,7 @@ mod tests {
             collapsed: false,
             members,
             bus_id,
+            rack: None,
         }
     }
 

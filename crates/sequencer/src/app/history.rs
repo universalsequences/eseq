@@ -107,6 +107,7 @@ pub struct GroupStructureState {
     pub collapsed: bool,
     pub members: Vec<TrackId>,
     pub bus_id: BusId,
+    pub rack: Option<crate::project::ProjectRackConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +485,8 @@ pub struct TrackCreationPatch {
     pub color: Option<crate::track_color::TrackColor>,
     pub collapsed: bool,
     pub group: Option<(u64, u64)>,
+    /// Rack pad this track was created to back, when the group is a drum rack.
+    pub rack_pad: Option<i32>,
 }
 
 impl TrackCreationPatch {

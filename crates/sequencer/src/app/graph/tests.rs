@@ -1280,6 +1280,7 @@
             collapsed: false,
             members: vec![0, 1, 2],
             bus_id: crate::sequencer::DEFAULT_BUS_A_ID,
+            rack: None,
         });
         let ids = app.track_registry.ids().to_vec();
 
