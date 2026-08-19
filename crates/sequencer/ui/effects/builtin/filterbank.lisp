@@ -182,9 +182,9 @@
           (%gate-led fx)))
       (label "HI EQ" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (h-stack :gap 0.14
-        (%choice fx hieq-p 0 "Cut" 2.75)
-        (%choice fx hieq-p 1 "Flat" 2.75)
-        (%choice fx hieq-p 2 "Boost" 2.75))
+        (%choice fx hieq-p 0 "Cut" 2.95)
+        (%choice fx hieq-p 1 "Flat" 2.95)
+        (%choice fx hieq-p 2 "Boost" 2.95))
       (box :height 0.35)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "noise" noise-p)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "fdbk" feedback-p))))

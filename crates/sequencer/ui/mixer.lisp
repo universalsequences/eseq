@@ -685,7 +685,7 @@
             (seq-set-track-volume i (%pointer-volume sy)))))
       (%track-meter i))))
 
-(def %bus-meter-control (i)
+(def %bus-meter-control (i is-group)
   (box :width 3.65 :height 4.24
     :on-click (lambda (event)
       (do
@@ -699,9 +699,9 @@
         ;;(seq-set-bus-volume i (%event-volume event))
         ))
     (v-stack
-      (box :width :fill :height 6.5)
+      (box :width :fill :height 5.9)
       (h-stack :gap 0.06 
-        (box :width 2 )
+        (box :width (if is-group 6 2))
         (mixer-v2-volume-triangle
           :value (bind-seq-nth "bus-volumes" i)
           :on-click (lambda (sx sy region)
@@ -1032,7 +1032,7 @@
         ;  )
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 5.0)
-          (%bus-meter-control i))
+          (%bus-meter-control i false))
         (box :height 2.8)
         (h-stack :gap 0.35
           (button (%bus-mute-label i)
@@ -1201,7 +1201,7 @@
       (muted (nth SEQ.bus-mutes bus-idx))
       (soloed (nth SEQ.bus-solos bus-idx))
       (armed (and rack (= SEQ.armed-rack-id gid))))
-    (h-stack :gap 0.35 :align :center
+    (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
       ;; Mute is lit when the strip is *passing* audio and goes dark when
       ;; muted, matching the track and bus strips right next to it.
       (button "M"
@@ -1241,7 +1241,7 @@
     (box :key (str "group-bus-strip-" bus-idx)
       :width 10.3 :height 13.72
       :corner-radius 12
-      :padding 0.0
+      :padding 0.1
       :background-color :mixer-strip-bg
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-types (if (>= bus-idx 0)
@@ -1249,19 +1249,21 @@
         (list))
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event gidx))
-      (v-stack :gap 0.4 :align :center
+      (v-stack :gap 0.3 :align :center
         
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (%bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
           (v-stack :gap 0.4 :align :center
-            (box :width :fill :height 8.2
-              (%bus-meter-control bus-idx))
-            (%group-control-buttons gidx bus-idx))
+            (box :width :fill :height 9.8 
+              (%bus-meter-control bus-idx true)
+              )
+            )
           (box :width 0.0 :height 0.0 :bg :transparent))
+            (%group-control-buttons gidx bus-idx)
         (%bus-mod-port-row (get group :bus-id))
-        (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
+        (box :corner-radius 24 :background-color c :width 9.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
           :selected (%group-delete-target? (get group :id))
           :selected-background-color :fx-panel-header-selected-bg

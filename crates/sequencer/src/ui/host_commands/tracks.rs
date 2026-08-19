@@ -760,6 +760,18 @@ pub(super) fn handle(
                 .find(|group| group.id == group_id)
                 .and_then(|group| group.members.first().copied())
                 .unwrap_or(0);
+            // A lazily-populated rack can own zero tracks. Deleting one must not
+            // yank the selection to the last track, so keep the current one.
+            let owns_tracks = app.groups.iter()
+                .find(|group| group.id == group_id)
+                .is_some_and(|group| {
+                    !group.members.is_empty()
+                        || group.rack_members.iter().any(|rack_id| {
+                            app.groups.iter().any(|rack| {
+                                rack.id == *rack_id && !rack.members.is_empty()
+                            })
+                        })
+                });
             let request_id = if state.is_playing() {
                 let request_id = state.request_track_delete_boundary(boundary_track);
                 let wait_deadline = Instant::now() + Duration::from_millis(250);
@@ -784,6 +796,13 @@ pub(super) fn handle(
                         state.complete_topology_edit(request_id);
                         state.publish_scheduler_snapshot();
                     }
+                    let new_idx = if owns_tracks {
+                        new_idx
+                    } else {
+                        current_track
+                            .load(Ordering::Relaxed)
+                            .min(app.tracks.len().saturating_sub(1))
+                    };
                     sync_after_track_topology_delete(&mut app, &mut editor, ctx, new_idx);
                     editor.handle_host_event(HostEvent::Status(
                         "Deleted track group".to_string(),

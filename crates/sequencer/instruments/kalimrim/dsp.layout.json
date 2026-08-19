@@ -4,8 +4,8 @@
   "root": {
     "nodes": {
       "add": {
-        "x": 98.03976,
-        "y": 33.965397
+        "x": 102.10811,
+        "y": 35.562893
       },
       "attack": {
         "x": 4.0,
@@ -56,12 +56,12 @@
         "y": 33.796345
       },
       "n11": {
-        "x": 150.82129,
-        "y": 8.0
+        "x": 130.34297,
+        "y": 20.366709
       },
       "n11-2": {
-        "x": 147.44238,
-        "y": 31.52
+        "x": 117.7209,
+        "y": 24.196634
       },
       "pitch": {
         "x": 97.205666,
@@ -101,10 +101,6 @@
       }
     },
     "cables": {
-      "n11-2:0->kalimba-modal-3:3": {
-        "segmented": true,
-        "y": 33.85
-      },
       "n11:0->kalimba-modal-2:3": {
         "segmented": true,
         "y": 23.029999
@@ -123,6 +119,7 @@
       "kalimba-modal-3:0": "cable",
       "kalimba-modal-3:1": "cable",
       "kalimba-modal-3:2": "cable",
+      "kalimba-modal-3:3": "cable",
       "kalimba-modal-3:4": "cable",
       "mix-2:0": "cable",
       "mix-2:1": "cable",
@@ -1242,12 +1239,16 @@
       },
       {
         "id": "n11",
-        "op": "11",
-        "kind": "constant",
-        "label": "11",
+        "op": "param",
+        "kind": "param",
+        "label": "param dacay @min 1 @max 2000 @default 1000",
         "outputs": [
           "out"
-        ]
+        ],
+        "param": {
+          "name": "dacay",
+          "modulatable": false
+        }
       },
       {
         "id": "kalimba-modal-2",
@@ -1465,15 +1466,13 @@
         "id": "add",
         "op": "+",
         "kind": "builtin",
-        "label": "+ add",
+        "label": "+",
         "args": [
           {
-            "kind": "symbol-ref",
-            "name": "delay-2"
+            "kind": "connected"
           },
           {
-            "kind": "symbol-ref",
-            "name": "mul"
+            "kind": "connected"
           }
         ],
         "outputs": [
@@ -1587,14 +1586,6 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "n11-2",
-        "fromOutput": 0,
-        "toNode": "kalimba-modal-3",
-        "toInput": 3,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
         "fromNode": "gain",
         "fromOutput": 0,
         "toNode": "kalimba-modal-3",
@@ -1687,6 +1678,14 @@
         "fromOutput": 0,
         "toNode": "audio",
         "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "n11",
+        "fromOutput": 0,
+        "toNode": "kalimba-modal-3",
+        "toInput": 3,
         "kind": "forward",
         "presentation": "cable"
       }
@@ -7168,6 +7167,15 @@
               ]
             },
             {
+              "id": "history2",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
               "id": "history1",
               "op": "make-history",
               "kind": "history",
@@ -8136,6 +8144,4564 @@
               "fromNode": "f3",
               "fromOutput": 0,
               "toNode": "out7",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "freq-to-delay",
+        "params": [
+          "freq",
+          "sample_rate"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/freq-to-delay/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/freq-to-delay/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "freq",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name freq",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "freq"
+                }
+              ],
+              "outputs": [
+                "freq"
+              ]
+            },
+            {
+              "id": "sample_rate",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name sample_rate",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "sample_rate"
+                }
+              ],
+              "outputs": [
+                "sample_rate"
+              ]
+            },
+            {
+              "id": "max-0",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max max-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "freq"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.001"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "return",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/ return",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sample_rate"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "max-0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "freq",
+              "fromOutput": 0,
+              "toNode": "max-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sample_rate",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "max-0",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "gain2",
+        "params": [
+          "x"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/gain2/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/gain2/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "x",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name x",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "x"
+                }
+              ],
+              "outputs": [
+                "x"
+              ]
+            },
+            {
+              "id": "return",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "x"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.45"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "x",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "mnm_srr",
+        "params": [
+          "sig",
+          "amount"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/mnm_srr/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/mnm_srr/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "sig",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name sig",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "sig"
+                }
+              ],
+              "outputs": [
+                "sig"
+              ]
+            },
+            {
+              "id": "amount",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name amount",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "amount"
+                }
+              ],
+              "outputs": [
+                "amount"
+              ]
+            },
+            {
+              "id": "srr_amt",
+              "op": "clip",
+              "kind": "builtin",
+              "label": "clip srr_amt",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "amount"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "/#0",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "300"
+                },
+                {
+                  "kind": "literal",
+                  "value": "samplerate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "pow#0",
+              "op": "pow",
+              "kind": "builtin",
+              "label": "pow",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "srr_amt"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "hold_hz",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* hold_hz",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "samplerate"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "srr_ph_h",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "srr_val_h",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "/#1",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "hold_hz"
+                },
+                {
+                  "kind": "literal",
+                  "value": "samplerate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "+#0",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "srr_prev_ph"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "srr_ph",
+              "op": "wrap",
+              "kind": "builtin",
+              "label": "wrap srr_ph",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "srr_wrapped",
+              "op": "lt",
+              "kind": "builtin",
+              "label": "lt srr_wrapped",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "srr_ph"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "srr_prev_ph"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "lte#0",
+              "op": "lte",
+              "kind": "builtin",
+              "label": "lte",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "srr_amt"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.001"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "max#0",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "srr_wrapped"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "srr_held",
+              "op": "gswitch",
+              "kind": "builtin",
+              "label": "gswitch srr_held",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "sig"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "amount",
+              "fromOutput": 0,
+              "toNode": "srr_amt",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "/#0",
+              "fromOutput": 0,
+              "toNode": "pow#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_amt",
+              "fromOutput": 0,
+              "toNode": "pow#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "pow#0",
+              "fromOutput": 0,
+              "toNode": "hold_hz",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_ph_h",
+              "fromOutput": 0,
+              "toNode": "+#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "hold_hz",
+              "fromOutput": 0,
+              "toNode": "/#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "/#1",
+              "fromOutput": 0,
+              "toNode": "+#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "+#0",
+              "fromOutput": 0,
+              "toNode": "srr_ph",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_ph",
+              "fromOutput": 0,
+              "toNode": "srr_wrapped",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_ph_h",
+              "fromOutput": 0,
+              "toNode": "srr_wrapped",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_ph",
+              "fromOutput": 0,
+              "toNode": "srr_ph_h",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_wrapped",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_amt",
+              "fromOutput": 0,
+              "toNode": "lte#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "lte#0",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "max#0",
+              "fromOutput": 0,
+              "toNode": "srr_held",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sig",
+              "fromOutput": 0,
+              "toNode": "srr_held",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_val_h",
+              "fromOutput": 0,
+              "toNode": "srr_held",
+              "toInput": 2,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_held",
+              "fromOutput": 0,
+              "toNode": "srr_val_h",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "srr_held",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "pitchless_delay_control",
+        "params": [
+          "target",
+          "fade_rate"
+        ],
+        "outputs": [
+          "out",
+          "out2",
+          "out3"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/pitchless_delay_control/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/pitchless_delay_control/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "target",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name target",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "target"
+                }
+              ],
+              "outputs": [
+                "target"
+              ]
+            },
+            {
+              "id": "fade_rate",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name fade_rate",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "fade_rate"
+                }
+              ],
+              "outputs": [
+                "fade_rate"
+              ]
+            },
+            {
+              "id": "h_fade",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "h_fade_dir",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "h_init",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "h_tap_a",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "h_tap_b",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "abs-2",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs abs-2",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-0",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-0",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-1",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-1",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-4",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-4",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "fade_to_a_finished",
+              "op": "<=",
+              "kind": "builtin",
+              "label": "<= fade_to_a_finished",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "fade_to_b_finished",
+              "op": ">=",
+              "kind": "builtin",
+              "label": ">= fade_to_b_finished",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-0"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "is_fading",
+              "op": ">",
+              "kind": "builtin",
+              "label": "> is_fading",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "abs-2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "is_fading_a",
+              "op": "<",
+              "kind": "builtin",
+              "label": "< is_fading_a",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "is_fading_b",
+              "op": ">",
+              "kind": "builtin",
+              "label": "> is_fading_b",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "is_first",
+              "op": "==",
+              "kind": "builtin",
+              "label": "== is_first",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-12",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-12",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-16",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-16",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-18",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-18",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "target"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-20",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-20",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "target"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-22",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-22",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-24",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-24",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-8",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-8",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-1",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-10",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-11",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-12",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-2",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-3",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-4",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-5",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-6",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-7",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-8",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "n1-9",
+              "op": "1",
+              "kind": "constant",
+              "label": "1",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "settled_at_a",
+              "op": "<=",
+              "kind": "builtin",
+              "label": "<= settled_at_a",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "settled_at_b",
+              "op": ">=",
+              "kind": "builtin",
+              "label": ">= settled_at_b",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-0",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "target"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "abs-0",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs abs-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "dev_a",
+              "op": ">",
+              "kind": "builtin",
+              "label": "> dev_a",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "abs-0"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-1",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "target"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "abs-1",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs abs-1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "dev_b",
+              "op": ">",
+              "kind": "builtin",
+              "label": "> dev_b",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "abs-1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-10",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-10",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-8"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-11",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-11",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-9"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-12",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-12",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-10"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-13",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-13",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-11"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_first"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-2",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "fade_to_b_finished"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-1",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-0",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading_b"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-3",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "fade_to_a_finished"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-3",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading_a"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "fading_next_dir",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ fading_next_dir",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-0"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-6",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-6",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "fading_next_dir"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-4",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-4",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-2"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-5",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-5",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-3"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-7",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-7",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-5"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-9",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-9",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-7"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "is_fading"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "trigger_fade_to_a",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* trigger_fade_to_a",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "settled_at_b"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "dev_b"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-10",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-10",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "trigger_fade_to_a"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "target"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-5",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-5",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "trigger_fade_to_a"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "fade_rate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-6",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-6",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-4"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "trigger_fade_to_a"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-11",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-11",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-6"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-2",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-10"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-11"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-9",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-9",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-5"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "next_tap_a",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ next_tap_a",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-8"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-9"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-19",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-19",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-10"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "next_tap_a"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "final_tap_a",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ final_tap_a",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-18"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-19"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "trigger_fade_to_b",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* trigger_fade_to_b",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "settled_at_a"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "dev_a"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-14",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-14",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "trigger_fade_to_b"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "target"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-4",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-4",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "trigger_fade_to_b"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "fade_rate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "not_fading_next_dir",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- not_fading_next_dir",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-4"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-7",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-7",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-4"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "not_fading_next_dir"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "next_fade_dir",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ next_fade_dir",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-6"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-7"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-5",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-5",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "next_fade_dir"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-17",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-17",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-9"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-25",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-25",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-13"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "next_fade_dir"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "final_fade_dir",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ final_fade_dir",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-24"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-25"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "next_fade",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ next_fade",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-16"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-17"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "next_fade_clamped",
+              "op": "clip",
+              "kind": "builtin",
+              "label": "clip next_fade_clamped",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "next_fade"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-23",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-23",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-12"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "next_fade_clamped"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "final_fade",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ final_fade",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-22"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-23"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-8",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-8",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "n1-6"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "trigger_fade_to_b"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-15",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-15",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-8"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add-3",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add-3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-14"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-15"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-13",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-13",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-7"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add-3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "next_tap_b",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ next_tap_b",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-12"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-13"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-21",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-21",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-11"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "next_tap_b"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "final_tap_b",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ final_tap_b",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-20"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-21"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "out2",
+              "op": "out",
+              "kind": "out",
+              "label": "out 2",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                }
+              ]
+            },
+            {
+              "id": "out3",
+              "op": "out",
+              "kind": "out",
+              "label": "out 3",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "abs-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade",
+              "fromOutput": 0,
+              "toNode": "add-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "add-0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade",
+              "fromOutput": 0,
+              "toNode": "add-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "add-1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade",
+              "fromOutput": 0,
+              "toNode": "add-4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "add-4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-1",
+              "fromOutput": 0,
+              "toNode": "fade_to_a_finished",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-0",
+              "fromOutput": 0,
+              "toNode": "fade_to_b_finished",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs-2",
+              "fromOutput": 0,
+              "toNode": "is_fading",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "is_fading_a",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "is_fading_b",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_init",
+              "fromOutput": 0,
+              "toNode": "is_first",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "mul-12",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_tap_b",
+              "fromOutput": 0,
+              "toNode": "mul-12",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "mul-16",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-4",
+              "fromOutput": 0,
+              "toNode": "mul-16",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "mul-18",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "target",
+              "fromOutput": 0,
+              "toNode": "mul-18",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "mul-20",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "target",
+              "fromOutput": 0,
+              "toNode": "mul-20",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "mul-22",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "mul-24",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "mul-8",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_tap_a",
+              "fromOutput": 0,
+              "toNode": "mul-8",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade",
+              "fromOutput": 0,
+              "toNode": "settled_at_a",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade",
+              "fromOutput": 0,
+              "toNode": "settled_at_b",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "target",
+              "fromOutput": 0,
+              "toNode": "sub-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_tap_a",
+              "fromOutput": 0,
+              "toNode": "sub-0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-0",
+              "fromOutput": 0,
+              "toNode": "abs-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs-0",
+              "fromOutput": 0,
+              "toNode": "dev_a",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "target",
+              "fromOutput": 0,
+              "toNode": "sub-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_tap_b",
+              "fromOutput": 0,
+              "toNode": "sub-1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-1",
+              "fromOutput": 0,
+              "toNode": "abs-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs-1",
+              "fromOutput": 0,
+              "toNode": "dev_b",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-8",
+              "fromOutput": 0,
+              "toNode": "sub-10",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "sub-10",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-9",
+              "fromOutput": 0,
+              "toNode": "sub-11",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "sub-11",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-10",
+              "fromOutput": 0,
+              "toNode": "sub-12",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "sub-12",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-11",
+              "fromOutput": 0,
+              "toNode": "sub-13",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_first",
+              "fromOutput": 0,
+              "toNode": "sub-13",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1",
+              "fromOutput": 0,
+              "toNode": "sub-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "fade_to_b_finished",
+              "fromOutput": 0,
+              "toNode": "sub-2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "mul-1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-2",
+              "fromOutput": 0,
+              "toNode": "mul-1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading_b",
+              "fromOutput": 0,
+              "toNode": "mul-0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-1",
+              "fromOutput": 0,
+              "toNode": "mul-0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-1",
+              "fromOutput": 0,
+              "toNode": "sub-3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "fade_to_a_finished",
+              "fromOutput": 0,
+              "toNode": "sub-3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade_dir",
+              "fromOutput": 0,
+              "toNode": "mul-3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-3",
+              "fromOutput": 0,
+              "toNode": "mul-3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading_a",
+              "fromOutput": 0,
+              "toNode": "mul-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-3",
+              "fromOutput": 0,
+              "toNode": "mul-2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-0",
+              "fromOutput": 0,
+              "toNode": "fading_next_dir",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-2",
+              "fromOutput": 0,
+              "toNode": "fading_next_dir",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "mul-6",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "fading_next_dir",
+              "fromOutput": 0,
+              "toNode": "mul-6",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-2",
+              "fromOutput": 0,
+              "toNode": "sub-4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "sub-4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-3",
+              "fromOutput": 0,
+              "toNode": "sub-5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "sub-5",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-5",
+              "fromOutput": 0,
+              "toNode": "sub-7",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "sub-7",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-7",
+              "fromOutput": 0,
+              "toNode": "sub-9",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "is_fading",
+              "fromOutput": 0,
+              "toNode": "sub-9",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "settled_at_b",
+              "fromOutput": 0,
+              "toNode": "trigger_fade_to_a",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "dev_b",
+              "fromOutput": 0,
+              "toNode": "trigger_fade_to_a",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "trigger_fade_to_a",
+              "fromOutput": 0,
+              "toNode": "mul-10",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "target",
+              "fromOutput": 0,
+              "toNode": "mul-10",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "trigger_fade_to_a",
+              "fromOutput": 0,
+              "toNode": "mul-5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "fade_rate",
+              "fromOutput": 0,
+              "toNode": "mul-5",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-4",
+              "fromOutput": 0,
+              "toNode": "sub-6",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "trigger_fade_to_a",
+              "fromOutput": 0,
+              "toNode": "sub-6",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-6",
+              "fromOutput": 0,
+              "toNode": "mul-11",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_tap_a",
+              "fromOutput": 0,
+              "toNode": "mul-11",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-10",
+              "fromOutput": 0,
+              "toNode": "add-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-11",
+              "fromOutput": 0,
+              "toNode": "add-2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-5",
+              "fromOutput": 0,
+              "toNode": "mul-9",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-2",
+              "fromOutput": 0,
+              "toNode": "mul-9",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-8",
+              "fromOutput": 0,
+              "toNode": "next_tap_a",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-9",
+              "fromOutput": 0,
+              "toNode": "next_tap_a",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-10",
+              "fromOutput": 0,
+              "toNode": "mul-19",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "next_tap_a",
+              "fromOutput": 0,
+              "toNode": "mul-19",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-18",
+              "fromOutput": 0,
+              "toNode": "final_tap_a",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-19",
+              "fromOutput": 0,
+              "toNode": "final_tap_a",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "settled_at_a",
+              "fromOutput": 0,
+              "toNode": "trigger_fade_to_b",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "dev_a",
+              "fromOutput": 0,
+              "toNode": "trigger_fade_to_b",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "trigger_fade_to_b",
+              "fromOutput": 0,
+              "toNode": "mul-14",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "target",
+              "fromOutput": 0,
+              "toNode": "mul-14",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "trigger_fade_to_b",
+              "fromOutput": 0,
+              "toNode": "mul-4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "fade_rate",
+              "fromOutput": 0,
+              "toNode": "mul-4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-4",
+              "fromOutput": 0,
+              "toNode": "not_fading_next_dir",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-5",
+              "fromOutput": 0,
+              "toNode": "not_fading_next_dir",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-4",
+              "fromOutput": 0,
+              "toNode": "mul-7",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "not_fading_next_dir",
+              "fromOutput": 0,
+              "toNode": "mul-7",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-6",
+              "fromOutput": 0,
+              "toNode": "next_fade_dir",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-7",
+              "fromOutput": 0,
+              "toNode": "next_fade_dir",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_fade",
+              "fromOutput": 0,
+              "toNode": "add-5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "next_fade_dir",
+              "fromOutput": 0,
+              "toNode": "add-5",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-9",
+              "fromOutput": 0,
+              "toNode": "mul-17",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-5",
+              "fromOutput": 0,
+              "toNode": "mul-17",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-13",
+              "fromOutput": 0,
+              "toNode": "mul-25",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "next_fade_dir",
+              "fromOutput": 0,
+              "toNode": "mul-25",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-24",
+              "fromOutput": 0,
+              "toNode": "final_fade_dir",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-25",
+              "fromOutput": 0,
+              "toNode": "final_fade_dir",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-16",
+              "fromOutput": 0,
+              "toNode": "next_fade",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-17",
+              "fromOutput": 0,
+              "toNode": "next_fade",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "next_fade",
+              "fromOutput": 0,
+              "toNode": "next_fade_clamped",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-12",
+              "fromOutput": 0,
+              "toNode": "mul-23",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "next_fade_clamped",
+              "fromOutput": 0,
+              "toNode": "mul-23",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-22",
+              "fromOutput": 0,
+              "toNode": "final_fade",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-23",
+              "fromOutput": 0,
+              "toNode": "final_fade",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-6",
+              "fromOutput": 0,
+              "toNode": "sub-8",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "trigger_fade_to_b",
+              "fromOutput": 0,
+              "toNode": "sub-8",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-8",
+              "fromOutput": 0,
+              "toNode": "mul-15",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "h_tap_b",
+              "fromOutput": 0,
+              "toNode": "mul-15",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-14",
+              "fromOutput": 0,
+              "toNode": "add-3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-15",
+              "fromOutput": 0,
+              "toNode": "add-3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-7",
+              "fromOutput": 0,
+              "toNode": "mul-13",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add-3",
+              "fromOutput": 0,
+              "toNode": "mul-13",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-12",
+              "fromOutput": 0,
+              "toNode": "next_tap_b",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-13",
+              "fromOutput": 0,
+              "toNode": "next_tap_b",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-11",
+              "fromOutput": 0,
+              "toNode": "mul-21",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "next_tap_b",
+              "fromOutput": 0,
+              "toNode": "mul-21",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-20",
+              "fromOutput": 0,
+              "toNode": "final_tap_b",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-21",
+              "fromOutput": 0,
+              "toNode": "final_tap_b",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_fade",
+              "fromOutput": 0,
+              "toNode": "h_fade",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_fade_dir",
+              "fromOutput": 0,
+              "toNode": "h_fade_dir",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "n1-12",
+              "fromOutput": 0,
+              "toNode": "h_init",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_tap_a",
+              "fromOutput": 0,
+              "toNode": "h_tap_a",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_tap_b",
+              "fromOutput": 0,
+              "toNode": "h_tap_b",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_tap_a",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_tap_b",
+              "fromOutput": 0,
+              "toNode": "out2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "final_fade",
+              "fromOutput": 0,
+              "toNode": "out3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "simp10",
+        "params": [
+          "input"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp10/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp10/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "phasor1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor phasor1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "triangle1",
+              "op": "triangle",
+              "kind": "builtin",
+              "label": "triangle triangle1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "phasor1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "triangle1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "twopi"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "cos1",
+              "op": "cos",
+              "kind": "builtin",
+              "label": "cos cos1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "phasor1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "phasor1",
+              "fromOutput": 0,
+              "toNode": "triangle1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "triangle1",
+              "fromOutput": 0,
+              "toNode": "mul1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul1",
+              "fromOutput": 0,
+              "toNode": "cos1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "cos1",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "simp11",
+        "params": [
+          "input",
+          "shape",
+          "depth"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp11/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp11/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "shape",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name shape",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "shape"
+                }
+              ],
+              "outputs": [
+                "shape"
+              ]
+            },
+            {
+              "id": "depth",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name depth",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "depth"
+                }
+              ],
+              "outputs": [
+                "depth"
+              ]
+            },
+            {
+              "id": "mul5",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul5",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "depth"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add1",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "shape"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "add1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "simp21",
+              "op": "simp2",
+              "kind": "macro-instance",
+              "label": "simp2 simp21",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "phasor1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor phasor1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "triangle1",
+              "op": "triangle",
+              "kind": "builtin",
+              "label": "triangle triangle1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "phasor1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "shape"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "triangle1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "twopi"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul4",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul4",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "cos1",
+              "op": "cos",
+              "kind": "builtin",
+              "label": "cos cos1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul4"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gain21",
+              "op": "gain2",
+              "kind": "macro-instance",
+              "label": "gain2 gain21",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "cos1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gain22",
+              "op": "gain2",
+              "kind": "macro-instance",
+              "label": "gain2 gain22",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "gain21"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mix1",
+              "op": "mix",
+              "kind": "builtin",
+              "label": "mix mix1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "gain22"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "simp21"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "shape"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mix1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "depth",
+              "fromOutput": 0,
+              "toNode": "mul5",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "shape",
+              "fromOutput": 0,
+              "toNode": "add1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add1",
+              "fromOutput": 0,
+              "toNode": "mul3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul5",
+              "fromOutput": 0,
+              "toNode": "mul3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "simp21",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "phasor1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "phasor1",
+              "fromOutput": 0,
+              "toNode": "triangle1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "shape",
+              "fromOutput": 0,
+              "toNode": "triangle1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "triangle1",
+              "fromOutput": 0,
+              "toNode": "mul1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul1",
+              "fromOutput": 0,
+              "toNode": "mul4",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul3",
+              "fromOutput": 0,
+              "toNode": "mul4",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul4",
+              "fromOutput": 0,
+              "toNode": "cos1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "cos1",
+              "fromOutput": 0,
+              "toNode": "gain21",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gain21",
+              "fromOutput": 0,
+              "toNode": "gain22",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gain22",
+              "fromOutput": 0,
+              "toNode": "mix1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "simp21",
+              "fromOutput": 0,
+              "toNode": "mix1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "shape",
+              "fromOutput": 0,
+              "toNode": "mix1",
+              "toInput": 2,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mix1",
+              "fromOutput": 0,
+              "toNode": "mul2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul2",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "simp2",
+        "params": [
+          "input"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp2/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/simp2/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "input",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name input",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "input"
+                }
+              ],
+              "outputs": [
+                "input"
+              ]
+            },
+            {
+              "id": "phasor1",
+              "op": "phasor",
+              "kind": "builtin",
+              "label": "phasor phasor1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "input"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul1",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "phasor1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "twopi"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "cos1",
+              "op": "cos",
+              "kind": "builtin",
+              "label": "cos cos1",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "input",
+              "fromOutput": 0,
+              "toNode": "phasor1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "phasor1",
+              "fromOutput": 0,
+              "toNode": "mul1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul1",
+              "fromOutput": 0,
+              "toNode": "cos1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "cos1",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "smoothstep",
+        "params": [
+          "edge0",
+          "edge1",
+          "x"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/smoothstep/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/sequencer/defmacros/smoothstep/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "edge0",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name edge0",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "edge0"
+                }
+              ],
+              "outputs": [
+                "edge0"
+              ]
+            },
+            {
+              "id": "edge1",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name edge1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "edge1"
+                }
+              ],
+              "outputs": [
+                "edge1"
+              ]
+            },
+            {
+              "id": "x",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name x",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "x"
+                }
+              ],
+              "outputs": [
+                "x"
+              ]
+            },
+            {
+              "id": "sub",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "x"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "edge0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "sub-2",
+              "op": "-",
+              "kind": "builtin",
+              "label": "- sub-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "edge1"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "edge0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "div",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/ div",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "sub-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "clip-2",
+              "op": "clip",
+              "kind": "builtin",
+              "label": "clip clip-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "div"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "clip-2"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "clip-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-2",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-2",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "clip-2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "-2"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "add",
+              "op": "+",
+              "kind": "builtin",
+              "label": "+ add",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul-2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "3"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "mul-3",
+              "op": "*",
+              "kind": "builtin",
+              "label": "* mul-3",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "mul"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "add"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "x",
+              "fromOutput": 0,
+              "toNode": "sub",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "edge0",
+              "fromOutput": 0,
+              "toNode": "sub",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "edge1",
+              "fromOutput": 0,
+              "toNode": "sub-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "edge0",
+              "fromOutput": 0,
+              "toNode": "sub-2",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub",
+              "fromOutput": 0,
+              "toNode": "div",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "sub-2",
+              "fromOutput": 0,
+              "toNode": "div",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "div",
+              "fromOutput": 0,
+              "toNode": "clip-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "clip-2",
+              "fromOutput": 0,
+              "toNode": "mul",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "clip-2",
+              "fromOutput": 0,
+              "toNode": "mul",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "clip-2",
+              "fromOutput": 0,
+              "toNode": "mul-2",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-2",
+              "fromOutput": 0,
+              "toNode": "add",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul",
+              "fromOutput": 0,
+              "toNode": "mul-3",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "add",
+              "fromOutput": 0,
+              "toNode": "mul-3",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "mul-3",
+              "fromOutput": 0,
+              "toNode": "out",
               "toInput": 0,
               "kind": "forward",
               "presentation": "cable"
