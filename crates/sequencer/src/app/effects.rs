@@ -6208,13 +6208,27 @@ mod tests {
 
         // Deleting a member drops its pad, so it stops choking anything.
         app.delete_track_recorded(hat_closed).expect("delete the closed hat");
-        let hat_open = app.groups[0].members[app.groups[0]
+        let shifted_hat_open = app.groups[0].members[app.groups[0]
             .rack
             .as_ref()
             .expect("rack config")
             .pad_index_for_note(46)
             .expect("open hat pad survives")];
+        assert_eq!(choke_key(&app, shifted_hat_open), expected);
+
+        // Undoing the delete restores the pad map at the original indices, and
+        // the runtime table must follow it (not keep the post-delete keys).
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(choke_key(&app, hat_closed), expected);
         assert_eq!(choke_key(&app, hat_open), expected);
+        assert_eq!(choke_key(&app, kick), 0);
+
+        // Choke group 0 is the packed "unassigned" value; storing it would
+        // create a pad that looks assigned but never chokes.
+        assert!(app.set_rack_pad_choke_group_recorded(group_id, 36, Some(0)).is_err());
         graph.process_block();
     }
 

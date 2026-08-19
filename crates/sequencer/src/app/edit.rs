@@ -2429,6 +2429,11 @@ impl App {
         pad_note: i32,
         choke: Option<u8>,
     ) -> Result<(), String> {
+        // Choke group 0 packs to the "unassigned" runtime key (`rack_choke_key`),
+        // so a pad stored with Some(0) would look assigned but never choke.
+        if choke == Some(0) {
+            return Err("Choke groups start at 1; use None to clear".to_string());
+        }
         self.apply_recorded_bus_group_structure_mutation("Set drum rack choke group", |app| {
             let group = app.groups.iter_mut().find(|group| group.id == group_id)
                 .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
@@ -2836,6 +2841,10 @@ impl App {
         self.state.move_appended_track_pattern_lane_to(patch.index, &patch.patterns)?;
         self.graph_controller().move_appended_track_to(patch.index)?;
         self.groups = patch.groups.clone();
+        // The runtime choke table still holds the post-delete reindexed keys;
+        // restoring the pre-delete groups has to republish it or choke fires
+        // on the wrong tracks until the next group edit.
+        self.publish_rack_choke_runtime();
         self.macro_engine.restore_track_topology_mappings(&patch.macro_mappings)
             .map_err(|error| format!("Could not restore track macro mappings: {error:?}"))?;
         self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
@@ -8344,15 +8353,14 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             ApplyMode::Undo => {
                 let track = app.track_registry.index_of(patch.track)
                     .ok_or(EditError::MissingStableTrack { track: patch.track })?;
-                if let Some((group_id, _)) = patch.group {
-                    if let Some(group) = app.groups.iter_mut().find(|group| group.id == group_id) {
-                        group.members.retain(|member| *member != track);
-                    }
-                }
                 app.device_registry.clear_track(patch.track);
                 app.graph_controller().delete_track(track)
-                    .map(|_| ())
-                    .map_err(EditError::ReplayFailed)
+                    .map_err(EditError::ReplayFailed)?;
+                // Same group bookkeeping as the track-deletion redo arm: drop
+                // the member (and the rack pad it backed), shift the member
+                // indices behind it, and republish the choke runtime table.
+                app.remap_groups_after_track_delete(track);
+                Ok(())
             }
             ApplyMode::Redo => app.restore_created_track(patch)
                 .map_err(EditError::ReplayFailed),
