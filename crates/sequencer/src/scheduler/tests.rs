@@ -1664,6 +1664,67 @@
         assert!((resolved.velocity - 0.7).abs() < 1e-6, "disarm restores stored values");
     }
 
+    /// Chord-backed steps own their sounding durations per note, which beat
+    /// `resolved.duration` at fire time — so the print substitution must
+    /// carry the duration delta onto the scheduled chord (mirroring the
+    /// write-behind stamp's `set_step_param_no_publish` chord move), or a
+    /// duration print on a recorded step is only heard one loop later.
+    #[test]
+    fn scheduler_lookahead_shifts_chord_durations_for_armed_step_print() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.step_data[0].set(0, StepParam::Duration, 2.0);
+        state.pattern.chord_data[0].add_note_with_duration(0, 0.0, 2.0);
+        state.pattern.chord_data[0].add_note_with_duration(0, 7.0, 1.0);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        // Latch duration 3.0: delta over the stored base (2.0) is +1.0, so
+        // the chord's explicit per-note durations move to 3.0 and 2.0.
+        state.step_print_override.set(0, None, Some(3.0), None);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            6_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let scheduled = queue.pop().expect("chord step trigger");
+        let ScheduledEventKind::ResolvedTrigger {
+            resolved, chord, ..
+        } = scheduled.kind
+        else {
+            panic!("expected resolved trigger");
+        };
+        assert!((resolved.duration - 3.0).abs() < 1e-6);
+        assert_eq!(chord.count, 2);
+        assert!(
+            (chord.durations[0] - 3.0).abs() < 1e-6,
+            "first chord note takes the stamp's delta (+1.0)"
+        );
+        assert!(
+            (chord.durations[1] - 2.0).abs() < 1e-6,
+            "relative chord durations are preserved, matching the stamp"
+        );
+    }
+
     #[test]
     fn scheduler_lookahead_flushes_quantizer_without_trigger_on_grid() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));

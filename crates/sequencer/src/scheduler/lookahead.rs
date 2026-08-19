@@ -172,6 +172,25 @@ pub(super) struct SchedulerLookaheadResult {
     pub(super) scheduled_until_sample: u64,
 }
 
+/// Live step-param printing (bead eseq-jc9): chord-backed steps own their
+/// sounding durations per note (`chord.durations[idx] > 0.0` beats
+/// `resolved.duration` at fire time), and the write-behind stamp moves them
+/// by the base-param delta (`set_step_param_no_publish`). The audible
+/// substitution has to carry the same per-note delta onto the scheduled
+/// chord, or a duration print on a chord-backed step is only heard one loop
+/// later.
+fn shift_chord_durations_for_print(chord: &mut ScheduledChordData, delta: Option<f32>) {
+    let Some(delta) = delta else {
+        return;
+    };
+    for idx in 0..chord.count {
+        if chord.durations[idx] > 0.0 {
+            chord.durations[idx] = (chord.durations[idx] + delta)
+                .clamp(StepParam::Duration.min(), StepParam::Duration.max());
+        }
+    }
+}
+
 pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     scheduler: &mut SchedulerLookaheadState,
     state: &Arc<SequencerState>,
@@ -580,7 +599,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             // playhead (each step is stamped after it was already scheduled),
             // so without this substitution a printed value would only become
             // audible one loop later. Substituting here mirrors exactly what
-            // the stamped step_data plays back on the next pass.
+            // the stamped step_data plays back on the next pass. Chord-backed
+            // steps own their sounding durations per note (they beat
+            // `resolved.duration` at fire time), and the stamp moves them by
+            // the base-param delta (`set_step_param_no_publish`) — so the
+            // audible substitution carries the same delta onto the scheduled
+            // chord below. Transpose needs no chord handling: playback
+            // already applies `resolved.transpose - step_transpose` as a
+            // delta per chord note (`resolved_chord_transpose`).
+            let mut print_chord_duration_delta: Option<f32> = None;
             {
                 let (velocity, duration, transpose) = state
                     .step_print_override
@@ -589,6 +616,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     resolved.velocity = value;
                 }
                 if let Some(value) = duration {
+                    print_chord_duration_delta = Some(value - resolved.duration);
                     resolved.duration = value;
                 }
                 if let Some(value) = transpose {
@@ -1222,7 +1250,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             samples_per_quarter.into(),
                         );
                     } else {
-                        let chord = step_chord_data(snapshot, target_track, trigger.step);
+                        let mut chord = step_chord_data(snapshot, target_track, trigger.step);
+                        if target_track == trigger.track {
+                            shift_chord_durations_for_print(
+                                &mut chord,
+                                print_chord_duration_delta,
+                            );
+                        }
                         let step_event = step_event_from_resolved(
                             snapshot,
                             target_track,
@@ -1264,7 +1298,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         }
                     }
                 } else {
-                    let chord = step_chord_data(snapshot, target_track, trigger.step);
+                    let mut chord = step_chord_data(snapshot, target_track, trigger.step);
+                    if target_track == trigger.track {
+                        shift_chord_durations_for_print(&mut chord, print_chord_duration_delta);
+                    }
                     let step_event = step_event_from_resolved(
                         snapshot,
                         target_track,
