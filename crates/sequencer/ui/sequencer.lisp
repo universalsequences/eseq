@@ -414,6 +414,24 @@
     (sdf/fill (sdf/rounded-rect width height 0.45)
       (rgba 0 0 0 0))))
 
+(defwidget drum-rack-indicator
+  :width 1.5 :height 1.5
+  :state ()
+  :shader
+  (sdf/layer
+    (sdf/fill 
+      (sdf/translate -0.4 0
+        (sdf/rounded-rect 0.1 1.40 0.05))
+      :dim
+      )
+    
+    (sdf/fill 
+      (sdf/translate 1.58 1.3
+        (sdf/rounded-rect 2 0.1 0.05))
+      :dim
+      )
+    ))
+
 (defwidget seqv-rec-arm-dot
   :width 1.5 :height 1.5
   :state (active)
@@ -1716,30 +1734,8 @@
       :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad 1))))
 
 (def %rack-member-chrome (gidx i)
-  (let ((pad (eseq.drum-rack-v2/pad-of-track gidx i)))
-    (v-stack :key (str "rack-member-chrome-" (eseq.drum-rack-v2/group-id gidx) "-" i)
-      :width 4.8 :gap 0.12 :align :center :padding 0.15
-      (if (= pad nil)
-        ;; Every member claims a pad on join, so this is the defensive case:
-        ;; a member the pad keyboard has nothing to answer with.
-        (badge "—"
-          :key (str "rack-pad-none-" (eseq.drum-rack-v2/group-id gidx) "-" i)
-          :font-size 9 :width 4.6 :height 0.9 :padding 0
-          :h-align :center
-          :background-color :transparent
-          :border-color :transparent
-          :highlight-color :transparent
-          :shadow-color :transparent
-          :color :dim)
-        (%rack-pad-badge gidx pad))
-      (if (= pad nil)
-        (box :width 4.6 :height 0.9 :bg :transparent)
-        (dropdown
-          :key (str "rack-pad-choke-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
-          :value-index (eseq.drum-rack-v2/choke-value-index (get pad :choke))
-          :options (eseq.drum-rack-v2/choke-options)
-          :width 4.6 :height 0.9 :font-size 7
-          :on-change (lambda (v) (eseq.drum-rack-v2/set-pad-choke gidx pad v)))))))
+  (drum-rack-indicator)
+  )
 
 (def %rack-member-row (gidx i)
   (h-stack :width :fill :gap 0.15 :align :start
@@ -1894,7 +1890,7 @@
   (let ((pad (%pad-at gidx cell)))
     (box
       :key (str "rack-pad-cell-" (eseq.drum-rack-v2/group-id gidx) "-" cell)
-      :width 6.4 :height 2.2 :padding 0.15
+      :width 6.4 :height 2.3 :padding 0.15
       :background-color (if (= pad nil)
         '(rgba 0.12 0.13 0.14 1.0)
         '(rgba 0.18 0.22 0.23 1.0))
@@ -1924,9 +1920,13 @@
             (eseq.drum-rack-v2/note-label (%pad-cell-note gidx cell))
             (get pad :label))
           :font-size 8 :color (if (= pad nil) '(rgba 0.42 0.44 0.46 1.0) :dim)
+          :active (%pad-trigger-binding pad)
+          :active-color :black
           :bg :transparent
           :width :fill :text-align :center)
         (label (if (= pad nil) "" (substring (%pad-cell-name pad) 0 12))
+          :active (%pad-trigger-binding pad)
+          :active-color :black
           :font-size 6.8 :color :white :bg :transparent
           :width :fill :text-align :center)
         (label (if (= pad nil)
@@ -1975,7 +1975,6 @@
     :background-color '(rgba 0.09 0.10 0.11 1.0)
     :corner-radius 8
     (v-stack :gap 0.1 :align :start
-      (%pad-grid-page-selector gidx)
       (each (range 0 4) |row|
         (%pad-grid-row gidx row)))))
 

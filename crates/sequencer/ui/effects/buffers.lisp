@@ -163,21 +163,21 @@
         (v-stack :gap 0 :height :fill
           (box :debug-name "rack-fx-header-box"
             :width :fill :height 1 :padding 0 :v-align :center :h-align :start
-            (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
+            (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :baseline :width :fill
               (pf/fx-panel-header-leading-spacer)
               (label (substring (eseq.drum-rack-v2/group-name gidx) 0 12)
                 :font-size 11 :color :white :bg :transparent)
               (box :flex 1 :height 0.15)
               (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
                 (v-stack
-                  (box :width 1 :height 0.1)
+                  (box :width 2.05 :height 1.45
                   (fx-mini-save-icon
                     :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
                     :on-click |x y r|
-                      (eseq.browser/enter-kit-save
-                        (eseq.drum-rack-v2/group-id gidx)
-                        (eseq.drum-rack-v2/group-name gidx))
-                    :active 0)))
+                    (eseq.browser/enter-kit-save
+                      (eseq.drum-rack-v2/group-id gidx)
+                      (eseq.drum-rack-v2/group-name gidx))
+                    :active 0))))
               (box :width 0.5)))
           (pf/fx-panel-body "rack-fx-pads-body"
             ;; Mini-map on the LEFT of the enlarged grid, the way a drum rack
@@ -186,7 +186,7 @@
             (h-stack :gap 0.2 :align :start
               (eseq.sequencer/rack-pad-map gidx)
               (eseq.sequencer/rack-pad-grid gidx)
-              (%rack-panel-controls gidx)))))
+              ))))
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
       (each (filter |fx| (> (len (get fx :params)) 0) (%selected-bus-effects)) |fx slot-idx|
