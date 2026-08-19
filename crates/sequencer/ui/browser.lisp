@@ -846,7 +846,11 @@
           (status "Choose an instrument"))))))
 
 (def %activate-builtin-instrument (name)
+  ;; With a drum rack selected SEQ.current-track is whatever was selected
+  ;; before the rack, so converting it in place would rewrite an unrelated
+  ;; track behind the visible selection: add a new track instead.
   (if (and (= name "sampler")
+           (< (%selected-drum-rack-id) 0)
            (eseq.track-collapse/replaceable-instrument? SEQ.current-track))
     (%swap-track-builtin-instrument SEQ.current-track name)
     (%add-builtin-instrument-track name)))

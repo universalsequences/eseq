@@ -2383,8 +2383,9 @@
     }
 
     /// eseq-4b5.19, eseq-4b5.23: the browser addresses kit and Sound
-    /// auditions to the selected drum rack and refuses saved instruments,
-    /// rather than targeting the stale current track hidden behind the rack.
+    /// auditions to the selected drum rack, refuses saved instruments, and
+    /// adds rather than converts for the builtin sampler, so no audition
+    /// targets the stale current track hidden behind the rack.
     #[test]
     fn metal_seq_browser_selected_rack_addresses_auditions_without_using_stale_track() {
         let mut editor = browser_editor_on_instrument_tab();
@@ -2409,9 +2410,18 @@
         editor.runtime_mut().eval_str(
             r#"(eseq.browser/%activate-instrument "emulations/minimoog")"#,
         ).expect("refuse saved instrument audition on selected rack");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%activate-builtin-instrument "sampler")"#,
+        ).expect("activate builtin sampler on selected rack");
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 2,
+        assert_eq!(commands.len(), 3,
             "saved instrument activation must not target the stale current track");
+        assert!(
+            matches!(&commands[2],
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "add-track-sampler"),
+            "builtin sampler must add a track, not convert the stale current track: {:?}",
+            commands[2],
+        );
         for (command, expected_name, expected_path) in [
             (&commands[0], "load-kit", "kits/House-Kit.kit"),
             (&commands[1], "audition-sound-on-rack", "sounds/Bass.sound"),
