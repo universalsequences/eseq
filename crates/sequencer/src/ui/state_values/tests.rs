@@ -48450,6 +48450,23 @@
             vec![("group-id", 7.0), ("pad-note", 38.0), ("note", 39.0)],
         );
 
+        // Nudges clamp to the grid's top cell (note 123), not raw MIDI 127: a
+        // pad at 124..127 would render on NO page (eseq-4b5.14), so the nudge
+        // badge must never strand one there.
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(eseq.drum-rack-v2/nudge-pad-note 0 (dict :pad-note (eseq.drum-rack-v2/max-grid-pad-note)) 1)",
+            )
+            .expect("top-of-grid nudge should evaluate");
+        assert!(
+            editor.drain_host_commands().iter().all(|command| !matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "set-rack-pad-note"
+            )),
+            "nudging up from the grid's top note is a no-op, not a move past it"
+        );
+
         editor
             .runtime_mut()
             .eval_str(

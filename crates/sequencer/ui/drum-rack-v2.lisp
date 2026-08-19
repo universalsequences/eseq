@@ -161,9 +161,12 @@
   (max 0 (min 127 note)))
 
 ;; Move a pad by a semitone. The host rejects a collision with another pad and
-;; leaves the map alone, so the badge simply does not move.
+;; leaves the map alone, so the badge simply does not move. Nudges clamp to the
+;; note-positional grid's range, not raw MIDI: notes above the top page's last
+;; cell exist but no page can show them, and a nudge must never strand a pad
+;; where the grid cannot render it.
 (def nudge-pad-note (gidx pad delta)
-  (let ((note (%clamp-pad-note (+ (get pad :pad-note) delta))))
+  (let ((note (max 0 (min (max-grid-pad-note) (+ (get pad :pad-note) delta)))))
     (if (= note (get pad :pad-note))
       nil
       (host-command "set-rack-pad-note"
@@ -226,6 +229,12 @@
 ;; Lowest note of a page — always a C.
 (def pad-page-base (page)
   (* 12 (clamp-pad-page page)))
+
+;; Highest note any cell can name: the top page's top-right cell (123). Notes
+;; above it are legal MIDI but invisible to the grid, so pad-placing UI paths
+;; clamp here rather than at 127.
+(def max-grid-pad-note ()
+  (+ (pad-page-base (- (pad-page-count) 1)) 15))
 
 ;; The page a note is drawn on. Overlap means a note can also appear in the
 ;; top row of the page below; this names the canonical one.
