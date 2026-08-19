@@ -2515,6 +2515,58 @@ impl App {
         })
     }
 
+    /// Deletes a mixer group as a container: its direct tracks and every rack
+    /// nested in it are removed with their complete track lanes. The ordinary
+    /// `delete_group_recorded` operation remains the non-destructive dissolve
+    /// primitive; this is the destructive badge + Backspace operation.
+    pub fn delete_group_with_members_recorded(&mut self, group_id: u64) -> Result<usize, String> {
+        let group_index = self.groups.iter().position(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let child_racks = self.groups[group_index].rack_members.clone();
+        let mut tracks = self.groups[group_index].members.clone();
+        for rack_id in &child_racks {
+            let rack = self.groups.iter().find(|group| group.id == *rack_id)
+                .ok_or_else(|| format!("Child rack {rack_id} does not exist"))?;
+            tracks.extend(rack.members.iter().copied());
+        }
+        tracks.sort_unstable();
+        tracks.dedup();
+
+        let checkpoint = self.history.clone();
+        let checkpoint_len = self.history.undo_len();
+        let result = (|| {
+            // Remove containers first. Track-deletion patches then capture the
+            // already-unlinked structure, so undo restores tracks before it
+            // restores group membership and bus routing.
+            self.delete_group_recorded(group_id)?;
+            for rack_id in child_racks {
+                self.delete_group_recorded(rack_id)?;
+            }
+            // The graph deliberately keeps one live track. If this group owns
+            // every track, create a fresh loose sampler before removing its
+            // members; the creation joins the same composite history entry.
+            if tracks.len() == self.tracks.len() {
+                let replacement = self.graph_controller().add_blank_sampler_track()?;
+                self.commit_created_track(replacement, "Replace deleted group")?;
+            }
+            let mut selected = self.tracks.len().saturating_sub(1);
+            for track in tracks.into_iter().rev() {
+                selected = self.delete_track_recorded(track)?;
+            }
+            squash_history_since(self, checkpoint_len, "Delete track group");
+            Ok(selected)
+        })();
+        match result {
+            Ok(selected) => Ok(selected),
+            Err(error) => match rollback_history_to(self, checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Track-group delete failed ({error}); rolling it back also failed ({rollback_error:?})"
+                )),
+            },
+        }
+    }
+
     /// Creates an empty drum rack: a track group carrying a rack config, its
     /// backing bus, and *zero* member tracks. Pads claim tracks lazily, when a
     /// sound is dropped on them (docs/drum-rack-v2-spec.md, "Track budget").

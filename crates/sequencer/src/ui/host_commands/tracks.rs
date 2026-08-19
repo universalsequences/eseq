@@ -11,12 +11,66 @@ pub(super) const COMMANDS: &[&str] = &[
     "add-track-instrument",
     "swap-track-instrument",
     "delete-track",
+    "delete-track-group",
     "load-sound-onto-track",
     "add-track-from-sound",
     "group-selected-tracks",
     "move-track-to-group",
     "remove-track-from-group",
 ];
+
+fn sync_after_track_topology_delete(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    new_idx: usize,
+) {
+    let state = ctx.shared.state.clone();
+    ctx.shared.current_track.store(new_idx, Ordering::Relaxed);
+    *ctx.shared.track_pan_ids.lock().unwrap() = app
+        .graph
+        .track_node_ids
+        .iter()
+        .map(|ids| ids.pan_id)
+        .collect();
+    push_solo_mutes(ctx.shared.lg_raw, &state);
+    ctx.meters.cached_track_peak_levels =
+        read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
+    ctx.meters.cached_bus_peak_levels =
+        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+    (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
+        read_modulator_display_values(app.graph.lg, app);
+    ctx.meters.last_meter_poll_at = Instant::now();
+    *ctx.shared.record_armed.lock().unwrap() = app.graph.record_armed.clone();
+    *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
+    *ctx.shared.bus_state.lock().unwrap() = app.buses.clone();
+    *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+
+    let rt = editor.runtime_mut();
+    sync_track_topology_state(
+        rt,
+        app,
+        &state,
+        ctx.track_names,
+        new_idx,
+        &ctx.shared.selected_steps,
+        &ctx.shared.piano_roll_selection,
+        &ctx.shared.accumulator_names,
+        &ctx.shared.record_armed,
+        &ctx.meters.cached_track_peak_levels,
+    );
+    sync_bus_mixer_state(rt, app);
+    sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
+    sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
+    sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
+    rt.clear_subtree_effects_for_named_target("*sequencer*");
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    refresh_visible_track_topology_layouts(editor);
+    ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, app);
+    ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
+    ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
@@ -32,7 +86,6 @@ pub(super) fn handle(
     let selected_tracks = ctx.shared.selected_tracks.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
     let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
-    let piano_roll_selection = ctx.shared.piano_roll_selection.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let track_pan_ids = ctx.shared.track_pan_ids.clone();
@@ -677,52 +730,7 @@ pub(super) fn handle(
                         state.complete_topology_edit(request_id);
                         state.publish_scheduler_snapshot();
                     }
-                    current_track.store(new_idx, Ordering::Relaxed);
-                    {
-                        let mut pan_ids = track_pan_ids.lock().unwrap();
-                        *pan_ids = app
-                            .graph
-                            .track_node_ids
-                            .iter()
-                            .map(|ids| ids.pan_id)
-                            .collect();
-                        push_solo_mutes(lg_raw, &state);
-                    }
-                    ctx.meters.cached_track_peak_levels = read_track_peak_levels(
-                        app.graph.lg,
-                        &app.graph.track_node_ids,
-                    );
-                    ctx.meters.cached_bus_peak_levels =
-                        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-                    (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
-                        read_modulator_display_values(app.graph.lg, &app);
-                    ctx.meters.last_meter_poll_at = Instant::now();
-                    *record_armed.lock().unwrap() = app.graph.record_armed.clone();
-                    *track_groups.lock().unwrap() = app.groups.clone();
-
-                    let rt = editor.runtime_mut();
-                    sync_track_topology_state(
-                        rt,
-                        &app,
-                        &state,
-                        &mut *ctx.track_names,
-                        new_idx,
-                        &selected_steps,
-                        &piano_roll_selection,
-                        &accumulator_names,
-                        &record_armed,
-                        &ctx.meters.cached_track_peak_levels,
-                    );
-                    sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                    sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
-                    sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-                    rt.clear_subtree_effects_for_named_target("*sequencer*");
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                    refresh_visible_track_topology_layouts(&mut editor);
-                    ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, &app);
-                    ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    sync_after_track_topology_delete(&mut app, &mut editor, ctx, new_idx);
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Deleted track {}",
                         track + 1
@@ -735,6 +743,59 @@ pub(super) fn handle(
                     }
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error deleting track: {e}"
+                    )));
+                }
+            }
+        }
+        "delete-track-group" => {
+            let Some(group_id) = extract_usize_from_payload(&payload, "group-id")
+                .map(|id| id as u64)
+            else {
+                editor.handle_host_event(HostEvent::Status(
+                    "Delete track group requires a group id".to_string(),
+                ));
+                return;
+            };
+            let boundary_track = app.groups.iter()
+                .find(|group| group.id == group_id)
+                .and_then(|group| group.members.first().copied())
+                .unwrap_or(0);
+            let request_id = if state.is_playing() {
+                let request_id = state.request_track_delete_boundary(boundary_track);
+                let wait_deadline = Instant::now() + Duration::from_millis(250);
+                while !state.topology_edit_ready(request_id) && Instant::now() < wait_deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                if !state.topology_edit_ready(request_id) {
+                    state.complete_topology_edit(request_id);
+                    state.publish_scheduler_snapshot();
+                    editor.handle_host_event(HostEvent::Status(
+                        "Delete timed out waiting for playback boundary".to_string(),
+                    ));
+                    return;
+                }
+                Some(request_id)
+            } else {
+                None
+            };
+            match app.delete_group_with_members_recorded(group_id) {
+                Ok(new_idx) => {
+                    if let Some(request_id) = request_id {
+                        state.complete_topology_edit(request_id);
+                        state.publish_scheduler_snapshot();
+                    }
+                    sync_after_track_topology_delete(&mut app, &mut editor, ctx, new_idx);
+                    editor.handle_host_event(HostEvent::Status(
+                        "Deleted track group".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    if let Some(request_id) = request_id {
+                        state.complete_topology_edit(request_id);
+                        state.publish_scheduler_snapshot();
+                    }
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Error deleting track group: {error}"
                     )));
                 }
             }

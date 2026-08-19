@@ -5747,6 +5747,10 @@
                 "mixer-track:{}",
                 test_delete_target_number(payload, "track")?
             )),
+            "mixer-group" => Some(format!(
+                "mixer-group:{}",
+                test_delete_target_number(payload, "group-id")?
+            )),
             "track-pattern" => Some(format!(
                 "track-pattern:{}:{}",
                 test_delete_target_number(payload, "track")?,
@@ -5883,6 +5887,7 @@
                     };
                     let kind = key.split(':').next().unwrap_or_default();
                     let name = match (ctx.current_buffer_name().as_str(), kind) {
+                        ("*mixer*", "mixer-group") => "delete-track-group",
                         ("*mixer*", "mixer-track") => {
                             let Value::Map(map) = &payload else {
                                 return Ok(Value::Bool(false));
@@ -45885,6 +45890,7 @@
         );
         let group_badge = find_node_by_stable_key_suffix(&layout, "/group-badge-7")
             .expect("group badge click target");
+        assert_finite_nonzero_rect(group_badge, "mixer group badge");
         let group_badge_click = group_badge
             .props
             .get("on-click")
@@ -45903,6 +45909,45 @@
             Some(Value::Number(2.0)),
             "clicking the group badge should select its backing bus"
         );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target after group badge click"),
+            Some(Value::String("mixer-group".to_string())),
+            "clicking the group badge should arm the whole group for deletion"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
+        editor.refresh_runtime_side_effects();
+        let armed_layout = editor.widget_layout().expect("armed group mixer layout");
+        let armed_group_badge = find_node_by_stable_key_suffix(&armed_layout, "/group-badge-7")
+            .expect("armed group badge");
+        assert_eq!(
+            layout_prop_bool(armed_group_badge, "selected"),
+            Some(true),
+            "the armed group badge should render its delete-target selection"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/handle-key \"BS\" nil)")
+            .expect("delete selected group from mixer");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "delete-track-group");
+                let Value::Map(payload) = payload else {
+                    panic!("delete-track-group payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0))
+                );
+            }
+            other => panic!("expected delete-track-group host command, got {other:?}"),
+        }
         let mod_out =
             find_node_by_stable_key_suffix(&layout, "/mod-out-0").expect("track mod out port");
         let custom_mod_out = find_node_by_stable_key_suffix(&layout, "/mod-out-1")

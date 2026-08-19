@@ -12,6 +12,9 @@ pub(crate) enum ActiveDeleteTarget {
     MixerTrack {
         track: usize,
     },
+    MixerGroup {
+        group_id: u64,
+    },
     TrackPattern {
         track: usize,
         pattern_id: PatternId,
@@ -1157,6 +1160,7 @@ impl ActiveDeleteTarget {
     pub(super) fn buffer_name(&self) -> &'static str {
         match self {
             ActiveDeleteTarget::MixerTrack { .. }
+            | ActiveDeleteTarget::MixerGroup { .. }
             | ActiveDeleteTarget::TrackPattern { .. }
             | ActiveDeleteTarget::ModRoute { .. } => "*mixer*",
             ActiveDeleteTarget::FxEffect { .. }

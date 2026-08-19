@@ -6870,6 +6870,78 @@ mod tests {
     }
 
     #[test]
+    fn destructive_rack_delete_removes_members_and_undo_restores_the_complete_rack() {
+        let graph = TestLiveGraph::new("destructive-rack-delete-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, rack_bus) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("rack");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare");
+        app.assign_rack_pad_track_recorded(rack_id, 0, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(rack_id, 1, snare).expect("snare pad");
+        app.add_builtin_effect_sync(snare, "Filter").expect("member effect");
+        app.state.pattern.patterns[snare].set_step_active(3, true);
+        app.state.pattern.timebase_plocks[snare].set(3, crate::sequencer::Timebase::Eighth);
+        let member_ids = [
+            app.track_registry.id_at(kick).expect("kick id"),
+            app.track_registry.id_at(snare).expect("snare id"),
+        ];
+        let history_before_delete = app.history.undo_len();
+
+        let selected = app
+            .delete_group_with_members_recorded(rack_id)
+            .expect("destructive rack delete");
+        assert_eq!(selected, 0);
+        assert_eq!(app.tracks.len(), 1, "the graph keeps one fresh loose track");
+        assert!(
+            !member_ids.contains(&app.track_registry.id_at(0).expect("replacement id")),
+            "the surviving track must be a fresh replacement, not a rack member",
+        );
+        assert!(app.groups.iter().all(|group| group.id != rack_id));
+        assert!(app.buses.iter().all(|bus| bus.id != rack_bus));
+        assert_eq!(
+            app.history.undo_len(),
+            history_before_delete + 1,
+            "the whole rack deletion is one undo entry",
+        );
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks.len(), 2);
+        let rack = app.groups.iter().find(|group| group.id == rack_id).expect("restored rack");
+        assert_eq!(rack.members, vec![kick, snare]);
+        assert_eq!(rack.rack_pad_track(0), Some(kick));
+        assert_eq!(rack.rack_pad_track(1), Some(snare));
+        assert!(app.buses.iter().any(|bus| bus.id == rack_bus));
+        assert!(app.state.pattern.patterns[snare].is_active(3));
+        assert_eq!(
+            app.state.pattern.timebase_plocks[snare].get(3),
+            Some(crate::sequencer::Timebase::Eighth),
+        );
+        assert_eq!(app.graph.effect_descriptors[snare][0].name, "Filter");
+        for track in [kick, snare] {
+            assert_eq!(
+                app.state.with_scene_track_pattern(0, track, |pattern| {
+                    pattern.track_params.output.clone()
+                }),
+                Some(crate::sequencer::TrackOutput::Bus(rack_bus)),
+            );
+        }
+
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks.len(), 1);
+        assert!(app.groups.iter().all(|group| group.id != rack_id));
+        assert!(app.buses.iter().all(|bus| bus.id != rack_bus));
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_bus_effect_chain_restores_stable_identity_and_scene_values() {
         let graph = TestLiveGraph::new("bus-fx-history-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);

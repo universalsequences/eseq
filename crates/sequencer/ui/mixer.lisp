@@ -37,6 +37,14 @@
 (def %track-delete-target-binding (i)
   (bind-seq (str "mixer-track-delete-target-" i)))
 
+;; Group targets are ID-stable and sparse, so derive their selected state from
+;; the shared target plus its reactive version instead of registering one field
+;; per current group.
+(def %group-delete-target? (group-id)
+  (do
+    SEQ.delete-target-version
+    (seq-delete-target? :mixer-group (dict :group-id group-id))))
+
 (def %track-pattern-cell-active-binding (track pattern-id)
   (bind-seq (str "track-pattern-cell-active-" track "-" pattern-id)))
 
@@ -1173,6 +1181,12 @@
       (%select-bus idx)
       false)))
 
+(def %select-group-delete-target (gidx)
+  (let ((group (nth SEQ.groups gidx)))
+    (do
+      (%select-group gidx)
+      (seq-set-delete-target :mixer-group (dict :group-id (get group :id))))))
+
 ;; True when this group's backing bus is the currently selected channel.
 (def %group-selected? (gidx)
   (let ((idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
@@ -1208,7 +1222,9 @@
         (%bus-mod-port-row (get group :bus-id))
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
-          :on-click (lambda (event) (%select-group gidx))
+          :selected (%group-delete-target? (get group :id))
+          :selected-background-color :fx-panel-header-selected-bg
+          :on-click (lambda (event) (%select-group-delete-target gidx))
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")
               :width 2.0 :height 0.9 :padding 0 :font-size 14
