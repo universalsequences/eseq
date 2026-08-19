@@ -6,7 +6,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "toggle-roll-mode",
 ];
 
-pub(crate) fn toggle_roll_mode(state: &SequencerState, editor: &mut Editor) -> bool {
+pub(super) fn toggle_roll_mode(state: &SequencerState, editor: &mut Editor) -> bool {
     let enabled = !state.transport.roll_mode.fetch_xor(true, Ordering::AcqRel);
     eprintln!("[roll-debug] host-command toggle-roll-mode enabled={enabled}");
     if !enabled {

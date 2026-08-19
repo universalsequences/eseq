@@ -17,7 +17,6 @@ mod step_history;
 mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;
-pub(crate) use misc::toggle_roll_mode;
 #[cfg(test)]
 pub(crate) use learn::open_patch_learn_buffer;
 pub(crate) use song::{apply_song_edit_command, apply_sound_palette_view_command};

@@ -812,26 +812,6 @@ pub(crate) fn run_event_loop(
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }
-                    // Regular roll-mode toggle is also a semantic binding in
-                    // the *sequencer* keymap, so comma remains rebindable and
-                    // works after another tile receives focus. Focused input
-                    // widgets keep precedence.
-                    let roll_mode_toggle_binding = key.kind
-                        == crossterm::event::KeyEventKind::Press
-                        && editor.buffer_mode_keybinding("*sequencer*", key)
-                            == Some("eseq.seq-grid-mode/roll-mode-toggle");
-                    if roll_mode_toggle_binding
-                        && should_route_to_live_keyboard(
-                            &editor,
-                            &key,
-                            &shared.held_notes,
-                            true,
-                        )
-                    {
-                        super::host_commands::toggle_roll_mode(&shared.state, &mut editor);
-                        ui_loop_stats.note_event(event_started.elapsed());
-                        continue;
-                    }
                     // Hold-capable sequence roll resolves through the
                     // *sequencer* mode keymap on both press and release, even
                     // when a transport/mixer click owns the active tile. The

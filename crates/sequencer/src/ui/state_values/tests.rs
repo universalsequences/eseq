@@ -14442,10 +14442,13 @@
             crossterm::event::KeyCode::Char(','),
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(
-            editor.buffer_mode_keybinding("*sequencer*", comma),
-            Some("eseq.seq-grid-mode/roll-mode-toggle"),
-        );
+        editor.handle_key(comma);
+        assert!(editor.drain_host_commands().iter().any(|command| {
+            matches!(
+                command,
+                eseqlisp::HostCommand::Custom { name, .. } if name == "toggle-roll-mode"
+            )
+        }), "comma must dispatch the global roll toggle while transport owns focus");
 
         editor
             .runtime_mut()
