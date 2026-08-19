@@ -1893,10 +1893,11 @@
       :key (str "rack-pad-cell-" (eseq.drum-rack-v2/group-id gidx) "-" cell)
       :width 6.4 :height 2.3 :padding 0.15
       :background-color (if (= pad nil)
-        '(rgba 0.12 0.13 0.14 1.0)
-        '(rgba 0.18 0.22 0.23 1.0))
+        :bg
+        :mixer-strip-bg
+        )
       :selected (%pad-trigger-binding pad)
-      :selected-background-color '(rgba 0.62 0.80 0.84 1.0)
+      :selected-background-color :accent 
       :border-width 1
       :border-color (if (pad-selected? gidx pad)
         :mixer-strip-selected-border
@@ -1973,8 +1974,8 @@
 (def rack-pad-grid (gidx)
   (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
     :width %pad-grid-intrinsic-width :padding 0.2
-    :background-color '(rgba 0.09 0.10 0.11 1.0)
-    :corner-radius 8
+    :background-color :bg
+    :corner-radius 14
     (v-stack :gap 0.1 :align :start
       (each (range 0 4) |row|
         (%pad-grid-row gidx row)))))
@@ -2067,7 +2068,7 @@
     (box :debug-name "rack-pad-map"
       :key (str "rack-pad-map-" gid)
       :width %pad-map-intrinsic-width :height :fill :padding 0.15
-      :background-color '(rgba 0.09 0.10 0.11 1.0)
+      :background-color :bg
       :corner-radius 8
       :v-align :center :h-align :center
       (v-stack :gap 0.05 :align :center

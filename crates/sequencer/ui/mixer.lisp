@@ -768,7 +768,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :on-click (lambda (event) (%track-body-click event i))
-      (v-stack :gap 0.20
+      (v-stack :gap 0.18
         ;; Grouped tracks drop the output dropdown (their output is the group
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
@@ -1239,7 +1239,7 @@
       (c (%group-color gidx))
       (bus-idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 10.3 :height 13.72
+      :width 10.2 :height 13.72
       :corner-radius 12
       :padding 0.1
       :background-color :mixer-strip-bg
@@ -1256,14 +1256,14 @@
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
           (v-stack :gap 0.4 :align :center
-            (box :width :fill :height 9.8 
+            (box :width :fill :height 9.6 
               (%bus-meter-control bus-idx true)
               )
             )
           (box :width 0.0 :height 0.0 :bg :transparent))
             (%group-control-buttons gidx bus-idx)
         (%bus-mod-port-row (get group :bus-id))
-        (box :corner-radius 24 :background-color c :width 9.5 :padding 0.2
+        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
           :selected (%group-delete-target? (get group :id))
           :selected-background-color :fx-panel-header-selected-bg
