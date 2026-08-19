@@ -2534,6 +2534,56 @@ impl App {
         })
     }
 
+    /// Browser "create drum rack", both halves as one transaction: the rack
+    /// group (with its backing bus) and — when a sound was dropped onto the
+    /// browser action — the member track that claims the rack's first pad.
+    ///
+    /// The group half records first, so a failing sample half used to leave a
+    /// phantom rack behind: recorded, but denied by the status message and
+    /// never synced into the UI. Roll the whole thing back instead, and on
+    /// success squash the halves into a single "Add drum rack" undo entry.
+    pub fn create_drum_rack_with_pad_recorded(
+        &mut self,
+        sample: Option<&std::path::Path>,
+    ) -> Result<(u64, Option<usize>), String> {
+        let checkpoint = self.history.clone();
+        let checkpoint_len = self.history.undo_len();
+        match self.create_drum_rack_with_pad(sample) {
+            Ok((group_id, track)) => {
+                if track.is_some() {
+                    squash_history_since(self, checkpoint_len, "Add drum rack");
+                }
+                Ok((group_id, track))
+            }
+            Err(error) => match rollback_history_to(self, checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Drum rack creation failed ({error}); rolling it back also failed ({rollback_error:?})"
+                )),
+            },
+        }
+    }
+
+    fn create_drum_rack_with_pad(
+        &mut self,
+        sample: Option<&std::path::Path>,
+    ) -> Result<(u64, Option<usize>), String> {
+        let (group_id, _) = self.create_drum_rack_recorded(None)?;
+        let Some(sample) = sample else {
+            return Ok((group_id, None));
+        };
+        let track = self.graph_controller().add_track(sample)?;
+        // The track is not in history yet, so undo cannot take it back: drop it
+        // here if it never reaches the pad.
+        let pad = Some(DRUM_RACK_FIRST_PAD_NOTE);
+        if let Err(error) = self.attach_track_to_group(track, group_id, pad) {
+            let _ = self.graph_controller().delete_track(track);
+            return Err(error);
+        }
+        self.commit_created_track(track, "Add drum rack pad")?;
+        Ok((group_id, Some(track)))
+    }
+
     /// Adds an existing track to a group as a member routed into the group's
     /// backing bus. With `pad_note`, the group must be a rack and the track
     /// becomes the member backing that pad. Without one, a rack group still

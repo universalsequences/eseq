@@ -117,12 +117,7 @@ pub(super) fn handle(
             let name = extract_string_from_payload(&payload, "name")
                 .map(|name| name.trim().to_string())
                 .filter(|name| !name.is_empty())
-                .or_else(|| {
-                    app.groups
-                        .iter()
-                        .find(|group| group.id == group_id)
-                        .map(|group| group.name.clone())
-                })
+                .or_else(|| group_name(app, group_id))
                 .unwrap_or_else(|| "Kit".to_string());
             let overwrite = extract_bool_from_payload(&payload, "overwrite");
             match app.save_rack_as_kit(group_id, &name, overwrite) {
@@ -149,15 +144,15 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            let tracks_before = app.tracks.len();
             match app.load_kit_as_rack(Path::new(&path)) {
                 Ok((group_id, failures)) => {
-                    let name = app
-                        .groups
-                        .iter()
-                        .find(|group| group.id == group_id)
-                        .map(|group| group.name.clone())
-                        .unwrap_or_else(|| "Kit".to_string());
-                    sync_after_rack_structure_change(app, editor, ctx);
+                    let name = group_name(app, group_id).unwrap_or_else(|| "Kit".to_string());
+                    // A kit whose every pad failed still created its (empty)
+                    // rack; there is no new track to focus then.
+                    let focus = (app.tracks.len() > tracks_before)
+                        .then(|| app.tracks.len() - 1);
+                    sync_after_rack_structure_change(app, editor, ctx, focus);
                     let status = if failures.is_empty() {
                         format!("Loaded kit '{name}'")
                     } else {
@@ -170,6 +165,15 @@ pub(super) fn handle(
         }
         _ => {}
     }
+}
+
+/// A rack group's display name by its stable id, for status messages and kit
+/// naming. Groups are addressed by `GroupId`, never by index.
+pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {
+    app.groups
+        .iter()
+        .find(|group| group.id == group_id)
+        .map(|group| group.name.clone())
 }
 
 /// Republishes what a pad-map edit can change: the group value the grid reads
@@ -194,10 +198,13 @@ fn sync_rack_pad_map(
 /// edit created. A kit load creates a group, a bus and N tracks in one go, so
 /// it needs the full new-track sync once at the end rather than per pad;
 /// "create drum rack" in the browser creates at most one member track.
+/// `focus` is the member track the edit created, if any — the caller knows it;
+/// this function must not guess (docs/drum-rack-v2-spec.md, "Track budget").
 pub(super) fn sync_after_rack_structure_change(
     app: &mut app::App,
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
+    focus: Option<usize>,
 ) {
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
@@ -224,10 +231,11 @@ pub(super) fn sync_after_rack_structure_change(
     *bus_state.lock().unwrap() = app.buses.clone();
     *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
     *track_groups.lock().unwrap() = app.groups.clone();
-    // A kit whose every pad failed still created its (empty) rack; there is no
-    // track to focus, so only the group/bus half of the sync applies.
-    if !app.tracks.is_empty() {
-        let focus = app.tracks.len() - 1;
+    // Only a structure edit that actually created a member track focuses one:
+    // an empty rack (a kit whose every pad failed, or "create drum rack" with
+    // no sound) must leave focus where the user left it rather than hijacking
+    // whatever track happens to be last.
+    if let Some(focus) = focus.filter(|focus| *focus < app.tracks.len()) {
         sync_after_instrument_track_apply(
             app,
             editor,

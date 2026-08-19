@@ -6234,6 +6234,100 @@ mod tests {
         graph.process_block();
     }
 
+    /// eseq-4b5.12: the browser's "create drum rack" is one transaction. A
+    /// sample that cannot be loaded must take the rack group and its bus down
+    /// with it — a recorded rack the UI never shows and the status message
+    /// denies is worse than no rack at all.
+    #[test]
+    fn add_drum_rack_rolls_back_when_the_sample_half_fails() {
+        let graph = TestLiveGraph::new("drum-rack-add-rollback-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let groups_before = app.groups.len();
+        let buses_before = app.buses.len();
+        let tracks_before = app.tracks.len();
+        let history_before = app.history.undo_len();
+
+        let error = app
+            .create_drum_rack_with_pad_recorded(Some(std::path::Path::new(
+                "assets/ir/this-sample-does-not-exist.wav",
+            )))
+            .expect_err("a sample that cannot be loaded fails the whole add");
+
+        assert!(!error.contains("rolling it back also failed"), "{error}");
+        assert_eq!(app.groups.len(), groups_before, "no phantom rack group survives");
+        assert_eq!(app.buses.len(), buses_before, "its backing bus goes too");
+        assert_eq!(app.tracks.len(), tracks_before);
+        assert_eq!(
+            app.history.undo_len(),
+            history_before,
+            "a failed add leaves nothing to undo",
+        );
+        graph.process_block();
+    }
+
+    /// The same transaction on the happy path: rack + first pad land together,
+    /// as a single undo entry, and undoing takes both halves back.
+    #[test]
+    fn add_drum_rack_with_a_sample_is_one_undo_entry() {
+        let graph = TestLiveGraph::new("drum-rack-add-transaction-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        // Undo refuses to delete the last remaining track, so the rack's pad
+        // track must not be the project's only one.
+        app.graph_controller().add_blank_sampler_track().expect("existing track");
+        let groups_before = app.groups.len();
+        let tracks_before = app.tracks.len();
+        let history_before = app.history.undo_len();
+
+        let (group_id, track) = app
+            .create_drum_rack_with_pad_recorded(Some(std::path::Path::new(
+                "assets/ir/lexicon-300-rich-plate.wav",
+            )))
+            .expect("drum rack with a sample");
+        let track = track.expect("the sample claims the rack's first pad");
+
+        let rack_index = app.groups.iter().position(|group| group.id == group_id)
+            .expect("the rack group exists");
+        assert_eq!(app.groups[rack_index].members, vec![track]);
+        assert_eq!(
+            app.groups[rack_index].rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE),
+            Some(track),
+        );
+        assert_eq!(
+            app.history.undo_len(),
+            history_before + 1,
+            "the rack and its pad squash into one 'Add drum rack' entry",
+        );
+
+        let replay = crate::app::edit::undo(&mut app);
+        assert!(matches!(replay, crate::app::history::HistoryReplay::Applied(_)), "{replay:?}");
+        assert_eq!(app.groups.len(), groups_before, "undo takes the rack back");
+        assert_eq!(app.tracks.len(), tracks_before, "and its pad track with it");
+        graph.process_block();
+    }
+
+    /// An empty rack creates no member track, so there is no track for the UI
+    /// sync to focus — the caller must be told that, not left guessing that the
+    /// last track is the new one.
+    #[test]
+    fn an_empty_drum_rack_reports_no_new_track_to_focus() {
+        let graph = TestLiveGraph::new("drum-rack-empty-focus-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let unrelated = app.graph_controller().add_blank_sampler_track().expect("other track");
+        let tracks_before = app.tracks.len();
+
+        let (group_id, track) = app
+            .create_drum_rack_with_pad_recorded(None)
+            .expect("empty drum rack");
+
+        assert_eq!(track, None, "an empty rack claims no track");
+        assert_eq!(app.tracks.len(), tracks_before);
+        let rack_index = app.groups.iter().position(|group| group.id == group_id)
+            .expect("the rack group exists");
+        assert!(app.groups[rack_index].members.is_empty());
+        assert!(!app.groups[rack_index].members.contains(&unrelated));
+        graph.process_block();
+    }
+
     #[test]
     fn rack_pad_choke_groups_publish_per_member_track_keys() {
         let graph = TestLiveGraph::new("drum-rack-choke-publish-test", 64, 44_100, 2);

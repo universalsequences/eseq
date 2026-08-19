@@ -145,42 +145,38 @@ pub(super) fn handle(
         "add-track-rack" => {
             let path_str = extract_path_from_payload(&payload)
                 .filter(|path| !path.trim().is_empty());
-            let result = app.create_drum_rack_recorded(None).and_then(|(group_id, _)| {
-                let Some(path_str) = path_str else {
-                    return Ok((group_id, None));
-                };
-                let track = app.graph_controller().add_track(Path::new(&path_str))?;
-                let pad_note = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
-                if !host_commands::add_new_track_to_group(
-                    &mut app,
-                    track,
-                    Some(group_id),
-                    Some(pad_note),
-                ) {
-                    return Err("Could not assign the sample to the rack's first pad".to_string());
-                }
-                app.commit_created_track(track, "Add drum rack pad")?;
-                register_waveform_sample(Path::new(&path_str));
-                Ok((group_id, Some(track)))
-            });
-            match result {
-                Ok((group_id, _)) => {
+            // Both halves are one transaction: a failing sample half rolls the
+            // rack group back rather than leaving a phantom the status message
+            // below would deny.
+            let sample = path_str.as_deref().map(Path::new);
+            match app.create_drum_rack_with_pad_recorded(sample) {
+                Ok((group_id, track)) => {
+                    if let Some(path_str) = path_str.as_deref() {
+                        register_waveform_sample(Path::new(path_str));
+                    }
+                    // An empty rack creates no track, so there is nothing to
+                    // focus — passing `None` keeps focus where the user left it.
                     host_commands::drum_rack_v2::sync_after_rack_structure_change(
                         &mut app,
                         &mut editor,
                         ctx,
+                        track,
                     );
-                    let name = app
-                        .groups
-                        .iter()
-                        .find(|group| group.id == group_id)
-                        .map(|group| group.name.clone())
+                    let name = host_commands::drum_rack_v2::group_name(&app, group_id)
                         .unwrap_or_else(|| "Drum Rack".to_string());
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Added drum rack: {name}"
                     )));
                 }
                 Err(e) => {
+                    // The transaction rolled back, so republish the group/bus
+                    // state the failed halves may have touched on their way out.
+                    host_commands::drum_rack_v2::sync_after_rack_structure_change(
+                        &mut app,
+                        &mut editor,
+                        ctx,
+                        None,
+                    );
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error adding drum rack: {e}"
                     )));
