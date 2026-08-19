@@ -772,20 +772,18 @@ pub(crate) fn reactive_tick_and_render(
                 &mut ctx.frame.rack_pad_triggered_at,
                 Instant::now(),
             );
-            if fx_visible {
-                if rack_pad_triggers != ctx.frame.prev_rack_pad_triggers {
-                    needs_reactive_cycle |= sync_rack_pad_trigger_field_delta(
-                        editor.runtime_mut(),
-                        &ctx.frame.prev_rack_pad_triggers,
-                        &rack_pad_triggers,
-                    );
-                    ctx.frame.prev_rack_pad_triggers = rack_pad_triggers;
-                }
-            } else if !ctx.frame.prev_rack_pad_triggers.is_empty() {
-                // Nothing draws the lights: forget what was published so that
-                // reopening the panel republishes whatever is lit right then,
-                // rather than waiting for the next change.
-                ctx.frame.prev_rack_pad_triggers.clear();
+            // `prev` mirrors what the runtime holds, so it is NOT updated
+            // while the panel is hidden: the first visible tick then publishes
+            // exactly what changed in the meantime — a pad that decayed while
+            // hidden goes dark, one that lit comes up — instead of leaving a
+            // stale light behind.
+            if fx_visible && rack_pad_triggers != ctx.frame.prev_rack_pad_triggers {
+                needs_reactive_cycle |= sync_rack_pad_trigger_field_delta(
+                    editor.runtime_mut(),
+                    &ctx.frame.prev_rack_pad_triggers,
+                    &rack_pad_triggers,
+                );
+                ctx.frame.prev_rack_pad_triggers = rack_pad_triggers;
             }
         }
         if ctx.meters.cached_modulator_phases != ctx.frame.prev_modulator_phases {
