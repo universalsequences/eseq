@@ -6585,6 +6585,14 @@ mod tests {
         assert_eq!(app.track_registry.index_of(kick_id), restored.rack_pad_track(36));
         assert_eq!(app.track_registry.index_of(snare_id), restored.rack_pad_track(38));
         assert!(app.state.pattern.patterns[restored.rack_pad_track(38).unwrap()].is_active(1));
+        // Redo re-applies the squashed audition as one entry.
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        let redone = app.groups.iter().find(|group| group.id == group_id).unwrap();
+        assert_eq!(redone.name, "New Kit");
+        assert_eq!(app.track_registry.index_of(kick_id), redone.rack_pad_track(36));
+        assert_eq!(redone.rack_pad_track(38), None);
+        assert!(redone.rack_pad_track(42).is_some(), "the new kit's pad comes back");
+
         std::fs::remove_dir_all(directory).unwrap();
         graph.process_block();
     }
@@ -6628,6 +6636,13 @@ mod tests {
         assert_eq!(app.track_registry.index_of(kick_id), restored.rack_pad_track(36));
         assert_eq!(app.track_registry.index_of(snare_id), restored.rack_pad_track(38));
         assert!(app.state.pattern.patterns[restored.rack_pad_track(38).unwrap()].is_active(1));
+        // Redo re-applies the squashed audition as one entry.
+        assert!(matches!(crate::app::edit::redo(&mut app), crate::app::history::HistoryReplay::Applied(_)));
+        assert!(app.groups.iter().all(|group| group.id != group_id));
+        let redone = app.track_registry.index_of(kick_id).expect("the Sound track comes back");
+        assert_eq!(app.track_registry.index_of(snare_id), None);
+        assert!(app.state.pattern.patterns[redone].is_active(0));
+
         std::fs::remove_dir_all(directory).unwrap();
         graph.process_block();
     }
@@ -6938,6 +6953,75 @@ mod tests {
         assert_eq!(app.tracks.len(), 1);
         assert!(app.groups.iter().all(|group| group.id != rack_id));
         assert!(app.buses.iter().all(|bus| bus.id != rack_bus));
+        graph.process_block();
+    }
+
+    #[test]
+    fn destructive_group_delete_takes_nested_racks_and_their_pad_tracks_with_it() {
+        let graph = TestLiveGraph::new("destructive-group-delete-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, rack_bus) = app.create_drum_rack_recorded(None).expect("rack");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick");
+        app.assign_rack_pad_track_recorded(rack_id, 0, kick).expect("kick pad");
+        let bass = app.graph_controller().add_blank_sampler_track().expect("bass");
+        let lead = app.graph_controller().add_blank_sampler_track().expect("lead");
+        let parent_bus = app
+            .group_tracks_and_racks_recorded(vec![bass, lead], vec![rack_id])
+            .expect("rack joins a parent group");
+        let parent_id = app.groups.iter().find(|group| group.bus_id == parent_bus.0)
+            .expect("parent group").id;
+        app.state.pattern.patterns[kick].set_step_active(5, true);
+        let history_before_delete = app.history.undo_len();
+
+        app.delete_group_with_members_recorded(parent_id)
+            .expect("destructive group delete");
+        assert!(
+            app.groups.iter().all(|group| group.id != parent_id && group.id != rack_id),
+            "the parent group and its nested rack are both gone",
+        );
+        assert!(
+            app.buses.iter().all(|bus| bus.id != rack_bus && bus.id != parent_bus),
+            "both backing buses are gone",
+        );
+        assert_eq!(app.tracks.len(), 1, "one fresh replacement track survives");
+        assert_eq!(
+            app.history.undo_len(),
+            history_before_delete + 1,
+            "the container delete is one undo entry",
+        );
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks.len(), 3);
+        let parent = app.groups.iter().find(|group| group.id == parent_id)
+            .expect("restored parent");
+        assert_eq!(parent.members, vec![bass, lead]);
+        assert_eq!(parent.rack_members, vec![rack_id]);
+        let rack = app.groups.iter().find(|group| group.id == rack_id).expect("restored rack");
+        assert_eq!(rack.members, vec![kick]);
+        assert_eq!(rack.rack_pad_track(0), Some(kick));
+        assert!(app.state.pattern.patterns[kick].is_active(5));
+        assert_eq!(
+            app.buses.iter().find(|bus| bus.id == rack_bus).expect("rack bus").output,
+            crate::project::BusOutput::Bus(parent_bus.0),
+            "the nested rack bus is rechained into the restored parent",
+        );
+        for track in [bass, lead] {
+            assert_eq!(
+                app.state.with_scene_track_pattern(0, track, |pattern| {
+                    pattern.track_params.output.clone()
+                }),
+                Some(crate::sequencer::TrackOutput::Bus(parent_bus)),
+            );
+        }
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, kick, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Bus(rack_bus)),
+        );
         graph.process_block();
     }
 
