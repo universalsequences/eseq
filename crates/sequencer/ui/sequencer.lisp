@@ -1880,6 +1880,16 @@
       (select-track-for-edit track)
       nil)))
 
+;; Pad trigger light (eseq-4b5.16): the host publishes one flag per rack member
+;; track, lit for as long as that track is sounding whatever fired it — a hit on
+;; this cell, an armed rack's keys, or its own sequenced steps. It rides the
+;; box's BOUND `selected` state rather than a lisp-computed colour so a hit
+;; repaints the cell without re-rendering the grid, the way a mixer meter does;
+;; the persistent pad focus keeps its own border, computed below.
+(def %pad-trigger-binding (pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)))
+
 (def %pad-cell (gidx cell)
   (let ((pad (%pad-at gidx cell)))
     (box
@@ -1888,6 +1898,8 @@
       :background-color (if (= pad nil)
         '(rgba 0.12 0.13 0.14 1.0)
         '(rgba 0.18 0.22 0.23 1.0))
+      :selected (%pad-trigger-binding pad)
+      :selected-background-color '(rgba 0.62 0.80 0.84 1.0)
       :border-width 1
       :border-color (if (pad-selected? gidx pad)
         :mixer-strip-selected-border
@@ -1980,7 +1992,7 @@
 ;; uses.
 ;;
 ;; The pad map is read ONCE at the root and flattened into a note-indexed
-;; occupancy list there. A per-cell read of SEQ.groups would re-render all 88
+;; track list there. A per-cell read of SEQ.groups would re-render all 88
 ;; cells on any pad edit — whole-list reads are the expensive kind of
 ;; reactivity here — and a per-cell scan of the pads would walk the map 88
 ;; times over to draw it once.
@@ -1988,36 +2000,50 @@
 (def %pad-map-cell-width 0.75)
 (def %pad-map-cell-height 0.34)
 
-;; Pad notes -> one bool per addressable note, in a single pass over the pads.
-;; Pad notes are transposes around C4 and so go negative, which no list index
-;; does: the map is indexed from the lowest note the grid can name.
+;; Where a note sits in that flattened list. Pad notes are transposes around C4
+;; and so go negative, which no list index does: the map is indexed from the
+;; lowest note the grid can name.
 (def %pad-map-slot (note)
   (- note (eseq.drum-rack-v2/min-grid-pad-note)))
 
-(def %pad-note-occupancy (notes)
-  (reduce |acc note| (if (and (>= note (eseq.drum-rack-v2/min-grid-pad-note))
-        (<= note (eseq.drum-rack-v2/max-grid-pad-note)))
-      (set-nth acc (%pad-map-slot note) true)
-      acc)
-    (map (lambda (n) false)
+;; Slot -> the member track behind that note, -1 where no pad answers. The map
+;; needs the track, not just "occupied", because a cell's trigger light is that
+;; track's (eseq-4b5.16) — and "occupied" is just `track >= 0`, so one pass over
+;; the pads still answers both questions.
+(def %pad-note-tracks (pads)
+  (reduce |acc pad|
+    (let ((note (get pad :pad-note)))
+      (if (and (>= note (eseq.drum-rack-v2/min-grid-pad-note))
+          (<= note (eseq.drum-rack-v2/max-grid-pad-note)))
+        (set-nth acc (%pad-map-slot note) (get pad :track))
+        acc))
+    (map (lambda (n) -1)
       (range 0 (+ (%pad-map-slot (eseq.drum-rack-v2/max-grid-pad-note)) 1)))
-    notes))
+    pads))
 
-(def %note-occupied? (occupancy note)
-  (= (nth occupancy (%pad-map-slot note)) true))
+(def %note-track (tracks note)
+  (nth tracks (%pad-map-slot note)))
 
-(def %pad-map-cell (gid occupancy note)
-  (box :key (str "rack-pad-map-cell-" gid "-" note)
-    :width %pad-map-cell-width :height %pad-map-cell-height
-    :background-color (if (%note-occupied? occupancy note)
-      '(rgba 0.60 0.72 0.75 1.0)
-      '(rgba 0.19 0.20 0.21 1.0))
-    :corner-radius 2))
+(def %note-occupied? (tracks note)
+  (>= (%note-track tracks note) 0))
+
+;; The map lights on the same per-track binding the enlarged grid does, which
+;; is what makes a hit on a pad the grid is NOT showing still visible here.
+(def %pad-map-cell (gid tracks note)
+  (let ((track (%note-track tracks note)))
+    (box :key (str "rack-pad-map-cell-" gid "-" note)
+      :width %pad-map-cell-width :height %pad-map-cell-height
+      :background-color (if (>= track 0)
+        '(rgba 0.60 0.72 0.75 1.0)
+        '(rgba 0.19 0.20 0.21 1.0))
+      :selected (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)
+      :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
+      :corner-radius 2)))
 
 ;; A row is the click target, not its cells: four notes is already a finer jump
 ;; than the octave-aligned pages the click snaps to, and one handler per row
 ;; keeps the map cheap.
-(def %pad-map-row (gidx gid occupancy row page)
+(def %pad-map-row (gidx gid tracks row page)
   (let ((base (eseq.drum-rack-v2/pad-map-row-base row))
       (on-page (eseq.drum-rack-v2/pad-map-row-on-page? row page)))
     (box :key (str "rack-pad-map-row-" gid "-" base)
@@ -2030,14 +2056,13 @@
       :on-click |x y r| (%set-pad-page gidx (eseq.drum-rack-v2/page-of-note base))
       (h-stack :gap 0.08 :align :center
         (each (range 0 4) |col|
-          (%pad-map-cell gid occupancy (+ base col)))))))
+          (%pad-map-cell gid tracks (+ base col)))))))
 
 (def %pad-map-intrinsic-width 3.6)
 
 (def rack-pad-map (gidx)
   (let ((gid (eseq.drum-rack-v2/group-id gidx))
-      (occupancy (%pad-note-occupancy
-        (map (lambda (pad) (get pad :pad-note)) (eseq.drum-rack-v2/pads gidx))))
+      (tracks (%pad-note-tracks (eseq.drum-rack-v2/pads gidx)))
       (page (%pad-page gidx)))
     (box :debug-name "rack-pad-map"
       :key (str "rack-pad-map-" gid)
@@ -2047,7 +2072,7 @@
       :v-align :center :h-align :center
       (v-stack :gap 0.05 :align :center
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
-          (%pad-map-row gidx gid occupancy row page))))))
+          (%pad-map-row gidx gid tracks row page))))))
 
 (def %rack-header-body (gidx)
   (let ((c (eseq.drum-rack-v2/color gidx))

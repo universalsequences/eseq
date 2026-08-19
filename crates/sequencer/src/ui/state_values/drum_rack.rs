@@ -76,3 +76,96 @@ pub(crate) fn sync_all_rack_slot_selection_binding_fields(
     }
     dirty
 }
+
+// ── Pad trigger lights (eseq-4b5.16) ────────────────────────────────────
+// A pad lights while it sounds, whatever fired it: a pad-grid click, an
+// armed rack's live keys, or the member track's own sequenced steps. All
+// three land on the pad's MEMBER TRACK, so the light is a per-member-track
+// signal — the grid cell and the mini-map cell both read the same one, which
+// is what lets a pad on a page the grid is not showing still flash in the map.
+
+/// How long a pad stays lit after the trigger that lit it. The light is a
+/// decay anchored on the trigger, not a mirror of the note's gate: a clipped
+/// hi-hat's gate can be shorter than a UI frame and would otherwise flash for
+/// zero frames, while a held pad key keeps refreshing this and stays lit.
+pub(crate) const RACK_PAD_TRIGGER_HOLD: Duration = Duration::from_millis(140);
+
+/// Binding field a pad cell reads: `1.0` while the pad's member track is lit.
+/// Per track, not per (rack, pad note), so moving a pad to another note moves
+/// its light with it for free.
+pub(crate) fn rack_pad_trigger_field(track: usize) -> String {
+    format!("rack-pad-trigger-{track}")
+}
+
+/// Pad lights for every track, `false` everywhere outside a drum rack.
+///
+/// Two sources feed it. `trigger_flash` is the audio thread's per-track latch,
+/// set by every trigger path there is (sequenced steps, live keyboard, rack
+/// slots) and read by nobody until now — consuming it is what makes the light
+/// miss-free, since a hit that fell entirely between two UI frames still left
+/// the latch set. Active-note activity then HOLDS the light for as long as the
+/// note actually sounds, so a held pad key stays lit rather than blinking once.
+pub(crate) fn read_rack_pad_trigger_flags(
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track_active_notes: &[Vec<sequencer::sequencer::ActiveNoteActivity>],
+    triggered_at: &mut Vec<Option<Instant>>,
+    now: Instant,
+) -> Vec<bool> {
+    let track_count = app.tracks.len();
+    triggered_at.resize(track_count, None);
+    let mut flags = vec![false; track_count];
+    for group in app.groups.iter().filter(|group| group.is_rack()) {
+        for &track in &group.members {
+            if track >= track_count {
+                continue;
+            }
+            let latched = state
+                .transport
+                .trigger_flash
+                .get(track)
+                .is_some_and(|flash| flash.swap(0, Ordering::Relaxed) != 0);
+            let sounding = track_active_notes
+                .get(track)
+                .is_some_and(|notes| !notes.is_empty());
+            if latched || sounding {
+                triggered_at[track] = Some(now);
+            }
+            flags[track] = triggered_at[track]
+                .is_some_and(|at| now.duration_since(at) < RACK_PAD_TRIGGER_HOLD);
+        }
+    }
+    flags
+}
+
+/// Publish only the pads whose light changed. A rack that is not playing holds
+/// every flag at `false`, so an idle panel publishes nothing at all.
+pub(crate) fn sync_rack_pad_trigger_field_delta(
+    rt: &mut Runtime,
+    previous: &[bool],
+    flags: &[bool],
+) -> bool {
+    let mut effects_dirty = false;
+    for (track, &lit) in flags.iter().enumerate() {
+        if previous.get(track).copied().unwrap_or(false) == lit {
+            continue;
+        }
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &rack_pad_trigger_field(track),
+                Value::Number(if lit { 1.0 } else { 0.0 }),
+            )
+            .effects_dirty;
+    }
+    // A track that disappeared takes its light with it.
+    for track in flags.len()..previous.len() {
+        if !previous[track] {
+            continue;
+        }
+        effects_dirty |= rt
+            .set_reactive("SEQ", &rack_pad_trigger_field(track), Value::Number(0.0))
+            .effects_dirty;
+    }
+    effects_dirty
+}

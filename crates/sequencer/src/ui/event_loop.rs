@@ -95,6 +95,8 @@ pub(crate) fn run_event_loop(
         prev_bus_peak_levels: Vec::new(),
         prev_modulator_phases: Vec::new(),
         prev_modulator_levels: Vec::new(),
+        prev_rack_pad_triggers: Vec::new(),
+        rack_pad_triggered_at: Vec::new(),
         prev_bus_playheads: Vec::new(),
         prev_track_playheads: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),

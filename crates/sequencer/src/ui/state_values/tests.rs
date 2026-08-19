@@ -48901,26 +48901,46 @@
             );
         }
 
-        // Occupancy is flattened out of the pad list ONCE, note-indexed, so a
-        // cell answers with a lookup rather than another scan of the pads.
+        // The pad list is flattened ONCE into a note-indexed track list, so a
+        // cell answers with a lookup rather than another scan of the pads —
+        // and it answers with the member track, which is both "occupied?" and
+        // the cell's trigger-light binding (eseq-4b5.16).
+        const MAP_PADS: &str =
+            "(list (dict :pad-note 36 :track 4) (dict :pad-note 38 :track 7))";
         assert!(flag(
             &mut editor,
-            "(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-occupancy (list 36 38)) 36)"
+            &format!("(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 36)")
         ));
         assert!(!flag(
             &mut editor,
-            "(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-occupancy (list 36 38)) 37)"
+            &format!("(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 37)")
         ));
         assert_eq!(
             number(
                 &mut editor,
-                "(len (eseq.sequencer/%pad-note-occupancy (list 36)))"
+                &format!("(eseq.sequencer/%note-track (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 38)")
+            ),
+            7.0,
+            "a map cell resolves to the member track behind its note"
+        );
+        assert_eq!(
+            number(
+                &mut editor,
+                &format!("(eseq.sequencer/%note-track (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 37)")
+            ),
+            -1.0,
+            "a note no pad answers to has no track"
+        );
+        assert_eq!(
+            number(
+                &mut editor,
+                &format!("(len (eseq.sequencer/%pad-note-tracks {MAP_PADS}))")
             ),
             number(
                 &mut editor,
                 "(+ (- (eseq.drum-rack-v2/max-grid-pad-note) (eseq.drum-rack-v2/min-grid-pad-note)) 1)"
             ),
-            "the occupancy list covers every note the map draws"
+            "the track list covers every note the map draws"
         );
 
         // Clicking a row pages the grid to the page holding those notes, and
@@ -49278,6 +49298,209 @@
                 .cloned(),
             highlight,
             "the page the grid left is no longer highlighted"
+        );
+    }
+
+    /// eseq-4b5.16: a pad lights while it sounds, in the enlarged grid AND in
+    /// the mini-map — including on a page the grid is not showing. The light
+    /// is one bound field per member track, so a hit repaints the cell without
+    /// re-rendering the panel: the assertions below read the SAME layout nodes
+    /// before and after the flag flips, with no relayout in between.
+    #[test]
+    fn metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding_impl)
+            .expect("spawn rack pad trigger light test")
+            .join()
+            .expect("rack pad trigger light test thread");
+    }
+
+    fn metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding_impl() {
+        let mut editor = rack_fx_panel_editor();
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+
+        // The fixture's pads are note 36 on member track 1 and note 38 on
+        // member track 2; the grid opens on page 3 (36..51), where note 36 is
+        // the bottom-left cell (12) and note 38 is cell 14.
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
+            .expect("rack pad grid");
+        let map = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-map-7")
+            .expect("rack pad mini-map");
+        let lit_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-12")
+            .expect("grid cell for note 36");
+        let other_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-14")
+            .expect("grid cell for note 38");
+        let empty_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-13")
+            .expect("grid cell for note 37");
+        let lit_map_cell = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-36")
+            .expect("map cell for note 36");
+        let other_map_cell = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-38")
+            .expect("map cell for note 38");
+
+        // Nothing is playing: every pad is dark, and an empty cell has no
+        // light to give — there is no member track behind it.
+        for (label, cell) in [
+            ("grid cell 36", lit_cell),
+            ("grid cell 38", other_cell),
+            ("map cell 36", lit_map_cell),
+        ] {
+            assert_eq!(
+                layout_prop_bool(cell, "selected"),
+                Some(false),
+                "{label} should start dark"
+            );
+            assert!(
+                cell.props.contains_key("selected-background-color"),
+                "{label} should carry a lit colour"
+            );
+        }
+        assert_eq!(
+            layout_prop_bool(empty_cell, "selected"),
+            None,
+            "an empty cell has no member track and so no light"
+        );
+
+        // Firing the pad's member track lights exactly that pad, in both views,
+        // with no re-render: the same nodes now read lit.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &rack_pad_trigger_field(1), Value::Number(1.0));
+        assert_eq!(
+            layout_prop_bool(lit_cell, "selected"),
+            Some(true),
+            "the triggered pad's grid cell should light"
+        );
+        assert_eq!(
+            layout_prop_bool(lit_map_cell, "selected"),
+            Some(true),
+            "the triggered pad's mini-map cell should light too"
+        );
+        assert_eq!(
+            layout_prop_bool(other_cell, "selected"),
+            Some(false),
+            "an untriggered pad stays dark"
+        );
+        assert_eq!(
+            layout_prop_bool(other_map_cell, "selected"),
+            Some(false),
+            "an untriggered pad stays dark in the map as well"
+        );
+
+        // A pad on a page the grid is NOT showing still flashes in the map:
+        // page away from 36..51 and the map cell keeps its own light.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 0)")
+            .expect("paging should evaluate");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let paged = editor.widget_layout().expect("paged rack fx panel layout");
+        let paged_map = find_layout_node_by_stable_key_suffix(&paged, "/rack-pad-map-7")
+            .expect("mini-map after paging");
+        assert_eq!(
+            layout_prop_bool(
+                find_layout_node_by_stable_key_suffix(paged_map, "/rack-pad-map-cell-7-36")
+                    .expect("offscreen map cell"),
+                "selected"
+            ),
+            Some(true),
+            "a pad off the enlarged page still shows its trigger in the map"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &rack_pad_trigger_field(1), Value::Number(0.0));
+    }
+
+    /// The pad light's host half: the audio thread's per-track trigger latch is
+    /// what makes it miss-free, active notes hold it up while the note sounds,
+    /// and an idle rack publishes nothing at all.
+    #[test]
+    fn rack_pad_trigger_flags_consume_the_latch_hold_notes_and_idle_silently() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = test_app_for_track_visual_state(state.clone());
+        app.groups = vec![rack_group_fixture(false)];
+        let mut triggered_at: Vec<Option<Instant>> = Vec::new();
+        let idle: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>> = vec![Vec::new(); 3];
+        let now = Instant::now();
+
+        // Idle: nothing lit, nothing to publish.
+        let dark = read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now);
+        assert_eq!(dark, vec![false, false, false]);
+
+        // A hit that came and went entirely between two UI frames leaves no
+        // active note behind — only the latch — and must still light the pad.
+        state.transport.trigger_flash[1].store(255, Ordering::Relaxed);
+        let lit = read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now);
+        assert_eq!(
+            lit,
+            vec![false, true, false],
+            "the latched trigger lights its member track"
+        );
+        assert_eq!(
+            state.transport.trigger_flash[1].load(Ordering::Relaxed),
+            0,
+            "reading the latch consumes it, so one hit is one light"
+        );
+
+        // The light decays on its own once the hold elapses …
+        assert_eq!(
+            read_rack_pad_trigger_flags(
+                &app,
+                &state,
+                &idle,
+                &mut triggered_at,
+                now + RACK_PAD_TRIGGER_HOLD
+            ),
+            vec![false, false, false],
+            "the light decays without another trigger"
+        );
+        // … but a note that is still sounding keeps refreshing it, so a held
+        // pad key stays lit rather than blinking once.
+        let mut held = idle.clone();
+        held[1] = vec![sequencer::sequencer::ActiveNoteActivity {
+            note: 60,
+            velocity: 1.0,
+            trigger_id: 1,
+        }];
+        assert_eq!(
+            read_rack_pad_trigger_flags(
+                &app,
+                &state,
+                &held,
+                &mut triggered_at,
+                now + RACK_PAD_TRIGGER_HOLD * 10
+            ),
+            vec![false, true, false],
+            "an active note holds the light up"
+        );
+
+        // Track 0 is not a rack member, so its triggers never light anything —
+        // and its latch is left alone for whoever else may want it.
+        state.transport.trigger_flash[0].store(255, Ordering::Relaxed);
+        assert!(
+            !read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now)[0],
+            "a loose track has no pad to light"
+        );
+        assert_eq!(
+            state.transport.trigger_flash[0].load(Ordering::Relaxed),
+            255,
+            "a loose track's latch is not consumed"
         );
     }
 

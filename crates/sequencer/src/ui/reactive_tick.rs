@@ -760,6 +760,34 @@ pub(crate) fn reactive_tick_and_render(
                 &mut ctx.meters.visualization_liveness,
             );
         }
+        // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
+        // reading is what consumes the audio thread's trigger latch, so it must
+        // not be skipped — but publishing is gated on the panel that draws
+        // them, exactly as the modulator readouts below are.
+        {
+            let rack_pad_triggers = read_rack_pad_trigger_flags(
+                &app,
+                &ctx.shared.state,
+                &track_active_notes,
+                &mut ctx.frame.rack_pad_triggered_at,
+                Instant::now(),
+            );
+            if fx_visible {
+                if rack_pad_triggers != ctx.frame.prev_rack_pad_triggers {
+                    needs_reactive_cycle |= sync_rack_pad_trigger_field_delta(
+                        editor.runtime_mut(),
+                        &ctx.frame.prev_rack_pad_triggers,
+                        &rack_pad_triggers,
+                    );
+                    ctx.frame.prev_rack_pad_triggers = rack_pad_triggers;
+                }
+            } else if !ctx.frame.prev_rack_pad_triggers.is_empty() {
+                // Nothing draws the lights: forget what was published so that
+                // reopening the panel republishes whatever is lit right then,
+                // rather than waiting for the next change.
+                ctx.frame.prev_rack_pad_triggers.clear();
+            }
+        }
         if ctx.meters.cached_modulator_phases != ctx.frame.prev_modulator_phases {
             if fx_visible {
                 needs_reactive_cycle |= sync_modulator_phase_field_delta(

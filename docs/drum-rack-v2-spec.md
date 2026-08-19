@@ -277,6 +277,17 @@ The grid view renders the rack as a header row plus full member rows:
     pages the grid to the page holding those notes, so a kit three octaves up
     is one gesture away. The map derives occupancy from the pad list read once
     at its root; the arrow pager stays for single-octave steps.
+  - A pad **lights while it sounds**, in the grid and in the mini-map alike —
+    including a pad on a page the grid is not currently showing, which is what
+    makes the map a play indicator and not just a navigator. All three trigger
+    sources light it, because all three land on the pad's member track: a cell
+    click, an armed rack's live keys, and the member's own sequenced steps.
+    The light is therefore one bound field per member track
+    (`rack-pad-trigger-<track>`), fed by the audio thread's per-track trigger
+    latch — so a hit shorter than a UI frame is never missed — and held up for
+    as long as the note is actually sounding, decaying shortly after. Being a
+    *bound* field, a hit repaints the cell without re-rendering the panel, and
+    a rack with nothing playing publishes nothing at all.
 
   A cell click hits the pad down the live path (member track at base pitch), so
   choke groups and the member's own fx chain apply exactly as from the
