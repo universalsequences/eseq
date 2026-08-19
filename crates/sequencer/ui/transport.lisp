@@ -829,8 +829,8 @@
             ;; display. Rate keys 1-8 switch the rate while roll mode is on.
             (subtree :key "transport-roll-toggle"
               (box :debug-name "transport-roll-toggle"
-                :width 5.0 :height 1.1
-                :background (if SEQ.sequence-rolling
+                :width 5.5 :height 1.1
+                :background-color (if SEQ.sequence-rolling
                   '(rgba 0.72 0.10 0.12 1)
                   "pattern-pill-bg")
                 :on-click |x y r| (host-command "toggle-roll-mode")
