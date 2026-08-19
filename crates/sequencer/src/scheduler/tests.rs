@@ -1583,6 +1583,87 @@
         assert!((resolved.velocity - 0.7).abs() < 1e-6);
     }
 
+    /// Live step-param printing (bead eseq-jc9): with the print latch armed,
+    /// the scheduler substitutes the latched values when it resolves a step
+    /// event on the armed track — that is what makes a print audible on the
+    /// SAME pass (the pattern write lands behind the playhead), instead of
+    /// one loop later. Untouched params and other tracks stay untouched.
+    #[test]
+    fn scheduler_lookahead_substitutes_armed_step_print_values() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.patterns[0].set_step_active(0, true);
+        state.pattern.step_data[0].set(0, StepParam::Velocity, 0.7);
+        state.pattern.step_data[0].set(0, StepParam::Transpose, 5.0);
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state
+            .step_print_override
+            .set(0, Some(0.25), Some(3.0), None);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            6_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let scheduled = queue.pop().expect("step 0 trigger");
+        let ScheduledEventKind::ResolvedTrigger {
+            track, resolved, ..
+        } = scheduled.kind
+        else {
+            panic!("expected resolved trigger");
+        };
+        assert_eq!(track, 0);
+        assert!((resolved.velocity - 0.25).abs() < 1e-6, "latched velocity plays");
+        assert!((resolved.duration - 3.0).abs() < 1e-6, "latched duration plays");
+        assert_eq!(resolved.transpose, 5.0, "untouched transpose keeps the step value");
+
+        // Disarmed (or armed for another track): the step plays as stored.
+        state.step_print_override.clear();
+        let queue = ScheduledEventQueue::<16>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            6_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+        let scheduled = queue.pop().expect("step 0 trigger after disarm");
+        let ScheduledEventKind::ResolvedTrigger { resolved, .. } = scheduled.kind else {
+            panic!("expected resolved trigger");
+        };
+        assert!((resolved.velocity - 0.7).abs() < 1e-6, "disarm restores stored values");
+    }
+
     #[test]
     fn scheduler_lookahead_flushes_quantizer_without_trigger_on_grid() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));

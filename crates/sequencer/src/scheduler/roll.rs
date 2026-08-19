@@ -223,7 +223,7 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     // Track defaults (F4): default step params; step and resolved transpose
     // stay at the shared default so `resolved_chord_transpose` passes the
     // notes through as-is.
-    let resolved = ResolvedStep {
+    let mut resolved = ResolvedStep {
         duration: StepParam::Duration.default_value(),
         velocity: StepParam::Velocity.default_value(),
         speed: StepParam::Speed.default_value(),
@@ -233,6 +233,30 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
         pan: StepParam::Pan.default_value(),
         chop: StepParam::Chop.default_value(),
     };
+    let (step, delay, step_dur_beats) = clock.roll_record_position(
+        track,
+        boundary_beats,
+        snapshot.tracks[track].params.num_steps,
+    );
+    // Live step-param printing (bead eseq-jc9): a latched velocity/duration
+    // shapes the rolled hit as it is HEARD (the chord below is built from
+    // `resolved`), matching the values the record feedback stamps into the
+    // pattern. The latch is in PATTERN-step units while this event's
+    // samples_per_step is the roll grid, so the duration converts by
+    // step_dur/grid. Transpose deliberately stays default here — the rolled
+    // key's pitch is the pass-through invariant above; the recorded
+    // transpose override is applied on the control thread instead.
+    {
+        let (velocity, duration, _) = state.step_print_override.values_for_track(track);
+        if let Some(value) = velocity {
+            resolved.velocity = value;
+        }
+        if let Some(value) = duration {
+            if grid_beats > 0.0 {
+                resolved.duration = value * (step_dur_beats / grid_beats) as f32;
+            }
+        }
+    }
     let chord = chord_data_from_parts(notes, &[], &[], resolved.duration, resolved.transpose);
     let event = StepEvent {
         track,
@@ -277,11 +301,6 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     ) {
         return false;
     }
-    let (step, delay, step_dur_beats) = clock.roll_record_position(
-        track,
-        boundary_beats,
-        snapshot.tracks[track].params.num_steps,
-    );
     let duration_steps = (grid_beats / step_dur_beats) as f32;
     for transpose in notes {
         state.push_roll_recorded_hit(crate::sequencer::RollHitRecorded {

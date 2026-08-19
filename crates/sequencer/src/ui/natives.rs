@@ -3664,6 +3664,25 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(val as f64))
     });
 
+    // seq-print-step-param-release — hold-to-print gesture end: the picker's
+    // mouse-up releases that param's print latch immediately (the last held
+    // param releasing ends print mode). Harmless when nothing is latched.
+    runtime.register_native("seq-print-step-param-release", move |args, ctx| {
+        let Some(Value::Keyword(param_name)) = args.first() else {
+            return Err("seq-print-step-param-release: expected (:param)".into());
+        };
+        let mut payload = HashMap::new();
+        payload.insert(
+            "param".to_string(),
+            Rc::new(RefCell::new(Value::Keyword(param_name.clone()))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "print-step-param-release".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Nil)
+    });
+
     runtime.register_native("seq-set-process-lane-step", move |args, ctx| {
         let (
             Some(Value::Number(track)),

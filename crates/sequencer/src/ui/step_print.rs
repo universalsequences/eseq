@@ -78,6 +78,42 @@ impl StepPrintState {
         self.touch_dirty = false;
     }
 
+    /// Mouse-up on one picker ends that param's print (hold-to-print: the
+    /// gesture is the arm). Returns whether the whole latch ended — the last
+    /// held param releasing disarms print mode entirely.
+    pub(crate) fn unlatch(&mut self, param: StepParam) -> bool {
+        self.values.retain(|(existing, _)| *existing != param);
+        if self.values.is_empty() {
+            self.disarm();
+            return true;
+        }
+        false
+    }
+
+    /// Mirror the latch into the engine-side override so the scheduler plays
+    /// the latched values on the armed track immediately (the pattern write
+    /// lands behind the playhead, so without this the print would only be
+    /// heard one loop later). Call after every latch change; `print_pass`
+    /// clears the engine side on disarm.
+    pub(crate) fn publish_engine_override(&self, state: &SequencerState) {
+        if !self.armed() {
+            state.step_print_override.clear();
+            return;
+        }
+        let value = |param: StepParam| {
+            self.values
+                .iter()
+                .find(|(existing, _)| *existing == param)
+                .map(|(_, value)| *value)
+        };
+        state.step_print_override.set(
+            self.track,
+            value(StepParam::Velocity),
+            value(StepParam::Duration),
+            value(StepParam::Transpose),
+        );
+    }
+
     /// Rolled hits recorded while print mode is armed take the latched
     /// values at record time — only for touched params on the armed track.
     pub(crate) fn override_roll_hit(&self, hit: &mut RollHitRecorded) {
@@ -115,8 +151,10 @@ pub(crate) fn print_pass(
         || print.track >= state.pattern.patterns.len()
     {
         // Pause/stop, record-off, or a focus move ends printing cleanly —
-        // the next touch during the next record+play session re-arms.
+        // the next touch during the next record+play session re-arms. The
+        // engine-side override dies with the latch.
         print.disarm();
+        state.step_print_override.clear();
         return PrintedSteps::default();
     }
     let track = print.track;
@@ -200,7 +238,7 @@ fn sync_print_display_fields(rt: &mut Runtime, print: &StepPrintState) -> bool {
 
 /// The latch just ended: hand the picker readouts back to the cursor step
 /// (or the selected step, matching `sync_single_step_param_binding`).
-fn restore_cursor_display_fields(
+pub(crate) fn restore_cursor_display_fields(
     rt: &mut Runtime,
     state: &SequencerState,
     track: usize,
@@ -429,6 +467,48 @@ mod step_print_tests {
         let velocity_before = other.velocity;
         print.override_roll_hit(&mut other);
         assert_eq!(other.velocity, velocity_before);
+    }
+
+    #[test]
+    fn release_unlatches_only_that_param_and_the_last_release_disarms() {
+        let state = playing_state();
+        state.pattern.patterns[0].toggle_step(0);
+        state.pattern.patterns[0].toggle_step(1);
+        set_playhead(&state, 0);
+        let mut print = StepPrintState::default();
+        print.latch(0, StepParam::Velocity, 0.25);
+        print.latch(0, StepParam::Duration, 3.0);
+        print.publish_engine_override(&state);
+        assert_eq!(
+            state.step_print_override.values_for_track(0),
+            (Some(0.25), Some(3.0), None),
+            "both held params reach the engine override"
+        );
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![0]);
+
+        // Velocity's mouse-up: only duration keeps printing (and only
+        // duration stays in the engine override).
+        assert!(!print.unlatch(StepParam::Velocity), "duration is still held");
+        print.publish_engine_override(&state);
+        assert_eq!(
+            state.step_print_override.values_for_track(0),
+            (None, Some(3.0), None)
+        );
+        let velocity_before = state.pattern.step_data[0].get(1, StepParam::Velocity);
+        set_playhead(&state, 1);
+        assert_eq!(print_pass(&state, &mut print, 0, true).steps, vec![1]);
+        assert_eq!(state.pattern.step_data[0].get(1, StepParam::Duration), 3.0);
+        assert_eq!(
+            state.pattern.step_data[0].get(1, StepParam::Velocity),
+            velocity_before,
+            "a released param must stop printing immediately"
+        );
+
+        // The last held param's release ends print mode entirely.
+        assert!(print.unlatch(StepParam::Duration));
+        assert!(!print.armed());
+        print.publish_engine_override(&state);
+        assert_eq!(state.step_print_override.values_for_track(0), (None, None, None));
     }
 
     #[test]

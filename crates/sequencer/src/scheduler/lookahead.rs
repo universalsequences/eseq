@@ -574,6 +574,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 pan: step_snapshot.params[StepParam::Pan.index()],
                 chop: step_snapshot.params[StepParam::Chop.index()],
             };
+            // Live step-param printing (bead eseq-jc9): while the *step*
+            // panel's print latch is armed for this track, the latched values
+            // are what must be HEARD now — the pattern write lands behind the
+            // playhead (each step is stamped after it was already scheduled),
+            // so without this substitution a printed value would only become
+            // audible one loop later. Substituting here mirrors exactly what
+            // the stamped step_data plays back on the next pass.
+            {
+                let (velocity, duration, transpose) = state
+                    .step_print_override
+                    .values_for_track(trigger.track);
+                if let Some(value) = velocity {
+                    resolved.velocity = value;
+                }
+                if let Some(value) = duration {
+                    resolved.duration = value;
+                }
+                if let Some(value) = transpose {
+                    resolved.transpose = value;
+                }
+            }
             let mut process_overlay = ProcessTargetOverlay::default();
             let mut process_base_alive = true;
             let step_beats = trigger.samples_per_step / samples_per_quarter as f32;

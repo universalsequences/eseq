@@ -496,8 +496,8 @@ impl WidgetDefinition for NumberPickerWidget {
             "height", "font-size", "noui", "text-align", "text-color", "active-color",
             "background-color", "bg-color", "border-color", "cursor-color", "edit-color",
             "focus-color", "highlight-color", "ring-color", "shadow-color", "tri-color",
-            "active", "on-change", "plock-active", "plock-color-r", "plock-color-g",
-            "plock-color-b",
+            "active", "on-change", "on-release", "plock-active", "plock-color-r",
+            "plock-color-g", "plock-color-b",
         ]
     }
 
@@ -623,6 +623,23 @@ impl WidgetDefinition for NumberPickerWidget {
 
                 MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(new_value as f64)))
             }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // Gesture end: fire the optional on-release callback (the
+                // drag capture routes the Up here even when the pointer left
+                // the widget). Number payloads mean value changes, so the
+                // release rides a keyword sentinel.
+                if node
+                    .props
+                    .get("on-release")
+                    .is_some_and(|v| !matches!(v, Value::Nil | Value::Bool(false)))
+                {
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Keyword(
+                        "release".to_string(),
+                    )))
+                } else {
+                    MouseEventOutcome::Consume
+                }
+            }
             _ => MouseEventOutcome::Consume,
         }
     }
@@ -666,6 +683,18 @@ impl WidgetDefinition for NumberPickerWidget {
         // Nil = cursor/edit state change only, no callback
         if matches!(value, Value::Nil) {
             return None;
+        }
+        // :release sentinel = the drag gesture ended; route to on-release.
+        if matches!(value, Value::Keyword(keyword) if keyword == "release") {
+            let callback = node
+                .props
+                .get("on-release")
+                .filter(|v| !matches!(v, Value::Nil | Value::Bool(false)))
+                .cloned()?;
+            return Some(EventOutput {
+                callback,
+                args: Vec::new(),
+            });
         }
         let Value::Number(new_value) = value else {
             return None;

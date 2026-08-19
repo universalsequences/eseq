@@ -267,9 +267,83 @@ pub struct PublishedSequencer {
     pub graph: Option<crate::graph::GraphManifest>,
 }
 
+/// Live step-param print override (bead eseq-jc9), read lock-free by the
+/// scheduler. While the *step* panel's print latch is armed, the scheduler
+/// substitutes these values when it resolves step events on the armed track:
+/// the pattern write only lands BEHIND the playhead (each step is stamped as
+/// it passes, after it was already scheduled), so without this override the
+/// printed value would only be heard one loop later. `mask` bits:
+/// 1 = velocity, 2 = duration, 4 = transpose; 0 = disarmed. Values are f32
+/// bits. Written by the control thread on latch/disarm, read per scheduled
+/// step by the scheduler.
+#[derive(Default)]
+pub struct StepPrintOverride {
+    track: std::sync::atomic::AtomicUsize,
+    mask: AtomicU32,
+    velocity_bits: AtomicU32,
+    duration_bits: AtomicU32,
+    transpose_bits: AtomicU32,
+}
+
+impl StepPrintOverride {
+    pub const VELOCITY: u32 = 1;
+    pub const DURATION: u32 = 1 << 1;
+    pub const TRANSPOSE: u32 = 1 << 2;
+
+    /// Publish the full latch state: values first, mask last (Release), so a
+    /// reader that observes a set bit never sees a stale value for it.
+    pub fn set(
+        &self,
+        track: usize,
+        velocity: Option<f32>,
+        duration: Option<f32>,
+        transpose: Option<f32>,
+    ) {
+        self.track.store(track, Ordering::Relaxed);
+        let mut mask = 0;
+        if let Some(value) = velocity {
+            self.velocity_bits.store(value.to_bits(), Ordering::Relaxed);
+            mask |= Self::VELOCITY;
+        }
+        if let Some(value) = duration {
+            self.duration_bits.store(value.to_bits(), Ordering::Relaxed);
+            mask |= Self::DURATION;
+        }
+        if let Some(value) = transpose {
+            self.transpose_bits.store(value.to_bits(), Ordering::Relaxed);
+            mask |= Self::TRANSPOSE;
+        }
+        self.mask.store(mask, Ordering::Release);
+    }
+
+    pub fn clear(&self) {
+        self.mask.store(0, Ordering::Relaxed);
+    }
+
+    /// The latched (velocity, duration, transpose) overrides for `track`, all
+    /// `None` when disarmed or armed for a different track.
+    pub fn values_for_track(&self, track: usize) -> (Option<f32>, Option<f32>, Option<f32>) {
+        let mask = self.mask.load(Ordering::Acquire);
+        if mask == 0 || self.track.load(Ordering::Relaxed) != track {
+            return (None, None, None);
+        }
+        let value = |bit: u32, bits: &AtomicU32| {
+            (mask & bit != 0).then(|| f32::from_bits(bits.load(Ordering::Relaxed)))
+        };
+        (
+            value(Self::VELOCITY, &self.velocity_bits),
+            value(Self::DURATION, &self.duration_bits),
+            value(Self::TRANSPOSE, &self.transpose_bits),
+        )
+    }
+}
+
 pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
+    /// Live step-param print override (bead eseq-jc9): scheduler-side
+    /// substitution so the printed value is audible the moment it is touched.
+    pub step_print_override: StepPrintOverride,
     pub runtime: RuntimeBindingState,
     pub(super) scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     pub(super) scheduler_snapshot_version: AtomicU64,

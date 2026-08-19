@@ -270,6 +270,7 @@ impl SequencerState {
             graph_control_commands: Mutex::new(Vec::new()),
             roll_commands: Mutex::new(Vec::new()),
             roll_recorded_hits: Mutex::new(Vec::new()),
+            step_print_override: StepPrintOverride::default(),
             track_output_events: Mutex::new(Vec::new()),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             active_note_until_samples: (0..MAX_TRACKS)

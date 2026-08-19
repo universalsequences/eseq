@@ -305,30 +305,45 @@
       (nth values step)
       0)))
 
+(def %step-set-param-direct (mode value)
+  ;; The stopped-transport edit path: cursor step, or the p-lock path for a
+  ;; selection.
+  (do
+    (eseq.seq-core-state/cool-off-follow)
+    (if (seq-has-selection?)
+      (seq-set-step-param-plock
+        (eseq.seqv-track-params/seqv-param-keyword mode)
+        (eseq.seqv-track-params/seqv-step-param-value mode value))
+      (seq-set-step-param
+        (eseq.seq-core-state/current-step)
+        (eseq.seqv-track-params/seqv-param-keyword mode)
+        (eseq.seqv-track-params/seqv-step-param-value mode value)))))
+
 (def %step-set-param (mode value)
-  ;; Playing with record on: the touch arms live PRINT mode — the value lands
+  ;; Playing with record on: the drag arms live PRINT mode — the value lands
   ;; on the trigger steps the playhead passes, not the cursor step (bead
-  ;; eseq-jc9). No cool-off-follow in that branch: the performer is watching
-  ;; the playhead, so auto-follow must stay alive. The cursor step rides
-  ;; along as the fallback target if the gate races off before dispatch.
+  ;; eseq-jc9), and only while the mouse is held (%step-param-release ends
+  ;; it). No cool-off-follow in that branch: the performer is watching the
+  ;; playhead, so auto-follow must stay alive. The cursor step rides along
+  ;; as the fallback target if the gate races off before dispatch.
   (if (and SEQ.playing SEQ.recording)
     (seq-print-step-param
       (eseq.seq-core-state/current-step)
       (eseq.seqv-track-params/seqv-param-keyword mode)
       (eseq.seqv-track-params/seqv-step-param-value mode value))
-    (do
-      (eseq.seq-core-state/cool-off-follow)
-      (if (seq-has-selection?)
-        (seq-set-step-param-plock
-          (eseq.seqv-track-params/seqv-param-keyword mode)
-          (eseq.seqv-track-params/seqv-step-param-value mode value))
-        (seq-set-step-param
-          (eseq.seq-core-state/current-step)
-          (eseq.seqv-track-params/seqv-param-keyword mode)
-          (eseq.seqv-track-params/seqv-step-param-value mode value))))))
+    (%step-set-param-direct mode value)))
+
+(def %step-param-release (mode)
+  ;; Hold-to-print: mouse-up on a picker ends that param's print
+  ;; immediately. A no-op while nothing is latched (plain clicks, stopped
+  ;; transport).
+  (seq-print-step-param-release
+    (eseq.seqv-track-params/seqv-param-keyword mode)))
 
 (def %step-set-sound (label)
-  (%step-set-param 3 (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label SEQ.current-track label)))
+  ;; The drum-sound dropdown is a discrete pick, not a hold gesture — it
+  ;; never routes through print mode (a latch with no release would stick).
+  (%step-set-param-direct 3 (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label SEQ.current-track label)))
 
 (def %step-duration-print-context? (mode)
   (and (= mode 1) SEQ.playing SEQ.recording))
@@ -358,6 +373,7 @@
       :font-size 10
       :text-color :white
       :on-change (lambda (v) (%step-set-param mode v))
+      :on-release (lambda () (%step-param-release mode))
       :width width
       :height 1.15)))
 
