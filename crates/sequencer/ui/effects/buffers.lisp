@@ -10,6 +10,7 @@
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.instrument-panel :as ip)
+(import eseq.effects.panel-frame :as pf)
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
@@ -124,15 +125,12 @@
       (nth SEQ.track-names track)
       "")))
 
-;; Kit controls beside the pads: what the pad focus is, a one-click jump into
-;; that pad's member track, and saving the whole rack as a browser kit.
+;; Pad focus controls stay beside the grid; rack identity and persistence live
+;; in the instrument-style header above it.
 (def %rack-panel-controls (gidx)
   (let ((pad (eseq.sequencer/selected-pad gidx)))
     (v-stack :debug-name "rack-fx-panel-controls"
       :width 8.8 :height :fill :gap 0.3 :align :start :padding 0.1
-      (label "KIT" :font-size 9 :color :blue :bg :transparent)
-      (label (eseq.drum-rack-v2/group-name gidx)
-        :font-size 11 :color :white :bg :transparent)
       (label (if (= pad nil) "No pad selected" (str "Pad " (get pad :label)))
         :font-size 8 :color :dim :bg :transparent)
       (label (substring (%rack-pad-member-name gidx pad) 0 14)
@@ -146,13 +144,6 @@
         :border-color :transparent
         :color (if (= pad nil) :dim :white)
         :on-click |x y r| (if (= pad nil) nil (eseq.sequencer/open-pad-member-fx gidx pad)))
-      (button "SAVE KIT"
-        :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
-        :width 8.4 :height 1.1 :padding 0 :font-size 8
-        :background-color '(rgba 0.1 0.1 0.1 1.0)
-        :border-color :transparent
-        :color :dim
-        :on-click |x y r| (eseq.drum-rack-v2/save-kit gidx))
       (box :flex 1 :width 0 :height 0 :bg :transparent)
       (label "Drop a sample or instrument on a pad"
         :width 8.4 :font-size 6.8 :color :dim :bg :transparent))))
@@ -162,20 +153,40 @@
     (h-stack :gap 1 :align :start
       (box :debug-name "rack-fx-pads-panel"
         :key (str "rack-fx-pads-panel-" (eseq.drum-rack-v2/group-id gidx))
-        :background-color :buffer-bg
-        :corner-radius 10
-        :border-color :mixer-strip-border
-        :border-width 2
+        :background "fx-panel-bg"
+        :color :instrument-panel-bg
+        :header :fx-panel-header-bg
+        :selected-header :fx-panel-header-selected-bg
         :height st/fx-fixed-panel-height
-        :padding 0.1
+        :padding 0
         :v-align :start :h-align :start
-        ;; Mini-map on the LEFT of the enlarged grid, the way a drum rack
-        ;; reads: the whole note range at a glance, the enlarged window
-        ;; highlighted inside it (eseq-4b5.15).
-        (h-stack :gap 0.2 :align :start
-          (eseq.sequencer/rack-pad-map gidx)
-          (eseq.sequencer/rack-pad-grid gidx)
-          (%rack-panel-controls gidx)))
+        (v-stack :gap 0 :height :fill
+          (box :debug-name "rack-fx-header-box"
+            :width :fill :height 1 :padding 0 :v-align :center :h-align :start
+            (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :center :width :fill
+              (pf/fx-panel-header-leading-spacer)
+              (label (substring (eseq.drum-rack-v2/group-name gidx) 0 12)
+                :font-size 11 :color :white :bg :transparent)
+              (box :flex 1 :height 0.15)
+              (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
+                (v-stack
+                  (box :width 1 :height 0.1)
+                  (fx-mini-save-icon
+                    :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
+                    :on-click |x y r|
+                      (eseq.browser/enter-kit-save
+                        (eseq.drum-rack-v2/group-id gidx)
+                        (eseq.drum-rack-v2/group-name gidx))
+                    :active 0)))
+              (box :width 0.5)))
+          (pf/fx-panel-body "rack-fx-pads-body"
+            ;; Mini-map on the LEFT of the enlarged grid, the way a drum rack
+            ;; reads: the whole note range at a glance, the enlarged window
+            ;; highlighted inside it (eseq-4b5.15).
+            (h-stack :gap 0.2 :align :start
+              (eseq.sequencer/rack-pad-map gidx)
+              (eseq.sequencer/rack-pad-grid gidx)
+              (%rack-panel-controls gidx)))))
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
       (each (filter |fx| (> (len (get fx :params)) 0) (%selected-bus-effects)) |fx slot-idx|

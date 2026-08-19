@@ -197,12 +197,6 @@
   (host-command "trigger-rack-pad"
     (dict :group-id (group-id gidx) :pad-note (get pad :pad-note))))
 
-;; Kit = group config + one Sound per pad, saved as a browser object. Patterns
-;; stay behind (docs/drum-rack-v2-spec.md, "Polish").
-(def save-kit (gidx)
-  (host-command "save-rack-as-kit"
-    (dict :group-id (group-id gidx) :name (group-name gidx) :overwrite true)))
-
 ;; ── Pad grid geometry (docs/drum-rack-v2-spec.md, "UI") ─────────────────
 ;; The 4x4 pad grid is NOT a window onto the pad vec: a cell IS a fixed pad
 ;; note, and a pad renders at the cell its `pad_note` names (empty everywhere

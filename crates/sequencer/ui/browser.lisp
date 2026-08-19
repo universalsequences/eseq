@@ -64,6 +64,11 @@
 ;; Preset save state
 (defstate %preset-name "")
 (defstate %preset-save-mode "")  ;; "" or "save-preset"
+;; Kit saves are initiated by the drum rack's FX-panel header, but completed
+;; here so naming and browser placement are explicit before anything is written.
+(defstate %kit-save-name "")
+(defstate %kit-save-group-id -1)
+(defstate %kit-save-mode false)
 (defstate preset-filter "")
 (defstate sbrowser-script-name "")
 (defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
@@ -960,19 +965,72 @@
 (def %load-kit (item)
   (host-command "load-kit" (dict :path (get item :path))))
 
+(def enter-kit-save (group-id name)
+  (set! search-filter "")
+  (set! %mode "audition")
+  (set! %preset-save-mode "")
+  (set! sbrowser-script-save-mode "")
+  (set! %kit-save-group-id group-id)
+  (set! %kit-save-name name)
+  (set! %kit-save-mode true)
+  (select-tab "kits"))
+
+(def %exit-kit-save ()
+  (set! %kit-save-mode false)
+  (set! %kit-save-group-id -1))
+
+(def %save-kit ()
+  (if (= (len %kit-save-name) 0)
+    (status "Enter a kit name")
+    (do
+      (host-command "save-rack-as-kit"
+        (dict :group-id %kit-save-group-id
+              :name %kit-save-name
+              :overwrite false))
+      (%exit-kit-save))))
+
+(def %kit-save-panel ()
+  (box :key "kit-save-panel" :width :fill :padding 0.5
+    (v-stack :width :fill :gap 0.5
+      (h-stack :width :fill :gap 0.5 :align :center
+        (label "Save Kit" :font-size 12 :color :white :bg :transparent)
+        (box :flex 1 :height 0)
+        (button "Cancel"
+          :key "kit-save-cancel"
+          :variant :ghost
+          :width 5.5 :height 1.2 :font-size 9
+          :on-click |x y r| (%exit-kit-save)
+          :color :gray))
+      (text-input
+        :key "kit-save-name"
+        :width :fill
+        :value %kit-save-name
+        :placeholder "kit name..."
+        :on-change (lambda (value) (set! %kit-save-name value))
+        :height 1.5
+        :font-size 12)
+      (button "Save Kit"
+        :key "kit-save-confirm"
+        :variant :primary
+        :width 10 :height 1.2 :font-size 11
+        :on-click |x y r| (%save-kit)
+        :color :white))))
+
 (def %kits-panel ()
-  (let ((items (%visible-kits)))
-    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-      (if (= (len items) 0)
-        (%empty-message "No kits yet. Save a drum rack with the KIT button on its header row.")
-        (scroll :key "kits-tab-scroll" :width :fill :flex 1
-          (tree :key "kits-tab-tree"
-                :width :fill
-                :background-color :buffer-bg
-                :items items
-                :focusable true
-                :drag-type "kit"
-                :on-activate (lambda (item) (%load-kit item))))))))
+  (if %kit-save-mode
+    (%kit-save-panel)
+    (let ((items (%visible-kits)))
+      (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+        (if (= (len items) 0)
+          (%empty-message "No kits yet. Use the save icon in a drum rack's FX-panel header.")
+          (scroll :key "kits-tab-scroll" :width :fill :flex 1
+            (tree :key "kits-tab-tree"
+                  :width :fill
+                  :background-color :buffer-bg
+                  :items items
+                  :focusable true
+                  :drag-type "kit"
+                  :on-activate (lambda (item) (%load-kit item)))))))))
 
 (def drop-preset-on-sounds (event)
   (if (= (get event :drag-type) "instrument-preset")

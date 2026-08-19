@@ -2382,6 +2382,66 @@
         }
     }
 
+    /// eseq-4b5.17: the rack header's save icon enters a Kits-tab naming flow;
+    /// confirming there emits the addressed save command instead of writing
+    /// immediately from the FX panel.
+    #[test]
+    fn metal_seq_browser_kits_tab_saves_a_named_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.browser/enter-kit-save 7 "Kit")"#)
+            .expect("enter kit save mode");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-tab")
+                .expect("read selected browser tab"),
+            Some(Value::String("kits".to_string())),
+        );
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 24);
+        let layout = editor.widget_layout().expect("kit save browser layout");
+        for key in ["/kit-save-name", "/kit-save-confirm"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("kit save flow should render {key}"));
+            assert_finite_nonzero_rect(node, key);
+        }
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(do (set! eseq.browser/%kit-save-name "Breakbeat") (eseq.browser/%save-kit))"#,
+            )
+            .expect("confirm kit save");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "save-rack-as-kit");
+                let Value::Map(payload) = payload else {
+                    panic!("save-rack-as-kit payload should be a dict: {payload:?}");
+                };
+                for (key, expected) in [
+                    ("group-id", Value::Number(7.0)),
+                    ("name", Value::String("Breakbeat".to_string())),
+                    ("overwrite", Value::Bool(false)),
+                ] {
+                    assert_eq!(
+                        payload.get(key).map(|value| value.borrow().clone()),
+                        Some(expected),
+                        "save payload field {key}",
+                    );
+                }
+            }
+            other => panic!("expected save-rack-as-kit host command, got {other:?}"),
+        }
+    }
+
     /// Module spec §10 hazard (l): `sbrowser-active-tree-key` hands a widget key
     /// *out* to Rust — `sample_browser_active_tree_key` in `src/ui/input.rs`
     /// feeds it straight into `focus_widget_by_stable_key`, an exact match — so
@@ -49106,11 +49166,17 @@
             find_layout_node_by_stable_key_suffix(&layout, "/rack-fx-open-pad-7").is_some(),
             "the panel should offer a jump to the pad's member track"
         );
-        // Kit save moved off the sequencer header (eseq-4b5.11), so this panel
-        // is now the only place it is offered from.
+        // Rack identity and saving use the same header structure and save icon
+        // contract as regular instrument panels; pad-only controls stay below.
+        let header = find_layout_node_by_debug_name(&layout, "rack-fx-header-row")
+            .expect("the rack panel should have an instrument-style header");
+        assert_finite_nonzero_rect(header, "rack fx header");
+        let save = find_layout_node_by_stable_key_suffix(header, "/rack-fx-save-kit-7")
+            .expect("the rack header should expose the kit save icon");
+        assert_finite_nonzero_rect(save, "rack kit save icon");
         assert!(
-            find_layout_node_by_stable_key_suffix(&layout, "/rack-fx-save-kit-7").is_some(),
-            "the panel should still save the rack as a kit"
+            save.props.contains_key("on-click"),
+            "the kit save icon should enter the browser naming flow"
         );
         editor
             .runtime_mut()
