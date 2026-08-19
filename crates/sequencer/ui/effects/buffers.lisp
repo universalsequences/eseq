@@ -101,11 +101,12 @@
 ;; rack-level effects that bus chain really is.
 ;;
 ;; The pads come from ui/sequencer.lisp — one pad-cell component, so drops,
-;; badges and audition cannot drift between the grid's PADS view and this
-;; panel. The eseq.sequencer names are spelled qualified rather than imported
-;; ON PURPOSE: this module is loaded from the effects manifest, which several
-;; Rust harnesses load on its own, and an import edge would drag the whole
-;; sequencer view (and its top-level registrations) into every one of them.
+;; badges and audition cannot drift between this panel and any other surface
+;; that draws them. The eseq.sequencer names are spelled qualified rather than
+;; imported ON PURPOSE: this module is loaded from the effects manifest, which
+;; several Rust harnesses load on its own, and an import edge would drag the
+;; whole sequencer view (and its top-level registrations) into every one of
+;; them.
 ;; They only run inside the rack branch, which cannot be reached without the
 ;; sequencer loaded. eseq.drum-rack-v2 IS imported (at the top of this file):
 ;; %selected-rack asks it about every bus selection, and it is a pure lookups
@@ -169,7 +170,7 @@
         :padding 0.1
         :v-align :start :h-align :start
         (h-stack :gap 0.2 :align :start
-          (eseq.sequencer/rack-pad-grid gidx false)
+          (eseq.sequencer/rack-pad-grid gidx)
           (%rack-panel-controls gidx)))
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.

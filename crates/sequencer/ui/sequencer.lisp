@@ -1749,21 +1749,11 @@
 ;; ── Pad grid performance view ───────────────────────────────────────────
 ;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
 ;; owns no sequencing state: a cell reads its pad from SEQ.groups and a hit
-;; goes straight down the live pad path.
+;; goes straight down the live pad path. The grid renders in the *fx* buffer's
+;; rack panel (ui/effects/buffers.lisp); the sequencer header carries no pad
+;; toggle of its own.
 
-;; Group id whose pad grid is open (-1 = none). One at a time keeps the grid
-;; a performance surface rather than a permanent row of empty squares.
-(defstate %pad-grid-open -1)
 (defstate %pad-grid-bank 0)
-
-(def %pad-grid-open? (gidx)
-  (= %pad-grid-open (eseq.drum-rack-v2/group-id gidx)))
-
-(def %toggle-pad-grid (gidx)
-  (do
-    (set! %pad-grid-bank 0)
-    (set! %pad-grid-open
-      (if (%pad-grid-open? gidx) -1 (eseq.drum-rack-v2/group-id gidx)))))
 
 ;; Banks always leave room for one more pad, so the next lazy pad is reachable
 ;; even from a rack whose last bank is exactly full.
@@ -1944,13 +1934,13 @@
 
 (def %pad-grid-intrinsic-width 26.45)
 
-;; The pad grid as a component: the sequencer block draws it full-width under a
-;; rack header, the *fx* rack panel draws it at its intrinsic width beside the
-;; rack's own controls. One definition, so pad badges, drops and audition can
-;; never differ between the two surfaces.
-(def rack-pad-grid (gidx fill)
+;; The pad grid as a component: the *fx* rack panel draws it at its intrinsic
+;; width beside the rack's own controls. It lives here, next to the pad cell it
+;; is made of, so pad badges, drops and audition stay one definition wherever a
+;; future surface draws them.
+(def rack-pad-grid (gidx)
   (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
-    :width (if fill :fill %pad-grid-intrinsic-width) :padding 0.2
+    :width %pad-grid-intrinsic-width :padding 0.2
     :background-color '(rgba 0.09 0.10 0.11 1.0)
     :corner-radius 8
     (v-stack :gap 0.1 :align :start
@@ -2025,24 +2015,10 @@
             :shadow-color :transparent
             :color (if muted (rgba 0.4 0.4 0.4 0.6) :dim)
             :bg :transparent))
-        ;; Pad grid = performance view over the pad map; KIT saves the rack as
-        ;; a browser kit (docs/drum-rack-v2-spec.md, "Polish").
-        (button "PADS"
-          :key (str "rack-pads-toggle-" (eseq.drum-rack-v2/group-id gidx))
-          :width 3.2 :height 1.2 :padding 0 :font-size 8
-          :background-color (if (%pad-grid-open? gidx)
-            '(rgba 0.30 0.37 0.39 1.0)
-            '(rgba 0.1 0.1 0.1 1.0))
-          :border-color :transparent
-          :color (if (%pad-grid-open? gidx) :white :dim)
-          :on-click |x y r| (%toggle-pad-grid gidx))
-        (button "KIT"
-          :key (str "rack-save-kit-" (eseq.drum-rack-v2/group-id gidx))
-          :width 2.6 :height 1.2 :padding 0 :font-size 8
-          :background-color '(rgba 0.1 0.1 0.1 1.0)
-          :border-color :transparent
-          :color :dim
-          :on-click |x y r| (eseq.drum-rack-v2/save-kit gidx))
+        ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
+        ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
+        ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
+        ;; name/meter shape an ordinary track header has.
         (%rack-volume-control gidx bus-idx)))))
 
 (def %rack-header-row (gidx)
@@ -2060,11 +2036,6 @@
       :padding 0.0145
       (v-stack :width :fill :gap 0.1
         (%rack-header-row gidx)
-        ;; The pad grid belongs to the header, not to the member rows, so a
-        ;; collapsed rack can still be finger-drummed.
-        (if (%pad-grid-open? gidx)
-          (rack-pad-grid gidx true)
-          (box :width 0.0 :height 0.0 :bg :transparent))
         (if (eseq.drum-rack-v2/collapsed? gidx)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :width :fill :gap 0.0

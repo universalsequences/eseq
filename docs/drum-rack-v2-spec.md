@@ -233,17 +233,21 @@ The grid view renders the rack as a header row plus full member rows:
 - Mixer: reuse the track-groups render-order layer; a rack renders as its
   group (header strip + members, collapsible).
 - Pad grid (4×4 performance view) stays a *view* over the pad map for finger
-  drumming / slot browsing; it owns no sequencing. As shipped it is a per-rack
-  toggle (`PADS` on the header row) that draws the pad map sixteen cells at a
-  time — cell position = pad index, banked past sixteen pads — and a cell click
-  hits the pad down the live path (member track at base pitch), so choke groups
-  and the member's own fx chain apply exactly as from the keyboard.
+  drumming / slot browsing; it owns no sequencing. It renders in the **`*fx*`
+  rack panel** — selecting a rack selects its bus, and that panel answers with
+  the kit rather than a bare bus chain — drawing the pad map sixteen cells at a
+  time (cell position = pad index, banked past sixteen pads). A cell click hits
+  the pad down the live path (member track at base pitch), so choke groups and
+  the member's own fx chain apply exactly as from the keyboard, and it also
+  focuses the pad so the panel can open that member's own track.
 - The pad-note badge is a note name with −/+ nudges, and the choke selector is
   an Off/1..16 dropdown; both address the pad by *(rack group id, pad note)*,
   never by track index, and both are ordinary recorded edits.
-- `KIT` on the header row saves the rack as a kit; the browser's **Kits** tab
-  lists saved kits and loading one builds a new rack beside the existing
-  tracks.
+- `SAVE KIT` in the `*fx*` rack panel saves the rack as a kit; the browser's
+  **Kits** tab lists saved kits and loading one builds a new rack beside the
+  existing tracks. The sequencer header carries neither this nor a pad toggle:
+  it stays the track-shaped strip described above (collapse, arm, mute/solo,
+  name, meter).
 
 Follow the `each`-based widget generation convention (never `map`).
 

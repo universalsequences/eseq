@@ -48372,43 +48372,40 @@
         );
     }
 
-    /// The pad grid is a VIEW over the pad map: it appears on demand, mirrors
-    /// the pads the rack already has, and holds no sequencing state of its own.
+    /// eseq-4b5.11: the rack's sequencer header is name/meter chrome only. The
+    /// pad grid and kit save live in the *fx* buffer's rack panel, so nothing
+    /// here toggles a grid, and the pad map itself is untouched by the move.
     #[test]
-    fn metal_seq_rack_pad_grid_is_a_view_over_the_pad_map() {
+    fn metal_seq_rack_header_carries_no_pad_or_kit_buttons() {
         let mut editor = sequencer_perf_editor(4, 16);
         apply_rack_group_bindings(&mut editor, false);
 
         let layout = editor
             .widget_layout()
             .expect("rack sequencer layout should build");
-        assert!(
-            find_layout_node_by_stable_key_suffix(&layout, "/rack-pads-toggle-7").is_some(),
-            "the header offers the pad grid"
-        );
-        assert!(
-            find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7").is_none(),
-            "the pad grid stays closed until it is asked for"
-        );
-
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.sequencer/%toggle-pad-grid 0)")
-            .expect("pad grid toggle should evaluate");
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor
-            .widget_layout()
-            .expect("open pad grid layout should build");
-        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
-            .expect("the pad grid should open");
-        // Sixteen cells, of which the first two are this rack's two pads; the
-        // rest are empty positions in the map, not sequencer lanes.
-        for cell in 0..16 {
+        for key in [
+            "/rack-pads-toggle-7",
+            "/rack-save-kit-7",
+            "/rack-pad-grid-7",
+        ] {
             assert!(
-                find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
-                    .is_some(),
-                "the 4x4 grid should render cell {cell}"
+                find_layout_node_by_stable_key_suffix(&layout, key).is_none(),
+                "the rack header should no longer render {key}"
+            );
+        }
+        // The header chrome the rack keeps: collapse, arm, mute/solo, name and
+        // its bus meter.
+        for key in [
+            "/rack-collapse-7",
+            "/rack-arm-7",
+            "/rack-mute-7",
+            "/rack-solo-7",
+            "/rack-name-label-7",
+            "/rack-volume-control-7",
+        ] {
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
+                "the rack header should still render {key}"
             );
         }
         assert_eq!(
@@ -48417,7 +48414,7 @@
                 .eval_str("(len (eseq.drum-rack-v2/pads 0))")
                 .expect("pad count should evaluate"),
             Some(Value::Number(2.0)),
-            "the grid adds no pads of its own"
+            "dropping the header buttons adds or removes no pads"
         );
 
         // A pad hit is a live hit, addressed by (rack, pad note) — the same
@@ -48483,37 +48480,11 @@
     fn metal_seq_rack_pad_cells_are_lazy_pad_drop_targets() {
         let mut editor = sequencer_perf_editor(4, 16);
         apply_rack_group_bindings(&mut editor, false);
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.sequencer/%toggle-pad-grid 0)")
-            .expect("pad grid toggle should evaluate");
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-
-        let layout = editor
-            .widget_layout()
-            .expect("open pad grid layout should build");
-        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
-            .expect("the pad grid should open");
-        // The affordance lives on the cell itself — occupied AND empty — so it
-        // travels with the pad interface wherever it renders.
-        for cell in [0, 5] {
-            let node =
-                find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
-                    .unwrap_or_else(|| panic!("pad cell {cell} should render"));
-            assert!(
-                node.props.contains_key("on-drop"),
-                "pad cell {cell} should accept drops"
-            );
-            assert!(
-                node.props.contains_key("drop-types"),
-                "pad cell {cell} should declare drop types"
-            );
-            assert!(
-                node.props.contains_key("drop-hover-border-color"),
-                "pad cell {cell} should highlight while hovered"
-            );
-        }
+        // The drop affordance lives on the cell itself — occupied AND empty —
+        // so it travels with the pad interface wherever it renders; the grid's
+        // own surface, the *fx* rack panel, asserts that in
+        // `metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer`. What
+        // this test pins is where each cell's drop is addressed.
 
         // An empty cell addresses the rack by (group id, pad note) derived from
         // its grid position — cell 5 of bank 0 is pad note 5.
@@ -48713,9 +48684,11 @@
         // The kit has to fit the fx strip's fixed panel height like any other
         // panel, or it spills out of the buffer.
         assert_layout_inside(grid, pads, "rack pad grid");
-        // The panel draws the SHARED pad cell, so the pad interface keeps the
-        // drop targets and audition the sequencer's PADS view gives it.
-        for cell in [0, 5] {
+        // Sixteen cells, of which the first two are this rack's two pads; the
+        // rest are empty positions in the map, not sequencer lanes. This panel
+        // is the pad interface's only surface (eseq-4b5.11), so every cell —
+        // occupied and empty alike — has to stay a drop target here.
+        for cell in 0..16 {
             let node =
                 find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
                     .unwrap_or_else(|| panic!("pad cell {cell}; layout={layout_summaries:#?}"));
@@ -48723,6 +48696,10 @@
             assert!(
                 node.props.contains_key("on-drop") && node.props.contains_key("drop-types"),
                 "pad cell {cell} should stay a drop target in the fx panel"
+            );
+            assert!(
+                node.props.contains_key("drop-hover-border-color"),
+                "pad cell {cell} should highlight while hovered"
             );
             assert!(
                 node.props.contains_key("on-click"),
@@ -48740,6 +48717,12 @@
         assert!(
             find_layout_node_by_stable_key_suffix(&layout, "/rack-fx-open-pad-7").is_some(),
             "the panel should offer a jump to the pad's member track"
+        );
+        // Kit save moved off the sequencer header (eseq-4b5.11), so this panel
+        // is now the only place it is offered from.
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-fx-save-kit-7").is_some(),
+            "the panel should still save the rack as a kit"
         );
         editor
             .runtime_mut()
