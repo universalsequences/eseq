@@ -71,7 +71,7 @@ pub struct ProjectRackConfig {
 }
 
 pub struct ProjectRackPad {
-    pub pad_note: i32,                     // MIDI note this pad answers to
+    pub pad_note: i32,                     // keyboard TRANSPOSE this pad answers to; 0 = C4
     pub member: usize,                     // index into group.members
 }
 ```
@@ -84,10 +84,17 @@ Invariants (inherit all track-group invariants, plus):
   pad grid, and has no choke selector — it is invisible, unplayable dead
   weight — so joining a rack always maps a pad: callers that name a `pad_note`
   get that pad, callers that don't (the mixer group-header drop, the track-badge
-  drag, move-track-to-group) get the lowest free note. A rack with all 128 notes
-  mapped is full and refuses the join. Projects saved before this rule are
+  drag, move-track-to-group) get the lowest free note. A rack with every note in
+  the pad-note domain mapped is full and refuses the join. Projects saved before this rule are
   repaired on load: unmapped members claim free notes in member order.
 - `pad_note` values are unique within a rack.
+- A pad note is a **transpose, not a raw MIDI number**: 0 is C4, the same zero a
+  step's transpose and the piano roll speak (`rack_slot_matches_routing` compares
+  `pad_note` against `transpose`), so notes below middle C are negative. The
+  domain is `DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE` = **-36..51**,
+  C1 (a drum rack's home octave, where a rack's first pad lands) up to D#8 —
+  which puts C4 in the *middle* of the pad space rather than at its floor, and
+  keeps every pad inside real MIDI once the transpose is applied.
 - Deleting a member track removes its pad; deleting the group deletes the rack
   config with it. Track reindex-on-delete updates `members` exactly as the
   track-groups spec requires — pads reference members by position in
@@ -236,7 +243,7 @@ The grid view renders the rack as a header row plus full member rows:
   drumming / slot browsing; it owns no sequencing. It renders in the **`*fx*`
   rack panel** — selecting a rack selects its bus, and that panel answers with
   the kit rather than a bare bus chain. The grid is **note-positional**: a cell
-  IS a fixed MIDI note, and it draws whichever pad answers to that note — grid
+  IS a fixed pad note, and it draws whichever pad answers to that note — grid
   position derives from `pad_note`, *never* from the pad's index in the vec, so
   a pad's label and its position can never contradict each other. Cells with no
   pad are empty; the grid is sparse and never compacts.
@@ -244,18 +251,29 @@ The grid view renders the rack as a header row plus full member rows:
     ascending left→right then bottom→top. Pages are **octave-aligned** (page
     *k* starts at note `12k`), so the bottom-left cell of every page is a C;
     the price is a four-note overlap between adjacent pages, which is exactly
-    what a plain 16-note stride cannot buy. The top page is clamped at *k* = 9
-    (notes 108–123) so no cell ever names a note past 127.
+    what a plain 16-note stride cannot buy. Pages run *k* = -3 (C1, notes
+    -36..-21) to *k* = 3 (notes 36..51), the host's pad-note domain, so no cell
+    ever names a note a pad could not be placed on.
   - Paging walks the note range, not the pad list, and its readout names the
     notes on screen. A rack's grid opens on the page holding its lowest pad —
     a kit that lives at C7 must not open onto empty octaves — and an empty rack
-    opens at the drum home (note 36). Page state is scoped to the rack, so one
-    rack's page never leaks into another's grid.
+    opens at the drum home, C1 (`DRUM_RACK_FIRST_PAD_NOTE`), where its first
+    pad will land. Page state is scoped to the rack, so one rack's page never
+    leaks into another's grid.
   - Dropping on an **empty** cell maps the new pad to *exactly* that cell's
     note (lazy pads, "Track budget"); there is no next-free fallback, because
     an occupied cell is never routed down the empty-drop path. Drops that name
     no cell — mixer group header, track badge, move-track-to-group — keep the
     lowest-free-note behavior.
+  - An **octave-overview mini-map** sits as a slim column to the *left* of the
+    grid: the whole grid-addressable range (C1–D#8) as tiny cells, four to a
+    row, lowest at the bottom — so C1 is the bottom row and C4 lands near the
+    middle — with occupied notes filled and the sixteen notes currently
+    enlarged drawn as a highlighted block. It is a second
+    *view* of the same page state — never a second state — and clicking a row
+    pages the grid to the page holding those notes, so a kit three octaves up
+    is one gesture away. The map derives occupancy from the pad list read once
+    at its root; the arrow pager stays for single-octave steps.
 
   A cell click hits the pad down the live path (member track at base pitch), so
   choke groups and the member's own fx chain apply exactly as from the

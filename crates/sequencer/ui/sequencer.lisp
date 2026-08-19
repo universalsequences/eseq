@@ -1967,6 +1967,88 @@
       (each (range 0 4) |row|
         (%pad-grid-row gidx row)))))
 
+;; ── Octave overview mini-map (eseq-4b5.15) ──────────────────────────────
+;; A slim full-range map to the LEFT of the pad grid: every note the grid can
+;; address as a tiny cell, four to a row, lowest at the bottom, with the
+;; sixteen notes currently enlarged drawn as a highlighted block. Occupied
+;; notes are filled, so a kit that lives three octaves up is visible without
+;; paging there — and a click on any row pages the grid to it, which is the
+;; affordance the arrows can only offer one octave at a time.
+;;
+;; It is a second VIEW of %pad-grid-page, not a second page state: the
+;; highlight and the click both go through the same page functions the grid
+;; uses.
+;;
+;; The pad map is read ONCE at the root and flattened into a note-indexed
+;; occupancy list there. A per-cell read of SEQ.groups would re-render all 124
+;; cells on any pad edit — whole-list reads are the expensive kind of
+;; reactivity here — and a per-cell scan of the pads would walk the map 124
+;; times over to draw it once.
+
+(def %pad-map-cell-width 0.75)
+(def %pad-map-cell-height 0.34)
+
+;; Pad notes -> one bool per addressable note, in a single pass over the pads.
+;; Pad notes are transposes around C4 and so go negative, which no list index
+;; does: the map is indexed from the lowest note the grid can name.
+(def %pad-map-slot (note)
+  (- note (eseq.drum-rack-v2/min-grid-pad-note)))
+
+(def %pad-note-occupancy (notes)
+  (reduce |acc note| (if (and (>= note (eseq.drum-rack-v2/min-grid-pad-note))
+        (<= note (eseq.drum-rack-v2/max-grid-pad-note)))
+      (set-nth acc (%pad-map-slot note) true)
+      acc)
+    (map (lambda (n) false)
+      (range 0 (+ (%pad-map-slot (eseq.drum-rack-v2/max-grid-pad-note)) 1)))
+    notes))
+
+(def %note-occupied? (occupancy note)
+  (= (nth occupancy (%pad-map-slot note)) true))
+
+(def %pad-map-cell (gid occupancy note)
+  (box :key (str "rack-pad-map-cell-" gid "-" note)
+    :width %pad-map-cell-width :height %pad-map-cell-height
+    :background-color (if (%note-occupied? occupancy note)
+      '(rgba 0.60 0.72 0.75 1.0)
+      '(rgba 0.19 0.20 0.21 1.0))
+    :corner-radius 2))
+
+;; A row is the click target, not its cells: four notes is already a finer jump
+;; than the octave-aligned pages the click snaps to, and one handler per row
+;; keeps the map cheap.
+(def %pad-map-row (gidx gid occupancy row page)
+  (let ((base (eseq.drum-rack-v2/pad-map-row-base row))
+      (on-page (eseq.drum-rack-v2/pad-map-row-on-page? row page)))
+    (box :key (str "rack-pad-map-row-" gid "-" base)
+      :background-color (if on-page
+        '(rgba 0.24 0.32 0.34 1.0)
+        :transparent)
+      :border-width 1
+      :border-color (if on-page :mixer-strip-selected-border :transparent)
+      :corner-radius 2
+      :on-click |x y r| (%set-pad-page gidx (eseq.drum-rack-v2/page-of-note base))
+      (h-stack :gap 0.08 :align :center
+        (each (range 0 4) |col|
+          (%pad-map-cell gid occupancy (+ base col)))))))
+
+(def %pad-map-intrinsic-width 3.6)
+
+(def rack-pad-map (gidx)
+  (let ((gid (eseq.drum-rack-v2/group-id gidx))
+      (occupancy (%pad-note-occupancy
+        (map (lambda (pad) (get pad :pad-note)) (eseq.drum-rack-v2/pads gidx))))
+      (page (%pad-page gidx)))
+    (box :debug-name "rack-pad-map"
+      :key (str "rack-pad-map-" gid)
+      :width %pad-map-intrinsic-width :height :fill :padding 0.15
+      :background-color '(rgba 0.09 0.10 0.11 1.0)
+      :corner-radius 8
+      :v-align :center :h-align :center
+      (v-stack :gap 0.05 :align :center
+        (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
+          (%pad-map-row gidx gid occupancy row page))))))
+
 (def %rack-header-body (gidx)
   (let ((c (eseq.drum-rack-v2/color gidx))
       (bus-idx (eseq.drum-rack-v2/bus-index gidx))

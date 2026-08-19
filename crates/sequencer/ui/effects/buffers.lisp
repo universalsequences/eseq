@@ -169,7 +169,11 @@
         :height st/fx-fixed-panel-height
         :padding 0.1
         :v-align :start :h-align :start
+        ;; Mini-map on the LEFT of the enlarged grid, the way a drum rack
+        ;; reads: the whole note range at a glance, the enlarged window
+        ;; highlighted inside it (eseq-4b5.15).
         (h-stack :gap 0.2 :align :start
+          (eseq.sequencer/rack-pad-map gidx)
           (eseq.sequencer/rack-pad-grid gidx)
           (%rack-panel-controls gidx)))
       ;; Rack-level fx still matter: the bus chain stays right here, edited the

@@ -158,7 +158,7 @@
     (if (= pad nil) -1 (get pad :choke))))
 
 (def %clamp-pad-note (note)
-  (max 0 (min 127 note)))
+  (max (min-grid-pad-note) (min (max-grid-pad-note) note)))
 
 ;; Move a pad by a semitone. The host rejects a collision with another pad and
 ;; leaves the map alone, so the badge simply does not move. Nudges clamp to the
@@ -204,37 +204,53 @@
     (dict :group-id (group-id gidx) :name (group-name gidx) :overwrite true)))
 
 ;; ── Pad grid geometry (docs/drum-rack-v2-spec.md, "UI") ─────────────────
-;; The 4x4 pad grid is NOT a window onto the pad vec: a cell IS a fixed MIDI
+;; The 4x4 pad grid is NOT a window onto the pad vec: a cell IS a fixed pad
 ;; note, and a pad renders at the cell its `pad_note` names (empty everywhere
 ;; else). A page shows sixteen consecutive notes with the LOWEST bottom-left,
 ;; ascending left-to-right then bottom-to-top, the way a drum rack reads
 ;; everywhere else. Pages are octave-aligned — page k starts at note 12k — so
 ;; the bottom-left cell of every page is a C; the price is a four-note overlap
 ;; between adjacent pages, which is exactly what a plain 16-note stride cannot
-;; buy. The top page is clamped so no cell ever names a note above 127.
+;; buy. Pages are clamped to the host's pad-note domain, C1 (page -3) up to
+;; D#8 (page 3), so no cell ever names a note no pad could be placed on.
 
 (def %note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
 
-;; Note name as the host writes pad labels (`drum_rack_pad_label`): note 0 is C4.
+;; Note name as the host writes pad labels (`drum_rack_pad_label`). A pad note
+;; is a TRANSPOSE, the same one the step sequencer and piano roll speak, so 0
+;; is C4 and notes below middle C are negative — hence the euclidean remainder
+;; rather than a bare `mod`, which would index the name table backwards.
 (def note-label (note)
   (let ((n (%clamp-pad-note note)))
-    (str (nth %note-names (mod n 12)) (+ 4 (floor (/ n 12))))))
+    (str (nth %note-names (mod (+ (mod n 12) 12) 12)) (+ 4 (floor (/ n 12))))))
 
-;; Pages 0..9: page 9 spans notes 108..123, and 12*10+15 would run past 127.
-(def pad-page-count () 10)
+;; Pages -3..3, mirroring DRUM_RACK_FIRST_PAD_NOTE/DRUM_RACK_LAST_PAD_NOTE: the
+;; bottom page starts at C1 (-36), the drum rack's home octave, and the top one
+;; spans C8..D#8 (36..51). C4 — transpose 0 — therefore sits in the MIDDLE of
+;; the pad space, where a drum rack's notes actually live, instead of at its
+;; floor.
+(def min-pad-page () -3)
+(def max-pad-page () 3)
+
+(def pad-page-count ()
+  (+ (- (max-pad-page) (min-pad-page)) 1))
 
 (def clamp-pad-page (page)
-  (max 0 (min (- (pad-page-count) 1) page)))
+  (max (min-pad-page) (min (max-pad-page) page)))
 
 ;; Lowest note of a page — always a C.
 (def pad-page-base (page)
   (* 12 (clamp-pad-page page)))
 
-;; Highest note any cell can name: the top page's top-right cell (123). Notes
-;; above it are legal MIDI but invisible to the grid, so pad-placing UI paths
-;; clamp here rather than at 127.
+;; The notes the grid can name: the bottom page's C (C1) up to the top page's
+;; top-right cell (D#8). Pad-placing UI paths clamp here, which is also the
+;; host's pad-note domain (DRUM_RACK_FIRST_PAD_NOTE..DRUM_RACK_LAST_PAD_NOTE),
+;; so nothing can be placed where no page could render it.
+(def min-grid-pad-note ()
+  (* 12 (min-pad-page)))
+
 (def max-grid-pad-note ()
-  (+ (pad-page-base (- (pad-page-count) 1)) 15))
+  (+ (* 12 (max-pad-page)) 15))
 
 ;; The page a note is drawn on. Overlap means a note can also appear in the
 ;; top row of the page below; this names the canonical one.
@@ -256,8 +272,9 @@
     nil
     (pads gidx)))
 
-;; The page an empty rack opens on: the drum home (note 36, the GM kick).
-(def %empty-rack-home-note () 36)
+;; The page an empty rack opens on: the drum home, C1 — the bottom of the pad
+;; space and where a rack's first pad lands (DRUM_RACK_FIRST_PAD_NOTE).
+(def %empty-rack-home-note () (min-grid-pad-note))
 
 ;; Where a rack's grid opens: the page holding its lowest pad, so a kit that
 ;; lives at C7 does not open onto empty octaves.
@@ -265,4 +282,30 @@
   (let ((ps (pads gidx)))
     (if (= (len ps) 0)
       (page-of-note (%empty-rack-home-note))
-      (page-of-note (reduce |acc pad| (min acc (get pad :pad-note)) 127 ps)))))
+      (page-of-note (reduce |acc pad| (min acc (get pad :pad-note))
+        (max-grid-pad-note) ps)))))
+
+;; ── Octave overview geometry (eseq-4b5.15) ──────────────────────────────
+;; The mini-map beside the pad grid lays the WHOLE grid-addressable note range
+;; out four notes to a row — the same four-wide reading order the pads use —
+;; with the lowest notes at the bottom. It is a second view of the page state
+;; above, never a second state: which rows light up is derived from the page
+;; the grid is already showing.
+
+;; Rows of four covering the whole pad-note domain (C1..D#8): 22 rows, so every
+;; cell of the map names a note some page can actually render, C1 is the bottom
+;; row and C4 lands on the middle one.
+(def pad-map-row-count ()
+  (floor (/ (+ (- (max-grid-pad-note) (min-grid-pad-note)) 1) 4)))
+
+;; Lowest note of a map row. Row 0 renders at the TOP and carries the highest
+;; four notes, matching the grid's bottom-up reading.
+(def pad-map-row-base (row)
+  (+ (min-grid-pad-note) (* 4 (- (- (pad-map-row-count) 1) row))))
+
+;; Whether a map row's four notes fall inside a page's sixteen-note window —
+;; what draws the highlighted block.
+(def pad-map-row-on-page? (row page)
+  (let ((base (pad-map-row-base row))
+      (page-base (pad-page-base page)))
+    (and (>= base page-base) (< base (+ page-base 16)))))

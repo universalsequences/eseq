@@ -48548,15 +48548,15 @@
         // Paging moves the cell's note by an octave, not by sixteen pads.
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 4)")
+            .eval_str("(eseq.sequencer/%set-pad-page 0 2)")
             .expect("paging should evaluate");
         assert_eq!(
             editor
                 .runtime_mut()
                 .eval_str("(eseq.sequencer/%pad-cell-note 0 5)")
                 .expect("paged cell note should evaluate"),
-            Some(Value::Number(57.0)),
-            "the next page starts an octave up, so the same cell is note+12"
+            Some(Value::Number(33.0)),
+            "the page below starts an octave down, so the same cell is note-12"
         );
         editor
             .runtime_mut()
@@ -48667,22 +48667,61 @@
         }
 
         // Pages are octave-aligned, so the bottom-left cell of EVERY page is a
-        // C (they overlap by four notes, which is what buys that), and no cell
-        // ever names a note past 127.
-        let pages = number(&mut editor, "(eseq.drum-rack-v2/pad-page-count)") as i32;
-        for page in 0..pages {
+        // C (they overlap by four notes, which is what buys that), and every
+        // page stays inside the host's pad-note domain. Pad notes are
+        // TRANSPOSES around C4, so the range runs negative: page -3 is C1.
+        let min_page = number(&mut editor, "(eseq.drum-rack-v2/min-pad-page)") as i32;
+        let max_page = number(&mut editor, "(eseq.drum-rack-v2/max-pad-page)") as i32;
+        assert_eq!(min_page, -3, "the bottom page is C1, a drum rack's home");
+        for page in min_page..=max_page {
             let base = number(
                 &mut editor,
                 &format!("(eseq.drum-rack-v2/cell-note {page} 12)"),
             );
-            assert_eq!(base % 12.0, 0.0, "page {page} should start on a C");
+            assert_eq!(base.rem_euclid(12.0), 0.0, "page {page} should start on a C");
             let top = number(
                 &mut editor,
                 &format!("(eseq.drum-rack-v2/cell-note {page} 3)"),
             );
             assert_eq!(top, base + 15.0, "a page spans sixteen notes");
-            assert!(top <= 127.0, "page {page} must not address a note past 127");
+            assert!(
+                base >= number(&mut editor, "(eseq.drum-rack-v2/min-grid-pad-note)")
+                    && top <= number(&mut editor, "(eseq.drum-rack-v2/max-grid-pad-note)"),
+                "page {page} must stay inside the pad-note domain"
+            );
         }
+        // A transpose of 0 is C4 — the same zero the step sequencer and piano
+        // roll speak — so the pad space straddles middle C rather than
+        // starting there.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.drum-rack-v2/min-grid-pad-note))")
+                .expect("lowest pad note label should evaluate"),
+            Some(Value::String("C1".to_string())),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label 0)")
+                .expect("middle C label should evaluate"),
+            Some(Value::String("C4".to_string())),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label -1)")
+                .expect("negative note label should evaluate"),
+            Some(Value::String("B3".to_string())),
+            "a negative transpose names the note below middle C, not a wrapped one"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label -12)")
+                .expect("octave-down label should evaluate"),
+            Some(Value::String("C3".to_string())),
+        );
 
         // Pads render sparsely AT their notes: 36 bottom-left, 38 two cells
         // along, and the cell between them empty.
@@ -48721,14 +48760,23 @@
             .expect("paging past the top should evaluate");
         assert_eq!(
             number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
-            (pages - 1) as f64,
-            "the page clamps at the top rather than addressing notes past 127"
+            max_page as f64,
+            "the page clamps at the top rather than addressing notes off the pad map"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 -99)")
+            .expect("paging past the bottom should evaluate");
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            min_page as f64,
+            "and clamps at C1 on the way down"
         );
     }
 
-    /// eseq-4b5.14: the default page follows the kit. A rack whose pads live an
-    /// octave up opens there without manual paging, and page state is scoped to
-    /// the rack so another rack's page never leaks in.
+    /// eseq-4b5.14: the default page follows the kit. A rack whose pads live in
+    /// another octave opens there without manual paging, and page state is
+    /// scoped to the rack so another rack's page never leaks in.
     #[test]
     fn metal_seq_rack_pad_grid_opens_on_the_page_holding_the_kit() {
         let mut editor = sequencer_perf_editor(4, 16);
@@ -48736,9 +48784,11 @@
         let Some(rack) = group.rack.as_mut() else {
             panic!("fixture should be a rack");
         };
-        // Both pads an octave up: 48/50 instead of 36/38.
+        // Both pads four octaves down, BELOW middle C: -12/-10 instead of
+        // 36/38. Pad notes are transposes around C4, so the pad map runs
+        // negative and the default page has to follow a kit down there.
         for pad in rack.pads.iter_mut() {
-            pad.pad_note += 12;
+            pad.pad_note -= 48;
         }
         let groups = [group];
         {
@@ -48755,7 +48805,7 @@
                 .runtime_mut()
                 .eval_str("(eseq.sequencer/%pad-page 0)")
                 .expect("default page should evaluate"),
-            Some(Value::Number(4.0)),
+            Some(Value::Number(-1.0)),
             "the grid opens on the page holding the kit's lowest pad"
         );
         assert_eq!(
@@ -48764,7 +48814,7 @@
                 .eval_str("(get (eseq.sequencer/%pad-at 0 12) :track)")
                 .expect("bottom-left pad should evaluate"),
             Some(Value::Number(1.0)),
-            "the kit's lowest pad still renders bottom-left, one page up"
+            "the kit's lowest pad still renders bottom-left, an octave away"
         );
         // Page state names the rack it belongs to: a page set for some other
         // rack leaves this one on its own derived default.
@@ -48777,8 +48827,137 @@
                 .runtime_mut()
                 .eval_str("(eseq.sequencer/%pad-page 0)")
                 .expect("default page should evaluate"),
-            Some(Value::Number(4.0)),
+            Some(Value::Number(-1.0)),
             "another rack's page must not leak into this rack's grid"
+        );
+    }
+
+
+    /// eseq-4b5.15: the octave-overview mini-map is a second VIEW of the grid's
+    /// page, never a second page state. It lays the whole grid-addressable note
+    /// range out four to a row with the lowest notes at the bottom, lights the
+    /// rows the enlarged grid is showing, and pages the grid on click.
+    #[test]
+    fn metal_seq_rack_pad_map_mirrors_the_grid_page() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let number = |editor: &mut eseqlisp::Editor, expr: &str| -> f64 {
+            match editor.runtime_mut().eval_str(expr).expect("expr evaluates") {
+                Some(Value::Number(n)) => n,
+                other => panic!("{expr} should be a number, got {other:?}"),
+            }
+        };
+        let flag = |editor: &mut eseqlisp::Editor, expr: &str| -> bool {
+            match editor.runtime_mut().eval_str(expr).expect("expr evaluates") {
+                Some(Value::Bool(b)) => b,
+                other => panic!("{expr} should be a bool, got {other:?}"),
+            }
+        };
+
+        // The map covers exactly what the grid can address — C1..D#8, four notes
+        // to a row — so no map cell names a note no page could ever show.
+        let rows = number(&mut editor, "(eseq.drum-rack-v2/pad-map-row-count)");
+        assert_eq!(rows, 22.0);
+        let bottom = number(&mut editor, "(eseq.drum-rack-v2/min-grid-pad-note)");
+        assert_eq!(
+            number(&mut editor, "(eseq.drum-rack-v2/pad-map-row-base 21)"),
+            bottom,
+            "the bottom row is C1, the same ascending order the grid reads"
+        );
+        assert_eq!(
+            number(&mut editor, "(eseq.drum-rack-v2/pad-map-row-base 0)"),
+            number(&mut editor, "(eseq.drum-rack-v2/max-grid-pad-note)") - 3.0,
+            "row 0 renders at the top and ends on the highest addressable note"
+        );
+        // What the mini-map is FOR: middle C sits in the middle of the map, not
+        // on its floor, because a pad note is a transpose around C4.
+        let middle_c_row = (0..22)
+            .find(|row| {
+                number(
+                    &mut editor,
+                    &format!("(eseq.drum-rack-v2/pad-map-row-base {row})"),
+                ) == 0.0
+            })
+            .expect("some row should carry middle C");
+        assert!(
+            (7..=14).contains(&middle_c_row),
+            "C4 should land near the middle of the 22 map rows, got row {middle_c_row}"
+        );
+
+        // The highlight is exactly the sixteen notes on screen: the rack's pads
+        // sit at 36/38, so the grid opens on page 3 (36..51) and the four rows
+        // based at 36/40/44/48 light up — the ones either side do not.
+        assert_eq!(number(&mut editor, "(eseq.sequencer/%pad-page 0)"), 3.0);
+        for (row, on_page) in [(4, false), (3, true), (2, true), (1, true), (0, true)] {
+            assert_eq!(
+                flag(
+                    &mut editor,
+                    &format!("(eseq.drum-rack-v2/pad-map-row-on-page? {row} 3)")
+                ),
+                on_page,
+                "row {row} should {} be inside page 3's window",
+                if on_page { "" } else { "not" }
+            );
+        }
+
+        // Occupancy is flattened out of the pad list ONCE, note-indexed, so a
+        // cell answers with a lookup rather than another scan of the pads.
+        assert!(flag(
+            &mut editor,
+            "(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-occupancy (list 36 38)) 36)"
+        ));
+        assert!(!flag(
+            &mut editor,
+            "(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-occupancy (list 36 38)) 37)"
+        ));
+        assert_eq!(
+            number(
+                &mut editor,
+                "(len (eseq.sequencer/%pad-note-occupancy (list 36)))"
+            ),
+            number(
+                &mut editor,
+                "(+ (- (eseq.drum-rack-v2/max-grid-pad-note) (eseq.drum-rack-v2/min-grid-pad-note)) 1)"
+            ),
+            "the occupancy list covers every note the map draws"
+        );
+
+        // Clicking a row pages the grid to the page holding those notes, and
+        // the highlight follows — one shared page, two views of it. Row 21 is
+        // the bottom row, C1, three octaves BELOW middle C.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 (eseq.drum-rack-v2/page-of-note (eseq.drum-rack-v2/pad-map-row-base 21)))")
+            .expect("map click should evaluate");
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            -3.0,
+            "a click on the bottom row pages to the page holding C1"
+        );
+        assert!(flag(
+            &mut editor,
+            "(eseq.drum-rack-v2/pad-map-row-on-page? 21 (eseq.sequencer/%pad-page 0))"
+        ));
+        assert!(
+            !flag(
+                &mut editor,
+                "(eseq.drum-rack-v2/pad-map-row-on-page? 3 (eseq.sequencer/%pad-page 0))"
+            ),
+            "the rows the grid left behind stop being highlighted"
+        );
+        // The clicked note is now on the enlarged grid, which is the point of
+        // the jump.
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-cell-note 0 12)"),
+            bottom
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/%pad-cell-note 0 12))")
+                .expect("bottom-left label should evaluate"),
+            Some(Value::String("C1".to_string())),
         );
     }
 
@@ -48946,6 +49125,136 @@
         assert!(
             find_layout_node_by_debug_name(&bus_layout, "rack-fx-pads-panel").is_none(),
             "a plain bus should still show the generic bus panel"
+        );
+    }
+
+
+    /// eseq-4b5.15: the rack panel draws the mini-map as a slim column LEFT of
+    /// the enlarged grid, inside the same fixed-height panel — occupied notes
+    /// filled, the enlarged window highlighted, every row a page jump.
+    #[test]
+    fn metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel() {
+        let mut editor = rack_fx_panel_editor();
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+
+        let pads = find_layout_node_by_debug_name(&layout, "rack-fx-pads-panel")
+            .unwrap_or_else(|| panic!("rack pad panel; layout={layout_summaries:#?}"));
+        let map = find_layout_node_by_stable_key_suffix(pads, "/rack-pad-map-7")
+            .unwrap_or_else(|| panic!("rack pad mini-map; layout={layout_summaries:#?}"));
+        let grid = find_layout_node_by_stable_key_suffix(pads, "/rack-pad-grid-7")
+            .unwrap_or_else(|| panic!("rack pad grid; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(map, "rack pad mini-map");
+        // Ableton's placement, and it has to fit the fixed panel height like
+        // everything else in this strip — no clipping, no pushing the controls
+        // column out of the panel.
+        assert!(
+            map.rect.col + map.rect.width <= grid.rect.col + 0.01,
+            "the mini-map should sit left of the enlarged grid: map={:?}, grid={:?}",
+            map.rect,
+            grid.rect
+        );
+        assert_layout_inside(map, pads, "rack pad mini-map");
+        let controls = find_layout_node_by_debug_name(pads, "rack-fx-panel-controls")
+            .unwrap_or_else(|| panic!("rack panel controls; layout={layout_summaries:#?}"));
+        assert_layout_inside(controls, pads, "rack panel controls");
+
+        // Every row of four notes is drawn, and each is a page jump.
+        for base in [-36, -12, 0, 36, 48] {
+            let row =
+                find_layout_node_by_stable_key_suffix(map, &format!("/rack-pad-map-row-7-{base}"))
+                    .unwrap_or_else(|| panic!("map row {base}; layout={layout_summaries:#?}"));
+            assert_finite_nonzero_rect(row, "map row");
+            assert!(
+                row.props.contains_key("on-click"),
+                "map row {base} should page the grid on click"
+            );
+        }
+        // Lowest notes at the bottom, like the grid: C1 under middle C under
+        // the top octave.
+        let low = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7--36")
+            .expect("bottom map row");
+        let high = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-48")
+            .expect("top map row");
+        let middle_c = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-0")
+            .expect("middle C map row");
+        assert!(
+            high.rect.row < middle_c.rect.row && middle_c.rect.row < low.rect.row,
+            "middle C should sit between the top and bottom of the map"
+        );
+        assert!(
+            high.rect.row < low.rect.row,
+            "the map should read bottom-up: high={:?}, low={:?}",
+            high.rect,
+            low.rect
+        );
+
+        // Occupied notes are distinguishable from empty ones at a glance.
+        let filled = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-36")
+            .expect("occupied map cell");
+        let empty = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-37")
+            .expect("empty map cell");
+        assert_finite_nonzero_rect(filled, "occupied map cell");
+        assert_ne!(
+            filled.props.get("background-color"),
+            empty.props.get("background-color"),
+            "an occupied note should not look like an empty one"
+        );
+        // The highlighted block is the page the grid is showing (36..51), and
+        // it moves when the grid pages.
+        let on_page = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-36")
+            .expect("highlighted map row");
+        let off_page = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-0")
+            .expect("unhighlighted map row");
+        assert_ne!(
+            on_page.props.get("background-color"),
+            off_page.props.get("background-color"),
+            "the enlarged window should be a distinct block in the map"
+        );
+        let highlight = on_page.props.get("background-color").cloned();
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 0)")
+            .expect("paging should evaluate");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let paged = editor.widget_layout().expect("paged rack fx panel layout");
+        let map = find_layout_node_by_stable_key_suffix(&paged, "/rack-pad-map-7")
+            .expect("mini-map after paging");
+        assert_eq!(
+            find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-0")
+                .expect("row 0 after paging")
+                .props
+                .get("background-color")
+                .cloned(),
+            highlight,
+            "paging the grid moves the mini-map's highlight to the new window"
+        );
+        assert_ne!(
+            find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-36")
+                .expect("row 36 after paging")
+                .props
+                .get("background-color")
+                .cloned(),
+            highlight,
+            "the page the grid left is no longer highlighted"
         );
     }
 
