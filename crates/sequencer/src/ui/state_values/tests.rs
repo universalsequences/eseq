@@ -2382,13 +2382,20 @@
         }
     }
 
-    /// eseq-4b5.19: the browser addresses kit and Sound auditions to the
-    /// selected drum rack instead of appending or targeting the stale track.
+    /// eseq-4b5.19, eseq-4b5.23: the browser addresses kit and Sound
+    /// auditions to the selected drum rack and refuses saved instruments,
+    /// rather than targeting the stale current track hidden behind the rack.
     #[test]
-    fn metal_seq_browser_selected_rack_auditions_kits_and_sounds_into_the_rack() {
+    fn metal_seq_browser_selected_rack_addresses_auditions_without_using_stale_track() {
         let mut editor = browser_editor_on_instrument_tab();
         apply_rack_group_bindings(&mut editor, false);
-        editor.runtime_mut().eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(3.0));
+        rt.set_reactive("SEQ", "current-track", Value::Number(1.0));
+        rt.set_reactive("SEQ", "track-instrument-types", test_string_list(&[
+            "sampler", "custom", "sampler",
+        ]));
+        rt.eval_str("(set! eseq.seq-core-state/selected-bus 2)")
             .expect("select rack backing bus");
         editor.runtime_mut().run_reactive_cycle();
         let _ = editor.drain_host_commands();
@@ -2399,8 +2406,12 @@
         editor.runtime_mut().eval_str(
             r#"(eseq.browser/%load-sound (dict :label "Bass" :path "sounds/Bass.sound"))"#,
         ).expect("audition selected rack Sound");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%activate-instrument "emulations/minimoog")"#,
+        ).expect("refuse saved instrument audition on selected rack");
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 2,
+            "saved instrument activation must not target the stale current track");
         for (command, expected_name, expected_path) in [
             (&commands[0], "load-kit", "kits/House-Kit.kit"),
             (&commands[1], "audition-sound-on-rack", "sounds/Bass.sound"),

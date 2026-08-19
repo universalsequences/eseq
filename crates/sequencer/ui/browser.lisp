@@ -268,11 +268,13 @@
       (drop-sample-on-track event))))
 
 (def %activate-instrument (name)
-  (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
-    (%swap-track-instrument SEQ.current-track name)
-    (do
-      (%add-instrument-track name)
-      (status (str "Adding instrument track: " name)))))
+  (if (>= (%selected-drum-rack-id) 0)
+    (status "Saved instruments cannot replace a selected drum rack")
+    (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
+      (%swap-track-instrument SEQ.current-track name)
+      (do
+        (%add-instrument-track name)
+        (status (str "Adding instrument track: " name))))))
 
 (def add-sampler-track ()
   (host-command "add-track-sampler" (dict))
