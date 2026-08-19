@@ -1980,9 +1980,9 @@
 ;; uses.
 ;;
 ;; The pad map is read ONCE at the root and flattened into a note-indexed
-;; occupancy list there. A per-cell read of SEQ.groups would re-render all 124
+;; occupancy list there. A per-cell read of SEQ.groups would re-render all 88
 ;; cells on any pad edit — whole-list reads are the expensive kind of
-;; reactivity here — and a per-cell scan of the pads would walk the map 124
+;; reactivity here — and a per-cell scan of the pads would walk the map 88
 ;; times over to draw it once.
 
 (def %pad-map-cell-width 0.75)

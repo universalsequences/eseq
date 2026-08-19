@@ -1078,8 +1078,8 @@ impl ProjectRackConfig {
         self.pads.iter().position(|pad| pad.member == member)
     }
 
-    /// Lowest pad note no pad answers to yet, or `None` once all 128 notes are
-    /// mapped. This is what a member joining the rack without an explicit note
+    /// Lowest pad note no pad answers to yet, or `None` once every note in the
+    /// pad domain is mapped. This is what a member joining the rack without an explicit note
     /// claims, so members added by mixer drops stay reachable from the grid
     /// (docs/drum-rack-v2-spec.md, "Core model": a member with no pad is
     /// unplayable and invisible).
@@ -1155,8 +1155,14 @@ impl ProjectRackConfig {
     }
 
     /// Enforces the rack invariants against a member count: pads point at live
-    /// members, `pad_note` is unique, and a member backs at most one pad.
-    /// Choke groups stay parallel to the surviving pads.
+    /// members, `pad_note` is inside the pad domain and unique, and a member
+    /// backs at most one pad. Choke groups stay parallel to the surviving pads.
+    ///
+    /// The domain check migrates projects saved when pad notes spanned 0..127
+    /// (before eseq-4b5.15 shrank the domain to C1..D#8): a pad at a note no
+    /// page can render would be invisible and un-nudgeable forever, so it is
+    /// dropped here and `map_unmapped_members` re-lands its member on the next
+    /// free in-domain note.
     pub fn sanitize(&mut self, member_count: usize) {
         self.choke_groups.resize(self.pads.len(), None);
         let mut seen_notes: Vec<i32> = Vec::with_capacity(self.pads.len());
@@ -1164,6 +1170,7 @@ impl ProjectRackConfig {
         let mut keep: Vec<bool> = Vec::with_capacity(self.pads.len());
         for pad in &self.pads {
             let valid = pad.member < member_count
+                && (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad.pad_note)
                 && !seen_notes.contains(&pad.pad_note)
                 && !seen_members.contains(&pad.member);
             if valid {
@@ -4152,6 +4159,31 @@ mod tests {
             ],
         );
         assert_eq!(rack.choke_groups, vec![Some(1), Some(5)]);
+    }
+
+    /// eseq-4b5.15 shrank the pad-note domain from 0..127 to C1..D#8. A pad
+    /// saved outside it would be invisible to every grid page and un-nudgeable,
+    /// so sanitize drops it and the load-time repair re-lands its member on the
+    /// next free in-domain note.
+    #[test]
+    fn rack_sanitize_migrates_out_of_domain_pad_notes() {
+        let mut rack = ProjectRackConfig {
+            pads: vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                // Legal before eseq-4b5.15, above D#8 now.
+                ProjectRackPad { pad_note: 96, member: 1 },
+            ],
+            choke_groups: vec![Some(1), Some(2)],
+        };
+        rack.sanitize(2);
+        assert_eq!(rack.pads, vec![ProjectRackPad { pad_note: 36, member: 0 }]);
+        assert_eq!(rack.choke_groups, vec![Some(1)]);
+        assert_eq!(rack.map_unmapped_members(2), 1);
+        assert_eq!(
+            rack.pads[1],
+            ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 1 },
+            "the orphaned member lands on the next free in-domain note"
+        );
     }
 
     /// eseq-4b5.8: projects saved before every attach path mapped a pad hold

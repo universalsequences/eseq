@@ -94,7 +94,10 @@ Invariants (inherit all track-group invariants, plus):
   domain is `DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE` = **-36..51**,
   C1 (a drum rack's home octave, where a rack's first pad lands) up to D#8 —
   which puts C4 in the *middle* of the pad space rather than at its floor, and
-  keeps every pad inside real MIDI once the transpose is applied.
+  keeps every pad inside real MIDI once the transpose is applied. Projects
+  saved when the domain was 0..127 may hold pads above D#8; load sanitizes
+  them away and re-lands their members on free in-domain notes, since a pad
+  outside the domain would be invisible to every grid page and un-nudgeable.
 - Deleting a member track removes its pad; deleting the group deletes the rack
   config with it. Track reindex-on-delete updates `members` exactly as the
   track-groups spec requires — pads reference members by position in

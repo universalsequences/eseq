@@ -49011,6 +49011,18 @@
     /// an ordinary bus still gets the generic panel.
     #[test]
     fn metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer() {
+        // The *fx* rack panel grew the 22-row octave mini-map (eseq-4b5.15),
+        // and laying the whole panel out overflows the default test-thread
+        // stack.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer_impl)
+            .expect("spawn rack fx panel layout test")
+            .join()
+            .expect("rack fx panel layout test thread");
+    }
+
+    fn metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer_impl() {
         let mut editor = rack_fx_panel_editor();
         // The rack's backing bus is bus 2 (`rack_group_fixture`'s bus id).
         editor
@@ -49134,6 +49146,17 @@
     /// filled, the enlarged window highlighted, every row a page jump.
     #[test]
     fn metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel() {
+        // Laying out the full *fx* panel plus the 22-row map overflows the
+        // default test-thread stack.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel_impl)
+            .expect("spawn rack pad map layout test")
+            .join()
+            .expect("rack pad map layout test thread");
+    }
+
+    fn metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel_impl() {
         let mut editor = rack_fx_panel_editor();
         editor
             .runtime_mut()
