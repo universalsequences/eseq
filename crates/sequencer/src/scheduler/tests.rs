@@ -8448,3 +8448,131 @@
             );
         });
     }
+
+    #[test]
+    fn sequence_roll_remaps_live_phase_across_an_odd_cycle() {
+        let cycle = 1.25;
+        let grid = 0.5;
+        let start = Some(0.75);
+        let reads = [1.0, 1.24, 1.25, 1.49, 1.5]
+            .map(|live| SnapshotSequencerClock::roll_read_position(live, start, grid, cycle));
+        let expected = [0.75, 0.99, 1.0, 1.24, 0.75];
+        for (actual, expected) in reads.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn sequence_roll_capture_and_rate_switch_reanchor_per_track() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_num_steps(5); // 1.25-beat cycle
+        state.pattern.track_params[1].set_num_steps(3); // 0.75-beat cycle
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.total_beats = 0.9;
+        clock.was_playing = true;
+        let mut roll = RollState::new();
+
+        roll.apply_commands_with_clock(
+            &[
+                RollCommand::SetRate { rate: Timebase::EighthTriplet },
+                RollCommand::SequenceRoll { on: true },
+            ],
+            &mut clock,
+            &snapshot,
+        );
+        assert_eq!(roll.window_start[0], Some(0.75));
+        assert_eq!(roll.window_start[1], Some(0.0));
+        roll.publish_windows(&state, Timebase::EighthTriplet.step_beats(16));
+        assert_eq!(
+            f64::from_bits(state.transport.roll_window_starts[0].load(Ordering::Relaxed)),
+            0.75,
+        );
+        assert!((f64::from_bits(
+            state.transport.roll_window_lengths[0].load(Ordering::Relaxed),
+        ) - 1.0 / 3.0)
+            .abs()
+            < 1.0e-9);
+
+        clock.total_beats = 1.1;
+        roll.apply_commands_with_clock(
+            &[RollCommand::SetRate { rate: Timebase::Eighth }],
+            &mut clock,
+            &snapshot,
+        );
+        assert_eq!(roll.window_start[0], Some(1.0));
+        assert_eq!(roll.window_start[1], Some(0.0));
+
+        // A same-rate slow straight re-press is a no-op.
+        clock.total_beats = 0.2;
+        roll.apply_commands_with_clock(
+            &[RollCommand::SetRate { rate: Timebase::Eighth }],
+            &mut clock,
+            &snapshot,
+        );
+        assert_eq!(roll.window_start[0], Some(1.0));
+
+        // Fast same-rate re-presses are the deliberate stutter gesture.
+        roll.apply_commands_with_clock(
+            &[RollCommand::SetRate { rate: Timebase::ThirtySecond }],
+            &mut clock,
+            &snapshot,
+        );
+        clock.total_beats = 0.7;
+        roll.apply_commands_with_clock(
+            &[RollCommand::SetRate { rate: Timebase::ThirtySecond }],
+            &mut clock,
+            &snapshot,
+        );
+        assert_eq!(roll.window_start[0], Some(0.75));
+    }
+
+    #[test]
+    fn sequence_roll_release_resumes_the_true_transport_position() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(5);
+        for step in 0..5 {
+            state.pattern.patterns[0].set_step_active(step, true);
+        }
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.total_beats = 0.6;
+        clock.was_playing = true;
+        let mut roll = RollState::new();
+        roll.apply_commands_with_clock(
+            &[RollCommand::SequenceRoll { on: true }],
+            &mut clock,
+            &snapshot,
+        );
+
+        let rolled = clock.process_chunk_with_roll(
+            30_000,
+            &snapshot,
+            &state,
+            Some(&mut roll.window_start),
+            Timebase::Sixteenth.step_beats(16),
+        );
+        assert_eq!(rolled.first().map(|trigger| trigger.step), Some(2));
+        assert!(rolled.len() >= 5, "one-step windows must retrigger on every wrap");
+        assert!(rolled.iter().all(|trigger| trigger.step == 2));
+
+        roll.apply_commands_with_clock(
+            &[RollCommand::SequenceRoll { on: false }],
+            &mut clock,
+            &snapshot,
+        );
+        let resumed = clock.process_chunk_with_roll(
+            10_000,
+            &snapshot,
+            &state,
+            Some(&mut roll.window_start),
+            Timebase::Sixteenth.step_beats(16),
+        );
+        assert_eq!(resumed.first().map(|trigger| trigger.step), Some(3));
+        assert!(resumed.iter().any(|trigger| trigger.step == 4));
+    }

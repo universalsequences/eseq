@@ -186,6 +186,12 @@ impl SequencerState {
                 roll_mode: AtomicBool::new(false),
                 roll_rate: AtomicU32::new(Timebase::Sixteenth as u32),
                 sequence_rolling: AtomicBool::new(false),
+                roll_window_starts: (0..MAX_TRACKS)
+                    .map(|_| AtomicU64::new(f64::NAN.to_bits()))
+                    .collect(),
+                roll_window_lengths: (0..MAX_TRACKS)
+                    .map(|_| AtomicU64::new(0.0_f64.to_bits()))
+                    .collect(),
             },
             runtime: RuntimeBindingState {
                 sampler_lids: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU64::new(0)).collect(),

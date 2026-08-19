@@ -301,7 +301,16 @@ pub fn spawn_scheduler_thread(
                 // inside the horizon (docs/rolling-core-spec.md 4.2, F3).
                 let roll_commands = state.drain_roll_commands();
                 if !roll_commands.is_empty() {
-                    lookahead_state.roll.apply_commands(&roll_commands);
+                    lookahead_state.roll.apply_commands_with_clock(
+                        &roll_commands,
+                        &mut lookahead_state.clock,
+                        &snapshot,
+                    );
+                    let grid = crate::sequencer::Timebase::from_index(
+                        state.transport.roll_rate.load(Ordering::Relaxed),
+                    )
+                    .step_beats(MAX_STEPS);
+                    lookahead_state.roll.publish_windows(&state, grid);
                 }
                 let live_midi_fx_active = any_live_midi_fx_notes(&live_midi_fx_tracks);
                 if live_midi_fx_active != last_live_midi_fx_active {

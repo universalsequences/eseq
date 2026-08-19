@@ -85,6 +85,7 @@ pub(crate) fn run_event_loop(
         prev_master_recording: false,
         prev_roll_mode: false,
         prev_roll_rate: u32::MAX,
+        prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
         prev_track_peak_levels: Vec::new(),
@@ -810,11 +811,24 @@ pub(crate) fn run_event_loop(
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }
-                    // Intercept keyboard for live recording when any track is armed
+                    // Hold-capable sequence roll resolves through the active
+                    // mode keymap on both press and release. The named command
+                    // is semantic; user lisp can move it to any key.
+                    let sequence_roll_binding = editor.active_mode_keybinding(key)
+                        == Some("eseq.seq-grid-mode/sequence-roll-hold");
+                    // Intercept keyboard for live recording when any track is armed.
+                    // Sequence roll itself is pattern-wide and does not require an
+                    // armed track.
                     let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a);
-                    let recording_key_outcome = if (any_armed
+                    let recording_key_outcome = if (sequence_roll_binding
+                        || any_armed
                         || held_note_for_key(&shared.held_notes, &key))
-                        && should_route_to_live_keyboard(&editor, &key, &shared.held_notes)
+                        && should_route_to_live_keyboard(
+                            &editor,
+                            &key,
+                            &shared.held_notes,
+                            sequence_roll_binding,
+                        )
                     {
                         handle_recording_key(
                             &key,
@@ -827,6 +841,7 @@ pub(crate) fn run_event_loop(
                             &shared.held_notes,
                             &shared.roll_record,
                             &shared.ui_epoch,
+                            sequence_roll_binding,
                         )
                     } else {
                         RecordingKeyOutcome::Ignored

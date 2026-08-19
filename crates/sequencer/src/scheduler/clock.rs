@@ -29,6 +29,10 @@ pub(super) struct SnapshotTrigger {
 
 pub(super) struct SnapshotTrackClockState {
     last_local_step: u32,
+    /// Last substituted read position. A sequence-roll window can jump back
+    /// to the start while remaining inside the same pattern step; detecting
+    /// that backward edge is what retriggers one-step windows.
+    last_read_position: f64,
     boundaries: [f64; MAX_STEPS + 1],
     step_ends: [f64; MAX_STEPS],
     cycle_beats: f64,
@@ -55,6 +59,7 @@ impl SnapshotSequencerClock {
         let track_clocks = (0..MAX_TRACKS)
             .map(|_| SnapshotTrackClockState {
                 last_local_step: u32::MAX,
+                last_read_position: f64::NAN,
                 boundaries: [0.0; MAX_STEPS + 1],
                 step_ends: [0.0; MAX_STEPS],
                 cycle_beats: 4.0,
@@ -75,6 +80,7 @@ impl SnapshotSequencerClock {
         self.was_playing = false;
         for track in &mut self.track_clocks {
             track.last_local_step = u32::MAX;
+            track.last_read_position = f64::NAN;
             track.anchor_beat = 0.0;
             track.offset_steps = 0.0;
         }
@@ -242,6 +248,7 @@ impl SnapshotSequencerClock {
             self.track_clocks[t].last_local_step = Self::derive_local_step(tc, pos_in_cycle, ns)
                 .map(|step| step as u32)
                 .unwrap_or(u32::MAX);
+            self.track_clocks[t].last_read_position = f64::NAN;
         }
         for t in num_tracks..MAX_TRACKS {
             self.track_clocks[t].last_local_step = u32::MAX;
@@ -298,11 +305,77 @@ impl SnapshotSequencerClock {
         }
     }
 
+    /// Capture one sequence-roll anchor per track from the current live clock
+    /// position (docs/rolling-core-spec.md 5.1). Each track uses its own
+    /// precomputed cycle, including timebase overrides and Sync padding.
+    pub(super) fn capture_roll_windows(
+        &mut self,
+        snapshot: &SequencerSnapshot,
+        grid_beats: f64,
+    ) -> [Option<f64>; MAX_TRACKS] {
+        const EPS: f64 = 1.0e-9;
+        let mut windows = [None; MAX_TRACKS];
+        if grid_beats <= EPS {
+            return windows;
+        }
+        for track in 0..snapshot.transport.num_tracks.min(MAX_TRACKS) {
+            self.precompute_boundaries(snapshot, track);
+            let num_steps = snapshot.tracks[track].params.num_steps;
+            let tc = &self.track_clocks[track];
+            let cycle = tc.cycle_beats;
+            if cycle <= EPS {
+                continue;
+            }
+            let live = Self::anchored_local_beats(tc, self.total_beats, num_steps)
+                .rem_euclid(cycle);
+            windows[track] = Some(Self::snap_roll_window(live, grid_beats, cycle));
+        }
+        windows
+    }
+
+    fn snap_roll_window(position: f64, grid_beats: f64, cycle_beats: f64) -> f64 {
+        const SIXTEENTH: f64 = 0.25;
+        const EPS: f64 = 1.0e-9;
+        let down = position - position.rem_euclid(grid_beats);
+        let wrapped = down.rem_euclid(cycle_beats);
+        let sixteenth_phase = wrapped.rem_euclid(SIXTEENTH);
+        if sixteenth_phase <= EPS || SIXTEENTH - sixteenth_phase <= EPS {
+            wrapped
+        } else {
+            (wrapped / SIXTEENTH).ceil() * SIXTEENTH
+        }
+    }
+
+    pub(super) fn roll_read_position(
+        live_pos_in_cycle: f64,
+        window_start: Option<f64>,
+        grid_beats: f64,
+        cycle_beats: f64,
+    ) -> f64 {
+        match window_start {
+            Some(start) if grid_beats > 1.0e-9 => {
+                (start + live_pos_in_cycle.rem_euclid(grid_beats)).rem_euclid(cycle_beats)
+            }
+            _ => live_pos_in_cycle,
+        }
+    }
+
     pub(super) fn process_chunk(
         &mut self,
         nframes: usize,
         snapshot: &SequencerSnapshot,
         state: &SequencerState,
+    ) -> Vec<SnapshotTrigger> {
+        self.process_chunk_with_roll(nframes, snapshot, state, None, 0.0)
+    }
+
+    pub(super) fn process_chunk_with_roll(
+        &mut self,
+        nframes: usize,
+        snapshot: &SequencerSnapshot,
+        state: &SequencerState,
+        mut window_start: Option<&mut [Option<f64>; MAX_TRACKS]>,
+        grid_beats: f64,
     ) -> Vec<SnapshotTrigger> {
         if !snapshot.transport.playing {
             self.reset();
@@ -319,11 +392,23 @@ impl SnapshotSequencerClock {
             self.total_beats = 0.0;
             for t in 0..MAX_TRACKS {
                 self.track_clocks[t].last_local_step = u32::MAX;
+                self.track_clocks[t].last_read_position = f64::NAN;
             }
         }
 
         for t in 0..num_tracks {
             self.precompute_boundaries(snapshot, t);
+            if let Some(start) = window_start.as_deref_mut().and_then(|starts| starts[t]) {
+                let cycle = self.track_clocks[t].cycle_beats;
+                // Per-chunk idempotent correction (§5.3): enforce both the
+                // current roll grid and F6's never-off-1/16 anchor rule, then
+                // let the read remap wrap against the current pattern cycle.
+                window_start.as_deref_mut().unwrap()[t] = Some(Self::snap_roll_window(
+                    start.rem_euclid(cycle),
+                    grid_beats,
+                    cycle,
+                ));
+            }
         }
 
         let mut triggers = Vec::new();
@@ -368,8 +453,25 @@ impl SnapshotSequencerClock {
                 // anchor and offset replace the free-running global clock;
                 // defaults make this `total_beats % cycle` exactly.
                 let local_beats = Self::anchored_local_beats(tc, self.total_beats, ns);
-                let pos_in_cycle = local_beats.rem_euclid(cycle);
-                match Self::derive_local_step(tc, pos_in_cycle, ns) {
+                let live_pos_in_cycle = local_beats.rem_euclid(cycle);
+                let rolling_window = window_start.as_deref().and_then(|starts| starts[t]);
+                let pos_in_cycle = Self::roll_read_position(
+                    live_pos_in_cycle,
+                    rolling_window,
+                    grid_beats,
+                    cycle,
+                );
+                let derived_step = Self::derive_local_step(tc, pos_in_cycle, ns);
+                if rolling_window.is_some()
+                    && pos_in_cycle + 1.0e-9 < self.track_clocks[t].last_read_position
+                {
+                    // A window wrap is a real replay boundary even when its
+                    // first and last positions derive to the same pattern
+                    // step (the common 1/16-window case).
+                    self.track_clocks[t].last_local_step = u32::MAX;
+                }
+                self.track_clocks[t].last_read_position = pos_in_cycle;
+                match derived_step {
                     Some(step) => {
                         let step_u32 = step as u32;
                         if step_u32 != self.track_clocks[t].last_local_step {
@@ -413,8 +515,14 @@ impl SnapshotSequencerClock {
             if clock.cycle_beats <= 0.0 {
                 continue;
             }
-            let position = Self::anchored_local_beats(clock, self.total_beats, num_steps)
+            let live_position = Self::anchored_local_beats(clock, self.total_beats, num_steps)
                 .rem_euclid(clock.cycle_beats);
+            let position = Self::roll_read_position(
+                live_position,
+                window_start.as_deref().and_then(|starts| starts[t]),
+                grid_beats,
+                clock.cycle_beats,
+            );
             if let Some(step) = Self::derive_local_step(clock, position, num_steps) {
                 let step_beats = (clock.step_ends[step] - clock.boundaries[step]).max(1.0e-9);
                 let phase = ((position - clock.boundaries[step]) / step_beats).clamp(0.0, 1.0);

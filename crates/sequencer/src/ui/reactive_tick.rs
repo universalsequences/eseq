@@ -581,6 +581,40 @@ pub(crate) fn reactive_tick_and_render(
             }
             ctx.frame.prev_roll_rate = roll_rate_raw;
         }
+        let roll_window_bits: Vec<(u64, u64)> = (0..app.tracks.len().min(
+            ctx.shared.state.transport.roll_window_starts.len(),
+        ))
+            .map(|track| {
+                (
+                    ctx.shared.state.transport.roll_window_starts[track]
+                        .load(Ordering::Relaxed),
+                    ctx.shared.state.transport.roll_window_lengths[track]
+                        .load(Ordering::Relaxed),
+                )
+            })
+            .collect();
+        if roll_window_bits != ctx.frame.prev_roll_windows {
+            let roll_windows = roll_window_bits
+                .iter()
+                .map(|(start_bits, length_bits)| {
+                    let start = f64::from_bits(*start_bits);
+                    let value = if start.is_nan() {
+                        Value::Bool(false)
+                    } else {
+                        Value::List(vec![
+                            Rc::new(RefCell::new(Value::Number(start))),
+                            Rc::new(RefCell::new(Value::Number(f64::from_bits(*length_bits)))),
+                        ])
+                    };
+                    Rc::new(RefCell::new(value))
+                })
+                .collect();
+            needs_reactive_cycle |= editor
+                .runtime_mut()
+                .set_reactive("SEQ", "roll-window", Value::List(roll_windows))
+                .effects_dirty;
+            ctx.frame.prev_roll_windows = roll_window_bits;
+        }
         // Song-mode bindings (docs/song-mode-spec.md 12): diff-published each
         // frame; the arrangement is re-read only on committed-song revision
         // change, and the lane surfaces derived from it diff by value.

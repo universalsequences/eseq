@@ -78,6 +78,12 @@
 
 ;; Cursor keys scoped to *metal* buffer via mode
 (define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
+;; Named hold command: Rust recognizes this semantic binding on both key-down
+;; and key-up, while the ordinary mode keymap remains the customization seam.
+;; Rebind this command (and replace the old binding) in user lisp to move the
+;; sequence-roll gesture without changing host code.
+(def sequence-roll-hold () true)
+(mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "`" "sequence-roll-hold")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "LEFT" "cursor-left")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "RIGHT" "cursor-right")
 (mode-bind-key "eseq.seq-grid-mode/seq-grid-mode" "C-a" "select-all-steps")

@@ -7,6 +7,7 @@ use eseqlisp::widget_render::number_picker::{
 #[derive(Clone, Debug)]
 pub(crate) struct HeldKeyboardNote {
     key: char,
+    sequence_roll_code: Option<crossterm::event::KeyCode>,
     transpose: f32,
     positions: Vec<(usize, sequencer::sequencer::RecordPosition)>,
     press_time: Instant,
@@ -379,17 +380,23 @@ pub(crate) fn held_note_for_key(
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     key: &crossterm::event::KeyEvent,
 ) -> bool {
-    let c = match key.code {
-        crossterm::event::KeyCode::Char(c) => c.to_ascii_lowercase(),
-        _ => return false,
+    let normalized_code = match key.code {
+        crossterm::event::KeyCode::Char(c) => {
+            crossterm::event::KeyCode::Char(c.to_ascii_lowercase())
+        }
+        code => code,
     };
-    held_notes.lock().unwrap().iter().any(|note| note.key == c)
+    held_notes.lock().unwrap().iter().any(|note| {
+        note.sequence_roll_code == Some(normalized_code)
+            || matches!(normalized_code, crossterm::event::KeyCode::Char(c) if note.key == c)
+    })
 }
 
 pub(crate) fn should_route_to_live_keyboard(
     editor: &Editor,
     key: &crossterm::event::KeyEvent,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    semantic_hold_binding: bool,
 ) -> bool {
     use crossterm::event::{KeyEventKind, KeyModifiers};
 
@@ -401,9 +408,10 @@ pub(crate) fn should_route_to_live_keyboard(
         return false;
     }
 
-    if key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    if !semantic_hold_binding
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
     {
         return false;
     }
@@ -412,7 +420,7 @@ pub(crate) fn should_route_to_live_keyboard(
         return false;
     }
 
-    matches!(key.code, crossterm::event::KeyCode::Char(_))
+    semantic_hold_binding || matches!(key.code, crossterm::event::KeyCode::Char(_))
 }
 
 pub(crate) fn normalize_command_shortcuts(
@@ -1506,43 +1514,34 @@ pub(crate) fn handle_recording_key(
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     roll_record: &Arc<Mutex<RollRecordBuffer>>,
     ui_epoch: &Arc<AtomicUsize>,
+    sequence_roll_binding: bool,
 ) -> RecordingKeyOutcome {
     use crossterm::event::{KeyCode, KeyEventKind};
 
-    let c = match key.code {
-        KeyCode::Char(c) => c.to_ascii_lowercase(),
-        _ => return RecordingKeyOutcome::Ignored,
+    let normalized_code = match key.code {
+        KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+        code => code,
     };
-
-    // Roll mode (docs/rolling-core-spec.md 4.1): intercept at the
-    // live-keyboard seam, before the editor ever sees the key (the editor
-    // drops Release events). Rate keys 1-8 and the sequence-roll backquote
-    // are consumed here while roll mode is on; note keys route to the
-    // scheduler as RollCommands instead of firing immediately (F1).
     let roll_mode = state.transport.roll_mode.load(Ordering::Relaxed);
-    if roll_mode && key.modifiers.is_empty() {
-        if let Some(rate) = sequencer::sequencer::Timebase::roll_rate_from_key(c) {
-            if key.kind == KeyEventKind::Press {
-                state
-                    .transport
-                    .roll_rate
-                    .store(rate as u32, Ordering::Release);
-                state.push_roll_command(sequencer::sequencer::RollCommand::SetRate { rate });
-            }
-            return RecordingKeyOutcome::Consumed;
-        }
-    }
-    if c == '`' {
-        // Sequence-roll key (momentary; the roll itself lands in phase 2).
-        // Press is key-repeat-deduped through held_notes; Release is
-        // intercepted whenever an entry exists — even if roll mode was
-        // toggled off mid-hold — so the held entry never leaks.
+    let held_sequence_roll = held_notes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|note| note.sequence_roll_code == Some(normalized_code));
+    if sequence_roll_binding || held_sequence_roll {
+        // The momentary sequence-roll gesture is selected by the active mode's
+        // named binding, not a hard-coded character. Release remains matched
+        // to the held marker even if the mode or binding changes mid-hold.
         match key.kind {
             KeyEventKind::Press if roll_mode => {
                 let mut held = held_notes.lock().unwrap();
-                if !held.iter().any(|note| note.key == c) {
+                if !held
+                    .iter()
+                    .any(|note| note.sequence_roll_code == Some(normalized_code))
+                {
                     held.push(HeldKeyboardNote {
-                        key: c,
+                        key: '\0',
+                        sequence_roll_code: Some(normalized_code),
                         transpose: 0.0,
                         positions: Vec::new(),
                         press_time: Instant::now(),
@@ -1561,7 +1560,9 @@ pub(crate) fn handle_recording_key(
             KeyEventKind::Release => {
                 let removed = {
                     let mut held = held_notes.lock().unwrap();
-                    let pos = held.iter().position(|note| note.key == c);
+                    let pos = held
+                        .iter()
+                        .position(|note| note.sequence_roll_code == Some(normalized_code));
                     pos.map(|idx| held.remove(idx)).is_some()
                 };
                 if removed {
@@ -1578,6 +1579,26 @@ pub(crate) fn handle_recording_key(
             }
             KeyEventKind::Press => return RecordingKeyOutcome::Ignored,
             _ => return RecordingKeyOutcome::Consumed,
+        }
+    }
+
+    let c = match normalized_code {
+        KeyCode::Char(c) => c,
+        _ => return RecordingKeyOutcome::Ignored,
+    };
+
+    // Roll mode (docs/rolling-core-spec.md 4.1): rate keys are consumed at
+    // the live-keyboard seam, before the editor drops Release events.
+    if roll_mode && key.modifiers.is_empty() {
+        if let Some(rate) = sequencer::sequencer::Timebase::roll_rate_from_key(c) {
+            if key.kind == KeyEventKind::Press {
+                state
+                    .transport
+                    .roll_rate
+                    .store(rate as u32, Ordering::Release);
+                state.push_roll_command(sequencer::sequencer::RollCommand::SetRate { rate });
+            }
+            return RecordingKeyOutcome::Consumed;
         }
     }
 
@@ -1654,6 +1675,7 @@ pub(crate) fn handle_recording_key(
 
             held.push(HeldKeyboardNote {
                 key: c,
+                sequence_roll_code: None,
                 transpose,
                 positions,
                 press_time,
@@ -1811,12 +1833,13 @@ mod live_keyboard_tests {
     use super::{
         build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        held_note_for_key, note_from_key, quantized_record_position,
+        handle_recording_key, held_note_for_key, note_from_key, quantized_record_position,
         sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
-        HeldKeyboardNote, SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
+        HeldKeyboardNote, RollRecordBuffer, SequencerHistoryShortcut, SoftStepParamEdit,
+        PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
@@ -1896,6 +1919,7 @@ mod live_keyboard_tests {
     fn held_note_lookup_is_case_insensitive_for_release_matching() {
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
             key: 'a',
+            sequence_roll_code: None,
             transpose: 0.0,
             positions: vec![(
                 0,
@@ -1910,6 +1934,63 @@ mod live_keyboard_tests {
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
 
         assert!(held_note_for_key(&held, &key));
+    }
+
+    #[test]
+    fn semantic_sequence_roll_binding_handles_non_char_press_and_release() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.transport.roll_mode.store(true, Ordering::Release);
+        let mut app = soft_edit_test_app(Arc::clone(&state));
+        let record_armed = Arc::new(Mutex::new(vec![false]));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let roll_record = Arc::new(Mutex::new(RollRecordBuffer::default()));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let press = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);
+
+        assert!(handle_recording_key(
+            &press,
+            &mut app,
+            &state,
+            &record_armed,
+            &recording,
+            &keyboard_tx,
+            &keyboard_octave,
+            &held,
+            &roll_record,
+            &ui_epoch,
+            true,
+        )
+        .consumed());
+        assert!(state.transport.sequence_rolling.load(Ordering::Acquire));
+        assert!(matches!(
+            state.drain_roll_commands().as_slice(),
+            [sequencer::sequencer::RollCommand::SequenceRoll { on: true }]
+        ));
+
+        let mut release = press;
+        release.kind = KeyEventKind::Release;
+        assert!(handle_recording_key(
+            &release,
+            &mut app,
+            &state,
+            &record_armed,
+            &recording,
+            &keyboard_tx,
+            &keyboard_octave,
+            &held,
+            &roll_record,
+            &ui_epoch,
+            false,
+        )
+        .consumed());
+        assert!(!state.transport.sequence_rolling.load(Ordering::Acquire));
+        assert!(matches!(
+            state.drain_roll_commands().as_slice(),
+            [sequencer::sequencer::RollCommand::SequenceRoll { on: false }]
+        ));
     }
 
     #[test]

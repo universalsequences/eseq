@@ -111,6 +111,10 @@ pub struct TransportState {
     /// Momentary: the sequence-roll key is held (sequencer rolling is phase 2;
     /// the state is published now so UI and commands stay in lockstep).
     pub sequence_rolling: AtomicBool,
+    /// Scheduler-published sequence-roll window per track (f64 bits). A NaN
+    /// start marks a non-participating track; lengths are zero in that case.
+    pub roll_window_starts: Vec<AtomicU64>,
+    pub roll_window_lengths: Vec<AtomicU64>,
 }
 
 /// Lock-free snapshot of the render clock for wall-clock interpolation on the

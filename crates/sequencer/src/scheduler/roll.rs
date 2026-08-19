@@ -1,17 +1,17 @@
 /*!
-Track rolling (docs/rolling-core-spec.md): scheduler-side held-note state and
-roll-grid emission. Phase 1 — audible track rolls; recording is phase 3.
+Rolling (docs/rolling-core-spec.md): scheduler-side held-note emission and
+sequence-roll window capture/remap state.
 */
 
 #[allow(unused_imports)]
 use super::*;
 
-use crate::sequencer::RollCommand;
+use crate::sequencer::{RollCommand, Timebase};
 
-/// Scheduler-side roll state (spec 3). Deliberately NOT stored here: the roll
-/// rate (F2 — re-read from the transport atomics every chunk, which is what
-/// makes mid-hold rate switching free) and any start time (F7 — boundaries
-/// live on the absolute transport beat grid).
+/// Scheduler-side roll state (spec 3). Track-roll emission deliberately reads
+/// its rate from the transport atomics every chunk (F2), while sequence roll
+/// retains the last ordered rate command solely for re-anchor semantics. No
+/// independent start time or phase counter is stored (F7).
 pub(super) struct RollState {
     /// Held notes per track. Set semantics: duplicate presses of the same
     /// transpose collapse to one roll voice; empty = not rolling.
@@ -26,6 +26,13 @@ pub(super) struct RollState {
     /// pruned on NoteOff/ClearAll so a tap released before the pass leaves
     /// nothing.
     pub(super) newly_pressed: Vec<(usize, f32)>,
+    /// Per-track sequence-roll window anchors in the track's cycle-beat
+    /// domain. `None` means normal, free-running pattern reads.
+    pub(super) window_start: [Option<f64>; MAX_TRACKS],
+    /// Last rate observed through the ordered command stream. Track-roll
+    /// emission still reads the transport atomic every chunk (F2); this is
+    /// retained solely to implement sequence-roll same-rate re-press rules.
+    sequence_rate: Timebase,
 }
 
 impl RollState {
@@ -34,6 +41,8 @@ impl RollState {
             held: std::array::from_fn(|_| Vec::new()),
             generation: 0,
             newly_pressed: Vec::new(),
+            window_start: [None; MAX_TRACKS],
+            sequence_rate: Timebase::Sixteenth,
         }
     }
 
@@ -43,11 +52,71 @@ impl RollState {
 
     pub(super) fn clear_all(&mut self) {
         self.newly_pressed.clear();
-        if self.any_held() {
-            for held in &mut self.held {
-                held.clear();
-            }
+        let had_state = self.any_held() || self.sequence_rolling();
+        for held in &mut self.held {
+            held.clear();
+        }
+        self.window_start.fill(None);
+        if had_state {
             self.generation += 1;
+        }
+    }
+
+    pub(super) fn sequence_rolling(&self) -> bool {
+        self.window_start.iter().any(Option::is_some)
+    }
+
+    pub(super) fn publish_windows(&self, state: &SequencerState, grid_beats: f64) {
+        for track in 0..MAX_TRACKS {
+            let start = self.window_start[track].unwrap_or(f64::NAN);
+            let length = if start.is_nan() { 0.0 } else { grid_beats };
+            state.transport.roll_window_starts[track]
+                .store(start.to_bits(), Ordering::Relaxed);
+            state.transport.roll_window_lengths[track]
+                .store(length.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Apply the ordered command stream at the scheduler frontier. Window
+    /// capture uses the clock's current live position; no transport seek or
+    /// queue mutation is involved (F7/F8).
+    pub(super) fn apply_commands_with_clock(
+        &mut self,
+        commands: &[RollCommand],
+        clock: &mut SnapshotSequencerClock,
+        snapshot: &SequencerSnapshot,
+    ) {
+        for command in commands {
+            match *command {
+                RollCommand::SetRate { rate } => {
+                    let changed = rate != self.sequence_rate;
+                    self.sequence_rate = rate;
+                    let stutter_repress = rate.step_beats(MAX_STEPS) <= 0.125
+                        || matches!(
+                            rate,
+                            Timebase::HalfTriplet
+                                | Timebase::QuarterTriplet
+                                | Timebase::EighthTriplet
+                                | Timebase::SixteenthTriplet
+                                | Timebase::ThirtySecondTriplet
+                                | Timebase::SixtyFourthTriplet
+                        );
+                    if self.sequence_rolling() && (changed || stutter_repress) {
+                        self.window_start = clock.capture_roll_windows(
+                            snapshot,
+                            rate.step_beats(MAX_STEPS),
+                        );
+                    }
+                }
+                RollCommand::SequenceRoll { on: true } => {
+                    self.window_start = clock.capture_roll_windows(
+                        snapshot,
+                        self.sequence_rate.step_beats(MAX_STEPS),
+                    );
+                }
+                RollCommand::SequenceRoll { on: false } => self.window_start.fill(None),
+                _ => self.apply_commands(std::slice::from_ref(command)),
+            }
         }
     }
 
@@ -70,11 +139,12 @@ impl RollState {
                         self.generation += 1;
                     }
                 }
-                // Rate switches need no scheduler-side state (F2): the next
-                // chunk simply scans the grid it reads from the atomics.
-                // Sequence rolling is phase 2; the command is accepted so its
-                // ordering is already right when the window capture lands.
-                RollCommand::SetRate { .. } | RollCommand::SequenceRoll { .. } => {}
+                // Context-free application is retained for track-roll unit
+                // tests. Production uses `apply_commands_with_clock`, where
+                // these commands can capture against the current clock.
+                RollCommand::SetRate { rate } => self.sequence_rate = rate,
+                RollCommand::SequenceRoll { on: false } => self.window_start.fill(None),
+                RollCommand::SequenceRoll { on: true } => {}
                 RollCommand::ClearAll => self.clear_all(),
             }
         }

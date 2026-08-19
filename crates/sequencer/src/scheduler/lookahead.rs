@@ -441,7 +441,18 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
         let chunk_start_beats = clock.total_beats;
-        let triggers = clock.process_chunk(chunk_frames, snapshot, state);
+        let roll_grid = crate::sequencer::Timebase::from_index(
+            state.transport.roll_rate.load(Ordering::Relaxed),
+        )
+        .step_beats(MAX_STEPS);
+        let triggers = clock.process_chunk_with_roll(
+            chunk_frames,
+            snapshot,
+            state,
+            Some(&mut scheduler.roll.window_start),
+            roll_grid,
+        );
+        scheduler.roll.publish_windows(state, roll_grid);
         let chunk_end_beats = clock.total_beats;
         let mut neural_events = Vec::new();
         let mut neural_cursor_beats = chunk_start_beats;

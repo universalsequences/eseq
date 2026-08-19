@@ -5462,6 +5462,20 @@ impl Editor {
         }
     }
 
+    /// Return the named command bound to `key` in the active buffer's major
+    /// mode. Hosts use this to implement hold gestures because `handle_key`
+    /// deliberately dispatches press events only; the mode keymap remains the
+    /// single user-customizable source of truth for the gesture's key.
+    pub fn active_mode_keybinding(&self, key: KeyEvent) -> Option<&str> {
+        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
+            return None;
+        };
+        self.mode_registry
+            .get(mode_name)
+            .and_then(|mode| mode.keybindings.get(&key_str(key)))
+            .map(String::as_str)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;

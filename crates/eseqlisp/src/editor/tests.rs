@@ -13197,6 +13197,50 @@ fn module_mode_binding_dispatches_a_vanilla_handler() {
 }
 
 #[test]
+fn active_mode_keybinding_exposes_rebindable_hold_command_semantics() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*hold*", "");
+    eval_module(
+        &mut editor,
+        "hold-binding",
+        r#"
+(module test.hold)
+(def sequence-roll-hold () true)
+(def ordinary () true)
+(define-mode "hold-mode")
+(mode-bind-key "hold-mode" "`" "sequence-roll-hold")
+(set-buffer-mode-for "*hold*" "hold-mode")
+"#,
+    );
+    let backquote = KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE);
+    assert_eq!(
+        editor.active_mode_keybinding(backquote),
+        Some("test.hold/sequence-roll-hold"),
+    );
+
+    // User lisp moves the semantic command by replacing the old binding and
+    // assigning the command to a new key; host code only sees the keymap.
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(mode-bind-key "test.hold/hold-mode" "`" "ordinary")
+(mode-bind-key "test.hold/hold-mode" "q" "test.hold/sequence-roll-hold")
+"#,
+        )
+        .expect("rebind hold command");
+    editor.refresh_runtime_side_effects();
+    assert_ne!(
+        editor.active_mode_keybinding(backquote),
+        Some("test.hold/sequence-roll-hold"),
+    );
+    assert_eq!(
+        editor.active_mode_keybinding(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+        Some("test.hold/sequence-roll-hold"),
+    );
+}
+
+#[test]
 fn vanilla_bind_key_records_stay_flat() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_scratch_buffer("*test*", "x");
