@@ -14426,6 +14426,21 @@
     }
 
     #[test]
+    fn full_grid_default_backquote_resolves_sequence_roll_hold_binding() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        assert!(editor.switch_active_tile_to_buffer_named("*transport*"));
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('`'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(
+            editor.buffer_mode_keybinding("*sequencer*", key),
+            Some("eseq.seq-grid-mode/sequence-roll-hold"),
+            "the production *sequencer* keymap must remain available after transport focus",
+        );
+    }
+
+    #[test]
     fn user_init_boot_proves_hook_mx_theme_and_visible_around_override() {
         let main_source = std::fs::read_to_string("ui/main.lisp").expect("read main");
         let init_path = std::path::Path::new("ui/test-fixtures/user-init-payoff.lisp");

@@ -8450,6 +8450,37 @@
     }
 
     #[test]
+    fn production_lookahead_replays_the_captured_sequence_window() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(4);
+            for step in 0..4 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            state.toggle_play();
+            state.transport.roll_mode.store(true, Ordering::Release);
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.roll.apply_commands_with_clock(
+                &[RollCommand::SequenceRoll { on: true }],
+                &mut scheduler.clock,
+                &snapshot,
+            );
+            let queue = ScheduledEventQueue::<64>::new();
+            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+
+            let mut steps = Vec::new();
+            while let Some(event) = queue.pop() {
+                if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
+                    steps.push(step);
+                }
+            }
+            assert!(steps.len() >= 4, "the captured step must retrigger each roll window");
+            assert!(steps.iter().all(|step| *step == 0), "rolled steps: {steps:?}");
+        });
+    }
+
+    #[test]
     fn sequence_roll_remaps_live_phase_across_an_odd_cycle() {
         let cycle = 1.25;
         let grid = 0.5;

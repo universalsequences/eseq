@@ -5467,7 +5467,20 @@ impl Editor {
     /// deliberately dispatches press events only; the mode keymap remains the
     /// single user-customizable source of truth for the gesture's key.
     pub fn active_mode_keybinding(&self, key: KeyEvent) -> Option<&str> {
-        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
+        self.mode_keybinding(&self.active_buffer().mode, key)
+    }
+
+    /// Return the binding from a named buffer's major mode without changing
+    /// the active tile. Application-wide hold gestures can therefore use one
+    /// declarative keymap even after a transport/mixer click moves focus to a
+    /// different tile.
+    pub fn buffer_mode_keybinding(&self, buffer_name: &str, key: KeyEvent) -> Option<&str> {
+        let buffer = self.buffers.iter().find(|buffer| buffer.name == buffer_name)?;
+        self.mode_keybinding(&buffer.mode, key)
+    }
+
+    fn mode_keybinding(&self, mode: &BufferMode, key: KeyEvent) -> Option<&str> {
+        let BufferMode::Named(mode_name) = mode else {
             return None;
         };
         self.mode_registry

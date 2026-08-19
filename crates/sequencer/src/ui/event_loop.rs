@@ -811,10 +811,11 @@ pub(crate) fn run_event_loop(
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }
-                    // Hold-capable sequence roll resolves through the active
-                    // mode keymap on both press and release. The named command
-                    // is semantic; user lisp can move it to any key.
-                    let sequence_roll_binding = editor.active_mode_keybinding(key)
+                    // Hold-capable sequence roll resolves through the
+                    // *sequencer* mode keymap on both press and release, even
+                    // when a transport/mixer click owns the active tile. The
+                    // named command is semantic; user lisp can move its key.
+                    let sequence_roll_binding = editor.buffer_mode_keybinding("*sequencer*", key)
                         == Some("eseq.seq-grid-mode/sequence-roll-hold");
                     // Intercept keyboard for live recording when any track is armed.
                     // Sequence roll itself is pattern-wide and does not require an

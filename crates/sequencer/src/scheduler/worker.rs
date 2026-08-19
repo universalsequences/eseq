@@ -301,6 +301,10 @@ pub fn spawn_scheduler_thread(
                 // inside the horizon (docs/rolling-core-spec.md 4.2, F3).
                 let roll_commands = state.drain_roll_commands();
                 if !roll_commands.is_empty() {
+                    eprintln!(
+                        "[roll-debug] scheduler drain commands={roll_commands:?} frontier_beats={:.6}",
+                        lookahead_state.clock.total_beats,
+                    );
                     lookahead_state.roll.apply_commands_with_clock(
                         &roll_commands,
                         &mut lookahead_state.clock,
@@ -311,6 +315,16 @@ pub fn spawn_scheduler_thread(
                     )
                     .step_beats(MAX_STEPS);
                     lookahead_state.roll.publish_windows(&state, grid);
+                    let active_windows: Vec<(usize, f64)> = lookahead_state
+                        .roll
+                        .window_start
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(track, start)| start.map(|start| (track, start)))
+                        .collect();
+                    eprintln!(
+                        "[roll-debug] scheduler applied grid_beats={grid:.6} windows={active_windows:?}"
+                    );
                 }
                 let live_midi_fx_active = any_live_midi_fx_notes(&live_midi_fx_tracks);
                 if live_midi_fx_active != last_live_midi_fx_active {

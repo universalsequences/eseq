@@ -48,6 +48,7 @@ pub(super) fn handle(
         }
         "toggle-roll-mode" => {
             let enabled = !state.transport.roll_mode.fetch_xor(true, Ordering::AcqRel);
+            eprintln!("[roll-debug] host-command toggle-roll-mode enabled={enabled}");
             if !enabled {
                 // Toggling roll mode off always clears stuck rolls
                 // (docs/rolling-core-spec.md 7).
