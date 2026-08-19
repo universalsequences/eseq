@@ -2241,6 +2241,44 @@ impl App {
         self.restore_bus_pattern_snapshot(&snapshot);
     }
 
+    /// Publishes drum rack v2 choke assignments into the lock-free per-track
+    /// runtime table the audio thread reads when a pad triggers
+    /// (docs/drum-rack-v2-spec.md, "Trigger routing"). Choke lives on the pad
+    /// list, but the audio thread only ever knows track indices, so the pad
+    /// map is flattened here: every member track backing a pad with a choke
+    /// group gets the packed (group id, choke group) key, everything else
+    /// gets 0. Call after any change to group membership or a pad's choke.
+    /// Republishing is a clear-then-write over the whole table: a hit landing
+    /// inside that window simply doesn't choke, which is inaudible next to the
+    /// edit that caused it.
+    pub fn publish_rack_choke_runtime(&self) {
+        use std::sync::atomic::Ordering;
+        let keys = &self.state.runtime.rack_choke_keys;
+        for key in keys.iter() {
+            key.store(0, Ordering::Release);
+        }
+        for group in &self.groups {
+            let Some(rack) = group.rack.as_ref() else {
+                continue;
+            };
+            for (pad_idx, pad) in rack.pads.iter().enumerate() {
+                let Some(choke) = rack.choke_group(pad_idx) else {
+                    continue;
+                };
+                let Some(track) = group.members.get(pad.member).copied() else {
+                    continue;
+                };
+                let Some(slot) = keys.get(track) else {
+                    continue;
+                };
+                slot.store(
+                    crate::sequencer::rack_choke_key(group.id, choke),
+                    Ordering::Release,
+                );
+            }
+        }
+    }
+
     pub fn publish_bus_gate_runtime(&self) {
         let runtime = self
             .buses

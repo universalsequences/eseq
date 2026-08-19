@@ -973,6 +973,7 @@ impl App {
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
+        self.publish_rack_choke_runtime();
         self.clear_project_arrangement_state();
 
         {
@@ -3494,6 +3495,7 @@ impl App {
                 group
             })
             .collect();
+        self.publish_rack_choke_runtime();
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any
         // pre-fix grouping) can have members still pointing at Mix in some/all

@@ -110,6 +110,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         } else {
             // Note-on: allocate voice and trigger
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
+            release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
             let resolved_transpose = resolve_live_keyboard_transpose(
                 &data.state,
                 data.accumulator_states[kt.track],

@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use super::{
     apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
-    collect_rack_choke_group_voice_releases, for_each_custom_voice_route_update,
+    collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
+    for_each_custom_voice_route_update,
     free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
     instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
     mute_group_winner_for_block_events, rack_slot_matches_routing,
@@ -26,6 +27,7 @@ use super::{
     FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
+use crate::sequencer::MAX_TRACKS;
 use crate::analysis::{pack_ptr, OnsetTableShared};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
@@ -567,6 +569,151 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         2,
         "unrelated sampler and custom gate-off block events should remain"
     );
+}
+
+/// Drum rack v2 choke: pads are member tracks, so a hit on one pad releases
+/// the sounding voices of the other member tracks in its choke group and
+/// nothing else (docs/drum-rack-v2-spec.md, "Trigger routing").
+#[test]
+fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
+    // Track 0 (sampler) and track 1 (custom) share rack 3's choke group 1;
+    // track 2 sits in the same rack with no choke; track 3 is another rack's
+    // choke group 1 — same group number, different rack.
+    let state = SequencerState::new(
+        4,
+        (0..4).map(|_| crate::sequencer::default_empty_effect_chain()).collect(),
+    );
+    let key = crate::sequencer::rack_choke_key(3, 1);
+    state.runtime.rack_choke_keys[0].store(key, Ordering::Release);
+    state.runtime.rack_choke_keys[1].store(key, Ordering::Release);
+    state.runtime.rack_choke_keys[2].store(0, Ordering::Release);
+    state.runtime.rack_choke_keys[3].store(
+        crate::sequencer::rack_choke_key(4, 1),
+        Ordering::Release,
+    );
+    for track in [0usize, 2, 3] {
+        state.runtime.instrument_type_flags[track]
+            .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+    }
+    state.runtime.instrument_type_flags[1]
+        .store(InstrumentType::Custom.runtime_flag(), Ordering::Relaxed);
+    state.runtime.track_engine_ids[1].store(2, Ordering::Relaxed);
+
+    let mut voice_pools: Vec<VoicePool> = (0..4).map(|_| VoicePool::new()).collect();
+    let mut custom_engine_pools: Vec<CustomEnginePool> =
+        (0..3).map(|_| CustomEnginePool::new()).collect();
+    for (track, lid) in [(0usize, 10u64), (2, 30), (3, 40)] {
+        voice_pools[track].add_voice(lid, 100 + track as i32);
+        voice_pools[track].voices[0].active = true;
+    }
+    custom_engine_pools[2].add_voice(20);
+    custom_engine_pools[2].voices[0].active = true;
+    custom_engine_pools[2].voices[0].assigned_track = Some(1);
+
+    let mut countdown_events = vec![CountdownEvent {
+        remaining_samples: 32.0,
+        period_samples: 0.0,
+        repeats: 0,
+        pattern_epoch: 0,
+        seq: 0,
+        kind: CountdownEventKind::GateOff(GateOffEvent {
+            track_idx: 0,
+            logical_id: 10,
+            target: GateOffTarget::Sampler { gatepitch_id: 0 },
+        }),
+    }];
+    let mut block_events = vec![BlockEvent {
+        frame_offset: 4,
+        seq: 1,
+        kind: BlockEventKind::GateOff(GateOffEvent {
+            track_idx: 3,
+            logical_id: 40,
+            target: GateOffTarget::Sampler { gatepitch_id: 0 },
+        }),
+    }];
+
+    // Track 1 triggers: it chokes track 0 and nothing else.
+    let mut note_offs = Vec::new();
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &[u64::MAX; MAX_TRACKS],
+        1,
+        1_000,
+        &mut note_offs,
+    );
+
+    assert!(
+        !voice_pools[0].voices[0].active,
+        "the other member track in the choke group should be released"
+    );
+    assert!(
+        custom_engine_pools[2].voices[0].active,
+        "the triggering track's own voice must survive its own choke"
+    );
+    assert!(
+        voice_pools[2].voices[0].active,
+        "a member track with no choke group is never choked"
+    );
+    assert!(
+        voice_pools[3].voices[0].active,
+        "choke group 1 of another rack is a different group"
+    );
+    assert_eq!(note_offs, vec![RackSlotNoteOff::Sampler { logical_id: 10 }]);
+    assert!(
+        countdown_events.is_empty(),
+        "the released voice's gate-off countdown should be cancelled"
+    );
+    assert_eq!(
+        block_events.len(),
+        1,
+        "an unchoked track's gate-off block event should remain"
+    );
+
+    // Track 0 triggers back at the sample track 1 fired at: simultaneous pads
+    // in one choke group keep each other's brand-new voice.
+    let mut last_trigger = [u64::MAX; MAX_TRACKS];
+    last_trigger[1] = 2_000;
+    note_offs.clear();
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &last_trigger,
+        0,
+        2_000,
+        &mut note_offs,
+    );
+    assert!(
+        custom_engine_pools[2].voices[0].active,
+        "a track that fired at this very sample is not choked"
+    );
+    assert!(note_offs.is_empty());
+
+    // One sample later the same hit does cut it.
+    note_offs.clear();
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &last_trigger,
+        0,
+        2_001,
+        &mut note_offs,
+    );
+    assert!(!custom_engine_pools[2].voices[0].active);
+    assert_eq!(
+        custom_engine_pools[2].voices[0].release_started_sample,
+        Some(2_001)
+    );
+    assert_eq!(note_offs, vec![RackSlotNoteOff::Custom { logical_id: 20 }]);
 }
 
 #[test]

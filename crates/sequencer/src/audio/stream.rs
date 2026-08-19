@@ -111,6 +111,8 @@ pub fn build_output_stream(
         host_clock_was_playing: false,
         host_clock_play_start_sample: 0,
         free_patch_transport_routes: [FreePatchTransportRouteState::default(); MAX_TRACKS],
+        rack_choke_last_trigger: [u64::MAX; MAX_TRACKS],
+        rack_choke_note_offs: Vec::with_capacity(MAX_VOICES * 2),
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
         countdown_events: Vec::with_capacity(SCHEDULED_COUNTDOWN_CAPACITY),

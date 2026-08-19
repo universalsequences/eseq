@@ -6166,6 +6166,59 @@ mod tests {
     }
 
     #[test]
+    fn rack_pad_choke_groups_publish_per_member_track_keys() {
+        let graph = TestLiveGraph::new("drum-rack-choke-publish-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let hat_closed = app.graph_controller().add_blank_sampler_track().expect("closed hat");
+        let hat_open = app.graph_controller().add_blank_sampler_track().expect("open hat");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat_closed).expect("closed hat pad");
+        app.assign_rack_pad_track_recorded(group_id, 46, hat_open).expect("open hat pad");
+
+        let choke_key = |app: &App, track: usize| {
+            app.state.runtime.rack_choke_keys[track].load(std::sync::atomic::Ordering::Acquire)
+        };
+        assert_eq!(choke_key(&app, hat_closed), 0, "pads start unassigned");
+
+        app.set_rack_pad_choke_group_recorded(group_id, 42, Some(1))
+            .expect("closed hat choke");
+        app.set_rack_pad_choke_group_recorded(group_id, 46, Some(1))
+            .expect("open hat choke");
+
+        let expected = crate::sequencer::rack_choke_key(group_id, 1);
+        assert_eq!(choke_key(&app, hat_closed), expected);
+        assert_eq!(choke_key(&app, hat_open), expected);
+        assert_eq!(choke_key(&app, kick), 0, "a pad with no choke never chokes");
+
+        // Undo restores the pad map, and with it the published table.
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(choke_key(&app, hat_open), 0);
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(choke_key(&app, hat_open), expected);
+
+        // Deleting a member drops its pad, so it stops choking anything.
+        app.delete_track_recorded(hat_closed).expect("delete the closed hat");
+        let hat_open = app.groups[0].members[app.groups[0]
+            .rack
+            .as_ref()
+            .expect("rack config")
+            .pad_index_for_note(46)
+            .expect("open hat pad survives")];
+        assert_eq!(choke_key(&app, hat_open), expected);
+        graph.process_block();
+    }
+
+    #[test]
     fn deleting_a_rack_member_track_drops_its_pad_and_reindexes_the_others() {
         let graph = TestLiveGraph::new("drum-rack-member-delete-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);

@@ -287,6 +287,168 @@ pub(super) fn collect_rack_choke_group_voice_releases(
     note_offs
 }
 
+/// Drum rack v2 choke, the per-member-track counterpart of
+/// [`collect_rack_slot_active_voice_releases`] (docs/drum-rack-v2-spec.md,
+/// "Trigger routing"). A rack pad is a real track, so choke releases a whole
+/// track's sounding voices instead of a slot's. Modulator and v1 rack tracks
+/// are skipped, exactly as the per-slot version skips those slot types.
+pub(super) fn collect_track_active_voice_releases(
+    state: &SequencerState,
+    voice_pools: &mut [VoicePool],
+    custom_engine_pools: &mut [CustomEnginePool],
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    track_idx: usize,
+    release_sample: u64,
+    note_offs: &mut Vec<RackSlotNoteOff>,
+) {
+    let instrument_type = InstrumentType::from_runtime_flag(
+        state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+    );
+    match instrument_type {
+        InstrumentType::Sampler => {
+            if track_idx >= voice_pools.len() {
+                return;
+            }
+            cancel_chops_for_track(countdown_events, block_events, track_idx);
+            let num_voices = voice_pools[track_idx].num_voices;
+            for voice_idx in 0..num_voices {
+                let voice = &voice_pools[track_idx].voices[voice_idx];
+                if !voice.active || voice.logical_id == 0 {
+                    continue;
+                }
+                let (lid, gatepitch_id) = (voice.logical_id, voice.gatepitch_id);
+                voice_pools[track_idx].release_voice_by_logical_id(lid);
+                cancel_gate_off_for_lid(countdown_events, block_events, lid);
+                if gatepitch_id > 0 {
+                    note_offs.push(RackSlotNoteOff::Custom {
+                        logical_id: gatepitch_id as u64,
+                    });
+                }
+                note_offs.push(RackSlotNoteOff::Sampler { logical_id: lid });
+            }
+        }
+        InstrumentType::Custom => {
+            let Some(engine_id) = track_engine_id(state, track_idx) else {
+                return;
+            };
+            if engine_id >= custom_engine_pools.len() {
+                return;
+            }
+            cancel_chops_for_track(countdown_events, block_events, track_idx);
+            let free_patch =
+                track_custom_run_mode(state, track_idx) == CustomInstrumentRunMode::FreePatch;
+            let num_voices = custom_engine_pools[engine_id].num_voices;
+            for voice_idx in 0..num_voices {
+                let voice = &custom_engine_pools[engine_id].voices[voice_idx];
+                if !voice.active || voice.assigned_track != Some(track_idx) {
+                    continue;
+                }
+                let lid = voice.logical_id;
+                if free_patch {
+                    custom_engine_pools[engine_id].release_free_patch_voice_by_logical_id(lid);
+                } else {
+                    custom_engine_pools[engine_id].release_voice_by_logical_id(lid, release_sample);
+                }
+                cancel_gate_off_for_lid(countdown_events, block_events, lid);
+                note_offs.push(RackSlotNoteOff::Custom { logical_id: lid });
+            }
+        }
+        InstrumentType::Modulator | InstrumentType::Rack => {}
+    }
+}
+
+/// Collects the note-offs for a drum rack v2 choke: the sounding voices of
+/// every *other* member track sharing the triggering track's choke group.
+/// Membership is not walked here — the control thread flattens the pad map
+/// into one key per track (`App::publish_rack_choke_runtime`), so two tracks
+/// choke each other iff their keys match and are non-zero. A track that fired
+/// at this very sample is left alone, so two pads of one choke group landing
+/// on the same frame (closed + open hat on one step) do not cut each other's
+/// brand-new voice.
+pub(super) fn collect_rack_choke_group_track_releases(
+    state: &SequencerState,
+    voice_pools: &mut [VoicePool],
+    custom_engine_pools: &mut [CustomEnginePool],
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    last_trigger: &[u64; MAX_TRACKS],
+    triggering_track: usize,
+    release_sample: u64,
+    note_offs: &mut Vec<RackSlotNoteOff>,
+) {
+    let num_tracks = state.active_track_count().min(MAX_TRACKS);
+    if triggering_track >= num_tracks {
+        return;
+    }
+    let key = state.runtime.rack_choke_keys[triggering_track].load(Ordering::Acquire);
+    if key == 0 {
+        return;
+    }
+    for track_idx in 0..num_tracks {
+        if track_idx == triggering_track || last_trigger[track_idx] == release_sample {
+            continue;
+        }
+        if state.runtime.rack_choke_keys[track_idx].load(Ordering::Acquire) != key {
+            continue;
+        }
+        collect_track_active_voice_releases(
+            state,
+            voice_pools,
+            custom_engine_pools,
+            countdown_events,
+            block_events,
+            track_idx,
+            release_sample,
+            note_offs,
+        );
+    }
+}
+
+/// Runs the drum rack v2 choke pass for a pad that just triggered, live or
+/// sequenced. Real-time safe: the note-off scratch buffer lives on the
+/// callback data, so a steady-state block allocates nothing.
+pub(super) fn release_rack_choke_group_track_voices(
+    data: &mut AudioCallbackData,
+    triggering_track: usize,
+    release_sample: u64,
+    frame_offset: u32,
+) {
+    if triggering_track >= MAX_TRACKS
+        || data.state.runtime.rack_choke_keys[triggering_track].load(Ordering::Acquire) == 0
+    {
+        return;
+    }
+    data.rack_choke_last_trigger[triggering_track] = release_sample;
+    let mut note_offs = std::mem::take(&mut data.rack_choke_note_offs);
+    note_offs.clear();
+    collect_rack_choke_group_track_releases(
+        &data.state,
+        &mut data.voice_pools,
+        &mut data.custom_engine_pools,
+        &mut data.countdown_events,
+        &mut data.block_events,
+        &data.rack_choke_last_trigger,
+        triggering_track,
+        release_sample,
+        &mut note_offs,
+    );
+    for note_off in note_offs.iter().copied() {
+        let seq = next_block_event_sequence(data);
+        unsafe {
+            match note_off {
+                RackSlotNoteOff::Custom { logical_id } => {
+                    send_custom_note_off(data.lg.0, logical_id, frame_offset, seq);
+                }
+                RackSlotNoteOff::Sampler { logical_id } => {
+                    send_sampler_note_off(data.lg.0, logical_id, frame_offset, seq);
+                }
+            }
+        }
+    }
+    data.rack_choke_note_offs = note_offs;
+}
+
 pub(super) fn dispatch_rack_slot_note_offs(
     data: &mut AudioCallbackData,
     frame_offset: u32,

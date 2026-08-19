@@ -110,6 +110,15 @@ pub(super) struct AudioCallbackData {
     pub(super) host_clock_was_playing: bool,
     pub(super) host_clock_play_start_sample: u64,
     pub(super) free_patch_transport_routes: [FreePatchTransportRouteState; MAX_TRACKS],
+    /// Sample at which each track last fired a drum rack v2 choke trigger,
+    /// `u64::MAX` for never. Two pads of one choke group hit on the same frame
+    /// (closed + open hat on one step) would otherwise choke each other's
+    /// brand-new voice and both fall silent; a track that triggered at the
+    /// same sample is skipped by the choke pass instead.
+    pub(super) rack_choke_last_trigger: [u64; MAX_TRACKS],
+    /// Reused note-off buffer for the choke pass, so cutting voices allocates
+    /// nothing on the audio thread after the first block that needs it.
+    pub(super) rack_choke_note_offs: Vec<RackSlotNoteOff>,
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pub(super) pending_accum_reset: [bool; MAX_TRACKS],
     pub(super) scheduled_events: Arc<ScheduledEventQueue<SCHEDULED_EVENT_QUEUE_CAPACITY>>,

@@ -2115,6 +2115,7 @@ impl App {
             graph.apply_track_bus_sends(track);
         }
         self.publish_bus_gate_runtime();
+        self.publish_rack_choke_runtime();
         self.state.publish_scheduler_snapshot();
         Ok(())
     }
@@ -2150,6 +2151,7 @@ impl App {
                 };
             }
         };
+        self.publish_rack_choke_runtime();
         let patch = BusGroupStructurePatch { before, after };
         let retained_bytes = patch.retained_bytes();
         self.history.commit(label, None, EditPatch::BusGroupStructure(patch), retained_bytes);
@@ -2400,6 +2402,7 @@ impl App {
                 rack.push_pad(crate::project::ProjectRackPad { pad_note, member: position });
             }
         }
+        self.publish_rack_choke_runtime();
         Ok(())
     }
 
@@ -2413,6 +2416,31 @@ impl App {
     ) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Assign drum rack pad", |app| {
             app.attach_track_to_group(track, group_id, Some(pad_note))
+        })
+    }
+
+    /// Sets (or clears, with `None`) the choke group of a rack pad. Choke is a
+    /// cross-track voice release at trigger time (docs/drum-rack-v2-spec.md,
+    /// "Trigger routing"), so the recorded mutation republishes the audio
+    /// thread's per-track choke table on the way out.
+    pub fn set_rack_pad_choke_group_recorded(
+        &mut self,
+        group_id: u64,
+        pad_note: i32,
+        choke: Option<u8>,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Set drum rack choke group", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let rack = group.rack.as_mut()
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let pad_index = rack.pad_index_for_note(pad_note)
+                .ok_or_else(|| format!("Drum rack has no pad {pad_note}"))?;
+            if rack.choke_group(pad_index) == choke {
+                return Err("Pad choke group is unchanged".to_string());
+            }
+            rack.set_choke_group(pad_index, choke);
+            Ok(())
         })
     }
 
@@ -2718,6 +2746,7 @@ impl App {
         // no members is nothing at all.
         self.groups
             .retain(|group| group.is_rack() || !group.members.is_empty());
+        self.publish_rack_choke_runtime();
     }
 
     pub fn delete_track_recorded(&mut self, track: usize) -> Result<usize, String> {
