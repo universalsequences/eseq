@@ -229,6 +229,21 @@ impl Editor {
         }
     }
 
+    /// Dismiss one overlay entry: dropdowns close directly; modal-family
+    /// overlays get an `:on-close` request (the app flips the binding).
+    pub(super) fn dismiss_overlay_entry(&mut self, entry: crate::widget_render::OverlayEntry) {
+        match entry.kind {
+            crate::widget_render::OverlayKind::Dropdown => {
+                crate::widget_render::dropdown::close_dropdown(entry.widget_id);
+                crate::widget_render::remove_overlay(entry.widget_id);
+            }
+            crate::widget_render::OverlayKind::Modal => {
+                // Request to close; the app flips the :is-open binding.
+                self.fire_modal_on_close(entry.widget_id);
+            }
+        }
+    }
+
     pub(super) fn try_click_focusable_widget(
         &mut self,
         precise_col: f32,
@@ -248,16 +263,7 @@ impl Editor {
             if crate::widget_render::overlay_contains(local_col, local_row) {
                 return false;
             }
-            match entry.kind {
-                crate::widget_render::OverlayKind::Dropdown => {
-                    crate::widget_render::dropdown::close_dropdown(entry.widget_id);
-                    crate::widget_render::remove_overlay(entry.widget_id);
-                }
-                crate::widget_render::OverlayKind::Modal => {
-                    // Request to close; the app flips the :is-open binding.
-                    self.fire_modal_on_close(entry.widget_id);
-                }
-            }
+            self.dismiss_overlay_entry(entry);
             self.mark_needs_redraw();
             return true;
         }
@@ -869,9 +875,11 @@ fn find_focusable_node_by_subtree_root_and_type(
     None
 }
 
-/// The open modal node in a layout, if any (open = it laid out children).
+/// The open modal-family overlay node (modal or context menu) in a layout,
+/// if any (open = it laid out children).
 pub(super) fn find_open_modal_node(node: &LayoutNode) -> Option<&LayoutNode> {
-    if node.widget_type == "modal" && !node.children.is_empty() {
+    if crate::widget_render::is_overlay_panel_widget(&node.widget_type) && !node.children.is_empty()
+    {
         return Some(node);
     }
     node.children.iter().find_map(find_open_modal_node)

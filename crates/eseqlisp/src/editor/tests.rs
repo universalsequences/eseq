@@ -13576,3 +13576,270 @@ fn module_fn_named_select_compiles_with_correct_arity() {
 }
 
 
+
+// ── Context menu: right-click plumbing + anchored overlay (eseq-dkn) ────────
+
+#[cfg(target_os = "macos")]
+const CONTEXT_MENU_PROGRAM: &str = r#"
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (effect-buffer "*panel*"
+      (v-stack
+        (box :width 58 :height 3
+          :on-right-click (lambda (event)
+            (set! menu-col (get event :col))
+            (set! menu-row (get event :row))
+            (set! menu-open true)))
+        (context-menu :is-open menu-open
+                      :anchor-col menu-col
+                      :anchor-row menu-row
+                      :on-close (lambda () (set! menu-open false))
+          (menu-item "Rename" :shortcut "cmd-R"
+            :on-select (lambda (event) (set! selected "rename")))
+          (menu-separator)
+          (menu-item "Blocked" :disabled true
+            :on-select (lambda (event) (set! selected "blocked")))
+          (menu-item "Delete"
+            :on-select (lambda (event) (set! selected "delete"))))))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+#[cfg(target_os = "macos")]
+fn context_menu_two_tile_editor() -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.runtime_mut().eval_str(CONTEXT_MENU_PROGRAM).unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    // Activate the panel tile with a click, then rebuild so the runtime
+    // layout is the panel's, laid out against the whole-window viewport.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let panel_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*panel*")
+        .unwrap();
+    let panel_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(panel_idx)
+        .unwrap()
+        .id;
+    assert_eq!(editor.active_tile, panel_tile, "panel tile must be active");
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor
+}
+
+/// Right-click at the given point, then rebuild the frame and register the
+/// resulting overlay entries, as a live render would.
+#[cfg(target_os = "macos")]
+fn right_click_at(editor: &mut Editor, col: f32, row: f32) {
+    for kind in [
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::Up(MouseButton::Right),
+    ] {
+        editor.handle_tiled_mouse_precise(mouse_event(kind, col as u16, row as u16), col, row, 0);
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(editor, 60, 20);
+    register_active_layout_overlays(editor);
+}
+
+#[cfg(target_os = "macos")]
+fn eval_string(editor: &mut Editor, expr: &str) -> String {
+    match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
+        Value::String(value) => value,
+        other => panic!("{expr} => {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_menu_item<'a>(
+    node: &'a crate::layout::LayoutNode,
+    text: &str,
+) -> Option<&'a crate::layout::LayoutNode> {
+    if node.widget_type == "menu-item"
+        && matches!(node.props.get("text"), Some(Value::String(t)) if t == text)
+    {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_menu_item(child, text))
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn right_click_opens_the_context_menu_at_the_pointer() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    assert!(
+        eval_bool(&mut editor, "menu-open"),
+        ":on-right-click must open the menu"
+    );
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert_eq!(entry.kind, crate::widget_render::OverlayKind::Modal);
+    assert!(
+        (entry.rect.col - 6.0).abs() < 0.5 && (entry.rect.row - 1.5).abs() < 0.5,
+        "panel {:?} must open at the pointer",
+        entry.rect
+    );
+    assert!(
+        !eval_bool(&mut editor, "underlay-clicked"),
+        "right-click must not activate widgets underneath"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_flips_and_clamps_near_the_screen_edge() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 57.5, 1.5);
+
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert!(
+        entry.rect.col + entry.rect.width <= 60.001,
+        "panel {:?} must stay inside the 60-col frame",
+        entry.rect
+    );
+    assert!(entry.rect.col >= -0.001, "panel {:?} clamped left", entry.rect);
+    assert!(
+        entry.rect.row + entry.rect.height <= 20.001,
+        "panel {:?} must stay inside the 20-row frame",
+        entry.rect
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Delete").expect("Delete item").clone();
+    let click_col = item.rect.col + item.rect.width * 0.5;
+    let click_row = item.rect.row + item.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col as u16, click_row as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+
+    assert_eq!(
+        eval_string(&mut editor, "selected"),
+        "delete",
+        "exactly the clicked item's handler must fire"
+    );
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "selecting an item must close the menu"
+    );
+    assert!(!eval_bool(&mut editor, "underlay-clicked"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_disabled_item_click_neither_fires_nor_closes() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Blocked").expect("Blocked item").clone();
+    let click_col = item.rect.col + item.rect.width * 0.5;
+    let click_row = item.rect.row + item.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col as u16, click_row as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+    assert!(
+        eval_bool(&mut editor, "menu-open"),
+        "a disabled item must not close the menu"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_outside_click_closes_without_firing_items() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+    assert!(eval_bool(&mut editor, "menu-open"));
+
+    // Click well below the panel, over the sequencer tile's underlay button.
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(mouse_event(kind, 30, 15), 30.0, 15.5, 0);
+    }
+
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "outside click must request close"
+    );
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+    assert!(
+        !eval_bool(&mut editor, "underlay-clicked"),
+        "the dismissing click must be consumed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_escape_closes_without_firing_items() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+    assert!(editor.modal_is_open(), "menu must gate keyboard input");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "Escape must request close"
+    );
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+}

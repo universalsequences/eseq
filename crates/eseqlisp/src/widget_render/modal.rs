@@ -127,7 +127,12 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
 }
 
 #[cfg(target_os = "macos")]
-fn emit_rounded_rect_overlay(rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport) {
+pub(crate) fn emit_rounded_rect_overlay(
+    rect: Rect,
+    color: Color,
+    radius_px: f32,
+    viewport: WidgetViewport,
+) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;

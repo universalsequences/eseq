@@ -199,6 +199,24 @@ fn pointer_dispatch_node(layout: &LayoutNode, hit_node: LayoutNode) -> LayoutNod
     nearest_pointer_capture_node(layout, &hit_node).unwrap_or(hit_node)
 }
 
+/// Right-clicks dispatch to the nearest ancestor carrying an
+/// `:on-right-click` handler when the hit node itself has none — a
+/// right-click on a label inside a right-clickable box reaches the box.
+fn right_click_dispatch_node(layout: &LayoutNode, hit_node: LayoutNode) -> LayoutNode {
+    if hit_node.props.contains_key("on-right-click") {
+        return hit_node;
+    }
+    let mut path = Vec::new();
+    if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
+        return hit_node;
+    }
+    path.into_iter()
+        .rev()
+        .find(|node| node.props.contains_key("on-right-click"))
+        .cloned()
+        .unwrap_or(hit_node)
+}
+
 fn nearest_widget_gesture_node(
     layout: &LayoutNode,
     hit_node: &LayoutNode,
@@ -845,6 +863,8 @@ impl Editor {
                         MouseEventKind::Down(MouseButton::Left)
                             | MouseEventKind::Drag(MouseButton::Left)
                             | MouseEventKind::Up(MouseButton::Left)
+                            | MouseEventKind::Down(MouseButton::Right)
+                            | MouseEventKind::Up(MouseButton::Right)
                             | MouseEventKind::ScrollUp
                             | MouseEventKind::ScrollDown
                             | MouseEventKind::ScrollLeft
@@ -934,6 +954,15 @@ impl Editor {
                 .as_ref()
                 .map(|layout| pointer_dispatch_node(layout, node.clone()))
                 .unwrap_or(node);
+            let node = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
+                self.runtime
+                    .current_layout
+                    .as_ref()
+                    .map(|layout| right_click_dispatch_node(layout, node.clone()))
+                    .unwrap_or(node)
+            } else {
+                node
+            };
 
             self.dispatch_widget_mouse_event(
                 &node,
@@ -1582,6 +1611,16 @@ impl Editor {
             return true;
         };
         let hit = pointer_dispatch_node(&layout, hit);
+        let hit = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
+            right_click_dispatch_node(&modal_node, hit)
+        } else {
+            hit
+        };
+        let selected_menu_item = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && modal_node.widget_type == "context-menu"
+            && hit.widget_type == "menu-item"
+            && hit.props.contains_key("on-select")
+            && !widget_render::context_menu::item_disabled(&hit.props);
         let output = self.dispatch_widget_mouse_event(
             &hit,
             mouse.kind,
@@ -1595,6 +1634,11 @@ impl Editor {
         );
         if !self.apply_widget_output(output) {
             self.mark_needs_redraw();
+        }
+        if selected_menu_item {
+            // Selecting an item closes the menu: fire the :on-close request
+            // (idempotent if the :on-select handler already closed it).
+            self.fire_modal_on_close(modal_node.widget_id);
         }
         true
     }

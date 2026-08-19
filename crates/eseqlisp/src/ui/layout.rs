@@ -747,6 +747,18 @@ impl<'a> LayoutEngine<'a> {
             }
         }
 
+        // Same handoff for open context menus. Their panel rect depends on
+        // child measurement, so it is recovered from the laid-out children's
+        // bounding box instead of re-derived from the node's props.
+        if widget_type == "context-menu"
+            && let Some(panel_rect) = widget_render::context_menu::panel_rect_from_children(&children)
+        {
+            let frame = current_frame_viewport().unwrap_or(rect);
+            for (key, value) in widget_render::modal::injected_layout_props(frame, panel_rect) {
+                props.insert(key, value);
+            }
+        }
+
         let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
         let stable_key = get_stable_widget_key(node);
         let stable_widget_id = get_stable_widget_id(node);

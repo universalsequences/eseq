@@ -2002,6 +2002,8 @@ impl Editor {
                     | MouseEventKind::Down(MouseButton::Left)
                     | MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::Up(MouseButton::Left)
+                    | MouseEventKind::Down(MouseButton::Right)
+                    | MouseEventKind::Up(MouseButton::Right)
             )
         {
             let tile_id = self.overlay_owner_tile(entry).unwrap_or(self.active_tile);
@@ -6327,6 +6329,39 @@ impl Editor {
         }
 
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Right) => {
+                if !widgets_visible {
+                    return;
+                }
+                // While an overlay is up, a right-click inside the topmost
+                // modal-family panel routes to its subtree (the intercept in
+                // try_handle_widget_mouse_precise); outside, it dismisses the
+                // topmost entry and is consumed, exactly like a left-click.
+                if let Some(entry) = crate::widget_render::topmost_overlay() {
+                    let local_col = precise_col - content_col as f32;
+                    let local_row = precise_row - content_row as f32;
+                    if !crate::widget_render::overlay_contains(local_col, local_row) {
+                        self.dismiss_overlay_entry(entry);
+                        self.mark_needs_redraw();
+                    } else if entry.kind == crate::widget_render::OverlayKind::Modal {
+                        let _ = self.try_handle_widget_mouse_precise(
+                            mouse,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
+                    }
+                    return;
+                }
+                let _ = self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                );
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
                 self.active_leaf_mut().active_widget_gesture = None;
@@ -9465,10 +9500,10 @@ fn inspect_hit_test_layout_impl(
     col: f32,
     scroll_dy: f32,
 ) -> Option<(&crate::layout::LayoutNode, f32)> {
-    // An open modal has a zero-size layout node (zero parent footprint);
-    // its children are anchored to the frame viewport with real rects, so
-    // descend without the containment gate.
-    if node.widget_type == "modal" {
+    // An open modal-family overlay has a zero-size layout node (zero parent
+    // footprint); its children are anchored to the frame viewport with real
+    // rects, so descend without the containment gate.
+    if crate::widget_render::is_overlay_panel_widget(&node.widget_type) {
         return node
             .children
             .iter()
