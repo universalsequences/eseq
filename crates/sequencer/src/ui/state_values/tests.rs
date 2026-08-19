@@ -49251,6 +49251,8 @@
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "groups", build_groups_value(&groups));
         rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(&groups));
+        // Pad-arm state the header's arm dot reads; -1 = no rack armed.
+        rt.set_reactive("SEQ", "armed-rack-id", Value::Number(-1.0));
         rt.set_reactive("SEQ", "bus-ids", test_number_list(&[0.0, 1.0, 2.0]));
         rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Kit"]));
         rt.set_reactive("SEQ", "bus-volumes", test_number_list(&[1.0, 1.0, 0.8]));
@@ -49361,6 +49363,37 @@
             count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
             track_count * step_count,
             "member rows are ordinary track rows, so every track keeps its step grid"
+        );
+    }
+
+    /// Drum rack v2 slice 3: the header's arm dot is a read of the host's
+    /// pad-arm state, not UI-local state, so the grid and the live keyboard
+    /// can never disagree about which kit answers the keys.
+    #[test]
+    fn metal_seq_rack_header_arm_follows_host_armed_rack_id() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/armed? 0)")
+                .expect("armed? should evaluate"),
+            Some(Value::Bool(false)),
+            "no rack is armed while SEQ.armed-rack-id is -1"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "armed-rack-id", Value::Number(7.0));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/armed? 0)")
+                .expect("armed? should evaluate"),
+            Some(Value::Bool(true)),
+            "the header reads the armed rack by group id"
         );
     }
 

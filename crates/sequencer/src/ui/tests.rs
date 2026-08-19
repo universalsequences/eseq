@@ -1873,6 +1873,7 @@
         let recording = Arc::new(AtomicBool::new(false));
         let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
@@ -1903,6 +1904,7 @@
             master_recording.clone(),
             master_recorder.clone(),
             record_armed.clone(),
+            armed_rack.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),
@@ -2523,6 +2525,7 @@
         let recording = Arc::new(AtomicBool::new(false));
         let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
@@ -2556,6 +2559,7 @@
             master_recording.clone(),
             master_recorder.clone(),
             record_armed.clone(),
+            armed_rack.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),
@@ -4886,6 +4890,7 @@
                 bus_node_ids: bus_node_ids.clone(),
                 track_groups: track_groups.clone(),
                 record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
                 recording: recording.clone(),
                 master_recording: master_recording.clone(),
                 held_notes: Arc::new(Mutex::new(Vec::new())),
@@ -5925,6 +5930,7 @@
                 bus_node_ids: bus_node_ids.clone(),
                 track_groups: track_groups.clone(),
                 record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
                 recording: recording.clone(),
                 master_recording: master_recording.clone(),
                 held_notes: Arc::new(Mutex::new(Vec::new())),
@@ -9617,6 +9623,7 @@
         let recording = Arc::new(AtomicBool::new(false));
         let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
@@ -9646,6 +9653,7 @@
             master_recording.clone(),
             master_recorder.clone(),
             record_armed.clone(),
+            armed_rack.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),

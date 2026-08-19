@@ -911,6 +911,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let recording = Arc::new(AtomicBool::new(false));
     let master_recording = Arc::new(AtomicBool::new(false));
     let record_armed = Arc::new(Mutex::new(vec![false; app.tracks.len()]));
+    let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     let fx_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
@@ -945,6 +946,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         master_recording,
         master_recorder,
         Arc::clone(&record_armed),
+        Arc::clone(&armed_rack),
         Arc::clone(&ui_epoch),
         fx_epoch,
         ui_invalidations,

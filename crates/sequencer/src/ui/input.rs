@@ -9,9 +9,24 @@ pub(crate) struct HeldKeyboardNote {
     key: char,
     sequence_roll_code: Option<crossterm::event::KeyCode>,
     transpose: f32,
-    positions: Vec<(usize, sequencer::sequencer::RecordPosition)>,
     press_time: Instant,
-    tracks: Vec<usize>,
+    /// Everything this key press sounds on, with the record position each
+    /// target was pressed at. One entry per armed track, plus the rack pad
+    /// target when a drum rack is armed.
+    targets: Vec<LiveNoteTarget>,
+}
+
+/// One live-keyboard target of a held key: the track it sounds on, at the
+/// transpose it sounds at, from the record position of the press. Armed tracks
+/// play chromatically (the key's own transpose); with a drum rack armed the
+/// matching pad plays its member track at base pitch — transpose 0 — so the
+/// member's own base note decides the pitch (docs/drum-rack-v2-spec.md,
+/// "Arming & live play").
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LiveNoteTarget {
+    track: usize,
+    transpose: f32,
+    position: sequencer::sequencer::RecordPosition,
 }
 
 pub(crate) fn layout_node_by_id(
@@ -1520,12 +1535,49 @@ fn quantized_record_position(
     }
 }
 
+/// Record position a live key press lands on for `track`. The latency
+/// compensated record clock is authoritative; a track with no anchor yet
+/// (stopped transport) falls back to its published playhead.
+fn press_record_position(
+    state: &Arc<SequencerState>,
+    track: usize,
+    press_time: Instant,
+) -> sequencer::sequencer::RecordPosition {
+    state
+        .record_position_at_instant(track, press_time)
+        .unwrap_or_else(|| sequencer::sequencer::RecordPosition {
+            step: state.transport.track_playheads[track].load(Ordering::Relaxed) as usize,
+            phase: f32::from_bits(
+                state.transport.track_playhead_phases[track].load(Ordering::Relaxed),
+            )
+            .clamp(0.0, 1.0),
+        })
+}
+
+/// Member track the armed rack's pad for `note` plays, if any. This is the
+/// whole of live pad routing (docs/drum-rack-v2-spec.md): the note selects a
+/// pad by `pad_note`, the pad names a member track, and that track is
+/// triggered directly — no `ByPitch` slot matching, and unmapped notes are
+/// simply ignored.
+fn armed_rack_pad_track(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    armed_rack: Option<u64>,
+    note: f32,
+) -> Option<usize> {
+    let group_id = armed_rack?;
+    groups
+        .iter()
+        .find(|group| group.id == group_id)?
+        .rack_pad_track(note.round() as i32)
+}
+
 /// Intercept keyboard events for live recording.
 pub(crate) fn handle_recording_key(
     key: &crossterm::event::KeyEvent,
     app: &mut sequencer::app::App,
     state: &Arc<SequencerState>,
     record_armed: &Arc<Mutex<Vec<bool>>>,
+    armed_rack: &Arc<Mutex<Option<u64>>>,
     recording: &Arc<AtomicBool>,
     keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
@@ -1561,9 +1613,8 @@ pub(crate) fn handle_recording_key(
                         key: '\0',
                         sequence_roll_code: Some(normalized_code),
                         transpose: 0.0,
-                        positions: Vec::new(),
                         press_time: Instant::now(),
-                        tracks: Vec::new(),
+                        targets: Vec::new(),
                     });
                     state
                         .transport
@@ -1662,12 +1713,37 @@ pub(crate) fn handle_recording_key(
                 return RecordingKeyOutcome::Consumed;
             }
 
-            let armed = record_armed.lock().unwrap();
             let octave = keyboard_octave.load(Ordering::Relaxed);
             let transpose = (note + octave) as f32;
-            let mut pressed_tracks = Vec::new();
             let press_time = Instant::now();
-            let mut positions = Vec::new();
+            let mut targets: Vec<LiveNoteTarget> = Vec::new();
+            {
+                let armed = record_armed.lock().unwrap();
+                for (track, a) in armed.iter().enumerate() {
+                    if *a {
+                        targets.push(LiveNoteTarget {
+                            track,
+                            transpose,
+                            position: press_record_position(state, track, press_time),
+                        });
+                    }
+                }
+            }
+            // Rack arm = pad-play mode: the key's note picks a pad, and the
+            // pad's member track is triggered at base pitch. A note with no
+            // pad is ignored; a member that is somehow armed as a track too
+            // keeps its chromatic entry rather than sounding twice.
+            if let Some(track) =
+                armed_rack_pad_track(&app.groups, *armed_rack.lock().unwrap(), transpose)
+            {
+                if !targets.iter().any(|t| t.track == track) {
+                    targets.push(LiveNoteTarget {
+                        track,
+                        transpose: 0.0,
+                        position: press_record_position(state, track, press_time),
+                    });
+                }
+            }
 
             // With roll mode on the sequencer owns triggering outright:
             // presses never take the immediate live path — playing OR
@@ -1677,37 +1753,22 @@ pub(crate) fn handle_recording_key(
             // however racy) clean, with no out-of-time live hit leaking in
             // ahead of the quantized roll. (Amends rolling-core-spec 4.3's
             // "stopped behaves as normal live keys".)
-            // Send note-on to audio thread for all armed tracks
-            for (track, a) in armed.iter().enumerate() {
-                if *a {
-                    pressed_tracks.push(track);
-                    let position = state
-                        .record_position_at_instant(track, press_time)
-                        .unwrap_or_else(|| sequencer::sequencer::RecordPosition {
-                            step: state.transport.track_playheads[track].load(Ordering::Relaxed)
-                                as usize,
-                            phase: f32::from_bits(
-                                state.transport.track_playhead_phases[track]
-                                    .load(Ordering::Relaxed),
-                            )
-                            .clamp(0.0, 1.0),
-                        });
-                    positions.push((track, position));
-                    if roll_mode {
-                        // No hit on keydown (F1): the scheduler fires the
-                        // first hit at the next roll-grid boundary.
-                        state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
-                            track,
-                            transpose,
-                        });
-                    } else {
-                        let _ = keyboard_tx.send(KeyboardTrigger {
-                            track,
-                            transpose,
-                            velocity: 1.0,
-                            note_off: false,
-                        });
-                    }
+            // Send note-on to audio thread for every target.
+            for target in &targets {
+                if roll_mode {
+                    // No hit on keydown (F1): the scheduler fires the
+                    // first hit at the next roll-grid boundary.
+                    state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
+                        track: target.track,
+                        transpose: target.transpose,
+                    });
+                } else {
+                    let _ = keyboard_tx.send(KeyboardTrigger {
+                        track: target.track,
+                        transpose: target.transpose,
+                        velocity: 1.0,
+                        note_off: false,
+                    });
                 }
             }
 
@@ -1715,9 +1776,8 @@ pub(crate) fn handle_recording_key(
                 key: c,
                 sequence_roll_code: None,
                 transpose,
-                positions,
                 press_time,
-                tracks: pressed_tracks,
+                targets,
             });
             RecordingKeyOutcome::Consumed
         }
@@ -1731,20 +1791,20 @@ pub(crate) fn handle_recording_key(
 
             // Record into pattern if recording + playing
             if let Some(note) = held_entry {
-                for track in &note.tracks {
+                for target in &note.targets {
                     if roll_mode {
                         // Cancels every roll hit not yet inside the lookahead
                         // horizon (F3).
                         state.push_roll_command(sequencer::sequencer::RollCommand::NoteOff {
-                            track: *track,
-                            transpose: note.transpose,
+                            track: target.track,
+                            transpose: target.transpose,
                         });
                     }
                     // The audio note-off always goes out so a sounding voice
                     // (rolled or normal) releases its envelope.
                     let _ = keyboard_tx.send(KeyboardTrigger {
-                        track: *track,
-                        transpose: note.transpose,
+                        track: target.track,
+                        transpose: target.transpose,
                         velocity: 0.0,
                         note_off: true,
                     });
@@ -1777,13 +1837,18 @@ pub(crate) fn handle_recording_key(
                     // arrangement view promotes into arrangement capture so
                     // this performance records as a take; the session view
                     // stamps loop overdub into the looping live pattern.
-                    if !note.positions.is_empty() {
+                    if !note.targets.is_empty() {
                         app.stamp_recording_kind_for_note();
                     }
                     let song_authority = app.song_playback_authority_active();
                     let overdub = app.recording_kind
                         == Some(sequencer::app::song_transport::RecordingKind::Overdub);
-                    for (track, position) in &note.positions {
+                    for &LiveNoteTarget {
+                        track,
+                        transpose,
+                        position,
+                    } in &note.targets
+                    {
                         // Song-mode take recording (takes spec 8.4): while
                         // arrangement capture is active, an armed track's
                         // notes retarget into its pending take at
@@ -1792,9 +1857,9 @@ pub(crate) fn handle_recording_key(
                         // pattern is NOT written.
                         if !overdub
                             && app.take_record_note(
-                                *track,
+                                track,
                                 note.press_time,
-                                note.transpose,
+                                transpose,
                                 duration_steps,
                             )
                         {
@@ -1815,35 +1880,39 @@ pub(crate) fn handle_recording_key(
                             // across row boundaries and the layered notes
                             // are audible. A lane currently playing a take
                             // refuses overdub — its note is dropped.
-                            if !app.claim_overdub_lane(*track) {
+                            if !app.claim_overdub_lane(track) {
                                 continue;
                             }
                         }
-                        let num_steps = state.pattern.track_params[*track].get_num_steps();
+                        // Each target quantizes against its OWN track's
+                        // timebase and length, which is what lets one rack
+                        // performance land a 1/64 hat pad and a 1/16 kick pad
+                        // on their own grids.
+                        let num_steps = state.pattern.track_params[track].get_num_steps();
                         let (local_step, delay) = quantized_record_position(
                             position.step,
                             position.phase,
                             num_steps,
-                            state.pattern.track_params[*track].get_timebase(),
+                            state.pattern.track_params[track].get_timebase(),
                             quantize,
                         );
-                        if !state.pattern.patterns[*track].is_active(local_step) {
-                            state.pattern.patterns[*track].toggle_step(local_step);
+                        if !state.pattern.patterns[track].is_active(local_step) {
+                            state.pattern.patterns[track].toggle_step(local_step);
                         }
-                        state.pattern.chord_data[*track].add_note_with_timing(
+                        state.pattern.chord_data[track].add_note_with_timing(
                             local_step,
-                            note.transpose,
+                            transpose,
                             duration_steps,
                             delay,
                         );
-                        let first_note = state.pattern.chord_data[*track].get(local_step, 0);
-                        state.pattern.step_data[*track].set(
+                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
+                        state.pattern.step_data[track].set(
                             local_step,
                             StepParam::Transpose,
                             first_note,
                         );
-                        state.pattern.step_data[*track].set(local_step, StepParam::Velocity, 1.0);
-                        state.pattern.step_data[*track].set(
+                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
+                        state.pattern.step_data[track].set(
                             local_step,
                             StepParam::Duration,
                             duration_steps,
@@ -1869,13 +1938,13 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
-        handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        handle_recording_key, held_note_for_key, is_active_roll_rate_key, note_from_key,
-        quantized_record_position,
+        armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
+        handle_metal_command_shortcut, handle_metal_soft_step_param_key,
+        handle_number_picker_edit_key_for_widget, handle_recording_key, held_note_for_key,
+        is_active_roll_rate_key, note_from_key, quantized_record_position,
         sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
-        HeldKeyboardNote, RollRecordBuffer, SequencerHistoryShortcut, SoftStepParamEdit,
-        PROCESS_LANE_MODE_OFFSET,
+        HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
+        SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1960,15 +2029,15 @@ mod live_keyboard_tests {
             key: 'a',
             sequence_roll_code: None,
             transpose: 0.0,
-            positions: vec![(
-                0,
-                RecordPosition {
+            press_time: Instant::now(),
+            targets: vec![LiveNoteTarget {
+                track: 0,
+                transpose: 0.0,
+                position: RecordPosition {
                     step: 0,
                     phase: 0.0,
                 },
-            )],
-            press_time: Instant::now(),
-            tracks: vec![0],
+            }],
         }]));
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
 
@@ -1995,6 +2064,7 @@ mod live_keyboard_tests {
         state.transport.roll_mode.store(true, Ordering::Release);
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let record_armed = Arc::new(Mutex::new(vec![false]));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let recording = Arc::new(AtomicBool::new(false));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(0));
@@ -2008,6 +2078,7 @@ mod live_keyboard_tests {
             &mut app,
             &state,
             &record_armed,
+            &armed_rack,
             &recording,
             &keyboard_tx,
             &keyboard_octave,
@@ -2030,6 +2101,7 @@ mod live_keyboard_tests {
             &mut app,
             &state,
             &record_armed,
+            &armed_rack,
             &recording,
             &keyboard_tx,
             &keyboard_octave,
@@ -2044,6 +2116,261 @@ mod live_keyboard_tests {
             state.drain_roll_commands().as_slice(),
             [sequencer::sequencer::RollCommand::SequenceRoll { on: false }]
         ));
+    }
+
+    /// Drum rack v2 slice 3 (`docs/drum-rack-v2-spec.md`, "Arming & live
+    /// play"): a kit whose pads answer notes 36 and 38 on member tracks 1
+    /// and 2.
+    fn rack_fixture() -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.5, 0.5, 0.5],
+            collapsed: false,
+            members: vec![1, 2],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig {
+                pads: vec![
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 36,
+                        member: 0,
+                    },
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 38,
+                        member: 1,
+                    },
+                ],
+                choke_groups: vec![None, None],
+            }),
+        }
+    }
+
+    fn rack_test_app(state: Arc<SequencerState>, track_count: usize) -> sequencer::app::App {
+        let mut app = soft_edit_test_app(state);
+        app.tracks = (0..track_count).map(|i| format!("Track {i}")).collect();
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count)
+                .expect("test track registry");
+        app.groups = vec![rack_fixture()];
+        app
+    }
+
+    /// Press `key` with the octave placing `a` at MIDI 36, then release it.
+    fn press_and_release_rack_key(
+        key: char,
+        app: &mut sequencer::app::App,
+        state: &Arc<SequencerState>,
+        record_armed: &Arc<Mutex<Vec<bool>>>,
+        armed_rack: &Arc<Mutex<Option<u64>>>,
+        recording: &Arc<AtomicBool>,
+        keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::KeyboardTrigger>,
+        held: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    ) -> RecordingKeyOutcome {
+        let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(36));
+        let roll_record = Arc::new(Mutex::new(RollRecordBuffer::default()));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let mut event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE);
+        event.kind = KeyEventKind::Press;
+        handle_recording_key(
+            &event,
+            app,
+            state,
+            record_armed,
+            armed_rack,
+            recording,
+            keyboard_tx,
+            &keyboard_octave,
+            held,
+            &roll_record,
+            &ui_epoch,
+            false,
+        );
+        event.kind = KeyEventKind::Release;
+        handle_recording_key(
+            &event,
+            app,
+            state,
+            record_armed,
+            armed_rack,
+            recording,
+            keyboard_tx,
+            &keyboard_octave,
+            held,
+            &roll_record,
+            &ui_epoch,
+            false,
+        )
+    }
+
+    #[test]
+    fn armed_rack_maps_pad_notes_to_member_tracks_and_ignores_the_rest() {
+        let groups = [rack_fixture()];
+        assert_eq!(
+            armed_rack_pad_track(&groups, Some(7), 36.0),
+            Some(1),
+            "pad note 36 plays the first member track"
+        );
+        assert_eq!(armed_rack_pad_track(&groups, Some(7), 38.0), Some(2));
+        assert_eq!(
+            armed_rack_pad_track(&groups, Some(7), 37.0),
+            None,
+            "a note with no pad is ignored"
+        );
+        assert_eq!(
+            armed_rack_pad_track(&groups, None, 36.0),
+            None,
+            "no rack armed means no pad routing at all"
+        );
+        assert_eq!(
+            armed_rack_pad_track(&groups, Some(99), 36.0),
+            None,
+            "an arm pointing at no live group routes nothing"
+        );
+    }
+
+    #[test]
+    fn rack_arm_plays_pad_member_track_at_base_pitch() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        let record_armed = Arc::new(Mutex::new(vec![false; 3]));
+        let armed_rack = Arc::new(Mutex::new(Some(7)));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+
+        // 'a' at this octave is MIDI 36 — the first pad.
+        press_and_release_rack_key(
+            'a',
+            &mut app,
+            &state,
+            &record_armed,
+            &armed_rack,
+            &recording,
+            &keyboard_tx,
+            &held,
+        );
+        let on = keyboard_rx.recv().expect("pad note-on");
+        assert_eq!(on.track, 1, "pad 36 triggers its member track");
+        assert_eq!(
+            on.transpose, 0.0,
+            "a pad plays its member at base pitch, not at the key's pitch"
+        );
+        assert!(!on.note_off);
+        let off = keyboard_rx.recv().expect("pad note-off");
+        assert_eq!((off.track, off.transpose, off.note_off), (1, 0.0, true));
+
+        // 'w' is MIDI 37 — no pad answers it.
+        press_and_release_rack_key(
+            'w',
+            &mut app,
+            &state,
+            &record_armed,
+            &armed_rack,
+            &recording,
+            &keyboard_tx,
+            &held,
+        );
+        assert!(
+            keyboard_rx.try_recv().is_err(),
+            "an unmapped note triggers nothing"
+        );
+    }
+
+    #[test]
+    fn arming_a_member_track_plays_it_chromatically_instead_of_as_a_pad() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        // Member track 1 armed as an ordinary track; the rack is not armed —
+        // the two are mutually exclusive.
+        let record_armed = Arc::new(Mutex::new(vec![false, true, false]));
+        let armed_rack = Arc::new(Mutex::new(None));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+
+        press_and_release_rack_key(
+            'a',
+            &mut app,
+            &state,
+            &record_armed,
+            &armed_rack,
+            &recording,
+            &keyboard_tx,
+            &held,
+        );
+        let on = keyboard_rx.recv().expect("chromatic note-on");
+        assert_eq!(
+            (on.track, on.transpose),
+            (1, 36.0),
+            "an armed member plays the key's pitch, not a pad at base pitch"
+        );
+        let off = keyboard_rx.recv().expect("chromatic note-off");
+        assert_eq!((off.track, off.transpose, off.note_off), (1, 36.0, true));
+        assert!(
+            keyboard_rx.try_recv().is_err(),
+            "only the armed track sounds"
+        );
+    }
+
+    #[test]
+    fn rack_recording_quantizes_each_pad_against_its_own_member_timebase() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        // Kick pad: 16 steps of 1/16. Hat pad: 64 steps of 1/64. Both are
+        // passing step 5 when the pads are hit, so only the member's own
+        // timebase decides where the hit lands.
+        state.pattern.track_params[1].set_num_steps(16);
+        state.pattern.track_params[1].set_timebase(Timebase::Sixteenth);
+        state.pattern.track_params[2].set_num_steps(64);
+        state.pattern.track_params[2].set_timebase(Timebase::SixtyFourth);
+        for track in [1usize, 2] {
+            state.transport.track_playheads[track].store(5, Ordering::Relaxed);
+            state.transport.track_playhead_phases[track].store(0f32.to_bits(), Ordering::Relaxed);
+        }
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state
+            .transport
+            .record_quantize
+            .store(RecordQuantize::Quarter as u32, Ordering::Relaxed);
+
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        let record_armed = Arc::new(Mutex::new(vec![false; 3]));
+        let armed_rack = Arc::new(Mutex::new(Some(7)));
+        let recording = Arc::new(AtomicBool::new(true));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+
+        for key in ['a', 's'] {
+            assert_eq!(
+                press_and_release_rack_key(
+                    key,
+                    &mut app,
+                    &state,
+                    &record_armed,
+                    &armed_rack,
+                    &recording,
+                    &keyboard_tx,
+                    &held,
+                ),
+                RecordingKeyOutcome::Recorded,
+                "pad {key} should record into its member pattern"
+            );
+        }
+
+        // 1/16 track: a quarter-note grid is 4 steps, so step 5 snaps to 4.
+        assert!(state.pattern.patterns[1].is_active(4));
+        assert_eq!(state.pattern.chord_data[1].get(4, 0), 0.0);
+        // 1/64 track: the same grid is 16 steps, so step 5 snaps to 0 — a
+        // different landing step from the same performance.
+        assert!(state.pattern.patterns[2].is_active(0));
+        assert_eq!(state.pattern.chord_data[2].get(0, 0), 0.0);
+        assert!(
+            !state.pattern.patterns[2].is_active(4),
+            "the hat pad must not borrow the kick's grid"
+        );
+        assert!(
+            (0..16).all(|step| !state.pattern.patterns[0].is_active(step)),
+            "a track outside the rack records nothing"
+        );
     }
 
     #[test]

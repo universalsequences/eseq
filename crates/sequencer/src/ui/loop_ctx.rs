@@ -102,6 +102,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_roll_windows: Vec<(u64, u64)>,
     pub(crate) prev_selected_tracks: HashSet<usize>,
     pub(crate) prev_groups: Vec<sequencer::project::ProjectTrackGroup>,
+    pub(crate) prev_armed_rack: Option<u64>,
     pub(crate) prev_track_peak_levels: Vec<f64>,
     pub(crate) prev_rack_slot_peak_levels: Vec<Vec<f64>>,
     pub(crate) prev_bus_peak_levels: Vec<f64>,
@@ -198,6 +199,10 @@ pub(crate) struct SharedHandles {
     pub(crate) bus_node_ids: Arc<Mutex<Vec<app::BusNodeIds>>>,
     pub(crate) track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
     pub(crate) record_armed: Arc<Mutex<Vec<bool>>>,
+    /// Group id of the drum rack whose pads the live keyboard plays, if any
+    /// (docs/drum-rack-v2-spec.md). Mutually exclusive with arming that rack's
+    /// member tracks; unrelated tracks may stay armed alongside it.
+    pub(crate) armed_rack: Arc<Mutex<Option<u64>>>,
     pub(crate) recording: Arc<AtomicBool>,
     pub(crate) master_recording: Arc<AtomicBool>,
     pub(crate) held_notes: Arc<Mutex<Vec<HeldKeyboardNote>>>,

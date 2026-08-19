@@ -877,6 +877,16 @@ impl ProjectTrackGroup {
     pub fn is_rack(&self) -> bool {
         self.rack.is_some()
     }
+
+    /// Track index the pad answering `pad_note` plays, when this group is a
+    /// rack with such a pad. This is the whole of live pad routing
+    /// (docs/drum-rack-v2-spec.md, "Trigger routing"): a note with no matching
+    /// pad — or on a plain group — resolves to nothing and is ignored.
+    pub fn rack_pad_track(&self, pad_note: i32) -> Option<usize> {
+        let rack = self.rack.as_ref()?;
+        let pad = rack.pads.get(rack.pad_index_for_note(pad_note)?)?;
+        self.members.get(pad.member).copied()
+    }
 }
 
 /// The drum-rack layer over a track group: an ordered pad map plus per-pad

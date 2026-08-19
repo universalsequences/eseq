@@ -2110,6 +2110,54 @@ mod process_binding_target_tests {
     }
 }
 
+/// Toggles a track's record arm, keeping the drum-rack arm exclusive with it:
+/// arming a member track hands the live keyboard back to chromatic play, so
+/// the rack it belongs to disarms (docs/drum-rack-v2-spec.md, "Arming & live
+/// play"). Tracks outside the armed rack leave pad play alone. Returns the new
+/// arm state, or `None` when the track index is out of range.
+pub(crate) fn toggle_track_record_arm(
+    record_armed: &mut [bool],
+    armed_rack: &mut Option<u64>,
+    groups: &[sequencer::project::ProjectTrackGroup],
+    track: usize,
+) -> Option<bool> {
+    let flag = record_armed.get_mut(track)?;
+    *flag = !*flag;
+    let armed = *flag;
+    if armed {
+        if let Some(rack_id) = *armed_rack {
+            let is_member = groups
+                .iter()
+                .any(|group| group.id == rack_id && group.members.contains(&track));
+            if is_member {
+                *armed_rack = None;
+            }
+        }
+    }
+    Some(armed)
+}
+
+/// Toggles a drum rack's pad arm. Only one rack answers the keyboard at a
+/// time, and arming one disarms its own member tracks so a member never
+/// responds to a key both as a pad and chromatically. Returns the new state.
+pub(crate) fn toggle_rack_pad_arm(
+    armed_rack: &mut Option<u64>,
+    record_armed: &mut [bool],
+    members: &[usize],
+    group_id: u64,
+) -> bool {
+    let armed = *armed_rack != Some(group_id);
+    *armed_rack = armed.then_some(group_id);
+    if armed {
+        for member in members {
+            if let Some(flag) = record_armed.get_mut(*member) {
+                *flag = false;
+            }
+        }
+    }
+    armed
+}
+
 pub(crate) fn init_runtime(
     app: &app::App,
     state: Arc<SequencerState>,
@@ -2129,6 +2177,7 @@ pub(crate) fn init_runtime(
     master_recording: Arc<AtomicBool>,
     master_recorder: Arc<sequencer::recorder::MasterRecorder>,
     record_armed: Arc<Mutex<Vec<bool>>>,
+    armed_rack: Arc<Mutex<Option<u64>>>,
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
@@ -2235,6 +2284,8 @@ pub(crate) fn init_runtime(
                 ("selected-tracks", Value::List(vec![])),
                 ("groups", Value::List(vec![])),
                 ("group-collapsed", Value::List(vec![])),
+                // Group id of the pad-armed drum rack; -1 = none.
+                ("armed-rack-id", Value::Number(-1.0)),
                 ("delete-target-version", Value::Number(0.0)),
                 ("selected-mod-routes", Value::List(vec![])),
                 (
@@ -6244,23 +6295,65 @@ pub(crate) fn init_runtime(
 
     // seq-toggle-record-arm — toggle record arm for a given track index
     let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-record-arm", move |args, _ctx| {
         let Some(Value::Number(track_idx)) = args.first() else {
             return Err("seq-toggle-record-arm: expected track index".into());
         };
         let track = *track_idx as usize;
-        let mut armed = ra.lock().unwrap();
-        if track < armed.len() {
-            armed[track] = !armed[track];
+        let armed = toggle_track_record_arm(
+            &mut ra.lock().unwrap(),
+            &mut ar.lock().unwrap(),
+            &groups_state.lock().unwrap(),
+            track,
+        );
+        match armed {
             // Disarming the last track no longer stops recording: record
             // mode stands on its own now (arrangement capture needs no
             // armed track).
-            ui_ep.fetch_add(1, Ordering::Relaxed);
-            Ok(Value::Bool(armed[track]))
-        } else {
-            Ok(Value::Bool(false))
+            Some(armed) => {
+                ui_ep.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Bool(armed))
+            }
+            None => Ok(Value::Bool(false)),
         }
+    });
+
+    // seq-toggle-rack-arm — (seq-toggle-rack-arm group-id)
+    // Arms a drum rack for pad play: the live keyboard stops playing tracks
+    // chromatically and starts hitting this kit's pads. Only one rack is armed
+    // at a time, and arming it disarms its own member tracks so a member never
+    // answers a key both as a pad and chromatically.
+    let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-rack-arm", move |args, _ctx| {
+        let Some(Value::Number(group_id)) = args.first() else {
+            return Err("seq-toggle-rack-arm: expected group id".into());
+        };
+        let group_id = *group_id as u64;
+        let members = {
+            let groups = groups_state.lock().unwrap();
+            match groups
+                .iter()
+                .find(|group| group.id == group_id && group.is_rack())
+            {
+                Some(group) => group.members.clone(),
+                None => {
+                    return Err(format!("seq-toggle-rack-arm: rack {group_id} not found").into());
+                }
+            }
+        };
+        // Lock order matches `seq-toggle-record-arm`: record arms, then the
+        // rack arm.
+        let mut track_armed = ra.lock().unwrap();
+        let mut rack = ar.lock().unwrap();
+        let armed = toggle_rack_pad_arm(&mut rack, &mut track_armed, &members, group_id);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(armed))
     });
 
     let sample_db = Rc::new(
@@ -7468,6 +7561,94 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drum rack v2 slice 3 (`docs/drum-rack-v2-spec.md`, "Arming & live
+    /// play"): the rack header is one more armable target, exclusive with its
+    /// own members.
+    fn arm_test_rack() -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.5, 0.5, 0.5],
+            collapsed: false,
+            members: vec![1, 2],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig::default()),
+        }
+    }
+
+    #[test]
+    fn arming_a_rack_disarms_its_members_and_only_one_rack_at_a_time() {
+        let groups = [arm_test_rack()];
+        let mut record_armed = vec![true, true, false, true];
+        let mut armed_rack = None;
+
+        assert!(toggle_rack_pad_arm(
+            &mut armed_rack,
+            &mut record_armed,
+            &groups[0].members,
+            7
+        ));
+        assert_eq!(armed_rack, Some(7));
+        assert_eq!(
+            record_armed,
+            vec![true, false, false, true],
+            "arming the rack disarms its members, and only its members"
+        );
+
+        // A second rack takes the keyboard from the first.
+        assert!(toggle_rack_pad_arm(&mut armed_rack, &mut record_armed, &[3], 9));
+        assert_eq!(armed_rack, Some(9));
+        assert_eq!(record_armed, vec![true, false, false, false]);
+
+        // Toggling the armed rack again disarms it outright.
+        assert!(!toggle_rack_pad_arm(
+            &mut armed_rack,
+            &mut record_armed,
+            &[3],
+            9
+        ));
+        assert_eq!(armed_rack, None);
+    }
+
+    #[test]
+    fn arming_a_member_track_disarms_the_rack_but_a_loose_track_does_not() {
+        let groups = [arm_test_rack()];
+        let mut record_armed = vec![false; 4];
+        let mut armed_rack = Some(7);
+
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 3),
+            Some(true)
+        );
+        assert_eq!(
+            armed_rack,
+            Some(7),
+            "arming a track outside the rack leaves pad play alone"
+        );
+
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 2),
+            Some(true)
+        );
+        assert_eq!(
+            armed_rack, None,
+            "arming a member hands the keyboard back to chromatic play"
+        );
+
+        // Disarming never re-arms the rack.
+        armed_rack = Some(7);
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 2),
+            Some(false)
+        );
+        assert_eq!(armed_rack, Some(7));
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 9),
+            None,
+            "an out-of-range track toggles nothing"
+        );
+    }
 
     fn def_song_value_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> f64 {
         match &*map.get(key).expect(key).borrow() {

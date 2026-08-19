@@ -989,6 +989,7 @@ mod tests {
             bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
             track_groups: Arc::new(Mutex::new(app.groups.clone())),
             record_armed: Arc::new(Mutex::new(vec![false])),
+            armed_rack: Arc::new(Mutex::new(None)),
             recording: Arc::new(AtomicBool::new(false)),
             master_recording: Arc::new(AtomicBool::new(false)),
             held_notes: Arc::new(Mutex::new(Vec::new())),

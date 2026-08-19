@@ -89,6 +89,7 @@ pub(crate) fn run_event_loop(
         prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
+        prev_armed_rack: None,
         prev_track_peak_levels: Vec::new(),
         prev_rack_slot_peak_levels: Vec::new(),
         prev_bus_peak_levels: Vec::new(),
@@ -822,7 +823,11 @@ pub(crate) fn run_event_loop(
                     // neither requires an armed track. Text/value widget focus
                     // still wins in `should_route_to_live_keyboard` below.
                     let roll_rate_key = is_active_roll_rate_key(&shared.state, &key);
-                    let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a);
+                    // An armed drum rack is an arm target too: with only the
+                    // rack armed the keys must still reach the live keyboard,
+                    // where they resolve to pads.
+                    let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a)
+                        || shared.armed_rack.lock().unwrap().is_some();
                     let recording_key_outcome = if (sequence_roll_binding
                         || roll_rate_key
                         || any_armed
@@ -839,6 +844,7 @@ pub(crate) fn run_event_loop(
                             &mut app,
                             &shared.state,
                             &shared.record_armed,
+                            &shared.armed_rack,
                             &shared.recording,
                             &shared.keyboard_tx,
                             &shared.keyboard_octave,
@@ -1136,6 +1142,7 @@ pub(crate) fn run_event_loop(
                         }
                         *shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *shared.record_armed.lock().unwrap() = vec![false; track_names.len()];
+                        *shared.armed_rack.lock().unwrap() = None;
                         shared.recording.store(false, Ordering::Relaxed);
                         frame.recording_history_open = false;
                         // Keep the shared bus mirror in sync with the loaded buses,

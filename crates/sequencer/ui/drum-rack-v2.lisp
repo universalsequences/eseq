@@ -80,18 +80,15 @@
       (range 0 (len SEQ.bus-ids)))))
 
 ;; ── Rack arming ─────────────────────────────────────────────────────────
-;; Which rack the live keyboard plays as pads. The control is UI-only in this
-;; slice; note->pad->member triggering lands with the pad-play slice, which
-;; takes ownership of this state.
-
-(defstate armed-rack-id -1)
+;; Which rack the live keyboard plays as pads (SEQ.armed-rack-id, -1 = none).
+;; The host owns this: `seq-toggle-rack-arm` flips it, disarms the rack's own
+;; member tracks, and the live-keyboard path routes note->pad->member track.
 
 (def armed? (gidx)
-  (and (>= gidx 0) (= armed-rack-id (group-id gidx))))
+  (and (>= gidx 0) (= SEQ.armed-rack-id (group-id gidx))))
 
 (def toggle-armed (gidx)
-  (let ((gid (group-id gidx)))
-    (set! armed-rack-id (if (= armed-rack-id gid) -1 gid))))
+  (seq-toggle-rack-arm (group-id gidx)))
 
 (def toggle-collapsed (gidx)
   (seq-toggle-group-collapsed (group-id gidx)))

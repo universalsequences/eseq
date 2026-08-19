@@ -109,7 +109,10 @@ Two independent arm targets, exactly as requested:
 
 Arm exclusivity follows whatever the existing single-armed-track rule is; the
 rack header is one more armable target. Arming the rack does not arm members
-(and vice versa).
+(and vice versa). As shipped: one rack is armed at a time, arming a rack
+disarms *its own* member tracks, and arming a member track disarms the rack it
+belongs to. Tracks outside the rack keep the existing multi-arm behavior and
+play chromatically alongside the pads.
 
 ## Trigger routing
 
@@ -259,9 +262,10 @@ per-track p-locks).
 
 ## Open questions
 
-- Should the rack header's arm and a member arm be mutually exclusive, or can
-  the rack stay armed while one member is "focus-armed" for chromatic play?
-  (Default: exclusive, same as any two tracks.)
+- ~~Should the rack header's arm and a member arm be mutually exclusive, or
+  can the rack stay armed while one member is "focus-armed" for chromatic
+  play?~~ Resolved: exclusive, scoped to the rack's own members (see "Arming &
+  live play").
 - Kit-as-preset: what exactly serializes when saving a drum rack to the
   browser (member instruments + fx + pad map, but presumably not patterns?).
 - Does the Instrument Rack eventually migrate onto this model (a group with

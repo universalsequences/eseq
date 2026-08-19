@@ -176,6 +176,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recording = Arc::new(AtomicBool::new(false));
     let master_recording = Arc::new(AtomicBool::new(false));
     let record_armed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(vec![false; track_names.len()]));
+    // Drum rack v2 pad-play arm: the group id of the rack the live keyboard
+    // plays as pads, if any (docs/drum-rack-v2-spec.md, "Arming & live play").
+    let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     // Keyboard trigger sender for live playing when armed
     let keyboard_tx = app.graph.keyboard_tx.clone();
     // Keyboard octave offset for live playing
@@ -209,6 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         master_recording.clone(),
         master_recorder.clone(),
         record_armed.clone(),
+        armed_rack.clone(),
         ui_epoch.clone(),
         fx_epoch.clone(),
         ui_invalidations.clone(),
@@ -249,6 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bus_node_ids: bus_node_ids.clone(),
         track_groups: track_groups.clone(),
         record_armed: record_armed.clone(),
+        armed_rack: armed_rack.clone(),
         recording: recording.clone(),
         master_recording: master_recording.clone(),
         held_notes: held_notes.clone(),

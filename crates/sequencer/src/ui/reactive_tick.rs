@@ -435,6 +435,22 @@ pub(crate) fn reactive_tick_and_render(
             }
         }
 
+        // Rack pad-arm reconcile: the arm native mutates the shared handle;
+        // the grid header reads SEQ.armed-rack-id (-1 = no rack armed).
+        {
+            let armed_rack = *ctx.shared.armed_rack.lock().unwrap();
+            if armed_rack != ctx.frame.prev_armed_rack {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "armed-rack-id",
+                    Value::Number(armed_rack.map(|id| id as f64).unwrap_or(-1.0)),
+                );
+                ctx.frame.prev_armed_rack = armed_rack;
+                needs_reactive_cycle = true;
+            }
+        }
+
         // Multi-select highlight reconcile. Runs after the track-switch block
         // so it overrides the single-select bindings written there.
         {

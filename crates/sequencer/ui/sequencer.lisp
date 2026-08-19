@@ -2045,9 +2045,9 @@
           :border-color :transparent
           :color :white
           :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
-        ;; Arm = pad-play mode: the live keyboard becomes this kit's pads.
-        ;; Slice 2 ships the control; the note->pad->member trigger path lands
-        ;; with the pad-play slice, which takes over `armed-rack-id`.
+        ;; Arm = pad-play mode: the live keyboard becomes this kit's pads —
+        ;; a key whose note matches a pad triggers that pad's member track at
+        ;; base pitch, and records into that member's own pattern.
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
           :key (str "rack-arm-" (eseq.drum-rack-v2/group-id gidx))
