@@ -2827,6 +2827,25 @@
             .collect()
     }
 
+    fn top_level_tree_field_keywords(value: &Value, field: &str) -> Vec<Option<String>> {
+        let Value::List(items) = value else {
+            panic!("tree should be a list: {value:?}");
+        };
+        items
+            .iter()
+            .map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get(field).and_then(|value| match &*value.borrow() {
+                    Value::Keyword(value) => Some(value.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
     fn top_level_tree_field_bools(value: &Value, field: &str) -> Vec<Option<bool>> {
         let Value::List(items) = value else {
             panic!("tree should be a list: {value:?}");
@@ -2927,6 +2946,7 @@
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
         let names = top_level_tree_field_strings(&tree, "name");
+        let icons = top_level_tree_field_keywords(&tree, "icon");
         let draggable = top_level_tree_field_bools(&tree, "draggable");
 
         assert_eq!(
@@ -2946,6 +2966,10 @@
         assert_eq!(kinds[4].as_deref(), Some("builtin-instrument"));
         assert_eq!(names[3].as_deref(), Some("rack"));
         assert_eq!(names[4].as_deref(), Some("layer-rack"));
+        assert_eq!(icons[1].as_deref(), Some("sampler"));
+        assert_eq!(icons[2].as_deref(), Some("sine"));
+        assert_eq!(icons[3].as_deref(), Some("sampler"));
+        assert_eq!(icons[4].as_deref(), Some("sampler"));
         assert_eq!(
             &draggable[..5],
             &[
@@ -26960,45 +26984,60 @@
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
-                ("num-tracks", Value::Number(3.0)),
-                ("track-ids", test_number_list(&[0.0, 1.0, 2.0])),
-                ("track-names", test_string_list(&["kick", "snare", "hat"])),
-                ("track-colors", test_multi_track_colors(3)),
-                ("track-collapsed", test_bool_list(&[false, true, false])),
+                ("num-tracks", Value::Number(4.0)),
+                ("track-ids", test_number_list(&[0.0, 1.0, 2.0, 3.0])),
+                (
+                    "track-names",
+                    test_string_list(&["kick", "snare", "hat", "modulator"]),
+                ),
+                ("track-colors", test_multi_track_colors(4)),
+                (
+                    "track-collapsed",
+                    test_bool_list(&[false, false, false, true]),
+                ),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
                 ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
-                ("record-armed", test_repeated_bool_list(false, 3)),
-                ("track-mutes", test_repeated_bool_list(false, 3)),
-                ("track-solos", test_repeated_bool_list(false, 3)),
-                ("track-muted-by-solo", test_repeated_bool_list(false, 3)),
-                ("track-muted-effective", test_repeated_bool_list(false, 3)),
+                ("record-armed", test_repeated_bool_list(false, 4)),
+                ("track-mutes", test_repeated_bool_list(false, 4)),
+                ("track-solos", test_repeated_bool_list(false, 4)),
+                ("track-muted-by-solo", test_repeated_bool_list(false, 4)),
+                ("track-muted-effective", test_repeated_bool_list(false, 4)),
                 (
                     "track-color-r-effective",
-                    test_multi_track_color_channel(3, 0),
+                    test_multi_track_color_channel(4, 0),
                 ),
                 (
                     "track-color-g-effective",
-                    test_multi_track_color_channel(3, 1),
+                    test_multi_track_color_channel(4, 1),
                 ),
                 (
                     "track-color-b-effective",
-                    test_multi_track_color_channel(3, 2),
+                    test_multi_track_color_channel(4, 2),
                 ),
                 (
                     "track-instrument-types",
-                    test_string_list(&["sampler", "custom", "rack"]),
+                    test_string_list(&["sampler", "custom", "rack", "modulator"]),
                 ),
                 (
                     "track-mod-output-available",
-                    test_repeated_bool_list(false, 3),
+                    test_repeated_bool_list(false, 4),
                 ),
                 ("mod-routes", test_list(vec![])),
                 ("selected-mod-routes", test_list(vec![])),
-                ("track-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                ("track-mixer-pans", test_number_list(&[0.0, 0.0, 0.0])),
-                ("track-outputs", test_string_list(&["main", "main", "main"])),
+                (
+                    "track-volumes",
+                    test_number_list(&[1.0, 1.0, 1.0, 1.0]),
+                ),
+                (
+                    "track-mixer-pans",
+                    test_number_list(&[0.0, 0.0, 0.0, 0.0]),
+                ),
+                (
+                    "track-outputs",
+                    test_string_list(&["main", "main", "main", "main"]),
+                ),
                 (
                     "track-output-options",
                     test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
@@ -27006,7 +27045,7 @@
                 (
                     "track-bus-sends",
                     test_list(
-                        (0..3)
+                        (0..4)
                             .map(|_| {
                                 test_list(vec![
                                     test_track_bus_send(1, "Bus A", 0.0),
@@ -27016,8 +27055,14 @@
                             .collect(),
                     ),
                 ),
-                ("track-num-steps", test_number_list(&[16.0, 16.0, 16.0])),
-                ("track-timebases", test_string_list(&["16", "16", "16"])),
+                (
+                    "track-num-steps",
+                    test_number_list(&[16.0, 16.0, 16.0, 16.0]),
+                ),
+                (
+                    "track-timebases",
+                    test_string_list(&["16", "16", "16", "16"]),
+                ),
                 ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
                 ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
                 ("bus-mutes", test_repeated_bool_list(false, 3)),
@@ -27033,7 +27078,7 @@
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
         {
             let rt = editor.runtime_mut();
-            for track in 0..3 {
+            for track in 0..4 {
                 rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
                 rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
                 rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
@@ -27126,14 +27171,14 @@
             .expect("mixer buffer should exist")
             .id;
         editor.set_active_buffer(mixer_id);
-        editor.set_layout_viewport(120, 16);
+        editor.set_layout_viewport(180, 16);
         let mixer_layout = editor
             .widget_layout()
             .expect("collapsed mixer layout should build");
 
         let compact_badge =
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-label-1")
-                .expect("collapsed track badge should render");
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-label-3")
+                .expect("collapsed modulator badge should render");
         assert_finite_nonzero_rect(compact_badge, "collapsed mixer track badge");
         assert!(
             compact_badge.props.contains_key("on-double-click"),
@@ -27141,22 +27186,21 @@
         );
         let compact_badge_content = find_layout_node_by_stable_key_suffix(
             &mixer_layout,
-            "/track-collapsed-label-content-1",
+            "/track-collapsed-label-content-3",
         )
-        .expect("collapsed track badge content should render");
-        assert_finite_nonzero_rect(compact_badge_content, "collapsed mixer badge content");
+        .expect("collapsed modulator badge content should render");
+        assert_finite_nonzero_rect(compact_badge_content, "collapsed modulator badge content");
         assert_eq!(compact_badge_content.widget_type, "badge");
         assert_eq!(
             compact_badge_content.props.get("icon"),
-            Some(&Value::Keyword("piano".to_string())),
-            "collapsed instrument badges should reuse the sidebar piano icon"
+            Some(&Value::Keyword("sine".to_string())),
+            "collapsed modulator badges should reuse the sidebar sine icon"
         );
-        let sampler_badge =
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-0")
-                .expect("expanded sampler badge should render");
+        let sampler_strip = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-0")
+            .expect("expanded sampler strip should render");
         assert!(
-            sampler_badge.props.contains_key("on-right-click"),
-            "the mixer badge must expose the track context-menu gesture",
+            sampler_strip.props.contains_key("on-right-click"),
+            "the full mixer strip must expose the track context-menu gesture",
         );
         let sampler_badge_content =
             find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-0")
@@ -27166,6 +27210,15 @@
             sampler_badge_content.props.get("icon"),
             Some(&Value::Keyword("waveform".to_string())),
             "sampler mixer badges should reuse the sidebar waveform icon"
+        );
+        let custom_badge_content =
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-1")
+                .expect("expanded custom instrument badge content should render");
+        assert_finite_nonzero_rect(custom_badge_content, "custom instrument mixer badge content");
+        assert_eq!(
+            custom_badge_content.props.get("icon"),
+            Some(&Value::Keyword("piano".to_string())),
+            "custom instrument mixer badges should reuse the sidebar piano icon"
         );
         let rack_badge_content =
             find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-2")
@@ -27177,15 +27230,15 @@
             "instrument rack mixer badges should use the device-rack icon"
         );
         let compact_mute =
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-mute-1")
-                .expect("collapsed track mute should render");
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-mute-3")
+                .expect("collapsed modulator mute should render");
         assert_finite_nonzero_rect(compact_mute, "collapsed mixer mute");
-        let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-1")
-            .expect("collapsed track meter should render");
+        let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-3")
+            .expect("collapsed modulator meter should render");
         assert_finite_nonzero_rect(compact_meter, "collapsed mixer meter");
         assert!(
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-1").is_none(),
-            "collapsed mixer track should not render the full-width label"
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-3").is_none(),
+            "collapsed modulator track should not render the full-width label"
         );
 
         editor.runtime_mut()
@@ -27207,6 +27260,28 @@
             .expect("cancel inline track rename");
         editor.refresh_runtime_side_effects();
 
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[false, false, false, false]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let expanded_mixer_layout = editor
+            .widget_layout()
+            .expect("expanded modulator mixer layout should build");
+        let modulator_badge_content = find_layout_node_by_stable_key_suffix(
+            &expanded_mixer_layout,
+            "/track-label-content-3",
+        )
+        .expect("expanded modulator badge content should render");
+        assert_finite_nonzero_rect(modulator_badge_content, "expanded modulator mixer badge");
+        assert_eq!(
+            modulator_badge_content.props.get("icon"),
+            Some(&Value::Keyword("sine".to_string())),
+            "expanded modulator badges should reuse the sidebar sine icon"
+        );
+
         let sequencer_id = editor
             .buffers
             .iter()
@@ -27225,12 +27300,16 @@
             }
         }
 
-        assert!(
-            find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-1").is_none(),
-            "collapsed track should be omitted from the sequencer row list"
-        );
-        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-0").is_some());
-        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-2").is_some());
+        for track in 0..4 {
+            assert!(
+                find_layout_node_by_stable_key(
+                    &sequencer_layout,
+                    &format!("sequencer-track-{track}"),
+                )
+                .is_some(),
+                "expanded track {track} should render in the sequencer"
+            );
+        }
         let rack_track_name =
             find_layout_node_by_stable_key_suffix(&sequencer_layout, "/track-name-label-2")
                 .expect("instrument rack sequencer badge should render");
@@ -27240,10 +27319,19 @@
             Some(&Value::Keyword("sliders".to_string())),
             "instrument rack sequencer badges should use the device-rack icon"
         );
+        let modulator_track_name =
+            find_layout_node_by_stable_key_suffix(&sequencer_layout, "/track-name-label-3")
+                .expect("modulator sequencer badge should render");
+        assert_finite_nonzero_rect(modulator_track_name, "modulator sequencer badge");
+        assert_eq!(
+            modulator_track_name.props.get("icon"),
+            Some(&Value::Keyword("sine".to_string())),
+            "modulator sequencer badges should reuse the sidebar sine icon"
+        );
         assert_eq!(
             count_stable_key_prefix(&sequencer_layout, "eseq.sequencer/step-cell-"),
-            32,
-            "sequencer should render step cells only for visible tracks"
+            64,
+            "sequencer should render step cells for all four expanded tracks"
         );
     }
 

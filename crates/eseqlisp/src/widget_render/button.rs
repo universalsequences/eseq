@@ -140,6 +140,7 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "note-arrow" | "midi-fx" => Some(5.0),
         "dial" | "preset" | "bookmark" => Some(6.0),
         "folder" | "project" => Some(7.0),
+        "sine" | "lfo" => Some(8.0),
         _ => None,
     }
 }
@@ -308,7 +309,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float fold_a = button_icon_segment(p, float2(-0.34, 0.46), float2(0.00, 0.20)) - stroke;
         float fold_b = button_icon_segment(p, float2(0.34, 0.46), float2(0.00, 0.20)) - stroke;
         d = min(min(left, right), min(top, min(fold_a, fold_b)));
-    } else {
+    } else if (in.value_t < 7.5) {
         // folder
         float left = button_icon_segment(p, float2(-0.44, -0.16), float2(-0.44, 0.40)) - stroke;
         float right = button_icon_segment(p, float2(0.50, -0.04), float2(0.50, 0.40)) - stroke;
@@ -317,6 +318,17 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float tab_side = button_icon_segment(p, float2(-0.12, -0.32), float2(0.02, -0.16)) - stroke;
         float lip = button_icon_segment(p, float2(-0.44, -0.16), float2(0.46, -0.16)) - stroke;
         d = min(min(left, right), min(bottom, min(tab_top, min(tab_side, lip))));
+    } else {
+        // sine: one cycle traced as short segments so it stays crisp at badge size.
+        float s0 = button_icon_segment(p, float2(-0.54, 0.00), float2(-0.405, 0.24)) - stroke;
+        float s1 = button_icon_segment(p, float2(-0.405, 0.24), float2(-0.27, 0.38)) - stroke;
+        float s2 = button_icon_segment(p, float2(-0.27, 0.38), float2(-0.135, 0.24)) - stroke;
+        float s3 = button_icon_segment(p, float2(-0.135, 0.24), float2(0.00, 0.00)) - stroke;
+        float s4 = button_icon_segment(p, float2(0.00, 0.00), float2(0.135, -0.24)) - stroke;
+        float s5 = button_icon_segment(p, float2(0.135, -0.24), float2(0.27, -0.38)) - stroke;
+        float s6 = button_icon_segment(p, float2(0.27, -0.38), float2(0.405, -0.24)) - stroke;
+        float s7 = button_icon_segment(p, float2(0.405, -0.24), float2(0.54, 0.00)) - stroke;
+        d = min(min(min(s0, s1), min(s2, s3)), min(min(s4, s5), min(s6, s7)));
     }
 
     float edge = max(fwidth(d), 0.001) * 1.2;
@@ -935,7 +947,7 @@ mod tests {
 
     #[test]
     fn source_list_icon_names_resolve_to_button_icons() {
-        for icon in ["piano", "sliders", "note-arrow", "dial", "folder"] {
+        for icon in ["piano", "sliders", "note-arrow", "dial", "folder", "sine", "lfo"] {
             let props = HashMap::from([("icon".to_string(), Value::Keyword(icon.to_string()))]);
             assert!(icon_value(&props).is_some(), "{icon} should resolve");
         }

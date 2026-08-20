@@ -47,7 +47,9 @@
         :waveform
         (if (= track-type "custom")
           :piano
-          (if (= track-type "rack") :sliders nil))))
+          (if (= track-type "rack")
+            :sliders
+            (if (= track-type "modulator") :sine nil)))))
     nil))
 
 (def group-type-icon (group)

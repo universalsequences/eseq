@@ -52,7 +52,7 @@ const BUILTIN_INSTRUMENTS: &[BuiltinInstrumentDescriptor] = &[
     BuiltinInstrumentDescriptor {
         label: "Modulator",
         name: "modulator",
-        icon: "waveform",
+        icon: "sine",
     },
     BuiltinInstrumentDescriptor {
         label: "Drum Rack",
