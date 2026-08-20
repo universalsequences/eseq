@@ -18,7 +18,7 @@
 ;; qualified names (hub-file precedent: keep public spellings). Converted
 ;; callers (eseq.effects.effect-modulation, eseq.effects.instrument-sources)
 ;; import this module instead. The aliases are deleted as callers convert.
-;; Everything else is %-private. Subtree :key strings and :debug-name strings
+;; Everything else is private. Subtree :key strings and :debug-name strings
 ;; are byte-identical (hazard e) — they are flat keyspaces that never qualify.
 
 (def fx-param-row (p fx subtree-key)

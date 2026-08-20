@@ -772,13 +772,13 @@
     :on-click (lambda (event)
       (do
         (select-bus i)
-        ;(seq-set-bus-volume i (%event-volume event))
+        ;(seq-set-bus-volume i (event-volume event))
         )
       )
     :on-drag (lambda (event)
       (do
         (select-bus i)
-        ;;(seq-set-bus-volume i (%event-volume event))
+        ;;(seq-set-bus-volume i (event-volume event))
         ))
     (v-stack
       (box :width :fill :height 5.9)
@@ -1474,7 +1474,7 @@
       (v-stack :gap 0.3 :align :center
         
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
-        ;; them selects the group's bus (%bus-meter-control selects by
+        ;; them selects the group's bus (bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
           (v-stack :gap 0.4 :align :center

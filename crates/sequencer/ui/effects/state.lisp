@@ -37,7 +37,7 @@
 ;; The aliases exist for the bare-name reason from the recipe's step 2: a
 ;; bare `instrument-mods-open` in an unconverted caller does not find
 ;; `eseq.effects.state/instrument-mods-open`. They are deleted as each
-;; consumer family converts. Not aliased: the two %-private sizing helpers,
+;; consumer family converts. Not aliased: the two private sizing helpers,
 ;; which have no caller outside this file.
 
 (defstate instrument-panel-tab 0)

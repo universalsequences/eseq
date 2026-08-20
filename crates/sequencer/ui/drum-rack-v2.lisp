@@ -159,7 +159,7 @@
       (range 0 (len SEQ.bus-ids)))))
 
 ;; Index (in SEQ.groups) of the rack backed by bus `bus-idx`, else -1. Selecting
-;; a rack selects its bus (ui/sequencer.lisp, %select-rack), so this is how a
+;; a rack selects its bus (ui/sequencer.lisp, select-rack), so this is how a
 ;; bus-driven surface — the *fx* buffer — asks "is this selection a kit?".
 (def rack-of-bus (bus-idx)
   (if (< bus-idx 0)
@@ -226,7 +226,7 @@
 (def grid-render-items ()
   (grid-render-items-with-collapsed-tracks false))
 
-;; Flatten a group in exactly the order `%group-block` draws it: direct members
+;; Flatten a group in exactly the order `group-block` draws it: direct members
 ;; first, then each nested rack. The structural form includes hidden rows and is
 ;; used only to locate a selection that has become invisible.
 (def group-track-order (gidx respect-group-collapse hide-collapsed-tracks)

@@ -576,7 +576,7 @@
 (def param-plock-projected-key (target slot rack-slot idx)
   (str "plk-" target "-" slot "-" rack-slot "-" idx))
 
-;; Key a control reads. Mirrors %param-plock-row's match exactly: instrument
+;; Key a control reads. Mirrors param-plock-row's match exactly: instrument
 ;; controls match any slot; only rack effects discriminate on the rack slot.
 (def param-plock-control-key (fx p)
   (param-plock-projected-key

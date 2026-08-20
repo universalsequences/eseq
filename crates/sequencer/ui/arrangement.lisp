@@ -454,7 +454,7 @@
 ;; The ids from a :select that name a REAL stored clip. Provisional recording
 ;; items (realtime feedback spec 3.4) carry no id, so selecting one selects
 ;; nothing — and every other gesture already resolves through
-;; %find-track-clip, which cannot match them either.
+;; find-track-clip, which cannot match them either.
 (def real-clip-ids (i ids)
   (filter (lambda (id) (not (= (find-track-clip i id) nil))) ids))
 
@@ -507,7 +507,7 @@
     (let ((duration (nth event 3)))
       (if (= duration nil) 0 (max 0 duration)))))
 
-;; Cap dots per item at %dot-cap, densest-first: events collapse
+;; Cap dots per item at dot-cap, densest-first: events collapse
 ;; into 1/cap-wide time buckets (one dot per bucket), so dense clusters thin
 ;; out first while isolated events always survive. Events arrive step-ordered
 ;; from the read surface. Only events inside the step window
@@ -983,7 +983,7 @@
 
 ;; Scene lane (spec 9.2: the only editable lane). View actions route to the
 ;; shared axis; live edit actions update the ghost preview only; terminal
-;; actions commit through %edit-finish.
+;; actions commit through edit-finish.
 (def scene-action (event)
   (if (view-action? event)
     (view-action event)

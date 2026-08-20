@@ -99,7 +99,7 @@
         :color :dim :bg :transparent))))
 
 ;; ── Drum rack selection panel (docs/drum-rack-v2-spec.md) ──────────────
-;; Selecting a rack selects its backing bus (ui/sequencer.lisp, %select-rack),
+;; Selecting a rack selects its backing bus (ui/sequencer.lisp, select-rack),
 ;; so without this branch a kit shows up here as a bare — usually empty — bus
 ;; chain. A rack has to feel like a track in *fx*: its kit first, then the
 ;; rack-level effects that bus chain really is.
@@ -113,7 +113,7 @@
 ;; them.
 ;; They only run inside the rack branch, which cannot be reached without the
 ;; sequencer loaded. eseq.drum-rack-v2 IS imported (at the top of this file):
-;; %selected-rack asks it about every bus selection, and it is a pure lookups
+;; selected-rack asks it about every bus selection, and it is a pure lookups
 ;; module over SEQ.groups — no view, no top-level registrations — that answers
 ;; -1 when no groups state exists.
 

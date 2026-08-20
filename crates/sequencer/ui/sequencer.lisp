@@ -2058,7 +2058,7 @@
 ;; paging there — and a click on any row pages the grid to it, which is the
 ;; affordance the arrows can only offer one octave at a time.
 ;;
-;; It is a second VIEW of %pad-grid-page, not a second page state: the
+;; It is a second VIEW of pad-grid-page, not a second page state: the
 ;; highlight and the click both go through the same page functions the grid
 ;; uses.
 ;;

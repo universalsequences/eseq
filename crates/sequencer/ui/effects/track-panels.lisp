@@ -330,7 +330,7 @@
 (def step-set-param (mode value)
   ;; Playing with record on: the drag arms live PRINT mode — the value lands
   ;; on the trigger steps the playhead passes, not the cursor step (bead
-  ;; eseq-jc9), and only while the mouse is held (%step-param-release ends
+  ;; eseq-jc9), and only while the mouse is held (step-param-release ends
   ;; it). No cool-off-follow in that branch: the performer is watching the
   ;; playhead, so auto-follow must stay alive. The cursor step rides along
   ;; as the fallback target if the gate races off before dispatch.

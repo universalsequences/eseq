@@ -8,7 +8,7 @@
 ;;    user-authored and script-generated lisp calls by FLAT spelling — the
 ;;    317 lisp files under crates/sequencer outside ui/ (instruments, effects,
 ;;    scripts, midi-fx, defmacros) are content and stay headerless forever.
-;;    So: no renames, no %-private names, and one *identity* compat alias per
+;;    So: no renames, no private-name sigils, and one *identity* compat alias per
 ;;    def. An identity alias serves both rungs at once — a headerless caller
 ;;    matches the flat key exactly, and a converted module's bare reference
 ;;    qualifies against itself, misses, and lands on the same alias by base

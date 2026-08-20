@@ -6,7 +6,7 @@
 (export)
 
 ;; No compat aliases: neither def has a caller outside this file (lisp or
-;; Rust), so both are %-private.
+;; Rust), so both are private.
 ;; The "instrument-source-…" string below is a subtree key built for
 ;; pg/fx-param-row, which attaches it — byte-identical, hazard (e).
 (def sources-grid (sections)
