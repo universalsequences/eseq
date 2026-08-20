@@ -74,6 +74,7 @@ pub mod hot_reload;
 pub mod live_audio;
 pub mod mode;
 pub mod module_alias_migration;
+pub mod module_export_migration;
 pub mod reactive;
 pub mod runtime;
 pub mod sound_glyph_data;
