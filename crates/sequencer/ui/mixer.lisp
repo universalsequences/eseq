@@ -1201,13 +1201,21 @@
           false)))))
 
 (def %bus-strip (i)
-  (let ((selected (= eseq.seq-core-state/selected-bus i)))
+  (do
+    ;; `do` keeps the original body indentation; the strip is one box.
     (box :key (str "bus-strip-" i)
       :width 10.3 :height 13.8
-      :background-color (%strip-bg selected (nth SEQ.bus-mutes i))
+      ;; Bound selection state (eseq-4jv): a raw `selected-bus` read here
+      ;; re-rendered every bus strip on each selection.
+      :selected (eseq.seq-core-state/bus-selected-vis-binding i)
+      :muted (nth SEQ.bus-mutes i)
+      :background-color :mixer-strip-bg
+      :selected-background-color :mixer-strip-selected-bg
+      :muted-background-color :mixer-strip-muted-bg
       :border-width 2
       :corner-radius 16
-      :border-color (%strip-border selected)
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
       :drop-types (list "audio-effect")
@@ -1378,10 +1386,12 @@
       (%select-group gidx)
       (seq-set-delete-target :mixer-group (dict :group-id (get group :id))))))
 
-;; True when this group's backing bus is the currently selected channel.
-(def %group-selected? (gidx)
-  (let ((idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
-    (and (>= idx 0) (= eseq.seq-core-state/selected-bus idx))))
+;; Selection visibility rides the *sel-sync* SEQV projection
+;; (ui/seq-core-state.lisp): a render-time `selected-bus` read here
+;; re-rendered the whole group container — every member strip — on each
+;; selection (eseq-4jv).
+(def %group-selected-binding (gidx)
+  (eseq.seq-core-state/group-selected-vis-binding (get (nth SEQ.groups gidx) :id)))
 
 ;; Mute and solo always operate on the group's backing bus. A rack additionally
 ;; owns a pad-play arm state; a plain mixer group deliberately has no arm
@@ -1524,14 +1534,18 @@
 ;; above the contained tracks.
 (def %group-container (gidx)
   (let ((group (nth SEQ.groups gidx))
-      (c (%group-color gidx))
-      (selected (%group-selected? gidx)))
+      (c (%group-color gidx)))
     (box
       :corner-radius 16
       :padding 0.2
-      :background-color (rgba (nth c 0) (nth c 1) (nth c 2) (if selected 1.0 0.78))
-      :border-width (if selected 4 2)
-      :border-color (if selected :mixer-strip-selected-border :mixer-strip-border)
+      ;; Selection is a bound state, not a computed color (eseq-4jv): the
+      ;; selected look keeps a constant border width so it never relayouts.
+      :selected (%group-selected-binding gidx)
+      :background-color (rgba (nth c 0) (nth c 1) (nth c 2) 0.78)
+      :selected-background-color (rgba (nth c 0) (nth c 1) (nth c 2) 1.0)
+      :border-width 2
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-types (list "track-badge")
       :drop-meta (dict :kind "group" :gidx gidx)

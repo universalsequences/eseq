@@ -279,3 +279,65 @@ The important ownership boundaries discovered by this probe are:
   single-clip gesture;
 - item-list accumulation in Lisp must be linear (cons + reverse), never
   `append`-per-element, which is quadratic in list length.
+
+## Group/track selection owner-switch probe
+
+`project_92_full_layout_group_track_selection_end_to_end_perf` (eseq-4jv)
+measures selecting a group or a track when the *fx* + instrument panels have
+to change owner (a track's chain torn down for a group's bus chain and back).
+The fixture reproduces the reported topology on top of project 92 through the
+real App primitives: 14 tracks — an 8-member group whose members include a
+1-slot instrument-rack track (`add_sampler_rack_track`) and a plain sampler
+track, five builtin effects on the group's backing bus
+(`add_builtin_bus_effect_sync`), and six tracks outside the group — under the
+production multi-pane layout (transport, samples sidebar, sequencer,
+step/track panels, mixer, *fx*), all groups expanded.
+
+```sh
+cargo nextest run -p sequencer --release \
+  --run-ignored only --no-capture \
+  -E 'test(=tests::project_92_full_layout_group_track_selection_end_to_end_perf)'
+```
+
+Four transitions are driven through the real sequencer header clicks
+(`handle_tiled_mouse_precise` on the `select-<track>` / `group-select-<id>`
+nodes), each with 5 warmups + 20 samples; setup clicks park the current track
+on a plain track first so a "group -> track" sample pays the real track
+switch the user's gesture pays. The visible update replays the reactive
+tick's track-switch rebuild branch, the groups/selected-tracks reconciles,
+and the ui/fx-epoch resyncs; `ESEQ_PROBE_BASELINE=1` skips the projection
+assertions and ceilings so the probe can measure a pre-fix tree.
+
+### Owner-switch reference timings
+
+Recorded 2026-08-20 on the developer's Apple-silicon Mac (release). The
+pre-tuning medians are the pre-eseq-4jv tree; the enforced absolute ceilings
+hold the tuned medians with ~1.5x load headroom and sit far below every
+pre-tuning median.
+
+| Transition | Pre-tuning median | Tuned median | Ceiling |
+| --- | ---: | ---: | ---: |
+| group -> instrument-rack track | 145.0 ms | 51.2 ms | 80 ms |
+| rack track -> group | 138.7 ms | 45.6 ms | 75 ms |
+| group -> sampler track | 170.4 ms | 75.8 ms | 110 ms |
+| same-instrument track -> track (reference) | 48.5 ms | 48.7 ms | 75 ms |
+
+The root cause was NOT the *fx* panel teardown itself: the
+`eseq.seq-core-state/selected-bus` defstate (the fx-owner discriminant) was
+read at render time by every sequencer track row, every hidden arrangement
+lane, the sequencer/mixer group blocks (which wrap all member rows), and the
+mixer bus strips — so one selection click re-rendered ~30 subtrees
+(~12 ms group block, ~7 ms mixer group, ~1-2 ms per row) before the
+legitimate owner switch even started. The fix is the `*sel-sync*` projection
+in `ui/seq-core-state.lisp`: one inert named effect owns the churn-prone
+reads and publishes per-row SEQV float fields
+(`sel-track-vis-*`, `sel-group-vis-*`, `sel-bus-vis-*`); rows bind those
+fields (`:selected` + `selected-*` color props), so a selection change
+dirties only the affected retained widgets. The probe asserts the projection
+fields track the selection so the highlight can never silently break.
+
+What remains after the fix is tracked as follow-up beads: the *fx* root's
+full re-evaluation on a genuine owner switch rebuilds every builtin panel
+(~30 ms for the 5-effect bus chain — keyed subtrees do not survive being
+absent from a flush), and every real track switch re-renders the *samples*
+sidebar (~35 ms) because `%sync-track-search` runs inside the browser root.

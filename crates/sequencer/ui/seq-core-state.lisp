@@ -107,3 +107,64 @@
 
 (def cool-off-follow ()
   (seq-pause-auto-follow))
+
+;; ── Selection-visibility projection (eseq-4jv) ──────────────────────────
+;; `selected-bus` is the fx-panel owner discriminant, and it used to be read
+;; directly from render bodies all over the UI: every sequencer track row,
+;; every arrangement lane, the group blocks, and the mixer bus strips. A
+;; single group/track selection therefore re-rendered every one of those
+;; subtrees before the *fx* panel had even started its (legitimate) owner
+;; switch. This one effect is now the only selection-visibility reader of the
+;; defstate: it projects the combined "does this row draw selected?" answer
+;; into per-row SEQV float fields, and rows bind those fields, so a selection
+;; change dirties only the affected retained widgets — no subtree re-renders.
+;; The *fx* buffer root is the intended remaining reader (it must
+;; restructure); nothing else should read `selected-bus` in render.
+(def sel-track-vis-field (i) (str "sel-track-vis-" i))
+(def sel-group-vis-field (gid) (str "sel-group-vis-" gid))
+(def sel-bus-vis-field (i) (str "sel-bus-vis-" i))
+
+(def track-selected-vis-binding (i)
+  (bind "SEQV" (sel-track-vis-field i)))
+
+(def group-selected-vis-binding (gid)
+  (bind "SEQV" (sel-group-vis-field gid)))
+
+(def bus-selected-vis-binding (i)
+  (bind "SEQV" (sel-bus-vis-field i)))
+
+(def %sel-bus-index-of (bus-id)
+  (let ((matches (filter (lambda (i) (= (nth SEQ.bus-ids i) bus-id))
+          (range 0 (len SEQ.bus-ids)))))
+    (if (> (len matches) 0) (nth matches 0) -1)))
+
+;; A named effect-buffer returning nil is inert (the *plock-sync* precedent):
+;; it owns the churn-prone reads so no visible surface has to.
+(effect-buffer "*sel-sync*"
+  (let ((bus-active (seq-has-selected-bus?)))
+    (do
+      ;; Track highlight: the Rust-owned per-track selection, gated off while
+      ;; a bus/group owns the fx panel (`reactive-value` records the reads,
+      ;; so Rust-side selection changes re-run this projection too).
+      (for-each
+        (lambda (i)
+          (reactive-set "SEQV" (sel-track-vis-field i)
+            (if bus-active
+              0
+              (reactive-value (bind-seq (str "track-selected-" i))))))
+        (range 0 SEQ.num-tracks))
+      (for-each
+        (lambda (i)
+          (reactive-set "SEQV" (sel-bus-vis-field i)
+            (if (and bus-active (= selected-bus i)) 1 0)))
+        (range 0 (len SEQ.bus-names)))
+      (for-each
+        (lambda (gi)
+          (let ((group (nth SEQ.groups gi)))
+            (reactive-set "SEQV" (sel-group-vis-field (get group :id))
+              (if (and bus-active
+                    (= selected-bus (%sel-bus-index-of (get group :bus-id))))
+                1
+                0))))
+        (range 0 (len SEQ.groups)))
+      nil)))

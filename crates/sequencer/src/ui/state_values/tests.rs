@@ -18949,12 +18949,16 @@
         let current_track_cell = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-1-0")
             .expect("current track step cell");
 
+        // Rows bind the *sel-sync* SEQV projection of the per-track selection
+        // (eseq-4jv), not the raw SEQ field: the projection gates the
+        // highlight off while a bus/group owns the fx panel without any row
+        // reading the `selected-bus` defstate in render.
         assert!(
             layout_tree_has_reactive_prop_field(
                 inactive_track_cell,
                 "selected",
-                "SEQ",
-                &track_selected_field(0),
+                "SEQV",
+                "sel-track-vis-0",
             ),
             "inactive track cursor wrapper should be gated by that track's selected binding"
         );
@@ -18962,8 +18966,8 @@
             layout_tree_has_reactive_prop_field(
                 current_track_cell,
                 "selected",
-                "SEQ",
-                &track_selected_field(1),
+                "SEQV",
+                "sel-track-vis-1",
             ),
             "current track cursor wrapper should be gated by that track's selected binding"
         );
@@ -46544,6 +46548,11 @@
         editor
             .runtime_mut()
             .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
+        // The real tick always runs a reactive cycle after publishing the
+        // delete-target version; the group badge re-renders through that
+        // dependency now that mixer group containers no longer re-render on
+        // every `selected-bus` write (eseq-4jv *sel-sync* projection).
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let armed_layout = editor.widget_layout().expect("armed group mixer layout");
         let armed_group_badge = find_node_by_stable_key_suffix(&armed_layout, "/group-badge-7")
@@ -49251,10 +49260,25 @@
             .expect("selected regular group sequencer layout should build");
         let selected_block = find_layout_node_by_stable_key_suffix(&selected, "sequencer-group-8")
             .expect("selected regular group block should render");
+        // Selection rides the *sel-sync* SEQV projection (eseq-4jv): the
+        // block binds `sel-group-vis-<id>` instead of reading `selected-bus`
+        // in render, so assert both the binding and the projected value.
+        assert!(
+            matches!(
+                selected_block.props.get("selected"),
+                Some(Value::ReactiveRef { namespace, field, .. })
+                    if namespace == "SEQV" && field == "sel-group-vis-8"
+            ),
+            "the group block's selected state must bind the sel-sync projection, got {:?}",
+            selected_block.props.get("selected")
+        );
         assert_eq!(
-            selected_block.props.get("selected"),
-            Some(&Value::Bool(true)),
-            "selecting group chrome should select its backing bus and activate the border"
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-value (bind \"SEQV\" \"sel-group-vis-8\"))")
+                .expect("read projected group selection"),
+            Some(Value::Number(1.0)),
+            "selecting group chrome should select its backing bus and light the projected field"
         );
         assert_eq!(
             selected_block.props.get("selected-background-color"),

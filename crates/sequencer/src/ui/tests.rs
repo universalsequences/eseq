@@ -2339,6 +2339,18 @@
             .expect("project 92 full-layout launch probe should pass");
     }
 
+    #[test]
+    #[ignore = "eseq-4jv: release-mode perf probe: group/track selection when the fx + instrument panels change owner (group bus chain <-> track chain), on a 14-track fixture with an 8-member group (rack + sampler + instrument tracks) and 5 group-bus effects, under the production multi-pane layout"]
+    fn project_92_full_layout_group_track_selection_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-group-track-selection-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::GroupTrackSelection))
+            .expect("spawn project 92 full-layout group/track selection probe")
+            .join()
+            .expect("project 92 full-layout group/track selection probe should pass");
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         SceneSwitch,
@@ -2404,6 +2416,19 @@
         /// `set-scene-cell` relies on that per-tick branch, so the two
         /// scenarios split the same cost across different phases.
         SceneAndClipLaunch,
+        /// Group/track selection when the *fx* + instrument panels change
+        /// owner (eseq-4jv). The fixture reproduces the reported topology on
+        /// top of project 92: one 8-member group (instrument-rack track,
+        /// plain sampler track, ordinary instrument tracks) with a 5-effect
+        /// bus chain, plus 6 tracks outside the group, all expanded, under
+        /// the production multi-pane layout. Four transitions are measured
+        /// through the real sequencer header clicks: group -> rack track,
+        /// rack track -> group, group -> sampler track, and same-instrument
+        /// track -> track (the "no relayout" reference point). The visible
+        /// update replays the reactive tick INCLUDING its track-switch
+        /// rebuild branch and the fx-epoch resync that `seq-set-track`
+        /// triggers.
+        GroupTrackSelection,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -2435,6 +2460,7 @@
                 | Project92UiProbe::ResponseCurveEditorDrag
                 | Project92UiProbe::StepBufferParamDrag
                 | Project92UiProbe::SceneAndClipLaunch
+                | Project92UiProbe::GroupTrackSelection
         );
         // The production layout packs seven tiles; 180x70 leaves the smaller
         // step-panel tile too short to keep all 64 step cells on screen, so
@@ -2682,6 +2708,62 @@
                 pool_sizes.iter().all(|len| *len >= POOL_CLIPS_PER_TRACK),
                 "launch fixture must grow every pool to {POOL_CLIPS_PER_TRACK} clips, got {pool_sizes:?}"
             );
+        }
+
+        if probe == Project92UiProbe::GroupTrackSelection {
+            // eseq-4jv reported topology, built on project 92 through the
+            // real App primitives: 14 tracks total — an 8-member group whose
+            // members include a 1-slot instrument-rack track and a plain
+            // sampler track, a 5-effect chain on the group's backing bus, and
+            // 6 tracks outside the group. All groups stay expanded.
+            let fixture_sample = std::path::PathBuf::from(
+                "samples/9151328ca89bbcef0d606a644e14d93d263e7ddfd1f9221cf5542353fe4565cc.wav",
+            );
+            assert!(
+                fixture_sample.exists(),
+                "group-selection fixture sample must ship with project 92"
+            );
+            let rack_track = app
+                .graph_controller()
+                .add_sampler_rack_track(std::slice::from_ref(&fixture_sample))
+                .expect("add 1-slot instrument-rack fixture track");
+            assert_eq!(rack_track, 10, "rack fixture track lands after project 92's 10");
+            assert!(
+                state.pattern.rack_tracks.lock().unwrap()[rack_track]
+                    .as_ref()
+                    .is_some_and(|rack| rack.slots.len() == 1),
+                "rack fixture track must expose exactly one instrument slot"
+            );
+            for _ in 0..3 {
+                app.graph_controller()
+                    .add_track(&fixture_sample)
+                    .expect("add outside-the-group fixture track");
+            }
+            assert_eq!(app.tracks.len(), 14, "fixture must total 14 tracks");
+            // Group: sampler 0, samplers 2-6, custom 7, and the rack track —
+            // 8 members. Outside: 1, 8, 9, 11, 12, 13 (6 tracks).
+            let group_bus_id = app
+                .group_tracks_and_racks_recorded(vec![0, 2, 3, 4, 5, 6, 7, rack_track], vec![])
+                .expect("group the fixture tracks");
+            let group_bus_idx = app
+                .buses
+                .iter()
+                .position(|bus| bus.id == group_bus_id)
+                .expect("group backing bus must exist");
+            for name in ["Filter", "Compressor", "Delay", "Reverb", "OTT"] {
+                app.add_builtin_bus_effect_sync(group_bus_idx, name)
+                    .unwrap_or_else(|error| {
+                        panic!("add group bus effect {name}: {error}")
+                    });
+            }
+            assert!(
+                app.groups.len() == 1 && app.groups[0].members.len() == 8,
+                "fixture must produce one 8-member group, got {:?}",
+                app.groups
+            );
+            assert!(!app.groups[0].collapsed, "the fixture group must stay expanded");
+            *bus_state.lock().unwrap() = app.buses.clone();
+            *track_groups.lock().unwrap() = app.groups.clone();
         }
 
         if probe == Project92UiProbe::RackMacroDrag {
@@ -7101,6 +7183,1266 @@
                 clip.pattern_epoch_updates, SAMPLES,
                 "every clip launch must resync through the pattern-epoch tick branch"
             );
+            return;
+        }
+
+        if probe == Project92UiProbe::GroupTrackSelection {
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+            let probe_prefix = "project-92-fullayout-owner-switch";
+            // Fixture indices (see the GroupTrackSelection fixture block):
+            // the group holds tracks {0,2..=7,10}; 10 is the 1-slot rack.
+            let rack_track = 10usize;
+            let sampler_track = 2usize;
+            let plain_a = 3usize;
+            let plain_b = 4usize;
+            let group_id = app.groups[0].id;
+            let group_bus_idx = {
+                let bus_id = app.groups[0].bus_id;
+                app.buses
+                    .iter()
+                    .position(|bus| bus.id.0 == bus_id)
+                    .expect("group backing bus index")
+            };
+
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer index");
+            let sequencer_tile = editor
+                .tile_root
+                .leaf_ids()
+                .into_iter()
+                .find(|tile_id| {
+                    editor
+                        .tile_root
+                        .find_leaf(*tile_id)
+                        .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)
+                })
+                .expect("the production layout must show *sequencer*");
+            editor.switch_active_tile(sequencer_tile);
+
+            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            assert!(fx_visible, "production layout must show the *fx* panel");
+            assert!(mixer_visible, "production layout must show the *mixer* strip");
+            assert!(
+                transport_visible,
+                "production layout must show the *transport* bar"
+            );
+            assert!(
+                !editor_has_visible_buffer(&editor, "*arrangement*"),
+                "the owner-switch probe must measure the Seq view"
+            );
+
+            // Initial full sync so the fixture group, its bus chain, and the
+            // 14-track topology are all live before the first click.
+            {
+                let rt = editor.runtime_mut();
+                sync_groups_bindings(rt, &app.groups);
+                sync_all_track_sequencer_state(rt, &state, &app, 0, &selected_steps);
+                sync_step_param_lists(rt, &state, 0);
+                rt.set_reactive("SEQ", "steps", build_steps_value(&state, 0));
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(
+                        &state,
+                        0,
+                        &app.graph.effect_descriptors,
+                        &selected_steps,
+                    ),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, 0, &selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "bus-effects",
+                    build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
+                );
+                sync_track_mixer_state(rt, &app, &state);
+                sync_bus_mixer_state(rt, &app);
+            }
+            sync_fx_param_binding_fields_with_neural_selection(
+                editor.runtime_mut(),
+                &app,
+                &state,
+                0,
+                &selected_steps,
+                None,
+            );
+
+            // The real host-command seam, shared with the probe's syncs.
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw,
+                current_track: current_track.clone(),
+                selected_tracks: selected_tracks.clone(),
+                selected_steps: selected_steps.clone(),
+                selected_neural_neurons: selected_neural_neurons.clone(),
+                piano_roll_selection: piano_roll_selection.clone(),
+                piano_roll_move_state: piano_roll_move_state.clone(),
+                piano_roll_focus: piano_roll_focus.clone(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
+                ui_invalidations: ui_invalidations.clone(),
+                expanded_step_projection: expanded_step_projection.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                auto_follow_override_until: auto_follow_override_until.clone(),
+                track_pan_ids: track_pan_ids.clone(),
+                track_collapsed: track_collapsed.clone(),
+                bus_state: bus_state.clone(),
+                bus_node_ids: bus_node_ids.clone(),
+                track_groups: track_groups.clone(),
+                record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
+                recording: recording.clone(),
+                master_recording: master_recording.clone(),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                roll_record: Arc::new(Mutex::new(RollRecordBuffer::default())),
+                step_print: Arc::new(Mutex::new(StepPrintState::default())),
+                keyboard_octave: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                sample_browser: sample_browser.clone(),
+                keyboard_tx: keyboard_tx.clone(),
+                accumulator_names: accumulator_names.clone(),
+                piano_roll_clipboard: piano_roll_clipboard.clone(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            };
+            let mut sessions = EditSessionState::default();
+            let mut gesture_state = GestureState::default();
+            let mut meters = MeterCache {
+                cached_peak_l_level: 0.0,
+                cached_peak_r_level: 0.0,
+                cached_track_peak_levels: cached_track_peak_levels.clone(),
+                cached_rack_slot_peak_levels: Vec::new(),
+                cached_bus_peak_levels: cached_bus_peak_levels.clone(),
+                cached_modulator_phases: cached_modulator_phases.clone(),
+                cached_modulator_levels: cached_modulator_levels.clone(),
+                cached_cpu_load_bits: 0.0f32.to_bits(),
+                last_meter_poll_at: Instant::now(),
+                last_cpu_ui_poll_at: Instant::now(),
+                last_neural_visualization_poll_at: Instant::now(),
+                visualization_liveness: VisualizationLiveness::default(),
+                last_voice_count_log_at: Instant::now(),
+            };
+            let mut ctx_track_names = track_names.clone();
+            let mut frame_diff = FrameDiffState::default();
+            frame_diff.prev_current_track = current_track.load(Ordering::Relaxed);
+            frame_diff.prev_pattern_epoch =
+                state.transport.pattern_epoch.load(Ordering::Relaxed);
+            frame_diff.prev_song_row_mirror_epoch = app.song_row_mirror_epoch;
+            frame_diff.prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
+            frame_diff.prev_fx_epoch = fx_epoch.load(Ordering::Relaxed);
+            frame_diff.prev_fx_value_epoch = fx_value_epoch.load(Ordering::Relaxed);
+            frame_diff.prev_sound_binding_epoch = app.sound_binding_epoch;
+            frame_diff.prev_delete_target_version =
+                active_delete_target_version.load(Ordering::Relaxed);
+            frame_diff.prev_track_button_states = track_button_state_snapshot(&state);
+            frame_diff.prev_track_playheads = track_playheads_snapshot(&state, &app);
+            frame_diff.prev_groups = app.groups.clone();
+            frame_diff.prev_selected_tracks = selected_tracks.lock().unwrap().clone();
+
+            let mut apply_host_commands = |editor: &mut Editor,
+                                           app: &mut app::App,
+                                           frame: &mut FrameDiffState,
+                                           commands: Vec<HostCommand>|
+             -> Vec<String> {
+                let mut applied = Vec::new();
+                for command in commands {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    let mut ctx = LoopCtx {
+                        sessions: &mut sessions,
+                        meters: &mut meters,
+                        frame,
+                        gesture: &mut gesture_state,
+                        track_names: &mut ctx_track_names,
+                        shared: &shared,
+                    };
+                    dispatch_custom_host_command(&name, payload, app, editor, &mut ctx);
+                    applied.push(name);
+                }
+                applied
+            };
+
+            app.sync_track_sound_bindings();
+            super::state_values::sync_song_state(
+                editor.runtime_mut(),
+                &app,
+                &mut frame_diff.song,
+                transport_visible,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(vp_cols, vp_rows);
+
+            let initial_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                &mut editor,
+                vp_cols as usize,
+                vp_rows as usize,
+            );
+            let visible_buffers: Vec<String> = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| tile.frame.buffer_name.clone())
+                .collect();
+            for required in ["*sequencer*", "*fx*", "*mixer*", "*transport*"] {
+                assert!(
+                    visible_buffers.iter().any(|name| name == required),
+                    "the production layout must show {required}, got {visible_buffers:?}"
+                );
+            }
+            eprintln!("[{probe_prefix}-visible-buffers] {visible_buffers:?}");
+
+            struct TileRetained {
+                buffer_name: String,
+                viewport: eseqlisp::widget_render::WidgetViewport,
+                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
+                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+            }
+            let mut tile_retained: Vec<TileRetained> = Vec::new();
+            for tile in &initial_frame.tiles {
+                let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "visible tile {} must have a widget layout",
+                        tile.frame.buffer_name
+                    )
+                });
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: vp_cols as f32 * 8.0,
+                    vp_h: vp_rows as f32 * 16.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: tile.frame.focused_widget_id,
+                    focused_branch: tile.is_active,
+                    overlay_viewport_bottom: vp_rows as f32,
+                    scroll_top: tile.frame.widget_scroll_top + tile.frame.text_scroll_top as f32,
+                    scroll_left: tile.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                    layout,
+                    viewport,
+                    viewport.scroll_top,
+                    vp_rows,
+                );
+                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                tile_retained.push(TileRetained {
+                    buffer_name: tile.frame.buffer_name.clone(),
+                    viewport,
+                    runs,
+                    indices,
+                });
+            }
+
+            // --- visible update: the real reactive tick, minus the render --
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+
+            struct OwnerSwitchUpdate {
+                tick_sync_ms: f64,
+                track_switch_ms: f64,
+                invalidation_ms: f64,
+                epoch_sync_ms: f64,
+                reactive_ms: f64,
+                frame_ms: f64,
+                retained_ms: f64,
+                reactive_cycle_ms: f64,
+                side_effects_ms: f64,
+                inactive_layout_refresh_ms: f64,
+                inactive_layout_refresh_count: usize,
+                track_switch_fired: bool,
+                ui_epoch_fired: bool,
+                fx_epoch_fired: bool,
+                dirty_fields: usize,
+                full_buffer_reruns: usize,
+                subtree_reruns: usize,
+                tiles: Vec<(String, usize, f64, bool)>,
+            }
+
+            let mut finish_visible_update = |editor: &mut Editor,
+                                             app: &mut app::App,
+                                             frame: &mut FrameDiffState,
+                                             tiles: &mut Vec<TileRetained>|
+             -> OwnerSwitchUpdate {
+                let started = Instant::now();
+                let ct = current_track.load(Ordering::Relaxed);
+
+                let build_revision = |state: &Arc<SequencerState>,
+                                      app: &app::App|
+                 -> super::loop_ctx::ParamSyncRevision {
+                    let mut sorted_steps: Vec<usize> =
+                        selected_steps.lock().unwrap().iter().copied().collect();
+                    sorted_steps.sort_unstable();
+                    super::loop_ctx::ParamSyncRevision {
+                        track: ct,
+                        scene: state.current_scene_index(),
+                        pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+                        song_row_mirror_epoch: app.song_row_mirror_epoch,
+                        ui_epoch: ui_epoch.load(Ordering::Relaxed),
+                        fx_epoch: fx_epoch.load(Ordering::Relaxed),
+                        sound_binding_epoch: app.sound_binding_epoch,
+                        display_step: displayed_plock_step(
+                            state,
+                            ct,
+                            sorted_steps.first().copied(),
+                        ),
+                        selected_steps: sorted_steps,
+                        selected_neural_neurons: neural.iter().copied().collect(),
+                    }
+                };
+
+                // --- reactive_tick.rs "track switch — rebuild everything" --
+                let track_switch_fired =
+                    ct != frame.prev_current_track && !app.tracks.is_empty();
+                if track_switch_fired {
+                    editor.reset_widget_scroll_for_buffer_named("*metal*");
+                    editor.reset_widget_scroll_for_buffer_named("*fx*");
+                    let cleared_step_selection = {
+                        let mut selection = selected_steps.lock().unwrap();
+                        let had_selection = !selection.is_empty();
+                        selection.clear();
+                        had_selection
+                    };
+                    let cleared_piano_selection = {
+                        let mut selection = piano_roll_selection.lock().unwrap();
+                        let had_selection = !selection.is_empty();
+                        selection.clear();
+                        had_selection
+                    };
+                    if cleared_step_selection || cleared_piano_selection {
+                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let _ = editor
+                        .runtime_mut()
+                        .eval_str("(set! eseq.seq-core-state/selected-bus -1)");
+                    reset_sampler_waveform_view(editor);
+                    let revision = build_revision(&state, app);
+                    let rt = editor.runtime_mut();
+                    sync_shared_track_collapsed(&track_collapsed, app);
+                    sync_track_name_state(rt, &mut track_names, app);
+                    sync_pattern_state(rt, &state);
+                    set_current_track_reactive(rt, app.tracks.len(), ct);
+                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                    sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
+                    sync_step_param_lists(rt, &state, ct);
+                    sync_track_mixer_state(rt, app, &state);
+                    sync_bus_mixer_state(rt, app);
+                    sync_track_peak_fields(rt, &cached_track_peak_levels);
+                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                    sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                    sync_modulator_level_fields(rt, &cached_modulator_levels);
+                    rt.set_reactive(
+                        "SEQ",
+                        "effects",
+                        build_effects_value(
+                            &state,
+                            ct,
+                            &app.graph.effect_descriptors,
+                            &selected_steps,
+                        ),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "midi-effects",
+                        build_midi_effects_value(&state, ct, &selected_steps),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "instrument-panel",
+                        build_instrument_panel_value(app, ct, &selected_steps),
+                    );
+                    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+                    if super::reactive_tick::claim_param_sync_revision(
+                        &mut frame.track_param_sync_revision,
+                        &revision,
+                    ) {
+                        sync_track_params_with_neural_selection(
+                            rt,
+                            app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&neural),
+                        );
+                    }
+                    if super::reactive_tick::claim_param_sync_revision(
+                        &mut frame.fx_param_sync_revision,
+                        &revision,
+                    ) {
+                        let _ = sync_fx_param_binding_fields_with_neural_selection(
+                            rt,
+                            app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&neural),
+                        );
+                    }
+                    rt.set_reactive(
+                        "SEQ",
+                        "step-has-plocks",
+                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                    );
+                    sync_sidebar_browser(rt, app, ct);
+                    frame.prev_current_track = ct;
+                    frame.prev_pattern_epoch =
+                        state.transport.pattern_epoch.load(Ordering::Relaxed);
+                }
+
+                // --- reactive_tick.rs groups / selected-tracks reconciles --
+                {
+                    let groups_snapshot = track_groups.lock().unwrap().clone();
+                    if groups_snapshot != frame.prev_groups {
+                        app.groups = groups_snapshot.clone();
+                        sync_groups_bindings(editor.runtime_mut(), &app.groups);
+                        frame.prev_groups = groups_snapshot;
+                    }
+                }
+                {
+                    let selected_snapshot = selected_tracks.lock().unwrap().clone();
+                    if selected_snapshot != frame.prev_selected_tracks {
+                        sync_selected_tracks_bindings(
+                            editor.runtime_mut(),
+                            app.tracks.len(),
+                            ct,
+                            &selected_snapshot,
+                        );
+                        frame.prev_selected_tracks = selected_snapshot;
+                    }
+                }
+                let track_switch_done = Instant::now();
+
+                app.sync_track_sound_bindings();
+                if app.sound_binding_epoch != frame.prev_sound_binding_epoch {
+                    frame.prev_sound_binding_epoch = app.sound_binding_epoch;
+                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+                super::state_values::sync_song_state(
+                    editor.runtime_mut(),
+                    app,
+                    &mut frame.song,
+                    transport_visible,
+                );
+                let tick_sync_done = Instant::now();
+
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: ct,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let invalidations_done = Instant::now();
+
+                // --- reactive_tick.rs ui_epoch / fx_epoch branches ---------
+                let ui_ep = ui_epoch.load(Ordering::Relaxed);
+                let fx_ep = fx_epoch.load(Ordering::Relaxed);
+                let fx_value_ep = fx_value_epoch.load(Ordering::Relaxed);
+                let ui_epoch_fired = ui_ep != frame.prev_ui_epoch;
+                let fx_epoch_fired = fx_visible
+                    && (fx_ep != frame.prev_fx_epoch
+                        || fx_value_ep != frame.prev_fx_value_epoch);
+                let fx_structural = fx_ep != frame.prev_fx_epoch;
+                if ui_epoch_fired {
+                    let revision = build_revision(&state, app);
+                    sync_shared_track_collapsed(&track_collapsed, app);
+                    let rt = editor.runtime_mut();
+                    sync_macro_state(rt, app);
+                    sync_track_name_state(rt, &mut track_names, app);
+                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                    sync_step_param_lists(rt, &state, ct);
+                    sync_all_track_sequencer_state(rt, &state, app, ct, &selected_steps);
+                    let _ = sync_all_expanded_step_viewports(
+                        rt,
+                        &state,
+                        app,
+                        &selected_steps,
+                        ct,
+                        &expanded_step_projection,
+                    );
+                    sync_track_mixer_state(rt, app, &state);
+                    sync_bus_mixer_state(rt, app);
+                    sync_track_peak_fields(rt, &cached_track_peak_levels);
+                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+                    if super::reactive_tick::claim_param_sync_revision(
+                        &mut frame.track_param_sync_revision,
+                        &revision,
+                    ) {
+                        sync_track_params_with_neural_selection(
+                            rt,
+                            app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&neural),
+                        );
+                    }
+                    if super::reactive_tick::claim_param_sync_revision(
+                        &mut frame.fx_param_sync_revision,
+                        &revision,
+                    ) {
+                        let _ = sync_fx_param_binding_fields_with_neural_selection(
+                            rt,
+                            app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&neural),
+                        );
+                    }
+                    rt.set_reactive(
+                        "SEQ",
+                        "selected-steps",
+                        build_selection_value(&selected_steps),
+                    );
+                    sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
+                    rt.set_reactive(
+                        "SEQ",
+                        "step-has-plocks",
+                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                    );
+                    frame.prev_track_button_states = track_button_state_snapshot(&state);
+                    frame.prev_ui_epoch = ui_ep;
+                }
+                if fx_epoch_fired {
+                    let rt = editor.runtime_mut();
+                    let publish = |rt: &mut Runtime, field: &str, value: Value| {
+                        if fx_structural {
+                            rt.set_reactive("SEQ", field, value);
+                        } else {
+                            rt.set_reactive_value_patch("SEQ", field, value);
+                        }
+                    };
+                    publish(
+                        rt,
+                        "effects",
+                        build_effects_value(
+                            &state,
+                            ct,
+                            &app.graph.effect_descriptors,
+                            &selected_steps,
+                        ),
+                    );
+                    publish(
+                        rt,
+                        "midi-effects",
+                        build_midi_effects_value(&state, ct, &selected_steps),
+                    );
+                    publish(
+                        rt,
+                        "instrument-panel",
+                        build_instrument_panel_value(app, ct, &selected_steps),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        "step-has-plocks",
+                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                    );
+                    publish(
+                        rt,
+                        "bus-effects",
+                        build_bus_effects_value_for_selection(app, Some(&selected_steps)),
+                    );
+                    frame.prev_fx_epoch = fx_ep;
+                    frame.prev_fx_value_epoch = fx_value_ep;
+                }
+                let epoch_sync_done = Instant::now();
+
+                editor.runtime_mut().run_reactive_cycle();
+                let cycle_done = Instant::now();
+                editor.refresh_runtime_side_effects();
+                let side_effects_done = Instant::now();
+                let (inactive_layout_refresh_ms, inactive_layout_refresh_count) = {
+                    let timings = editor.last_layout_refresh_timings();
+                    (
+                        timings
+                            .iter()
+                            .map(|timing| timing.elapsed.as_secs_f64() * 1000.0)
+                            .sum::<f64>(),
+                        timings.len(),
+                    )
+                };
+                // reactive_tick.rs post-cycle refresh: the sequencer after a
+                // ui-epoch resync.
+                if ui_epoch_fired {
+                    editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                }
+                let reactive_done = Instant::now();
+                // The invalidation trace is only refreshed by the tick's
+                // run_reactive_cycle; a pure owner-flip click does its
+                // reactive work inline in the dispatch (process_dirty_reactive
+                // inside Runtime::invoke), which leaves the trace stale — so
+                // only report counts for updates that actually ran a cycle.
+                let (dirty_fields, full_buffer_reruns, subtree_reruns) =
+                    if track_switch_fired || ui_epoch_fired || fx_epoch_fired {
+                        editor
+                            .runtime()
+                            .last_ui_invalidation_trace()
+                            .map(|trace| {
+                                (
+                                    trace.dirty_fields.len(),
+                                    trace.full_buffer_reruns,
+                                    trace.subtree_reruns,
+                                )
+                            })
+                            .unwrap_or((0, 0, 0))
+                    } else {
+                        (0, 0, 0)
+                    };
+                let frame_built = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let frame_done = Instant::now();
+                assert_eq!(
+                    frame_built.tiles.len(),
+                    tiles.len(),
+                    "the production layout must keep every tile visible"
+                );
+                let mut tile_stats = Vec::with_capacity(frame_built.tiles.len());
+                for tile in &frame_built.tiles {
+                    let entry = tiles
+                        .iter_mut()
+                        .find(|entry| entry.buffer_name == tile.frame.buffer_name)
+                        .unwrap_or_else(|| {
+                            panic!("retained runs for visible tile {}", tile.frame.buffer_name)
+                        });
+                    let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                        panic!(
+                            "visible tile {} must keep a widget layout",
+                            tile.frame.buffer_name
+                        )
+                    });
+                    let tile_started = Instant::now();
+                    let (_, stats) =
+                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                            &mut entry.runs,
+                            &entry.indices,
+                            &tile.frame.dirty_widget_ids,
+                        );
+                    let structural_rebuild =
+                        stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
+                    if structural_rebuild {
+                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                        );
+                        entry.indices =
+                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                        entry.runs = runs;
+                    }
+                    tile_stats.push((
+                        tile.frame.buffer_name.clone(),
+                        tile.frame.dirty_widget_ids.len(),
+                        duration_ms(tile_started.elapsed()),
+                        structural_rebuild,
+                    ));
+                }
+                let retained_done = Instant::now();
+                OwnerSwitchUpdate {
+                    tick_sync_ms: duration_ms(tick_sync_done - track_switch_done),
+                    track_switch_ms: duration_ms(track_switch_done - started),
+                    invalidation_ms: duration_ms(invalidations_done - tick_sync_done),
+                    epoch_sync_ms: duration_ms(epoch_sync_done - invalidations_done),
+                    reactive_ms: duration_ms(reactive_done - epoch_sync_done),
+                    frame_ms: duration_ms(frame_done - reactive_done),
+                    retained_ms: duration_ms(retained_done - frame_done),
+                    reactive_cycle_ms: duration_ms(cycle_done - epoch_sync_done),
+                    side_effects_ms: duration_ms(side_effects_done - cycle_done),
+                    inactive_layout_refresh_ms,
+                    inactive_layout_refresh_count,
+                    track_switch_fired,
+                    ui_epoch_fired,
+                    fx_epoch_fired,
+                    dirty_fields,
+                    full_buffer_reruns,
+                    subtree_reruns,
+                    tiles: tile_stats,
+                }
+            };
+
+            // Screen-space center of a clickable node inside the *sequencer*
+            // tile, located by stable-key suffix, so clicks travel through
+            // `handle_tiled_mouse_precise` exactly like the real event loop.
+            let locate_seq_target = |editor: &mut Editor, suffix: &str| -> (f32, f32) {
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let tile = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer tile");
+                let origin_col = tile.body_rect.col.floor();
+                let origin_row = tile.body_rect.row.floor();
+                let scroll_top =
+                    tile.frame.widget_scroll_top + tile.frame.text_scroll_top as f32;
+                let scroll_left = tile.frame.widget_layout_scroll_left;
+                let body = tile.body_rect;
+                let layout = tile
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("sequencer tile layout");
+                let node = find_layout_node_by_stable_key_suffix(layout, suffix)
+                    .unwrap_or_else(|| panic!("sequencer node with key suffix {suffix}"));
+                let center_col = origin_col + node.rect.col + node.rect.width * 0.5 - scroll_left;
+                let center_row = origin_row + node.rect.row + node.rect.height * 0.5 - scroll_top;
+                assert!(
+                    center_col >= body.col
+                        && center_col < body.col + body.width
+                        && center_row >= body.row
+                        && center_row < body.row + body.height,
+                    "target {suffix} must be on screen inside the sequencer tile: \
+                     center=({center_col:.2},{center_row:.2}) body=({:.2},{:.2},{:.2},{:.2})",
+                    body.col,
+                    body.row,
+                    body.width,
+                    body.height,
+                );
+                (center_col, center_row)
+            };
+
+            // Owner-marker check on the current *fx* tile layout: the group
+            // chain shows `bus-fx-panel-*` subtrees, a track chain never does.
+            let fx_owner_markers = |editor: &mut Editor| -> (bool, bool, bool) {
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let tile = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible fx tile");
+                let layout = tile.frame.widget_layout.as_ref().expect("fx tile layout");
+                let mut bus_nodes = Vec::new();
+                collect_layout_nodes(
+                    layout,
+                    &mut |node| {
+                        node.stable_key
+                            .as_deref()
+                            .is_some_and(|key| key.contains("bus-fx-panel-"))
+                    },
+                    &mut bus_nodes,
+                );
+                let mut sampler_nodes = Vec::new();
+                collect_layout_nodes(
+                    layout,
+                    &mut |node| {
+                        node.stable_key
+                            .as_deref()
+                            .is_some_and(|key| key.contains("sampler-param-"))
+                    },
+                    &mut sampler_nodes,
+                );
+                let mut rack_nodes = Vec::new();
+                collect_layout_nodes(
+                    layout,
+                    &mut |node| {
+                        node.stable_key
+                            .as_deref()
+                            .is_some_and(|key| {
+                                key.contains("rack-macro-") || key.contains("rack-chain-view-toggle")
+                            })
+                    },
+                    &mut rack_nodes,
+                );
+                (
+                    !bus_nodes.is_empty(),
+                    !sampler_nodes.is_empty(),
+                    !rack_nodes.is_empty(),
+                )
+            };
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+
+            #[derive(Default)]
+            struct OwnerSamples {
+                total: Vec<f64>,
+                dispatch: Vec<f64>,
+                host: Vec<f64>,
+                track_switch: Vec<f64>,
+                tick_sync: Vec<f64>,
+                invalidation: Vec<f64>,
+                epoch_sync: Vec<f64>,
+                reactive: Vec<f64>,
+                frame: Vec<f64>,
+                retained: Vec<f64>,
+                reactive_cycle: Vec<f64>,
+                side_effects: Vec<f64>,
+                inactive_layout_refresh: Vec<f64>,
+                dirty_fields: usize,
+                full_buffer_reruns: usize,
+                subtree_reruns: usize,
+                track_switch_updates: usize,
+                ui_epoch_updates: usize,
+                fx_epoch_updates: usize,
+                tile_retained: std::collections::BTreeMap<String, Vec<f64>>,
+                tile_rebuilds: std::collections::BTreeMap<String, usize>,
+                tile_dirty: std::collections::BTreeMap<String, usize>,
+            }
+            impl OwnerSamples {
+                fn record(
+                    &mut self,
+                    total_ms: f64,
+                    dispatch_ms: f64,
+                    host_ms: f64,
+                    update: &OwnerSwitchUpdate,
+                ) {
+                    self.total.push(total_ms);
+                    self.dispatch.push(dispatch_ms);
+                    self.host.push(host_ms);
+                    self.track_switch.push(update.track_switch_ms);
+                    self.tick_sync.push(update.tick_sync_ms);
+                    self.invalidation.push(update.invalidation_ms);
+                    self.epoch_sync.push(update.epoch_sync_ms);
+                    self.reactive.push(update.reactive_ms);
+                    self.frame.push(update.frame_ms);
+                    self.retained.push(update.retained_ms);
+                    self.reactive_cycle.push(update.reactive_cycle_ms);
+                    self.side_effects.push(update.side_effects_ms);
+                    self.inactive_layout_refresh
+                        .push(update.inactive_layout_refresh_ms);
+                    self.dirty_fields += update.dirty_fields;
+                    self.full_buffer_reruns += update.full_buffer_reruns;
+                    self.subtree_reruns += update.subtree_reruns;
+                    if update.track_switch_fired {
+                        self.track_switch_updates += 1;
+                    }
+                    if update.ui_epoch_fired {
+                        self.ui_epoch_updates += 1;
+                    }
+                    if update.fx_epoch_fired {
+                        self.fx_epoch_updates += 1;
+                    }
+                    for (name, dirty, retained_ms, rebuilt) in &update.tiles {
+                        self.tile_retained
+                            .entry(name.clone())
+                            .or_default()
+                            .push(*retained_ms);
+                        *self.tile_dirty.entry(name.clone()).or_default() += *dirty;
+                        if *rebuilt {
+                            *self.tile_rebuilds.entry(name.clone()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+
+            struct ScenarioReport {
+                label: String,
+                median_ms: f64,
+                p95_ms: f64,
+            }
+            let mut scenario_reports: Vec<ScenarioReport> = Vec::new();
+            let report_scenario = |label: &str,
+                                   samples: &mut OwnerSamples,
+                                   reports: &mut Vec<ScenarioReport>| {
+                let median = percentile(&mut samples.total, 0.50);
+                let p95 = percentile(&mut samples.total, 0.95);
+                eprintln!(
+                    "[{probe_prefix}-{label}] samples={SAMPLES} median_ms={:.3} p95_ms={:.3} input_ms={:.3} host_ms={:.3} track_switch_updates={}/{SAMPLES} ui_epoch_updates={}/{SAMPLES} fx_epoch_updates={}/{SAMPLES}",
+                    median,
+                    p95,
+                    percentile(&mut samples.dispatch, 0.50),
+                    percentile(&mut samples.host, 0.50),
+                    samples.track_switch_updates,
+                    samples.ui_epoch_updates,
+                    samples.fx_epoch_updates,
+                );
+                eprintln!(
+                    "[{probe_prefix}-{label}-phases] track_switch_ms={:.3} tick_sync_ms={:.3} invalidation_ms={:.3} epoch_sync_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                    percentile(&mut samples.track_switch, 0.50),
+                    percentile(&mut samples.tick_sync, 0.50),
+                    percentile(&mut samples.invalidation, 0.50),
+                    percentile(&mut samples.epoch_sync, 0.50),
+                    percentile(&mut samples.reactive, 0.50),
+                    percentile(&mut samples.frame, 0.50),
+                    percentile(&mut samples.retained, 0.50),
+                );
+                eprintln!(
+                    "[{probe_prefix}-{label}-counts] cycle_ms={:.3} side_effects_ms={:.3} inactive_layout_refresh_ms={:.3} dirty_fields={} full_reruns={} subtree_reruns={}",
+                    percentile(&mut samples.reactive_cycle, 0.50),
+                    percentile(&mut samples.side_effects, 0.50),
+                    percentile(&mut samples.inactive_layout_refresh, 0.50),
+                    samples.dirty_fields,
+                    samples.full_buffer_reruns,
+                    samples.subtree_reruns,
+                );
+                let tile_rebuilds = samples.tile_rebuilds.clone();
+                let tile_dirty_totals = samples.tile_dirty.clone();
+                let tile_breakdown = samples
+                    .tile_retained
+                    .iter_mut()
+                    .map(|(tile, tile_samples)| {
+                        format!(
+                            "{tile}={:.3}(dirty={} rebuilds={})",
+                            percentile(tile_samples, 0.50),
+                            tile_dirty_totals.get(tile).copied().unwrap_or(0),
+                            tile_rebuilds.get(tile).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!("[{probe_prefix}-{label}-retained-tiles] {tile_breakdown}");
+                reports.push(ScenarioReport {
+                    label: label.to_string(),
+                    median_ms: median,
+                    p95_ms: p95,
+                });
+            };
+
+            let selected_bus_value = |editor: &mut Editor| -> i64 {
+                match editor
+                    .runtime_mut()
+                    .eval_str("eseq.seq-core-state/selected-bus")
+                {
+                    Ok(Some(Value::Number(bus))) => bus as i64,
+                    other => panic!("selected-bus must eval to a number, got {other:?}"),
+                }
+            };
+            // The *sel-sync* projection (ui/seq-core-state.lisp) is what the
+            // row/group highlight widgets bind to; assert it tracks the
+            // selection so the fan-out fix can never silently break the
+            // visible highlight. ESEQ_PROBE_BASELINE=1 skips these (and the
+            // ceilings) so the probe can measure a pre-projection tree.
+            let baseline_mode = std::env::var_os("ESEQ_PROBE_BASELINE").is_some();
+            let sel_vis_value = |editor: &mut Editor, field: &str| -> f64 {
+                match editor
+                    .runtime_mut()
+                    .eval_str(&format!("(reactive-value (bind \"SEQV\" \"{field}\"))"))
+                {
+                    Ok(Some(Value::Number(value))) => value,
+                    other => panic!("SEQV.{field} must eval to a number, got {other:?}"),
+                }
+            };
+
+            let group_select_suffix = format!("/group-select-{group_id}");
+            let track_select_suffix = |track: usize| format!("/select-{track}");
+
+            // Pre-warm click: focuses the sequencer tile and pays one-time
+            // first-interaction costs outside every timed region.
+            {
+                let (col, row) = locate_seq_target(&mut editor, &track_select_suffix(plain_a));
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    editor.handle_tiled_mouse_precise(
+                        mouse_event(kind, col.floor() as u16, row.floor() as u16),
+                        col,
+                        row,
+                        0,
+                    );
+                    let commands = editor.drain_host_commands();
+                    apply_host_commands(&mut editor, &mut app, &mut frame_diff, commands);
+                }
+                finish_visible_update(&mut editor, &mut app, &mut frame_diff, &mut tile_retained);
+                assert_eq!(
+                    editor.active_buffer().name,
+                    "*sequencer*",
+                    "clicking a track header must keep focus on the sequencer tile"
+                );
+                assert_eq!(current_track.load(Ordering::Relaxed), plain_a);
+            }
+
+            // One transition scenario: an untimed setup click establishes the
+            // "from" owner, then the timed click switches to the "to" owner
+            // and the whole visible update (host dispatch, tick mirror,
+            // reactive cycle, layout, frame, retained refresh) is measured.
+            let mut run_transition =
+                |label: &str,
+                 setup_suffixes: &[&str],
+                 timed_suffix: &str,
+                 expect_track: Option<usize>,
+                 expect_bus: Option<usize>,
+                 editor: &mut Editor,
+                 app: &mut app::App,
+                 frame_diff: &mut FrameDiffState,
+                 tile_retained: &mut Vec<TileRetained>,
+                 reports: &mut Vec<ScenarioReport>| {
+                    let mut samples = OwnerSamples::default();
+                    for iteration in 0..(WARMUPS + SAMPLES) {
+                        // Untimed: establish the "from" state. A transition
+                        // that starts "group selected" first parks the
+                        // current track on a plain track, so the timed click
+                        // pays the real track switch the user's gesture pays.
+                        for setup_suffix in setup_suffixes {
+                            let (col, row) = locate_seq_target(editor, setup_suffix);
+                            for kind in [
+                                MouseEventKind::Down(MouseButton::Left),
+                                MouseEventKind::Up(MouseButton::Left),
+                            ] {
+                                editor.handle_tiled_mouse_precise(
+                                    mouse_event(kind, col.floor() as u16, row.floor() as u16),
+                                    col,
+                                    row,
+                                    0,
+                                );
+                                let commands = editor.drain_host_commands();
+                                apply_host_commands(editor, app, frame_diff, commands);
+                            }
+                            finish_visible_update(editor, app, frame_diff, tile_retained);
+                        }
+
+                        // Timed: switch to the "to" owner.
+                        let (col, row) = locate_seq_target(editor, timed_suffix);
+                        let started = Instant::now();
+                        editor.handle_tiled_mouse_precise(
+                            mouse_event(
+                                MouseEventKind::Down(MouseButton::Left),
+                                col.floor() as u16,
+                                row.floor() as u16,
+                            ),
+                            col,
+                            row,
+                            0,
+                        );
+                        let commands = editor.drain_host_commands();
+                        let dispatch_done = Instant::now();
+                        apply_host_commands(editor, app, frame_diff, commands);
+                        let host_done = Instant::now();
+                        let update =
+                            finish_visible_update(editor, app, frame_diff, tile_retained);
+                        let total_ms = duration_ms(started.elapsed());
+                        if let Some(track) = expect_track {
+                            assert_eq!(
+                                current_track.load(Ordering::Relaxed),
+                                track,
+                                "{label} click {iteration} must select track {track}"
+                            );
+                            assert_eq!(
+                                selected_bus_value(editor),
+                                -1,
+                                "{label} click {iteration} must clear the bus selection"
+                            );
+                            if !baseline_mode {
+                                assert_eq!(
+                                    sel_vis_value(editor, &format!("sel-track-vis-{track}")),
+                                    1.0,
+                                    "{label}: the selected track's highlight field must be lit"
+                                );
+                                assert_eq!(
+                                    sel_vis_value(editor, &format!("sel-group-vis-{group_id}")),
+                                    0.0,
+                                    "{label}: the group highlight field must clear on track select"
+                                );
+                            }
+                        }
+                        if let Some(bus) = expect_bus {
+                            assert_eq!(
+                                selected_bus_value(editor),
+                                bus as i64,
+                                "{label} click {iteration} must select the group bus"
+                            );
+                            if !baseline_mode {
+                                assert_eq!(
+                                    sel_vis_value(editor, &format!("sel-group-vis-{group_id}")),
+                                    1.0,
+                                    "{label}: the group highlight field must light on group select"
+                                );
+                                assert_eq!(
+                                    sel_vis_value(
+                                        editor,
+                                        &format!(
+                                            "sel-track-vis-{}",
+                                            current_track.load(Ordering::Relaxed)
+                                        ),
+                                    ),
+                                    0.0,
+                                    "{label}: track highlights must gate off while the group owns the fx panel"
+                                );
+                            }
+                        }
+                        if iteration == 0 {
+                            let (bus_chain, sampler_panel, rack_panel) =
+                                fx_owner_markers(editor);
+                            if expect_bus.is_some() {
+                                assert!(
+                                    bus_chain,
+                                    "{label}: the fx tile must show the group's bus chain"
+                                );
+                            } else if let Some(track) = expect_track {
+                                assert!(
+                                    !bus_chain,
+                                    "{label}: the fx tile must drop the bus chain"
+                                );
+                                if track == rack_track {
+                                    assert!(
+                                        rack_panel,
+                                        "{label}: the fx tile must show the rack panel"
+                                    );
+                                } else {
+                                    assert!(
+                                        sampler_panel,
+                                        "{label}: the fx tile must show the sampler panel"
+                                    );
+                                }
+                            }
+                        }
+                        if iteration >= WARMUPS {
+                            samples.record(
+                                total_ms,
+                                duration_ms(dispatch_done - started),
+                                duration_ms(host_done - dispatch_done),
+                                &update,
+                            );
+                        }
+                        // Close the pointer outside the timed region.
+                        editor.handle_tiled_mouse_precise(
+                            mouse_event(
+                                MouseEventKind::Up(MouseButton::Left),
+                                col.floor() as u16,
+                                row.floor() as u16,
+                            ),
+                            col,
+                            row,
+                            0,
+                        );
+                        let commands = editor.drain_host_commands();
+                        apply_host_commands(editor, app, frame_diff, commands);
+                    }
+                    report_scenario(label, &mut samples, reports);
+                };
+
+            let plain_a_suffix = track_select_suffix(plain_a);
+            let rack_suffix = track_select_suffix(rack_track);
+            run_transition(
+                "group-to-rack-track",
+                &[plain_a_suffix.as_str(), group_select_suffix.as_str()],
+                &rack_suffix,
+                Some(rack_track),
+                None,
+                &mut editor,
+                &mut app,
+                &mut frame_diff,
+                &mut tile_retained,
+                &mut scenario_reports,
+            );
+            run_transition(
+                "rack-track-to-group",
+                &[rack_suffix.as_str()],
+                &group_select_suffix,
+                None,
+                Some(group_bus_idx),
+                &mut editor,
+                &mut app,
+                &mut frame_diff,
+                &mut tile_retained,
+                &mut scenario_reports,
+            );
+            run_transition(
+                "group-to-sampler-track",
+                &[plain_a_suffix.as_str(), group_select_suffix.as_str()],
+                &track_select_suffix(sampler_track),
+                Some(sampler_track),
+                None,
+                &mut editor,
+                &mut app,
+                &mut frame_diff,
+                &mut tile_retained,
+                &mut scenario_reports,
+            );
+            run_transition(
+                "same-instrument-track",
+                &[plain_a_suffix.as_str()],
+                &track_select_suffix(plain_b),
+                Some(plain_b),
+                None,
+                &mut editor,
+                &mut app,
+                &mut frame_diff,
+                &mut tile_retained,
+                &mut scenario_reports,
+            );
+
+            eprintln!(
+                "[{probe_prefix}-comparison] {}",
+                scenario_reports
+                    .iter()
+                    .map(|report| format!(
+                        "{}={:.3}ms(p95={:.3})",
+                        report.label, report.median_ms, report.p95_ms,
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+
+            // Pre-tuning medians (2026-08-20, Apple-silicon dev machine,
+            // --release, measured on the pre-eseq-4jv tree with
+            // ESEQ_PROBE_BASELINE=1): group-to-rack-track 145.0ms,
+            // rack-track-to-group 138.7ms, group-to-sampler-track 170.4ms,
+            // same-instrument-track 48.5ms (the "no owner change" reference).
+            // After the *sel-sync* selection-visibility projection
+            // (ui/seq-core-state.lisp) the same machine measures 51.2 / 45.6
+            // / 75.8 / 48.7ms. The ceilings hold the tuned medians with
+            // ~1.5x headroom for machine load and still sit far below every
+            // pre-tuning median, so a regression back to the defstate
+            // fan-out trips them immediately.
+            if baseline_mode {
+                eprintln!("[{probe_prefix}-baseline-mode] ceilings skipped");
+                return;
+            }
+            for report in &scenario_reports {
+                let ceiling_ms = match report.label.as_str() {
+                    "group-to-rack-track" => 80.0,
+                    "rack-track-to-group" => 75.0,
+                    "group-to-sampler-track" => 110.0,
+                    "same-instrument-track" => 75.0,
+                    other => panic!("unknown owner-switch scenario {other}"),
+                };
+                assert!(
+                    report.median_ms < ceiling_ms,
+                    "{}: owner-switch median {:.3}ms exceeded the {ceiling_ms:.0}ms ceiling",
+                    report.label,
+                    report.median_ms,
+                );
+            }
             return;
         }
 

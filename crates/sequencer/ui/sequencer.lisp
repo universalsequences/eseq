@@ -68,10 +68,13 @@
 (def %muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
+;; Bound, never a raw `selected-bus` read: reading the defstate here made
+;; every track row (and every arrangement lane reusing this binding) re-render
+;; on each bus/group selection. The *sel-sync* projection in
+;; ui/seq-core-state.lisp owns that read and gates the Rust-owned per-track
+;; selection into one bindable field per row (eseq-4jv).
 (def track-selected-binding (i)
-  (if (< eseq.seq-core-state/selected-bus 0)
-    (bind-seq (str "track-selected-" i))
-    0))
+  (eseq.seq-core-state/track-selected-vis-binding i))
 
 (def %track-color (i)
   (if (< i (len SEQ.track-colors))
@@ -1720,9 +1723,11 @@
       (set! eseq.seq-core-state/selected-bus bus-idx)
       false)))
 
-(def %group-selected? (gidx)
-  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
-    (and (>= bus-idx 0) (= eseq.seq-core-state/selected-bus bus-idx))))
+;; Selection visibility rides the *sel-sync* SEQV field, never a raw
+;; `selected-bus` read: this block wraps every member row, so a render-time
+;; read here re-rendered the whole group on each selection (eseq-4jv).
+(def %group-selected-binding (gidx)
+  (eseq.seq-core-state/group-selected-vis-binding (eseq.drum-rack-v2/group-id gidx)))
 
 ;; ── Group member chrome ─────────────────────────────────────────────────
 ;; Every group member gets the same indented prefix used by drum racks. It
@@ -2185,7 +2190,7 @@
   (let ((c (eseq.drum-rack-v2/color gidx)))
     (box :width :fill
       :key (%group-element-key gidx "block")
-      :selected (%group-selected? gidx)
+      :selected (%group-selected-binding gidx)
       :background-color (%group-container-bg c)
       :selected-background-color (%group-container-bg c)
       :border-width 2
