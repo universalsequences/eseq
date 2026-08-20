@@ -1,11 +1,10 @@
-;; ui/drum-rack-v2.lisp — Drum rack v2 lookups over SEQ.groups.
+;; ui/drum-rack-v2.lisp — Track-group and drum-rack lookups over SEQ.groups.
 ;;
-;; A drum rack is a track group with a pad map (docs/drum-rack-v2-spec.md), so
-;; every rack question is a question about SEQ.groups: which group (if any) a
-;; track belongs to, which members are visible, and where the rack sits in the
-;; grid's render order. Rendering lives with the widgets it uses — the grid
-;; header/member rows in ui/sequencer.lisp, the group strip in ui/mixer.lisp —
-;; and both read their structure from here.
+;; A drum rack is a track group with a pad map (docs/drum-rack-v2-spec.md).
+;; Shared group topology here determines membership, nesting and grid render
+;; order; rack-only helpers add the pad map and arming behavior. Rendering lives
+;; with the widgets it uses — the grid header/member rows in ui/sequencer.lisp
+;; and the group strip in ui/mixer.lisp.
 
 (module eseq.drum-rack-v2)
 
@@ -39,21 +38,26 @@
   (let ((c (get (group-at gidx) :color)))
     (if (>= (len c) 3) c (list 0.5 0.5 0.5))))
 
-;; Lowest member index — where the rack sits in the flat track order. A rack
-;; with no members yet (lazy pads) reports -1 and is rendered after the tracks.
+;; Lowest direct member index — where the group sits in flat track order. A
+;; group with no direct members reports -1; group-anchor also considers child
+;; racks, while a truly empty lazy rack is rendered after the tracks.
 (def anchor (gidx)
   (let ((ms (members gidx)))
     (if (= (len ms) 0) -1 (get (group-at gidx) :anchor))))
 
-;; Index (in SEQ.groups) of the RACK containing track i, else -1. Plain groups
-;; are deliberately invisible here: the grid leaves their tracks loose.
-(def rack-of-track (i)
+;; Index (in SEQ.groups) of the group containing track i, else -1.
+(def group-of-track (i)
   (reduce |acc gidx|
     (if (>= acc 0)
       acc
-      (if (and (rack? gidx) (%contains? (members gidx) i)) gidx acc))
+      (if (%contains? (members gidx) i) gidx acc))
     -1
     (range 0 (len SEQ.groups))))
+
+;; Index (in SEQ.groups) of the rack containing track i, else -1.
+(def rack-of-track (i)
+  (let ((gidx (group-of-track i)))
+    (if (and (>= gidx 0) (rack? gidx)) gidx -1)))
 
 (def rack-member? (i)
   (>= (rack-of-track i) 0))
@@ -63,6 +67,36 @@
   (filter
     (lambda (m) (not (eseq.track-collapse/collapsed? m)))
     (members gidx)))
+
+;; Group nesting currently permits a regular group to contain drum racks. The
+;; host publishes both directions: :rack-members on the parent and :parent on
+;; the child. Nested racks are rendered by their parent, never at top level.
+(def group-index-by-id (gid)
+  (reduce |acc gidx|
+    (if (>= acc 0)
+      acc
+      (if (= (group-id gidx) gid) gidx acc))
+    -1
+    (range 0 (len SEQ.groups))))
+
+(def nested? (gidx)
+  (let ((parent (get (group-at gidx) :parent)))
+    (if parent (>= parent 0) false)))
+
+(def child-racks (gidx)
+  (filter (lambda (child) (>= child 0))
+    (map (lambda (gid) (group-index-by-id gid))
+      (or (get (group-at gidx) :rack-members) (list)))))
+
+;; Lowest track owned by this group or by a rack nested in it.
+(def group-anchor (gidx)
+  (reduce |acc child|
+    (let ((child-anchor (anchor child)))
+      (if (< acc 0)
+        child-anchor
+        (if (< child-anchor 0) acc (min acc child-anchor))))
+    (anchor gidx)
+    (child-racks gidx)))
 
 ;; Storage index of the group's backing bus in the SEQ.bus-* lists, or -1.
 (def bus-index (gidx)
@@ -100,15 +134,23 @@
   (seq-toggle-group-collapsed (group-id gidx)))
 
 ;; ── Grid render order ───────────────────────────────────────────────────
-;; Loose tracks stay in track order; a rack collapses its member run into one
-;; "rack" item anchored at its lowest member, so members render nested under
-;; the rack header instead of as siblings. Empty racks (no pad has claimed a
-;; track yet) have no anchor and follow the tracks so the kit is still visible.
+;; Loose tracks stay in track order. Every top-level group collapses its member
+;; run into one item anchored at its lowest member, so regular groups and drum
+;; racks use the same nested block model. Unanchored groups follow the tracks;
+;; this keeps empty, lazy drum racks visible.
 
-(def %empty-rack-items ()
+(def group-anchored-at (track)
   (reduce |acc gidx|
-    (if (and (rack? gidx) (= (len (members gidx)) 0))
-      (append acc (list (dict :kind "rack" :gidx gidx)))
+    (if (>= acc 0)
+      acc
+      (if (and (not (nested? gidx)) (= (group-anchor gidx) track)) gidx acc))
+    -1
+    (range 0 (len SEQ.groups))))
+
+(def %unanchored-group-items ()
+  (reduce |acc gidx|
+    (if (and (not (nested? gidx)) (< (group-anchor gidx) 0))
+      (append acc (list (dict :kind "group" :gidx gidx)))
       acc)
     (list)
     (range 0 (len SEQ.groups))))
@@ -116,17 +158,17 @@
 (def grid-render-items ()
   (append
     (reduce |acc i|
-      (let ((gidx (rack-of-track i)))
+      (let ((gidx (group-anchored-at i)))
         (if (>= gidx 0)
-          (if (= i (anchor gidx))
-            (append acc (list (dict :kind "rack" :gidx gidx)))
-            acc)
-          (if (eseq.track-collapse/collapsed? i)
+          (append acc (list (dict :kind "group" :gidx gidx)))
+          (if (>= (group-of-track i) 0)
             acc
-            (append acc (list (dict :kind "track" :track i))))))
+            (if (eseq.track-collapse/collapsed? i)
+              acc
+              (append acc (list (dict :kind "track" :track i)))))))
       (list)
       (range 0 SEQ.num-tracks))
-    (%empty-rack-items)))
+    (%unanchored-group-items)))
 
 ;; ── Pad map (slice 6 polish) ────────────────────────────────────────────
 ;; The pad map is the rack's whole curation layer: an ordered list of pads,

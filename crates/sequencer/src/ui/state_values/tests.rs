@@ -48995,15 +48995,25 @@
         }
     }
 
-    fn apply_rack_group_bindings(editor: &mut eseqlisp::Editor, collapsed: bool) {
-        let groups = [rack_group_fixture(collapsed)];
+    fn regular_group_fixture(collapsed: bool) -> sequencer::project::ProjectTrackGroup {
+        let mut group = rack_group_fixture(collapsed);
+        group.id = 8;
+        group.name = "Band".to_string();
+        group.rack = None;
+        group
+    }
+
+    fn apply_groups_bindings(
+        editor: &mut eseqlisp::Editor,
+        groups: &[sequencer::project::ProjectTrackGroup],
+    ) {
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "groups", build_groups_value(&groups));
-        rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(&groups));
-        // Pad-arm state the header's arm dot reads; -1 = no rack armed.
+        rt.set_reactive("SEQ", "groups", build_groups_value(groups));
+        rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(groups));
+        // Pad-arm state is read only by a drum-rack header; -1 = no rack armed.
         rt.set_reactive("SEQ", "armed-rack-id", Value::Number(-1.0));
         rt.set_reactive("SEQ", "bus-ids", test_number_list(&[0.0, 1.0, 2.0]));
-        rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Kit"]));
+        rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Group"]));
         rt.set_reactive("SEQ", "bus-volumes", test_number_list(&[1.0, 1.0, 0.8]));
         rt.set_reactive("SEQ", "bus-mutes", test_bool_list(&[false, false, false]));
         rt.set_reactive("SEQ", "bus-solos", test_bool_list(&[false, false, false]));
@@ -49012,6 +49022,17 @@
         }
         rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
+    }
+
+    fn apply_group_bindings(
+        editor: &mut eseqlisp::Editor,
+        group: sequencer::project::ProjectTrackGroup,
+    ) {
+        apply_groups_bindings(editor, &[group]);
+    }
+
+    fn apply_rack_group_bindings(editor: &mut eseqlisp::Editor, collapsed: bool) {
+        apply_group_bindings(editor, rack_group_fixture(collapsed));
     }
 
     #[test]
@@ -49187,6 +49208,92 @@
             ),
             "the rack meter level must bind the backing bus peak (bus 2), got {:?}",
             rack_meter.props.get("level")
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_renders_regular_group_as_collapsible_member_container_without_arm() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_group_bindings(&mut editor, regular_group_fixture(false));
+
+        let expanded = editor
+            .widget_layout()
+            .expect("regular group sequencer layout should build");
+        let block = find_layout_node_by_stable_key_suffix(&expanded, "sequencer-group-8")
+            .expect("regular group block should render");
+        for key in [
+            "/group-collapse-8",
+            "/group-mute-8",
+            "/group-solo-8",
+            "/group-name-label-8",
+            "/group-volume-control-8",
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(block, key)
+                .unwrap_or_else(|| panic!("regular group header should render {key}"));
+            assert_finite_nonzero_rect(node, "regular group header control");
+            if key == "/group-collapse-8" {
+                assert!(
+                    node.props.contains_key("on-click"),
+                    "regular group collapse control should use the drum-rack interaction model"
+                );
+            }
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(block, "/group-arm-8").is_none(),
+            "regular groups cannot be armed and must not render an Arm control"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + member)),
+                1,
+                "regular group member track {member} should be nested in its block"
+            );
+        }
+
+        apply_group_bindings(&mut editor, regular_group_fixture(true));
+        let collapsed = editor
+            .widget_layout()
+            .expect("collapsed regular group sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&collapsed, "/group-collapse-8").is_some(),
+            "collapsing a regular group keeps the control that expands it"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(&collapsed, &format!("sequencer-track-{}", 1000 + member)),
+                0,
+                "collapsed regular group should hide member track {member}"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_sequencer_nests_drum_rack_inside_regular_group() {
+        let mut parent = regular_group_fixture(false);
+        parent.members = vec![0, 3];
+        parent.rack_members = vec![7];
+        let rack = rack_group_fixture(false);
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_groups_bindings(&mut editor, &[parent, rack]);
+
+        let layout = editor
+            .widget_layout()
+            .expect("nested group sequencer layout should build");
+        let parent_block = find_layout_node_by_stable_key_suffix(&layout, "sequencer-group-8")
+            .expect("regular parent group should render");
+        let rack_block = find_layout_node_by_stable_key_suffix(parent_block, "sequencer-rack-7")
+            .expect("child drum rack should render inside its regular parent");
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(rack_block, &format!("sequencer-track-{}", 1000 + member)),
+                1,
+                "rack member track {member} should remain nested in the child rack"
+            );
+        }
+        assert_eq!(
+            count_stable_key_prefix(&layout, "sequencer-rack-7"),
+            1,
+            "a nested drum rack must not also render as a top-level block"
         );
     }
 

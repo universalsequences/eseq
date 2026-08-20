@@ -1665,26 +1665,32 @@
           (box :flex 1 :width 0 :height 0.1 :bg :transparent)
           (%track-actions i)))))
 
-;; ── Drum rack v2 (docs/drum-rack-v2-spec.md) ────────────────────────────
-;; A rack is a track group with a pad map, so the grid draws it as one block:
-;; a header row that owns the kit (arm, the backing bus's mute/solo/volume,
-;; name, collapse) with its member tracks nested beneath as ordinary rows.
+;; ── Track groups ────────────────────────────────────────────────────────
+;; Regular groups and drum racks share one nested block: a header row owns the
+;; backing bus's mute/solo/volume, name and collapse state, with member tracks
+;; beneath as ordinary rows. A drum rack additionally owns pad-play arming and
+;; rack-specific member chrome; regular groups deliberately have no Arm control.
 
-(def %rack-bus-volume-from-event (bus-idx event)
+(def %group-ui-kind (gidx)
+  (if (eseq.drum-rack-v2/rack? gidx) "rack" "group"))
+
+(def %group-element-key (gidx element)
+  (str (%group-ui-kind gidx) "-" element "-" (eseq.drum-rack-v2/group-id gidx)))
+
+(def %group-bus-volume-from-event (bus-idx event)
   (let ((sx (get event :sx)))
     (if (= sx nil)
       nil
       (seq-set-bus-volume bus-idx (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0))))))))
 
-;; Volume/meter for the rack's backing bus — the rack fader of the spec. A rack
-;; always has a bus, but the lists it resolves against are rebuilt per frame, so
-;; an unresolved index degrades to a spacer instead of an error.
-(def %rack-volume-control (gidx bus-idx)
+;; Volume/meter for a group's backing bus. Group bus lists are rebuilt per
+;; frame, so an unresolved index degrades to a spacer instead of an error.
+(def %group-volume-control (gidx bus-idx)
   (let ((c (eseq.drum-rack-v2/color gidx)))
     (v-stack (box :height 0.13)
       (if (>= bus-idx 0)
         (box
-          :key (str "rack-volume-control-" (eseq.drum-rack-v2/group-id gidx))
+          :key (%group-element-key gidx "volume-control")
           :width 8.2 :height 1.25
           :background "seqv-track-volume-meter"
           :level (bind-seq (str "bus-peak-" bus-idx))
@@ -1692,13 +1698,13 @@
           :track-r (nth c 0)
           :track-g (nth c 1)
           :track-b (nth c 2)
-          :on-click (lambda (event) (%rack-bus-volume-from-event bus-idx event))
-          :on-drag (lambda (event) (%rack-bus-volume-from-event bus-idx event)))
+          :on-click (lambda (event) (%group-bus-volume-from-event bus-idx event))
+          :on-drag (lambda (event) (%group-bus-volume-from-event bus-idx event)))
         (box :width 8.2 :height 1.25 :bg :transparent)))))
 
-;; Selecting a rack selects its backing bus, exactly as the mixer's group
-;; header does, so the fx panel follows the rack chain.
-(def %select-rack (gidx)
+;; Selecting a group selects its backing bus, exactly as the mixer header does,
+;; so the fx panel follows the group chain.
+(def %select-group (gidx)
   (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
     (if (>= bus-idx 0)
       (set! eseq.seq-core-state/selected-bus bus-idx)
@@ -1738,10 +1744,12 @@
   (drum-rack-indicator)
   )
 
-(def %rack-member-row (gidx i)
-  (h-stack :width :fill :gap 0.15 :align :start
-    (%rack-member-chrome gidx i)
-    (box :width 0 :flex 1 (%track-row i))))
+(def %group-member-row (gidx i)
+  (if (eseq.drum-rack-v2/rack? gidx)
+    (h-stack :width :fill :gap 0.15 :align :start
+      (%rack-member-chrome gidx i)
+      (box :width 0 :flex 1 (%track-row i)))
+    (%track-row i)))
 
 ;; ── Pad grid performance view ───────────────────────────────────────────
 ;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
@@ -2075,65 +2083,67 @@
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
           (%pad-map-row gidx gid tracks row page))))))
 
-(def %rack-header-body (gidx)
+(def %group-header-body (gidx)
   (let ((c (eseq.drum-rack-v2/color gidx))
       (bus-idx (eseq.drum-rack-v2/bus-index gidx))
+      (rack (eseq.drum-rack-v2/rack? gidx))
       (armed (eseq.drum-rack-v2/armed? gidx))
       (muted (and (>= bus-idx 0) (nth SEQ.bus-mutes bus-idx)))
       (soloed (and (>= bus-idx 0) (nth SEQ.bus-solos bus-idx))))
     (box :background "seqv-track-container"
       :padding 0.1
-      :on-click |x y r| (%select-rack gidx)
+      :on-click |x y r| (%select-group gidx)
       (h-stack :gap 0.4 :align :center
         (box
-          :key (str "rack-color-badge-" (eseq.drum-rack-v2/group-id gidx))
+          :key (%group-element-key gidx "color-badge")
           :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
           :track-r (nth c 0)
           :track-g (nth c 1)
           :track-b (nth c 2)
-          :on-click |x y r| (%select-rack gidx))
+          :on-click |x y r| (%select-group gidx))
         (button (if (eseq.drum-rack-v2/collapsed? gidx) "▸" "▾")
-          :key (str "rack-collapse-" (eseq.drum-rack-v2/group-id gidx))
+          :key (%group-element-key gidx "collapse")
           :width 1.55 :height 1.4 :padding 0 :font-size 15
           :background-color '(rgba 0.1 0.1 0.1 1.0)
           :border-color :transparent
           :color :white
           :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
-        ;; Arm = pad-play mode: the live keyboard becomes this kit's pads —
-        ;; a key whose note matches a pad triggers that pad's member track at
-        ;; base pitch, and records into that member's own pattern.
-        (box :width 2 :height 1.5
-          :background "seqv-rec-arm-dot"
-          :key (str "rack-arm-" (eseq.drum-rack-v2/group-id gidx))
-          :active (if armed 1 0)
-          :on-click |x y r| (do
-            (%select-rack gidx)
-            (eseq.drum-rack-v2/toggle-armed gidx)))
+        ;; Arm = drum-rack pad-play mode. A regular group is not an input
+        ;; target and therefore contributes no Arm control or placeholder.
+        (if rack
+          (box :width 2 :height 1.5
+            :background "seqv-rec-arm-dot"
+            :key (%group-element-key gidx "arm")
+            :active (if armed 1 0)
+            :on-click |x y r| (do
+              (%select-group gidx)
+              (eseq.drum-rack-v2/toggle-armed gidx)))
+          (box :width 0.0 :height 0.0 :bg :transparent))
         (button "M"
-          :key (str "rack-mute-" (eseq.drum-rack-v2/group-id gidx))
+          :key (%group-element-key gidx "mute")
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :border-color :transparent
           :background-color (%mute-bg muted)
           :color (if muted :gray :black)
           :on-click |x y r| (if (>= bus-idx 0)
-            (do (%select-rack gidx) (seq-toggle-bus-mute bus-idx))
+            (do (%select-group gidx) (seq-toggle-bus-mute bus-idx))
             nil))
         (button "S"
-          :key (str "rack-solo-" (eseq.drum-rack-v2/group-id gidx))
+          :key (%group-element-key gidx "solo")
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (%solo-bg soloed)
           :border-color :transparent
           :color (if soloed :white :gray)
           :on-click |x y r| (if (>= bus-idx 0)
-            (do (%select-rack gidx) (seq-toggle-bus-solo bus-idx))
+            (do (%select-group gidx) (seq-toggle-bus-solo bus-idx))
             nil))
         (box :width 8.6 :height 1
-          :key (str "rack-select-" (eseq.drum-rack-v2/group-id gidx))
+          :key (%group-element-key gidx "select")
           :background-color :transparent
-          :on-click |x y r| (%select-rack gidx)
+          :on-click |x y r| (%select-group gidx)
           (badge (%track-name-display (eseq.drum-rack-v2/group-name gidx))
-            :key (str "rack-name-label-" (eseq.drum-rack-v2/group-id gidx))
+            :key (%group-element-key gidx "name-label")
             :icon (eseq.track-collapse/group-type-icon (nth SEQ.groups gidx))
             :font-size 11 :width 8.6 :height 1 :padding 0
             :h-align :left
@@ -2147,35 +2157,38 @@
         ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
         ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
         ;; name/meter shape an ordinary track header has.
-        (%rack-volume-control gidx bus-idx)))))
+        (%group-volume-control gidx bus-idx)))))
 
-(def %rack-header-row (gidx)
-  (subtree :key (str "seqv-rack-header-" (eseq.drum-rack-v2/group-id gidx))
-    (%rack-header-body gidx)))
+(def %group-header-row (gidx)
+  (subtree :key (str "seqv-" (%group-ui-kind gidx) "-header-" (eseq.drum-rack-v2/group-id gidx))
+    (%group-header-body gidx)))
 
-(def %rack-block (gidx)
+(def %group-block (gidx)
   (let ((c (eseq.drum-rack-v2/color gidx)))
     (box :width :fill
-      :key (str "rack-block-" (eseq.drum-rack-v2/group-id gidx))
+      :key (%group-element-key gidx "block")
       :background-color (rgba (nth c 0) (nth c 1) (nth c 2) 0.22)
       :border-width 2
       :border-color :mixer-strip-border
       :corner-radius 10
       :padding 0.345
       (v-stack :width :fill :gap 0.1
-        (%rack-header-row gidx)
+        (%group-header-row gidx)
         (if (eseq.drum-rack-v2/collapsed? gidx)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :width :fill :gap 0.0
             (each (eseq.drum-rack-v2/visible-members gidx) |m|
               (subtree :key (str "sequencer-track-" (nth SEQ.track-ids m))
-                (%rack-member-row gidx m)))))))))
+                (%group-member-row gidx m)))
+            (each (eseq.drum-rack-v2/child-racks gidx) |child|
+              (subtree :key (str "sequencer-rack-" (eseq.drum-rack-v2/group-id child))
+                (%group-block child)))))))))
 
 (def %grid-render-item (item)
-  (if (= (get item :kind) "rack")
+  (if (= (get item :kind) "group")
     (let ((gidx (get item :gidx)))
-      (subtree :key (str "sequencer-rack-" (eseq.drum-rack-v2/group-id gidx))
-        (%rack-block gidx)))
+      (subtree :key (str "sequencer-" (%group-ui-kind gidx) "-" (eseq.drum-rack-v2/group-id gidx))
+        (%group-block gidx)))
     (let ((i (get item :track)))
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
         (%track-row i)))))
