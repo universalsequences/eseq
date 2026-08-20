@@ -172,6 +172,12 @@ fn analyze(source: &str) -> Result<SourceAnalysis, String> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SourceKind {
+    Lisp,
+    Rust,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     Symbol,
@@ -252,6 +258,71 @@ fn scan_tokens(source: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
+fn rust_string_ranges(source: &str) -> Result<Vec<(usize, usize)>, String> {
+    use rustc_lexer::{LiteralKind, TokenKind};
+
+    let mut strings = Vec::new();
+    let mut offset = 0;
+    for token in rustc_lexer::tokenize(source) {
+        match token.kind {
+            TokenKind::BlockComment { terminated: false } => {
+                return Err(format!("unterminated block comment at byte {offset}"));
+            }
+            TokenKind::Literal { kind, suffix_start } => {
+                let (prefix, suffix) = match kind {
+                    LiteralKind::Str { terminated: true } => (1, 1),
+                    LiteralKind::ByteStr { terminated: true } => (2, 1),
+                    LiteralKind::RawStr {
+                        n_hashes,
+                        started: true,
+                        terminated: true,
+                    } => (n_hashes + 2, n_hashes + 1),
+                    LiteralKind::RawByteStr {
+                        n_hashes,
+                        started: true,
+                        terminated: true,
+                    } => (n_hashes + 3, n_hashes + 1),
+                    LiteralKind::Str { terminated: false }
+                    | LiteralKind::ByteStr { terminated: false }
+                    | LiteralKind::RawStr {
+                        terminated: false, ..
+                    }
+                    | LiteralKind::RawByteStr {
+                        terminated: false, ..
+                    } => {
+                        return Err(format!("unterminated string at byte {offset}"));
+                    }
+                    _ => {
+                        offset += token.len;
+                        continue;
+                    }
+                };
+                strings.push((offset + prefix, offset + suffix_start - suffix));
+            }
+            _ => {}
+        }
+        offset += token.len;
+    }
+    Ok(strings)
+}
+
+fn symbol_occurrences<'a>(text: &'a str, symbol: &'a str) -> impl Iterator<Item = usize> + 'a {
+    text.match_indices(symbol).filter_map(move |(offset, _)| {
+        let before = (offset == 0).then_some(true).unwrap_or_else(|| {
+            text.as_bytes()
+                .get(offset - 1)
+                .is_some_and(|byte| is_delimiter(*byte))
+        });
+        let end = offset + symbol.len();
+        let after = end == text.len()
+            || text
+                .as_bytes()
+                .get(end)
+                .is_some_and(|byte| is_delimiter(*byte));
+        (before && after).then_some(offset)
+    })
+}
+
 fn line_column(source: &str, offset: usize) -> (usize, usize) {
     let prefix = &source[..offset];
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
@@ -281,7 +352,19 @@ fn selected(selector: &str, module: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-fn collect_path(path: &Path, files: &mut Vec<PathBuf>, explicit: bool) -> io::Result<()> {
+fn source_kind(path: &Path) -> Option<SourceKind> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("lisp") => Some(SourceKind::Lisp),
+        Some("rs") => Some(SourceKind::Rust),
+        _ => None,
+    }
+}
+
+fn collect_path(
+    path: &Path,
+    files: &mut Vec<(PathBuf, SourceKind)>,
+    explicit: bool,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -290,15 +373,12 @@ fn collect_path(path: &Path, files: &mut Vec<PathBuf>, explicit: bool) -> io::Re
         ));
     }
     if metadata.is_file() {
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "lisp")
-        {
-            files.push(path.to_path_buf());
+        if let Some(kind) = source_kind(path) {
+            files.push((path.to_path_buf(), kind));
         } else if explicit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("not a .lisp file: {}", path.display()),
+                format!("not a .lisp or .rs file: {}", path.display()),
             ));
         }
     } else if metadata.is_dir() {
@@ -335,19 +415,26 @@ pub fn plan_migration(selector: &str, paths: &[PathBuf]) -> io::Result<Migration
     paths_to_scan.dedup();
 
     let mut sources = Vec::with_capacity(paths_to_scan.len());
-    for path in paths_to_scan {
+    for (path, kind) in paths_to_scan {
         let source = fs::read_to_string(&path)?;
-        let analysis = analyze(&source).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {error}", path.display()),
-            )
-        })?;
-        sources.push((path, source, analysis));
+        let analysis = if kind == SourceKind::Lisp {
+            Some(analyze(&source).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {error}", path.display()),
+                )
+            })?)
+        } else {
+            None
+        };
+        sources.push((path, source, kind, analysis));
     }
 
     let mut module_plans = HashMap::new();
-    for (path, _, analysis) in &sources {
+    for (path, _, _, analysis) in &sources {
+        let Some(analysis) = analysis else {
+            continue;
+        };
         let Some(module) = analysis
             .module
             .as_deref()
@@ -421,27 +508,43 @@ pub fn plan_migration(selector: &str, paths: &[PathBuf]) -> io::Result<Migration
     }
 
     let mut files = Vec::with_capacity(sources.len());
-    for (path, original, analysis) in sources {
+    for (path, original, kind, analysis) in sources {
         let mut replacements = Vec::<(usize, usize, String)>::new();
         let mut manual = Vec::new();
         let own = analysis
-            .module
             .as_ref()
+            .and_then(|analysis| analysis.module.as_ref())
             .and_then(|module| module_plans.get(module));
 
         let mut qualified = BTreeMap::new();
         for (module, plan) in &module_plans {
             for (old, new) in &plan.private {
                 qualified.insert(format!("{module}/{old}"), format!("{module}/{new}"));
-                for (alias, imported) in &analysis.aliases {
-                    if imported == module {
-                        qualified.insert(format!("{alias}/{old}"), format!("{alias}/{new}"));
+                if let Some(analysis) = &analysis {
+                    for (alias, imported) in &analysis.aliases {
+                        if imported == module {
+                            qualified.insert(format!("{alias}/{old}"), format!("{alias}/{new}"));
+                        }
                     }
                 }
             }
         }
 
-        for token in scan_tokens(&original).map_err(|error| {
+        let tokens = if kind == SourceKind::Lisp {
+            scan_tokens(&original)
+        } else {
+            rust_string_ranges(&original).map(|ranges| {
+                ranges
+                    .into_iter()
+                    .map(|(start, end)| Token {
+                        kind: TokenKind::String,
+                        start: start - 1,
+                        end: end + 1,
+                    })
+                    .collect()
+            })
+        };
+        for token in tokens.map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: {error}", path.display()),
@@ -475,14 +578,14 @@ pub fn plan_migration(selector: &str, paths: &[PathBuf]) -> io::Result<Migration
                         candidates.extend(plan.private.clone());
                     }
                     for (old, new) in candidates {
-                        if let Some(relative) = text.find(&old) {
+                        for relative in symbol_occurrences(text, &old) {
                             let offset = inner.0 + relative;
                             let (line, column) = line_column(&original, offset);
                             manual.push(ManualOccurrence {
                                 line,
                                 column,
-                                old,
-                                new,
+                                old: old.clone(),
+                                new: new.clone(),
                             });
                         }
                     }
@@ -680,6 +783,11 @@ mod tests {
             &consumer,
             "(module test.consumer)\n(import test.owner :as own)\n(def use () (list (own/%hidden 1) test.owner/%cell foreign/%hidden))\n(def names () \"test.owner/%hidden\")\n",
         ).unwrap();
+        let rust_consumer = dir.join("consumer.rs");
+        fs::write(
+            &rust_consumer,
+            "// \"test.owner/%hidden\" is only a comment\nconst QUOTE: char = '\"';\nconst ONE: &str = \"test.owner/%hidden test.owner/%hidden\";\nconst TWO: &str = r#\"test.owner/%cell\"#;\n",
+        ).unwrap();
 
         let result = plan_migration("test.owner", &[dir.clone()]).unwrap();
         assert_eq!(result.modules, vec!["test.owner"]);
@@ -703,6 +811,13 @@ mod tests {
         assert!(consumer.rewritten.contains("test.owner/cell"));
         assert!(consumer.rewritten.contains("foreign/%hidden"));
         assert_eq!(consumer.manual.len(), 1);
+        let rust_consumer = result
+            .files
+            .iter()
+            .find(|file| file.path == rust_consumer)
+            .unwrap();
+        assert_eq!(rust_consumer.manual.len(), 3);
+        assert_eq!(rust_consumer.rewritten, rust_consumer.original);
         assert!(unified_diff(owner).contains("+        published-hook)"));
         fs::remove_dir_all(dir).unwrap();
     }
