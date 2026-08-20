@@ -784,6 +784,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :on-click (lambda (event) (%track-body-click event i))
+      :on-right-click (lambda (event) (%open-track-menu event i))
       (v-stack :gap 0.18
         ;; Grouped tracks drop the output dropdown (their output is the group
         ;; bus); the container provides the color above. A small spacer keeps
@@ -946,7 +947,6 @@
         1.0)
       :selected-background-color :fx-panel-header-selected-bg
       :on-click (lambda (event) (%track-label-click event i))
-      :on-right-click (lambda (event) (%open-track-menu event i))
       :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
       (if (= %track-renaming i)
         (%track-rename-input i "track-rename-input-" 9.8 10)
@@ -989,6 +989,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :on-click (lambda (event) (%track-body-click event i))
+      :on-right-click (lambda (event) (%open-track-menu event i))
       (v-stack :gap 0.42 :align :center
         (box :width :fill :height 3.45 :bg :transparent)
         (%track-meter-control i)
@@ -1010,7 +1011,6 @@
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (%track-label-click event i))
-          :on-right-click (lambda (event) (%open-track-menu event i))
           :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
           (if (= %track-renaming i)
             (%track-rename-input i "track-collapsed-rename-input-" 3.65 9)

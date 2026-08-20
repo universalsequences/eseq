@@ -26780,6 +26780,116 @@
     }
 
     #[test]
+    fn metal_seq_mixer_track_strip_context_menu_starts_inline_rename() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer should exist")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(140, 20);
+
+        let layout = editor.widget_layout().expect("mixer layout should build");
+        let track_strip = find_layout_node_by_stable_key(&layout, "mixer-v2-track-0")
+            .expect("expanded mixer track strip should render");
+        let open_menu = track_strip
+            .props
+            .get("on-right-click")
+            .cloned()
+            .expect("the full track strip should expose the context-menu gesture");
+        let track_label = find_layout_node_by_stable_key(&layout, "mixer-v2-strip-label-0")
+            .expect("expanded mixer track label should render");
+        assert!(
+            !track_label.props.contains_key("on-right-click"),
+            "the nested label must defer to the strip handler instead of opening the menu twice",
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                open_menu,
+                vec![map_value([
+                    ("col", Value::Number(83.25)),
+                    ("row", Value::Number(7.5)),
+                ])],
+            )
+            .expect("right-click mixer track strip");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-track").unwrap(),
+            Some(Value::Number(0.0)),
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-col").unwrap(),
+            Some(Value::Number(83.25)),
+            "the context menu should retain the pointer column",
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-row").unwrap(),
+            Some(Value::Number(7.5)),
+            "the context menu should retain the pointer row",
+        );
+
+        let menu_layout = editor.widget_layout().expect("track context menu layout should build");
+        let rename_item = find_layout_node_by_text(&menu_layout, "Rename")
+            .expect("track context menu should offer rename");
+        let rename = rename_item
+            .props
+            .get("on-select")
+            .cloned()
+            .expect("rename item should expose a select callback");
+        editor.runtime_mut().invoke(rename, vec![Value::Nil])
+            .expect("select track rename action");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            Some(Value::Bool(false)),
+            "selecting rename should close the context menu",
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-renaming").unwrap(),
+            Some(Value::Number(0.0)),
+        );
+        let rename_layout = editor.widget_layout().expect("inline rename layout should build");
+        let rename_input = find_layout_node_by_stable_key_suffix(
+            &rename_layout,
+            "/track-rename-input-0",
+        ).expect("row-level context menu rename should replace the track label with an input");
+        assert_finite_nonzero_rect(rename_input, "mixer inline track rename input");
+        assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
+        assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
+
+        editor.runtime_mut()
+            .eval_str("(eseq.mixer/%finish-track-rename 0 false)")
+            .expect("finish expanded inline rename");
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[true]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let collapsed_layout = editor.widget_layout().expect("collapsed mixer layout should build");
+        let collapsed_strip = find_layout_node_by_stable_key(&collapsed_layout, "mixer-v2-track-0")
+            .expect("collapsed mixer track strip should render");
+        assert!(
+            collapsed_strip.props.contains_key("on-right-click"),
+            "the full collapsed track strip should expose the context-menu gesture",
+        );
+        let collapsed_label = find_layout_node_by_stable_key_suffix(
+            &collapsed_layout,
+            "/track-collapsed-label-0",
+        ).expect("collapsed mixer track label should render");
+        assert!(
+            !collapsed_label.props.contains_key("on-right-click"),
+            "the nested collapsed label must defer to the strip context-menu handler",
+        );
+    }
+
+    #[test]
     fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
