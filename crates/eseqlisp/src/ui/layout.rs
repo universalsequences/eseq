@@ -131,7 +131,19 @@ pub struct LayoutEngine<'a> {
     /// Whole-window viewport in this tile's local cell coordinates (origin
     /// may be negative for non-top-left tiles). Consumed by frame-anchored
     /// widgets (modal). `None` falls back to the tile's own root area.
+    ///
+    /// Expressed in POST-SCROLL frame space: panning the tile does not move
+    /// it. Use `content_scroll` to bring it into the content space layout
+    /// rects live in.
     pub frame_viewport: Option<Rect>,
+    /// The tile's content-scroll offsets `(cols, rows)` for this pass.
+    ///
+    /// Layout rects live in CONTENT space — the backend draws the whole
+    /// layout (and the overlay channel) translated by `-content_scroll`. The
+    /// frame viewport, by contrast, is fixed in frame space. Frame-anchored
+    /// widgets add this offset to reconcile the two; see
+    /// `current_frame_viewport`.
+    pub content_scroll: (f32, f32),
 }
 
 std::thread_local! {
@@ -145,13 +157,33 @@ std::thread_local! {
 #[derive(Clone, Copy)]
 struct LayoutPassGeometry {
     frame_viewport: Rect,
+    content_scroll: (f32, f32),
     cell_w: f32,
     cell_h: f32,
 }
 
-/// The frame viewport of the in-progress layout pass, if any.
+/// The frame viewport of the in-progress layout pass, if any, expressed in
+/// the CONTENT space layout rects use.
+///
+/// The raw frame viewport is fixed in post-scroll frame space, but a widget
+/// anchored against it produces a layout rect that the backend then draws
+/// translated by `-content_scroll` (widget primitives and the overlay channel
+/// alike). Translating the frame into content space here keeps clamping and
+/// flipping decisions in the same space as the anchors they are compared
+/// against — without it, panning a tile shifts every frame-anchored widget by
+/// the scroll amount (a context menu flips to the left of the pointer once the
+/// mixer is panned right).
 pub(crate) fn current_frame_viewport() -> Option<Rect> {
-    LAYOUT_PASS_GEOMETRY.with(|slot| slot.get().map(|geometry| geometry.frame_viewport))
+    LAYOUT_PASS_GEOMETRY.with(|slot| {
+        slot.get().map(|geometry| {
+            let (scroll_col, scroll_row) = geometry.content_scroll;
+            Rect {
+                col: geometry.frame_viewport.col + scroll_col,
+                row: geometry.frame_viewport.row + scroll_row,
+                ..geometry.frame_viewport
+            }
+        })
+    })
 }
 
 pub(crate) fn current_layout_cell_dims() -> Option<(f32, f32)> {
@@ -168,9 +200,10 @@ struct LayoutPassGeometryGuard {
 }
 
 impl LayoutPassGeometryGuard {
-    fn install(frame_viewport: Rect, cell_w: f32, cell_h: f32) -> Self {
+    fn install(frame_viewport: Rect, content_scroll: (f32, f32), cell_w: f32, cell_h: f32) -> Self {
         let geometry = LayoutPassGeometry {
             frame_viewport,
+            content_scroll,
             cell_w,
             cell_h,
         };
@@ -200,6 +233,7 @@ impl<'a> LayoutEngine<'a> {
             cell_w: 1.0,
             cell_h: 1.0,
             frame_viewport: None,
+            content_scroll: (0.0, 0.0),
         }
     }
 
@@ -237,6 +271,7 @@ impl<'a> LayoutEngine<'a> {
             cell_w,
             cell_h,
             frame_viewport: None,
+            content_scroll: (0.0, 0.0),
         }
     }
 
@@ -247,6 +282,7 @@ impl<'a> LayoutEngine<'a> {
     pub fn layout_with_id_offset(&self, tree: &Value, widget_id_offset: u64) -> Option<LayoutNode> {
         let _layout_geometry = LayoutPassGeometryGuard::install(
             self.effective_frame_viewport(),
+            self.content_scroll,
             self.cell_w,
             self.cell_h,
         );
@@ -1330,6 +1366,7 @@ pub fn relayout_subtree_path_result(
 ) -> Result<LayoutNode, String> {
     let _layout_geometry = LayoutPassGeometryGuard::install(
         engine.effective_frame_viewport(),
+        engine.content_scroll,
         engine.cell_w,
         engine.cell_h,
     );

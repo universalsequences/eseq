@@ -123,8 +123,16 @@ fn box_mouse_info(
         "y".to_string(),
         Rc::new(RefCell::new(Value::Number(wr as f64))),
     );
-    // Absolute pointer position in tile-local layout cells — the space
-    // `context-menu` :anchor-col/:anchor-row are expressed in.
+    // Absolute pointer position in tile-local layout CONTENT cells: the
+    // tile's own scroll offsets are already folded in, so this matches the
+    // space layout rects live in (the backend draws the layout, and the
+    // overlay channel, translated by -scroll). It is therefore the space
+    // `context-menu` :anchor-col/:anchor-row are expressed in — a
+    // frame-anchored widget reconciles the two via `current_frame_viewport`,
+    // which reports the frame in this same content space.
+    //
+    // Not folded in: the offset of an enclosing `scroll` WIDGET, which
+    // children read separately via `scroll::current_event_scroll_offset`.
     info.insert(
         "col".to_string(),
         Rc::new(RefCell::new(Value::Number(local_col as f64))),

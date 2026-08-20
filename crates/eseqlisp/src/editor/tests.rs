@@ -12124,6 +12124,10 @@ fn register_active_layout_overlays(editor: &mut Editor) {
         .current_layout
         .clone()
         .expect("active widget layout");
+    // Mirror the backend: overlay rects are emitted in post-scroll tile-local
+    // space, so the tile's live scroll has to reach the collector.
+    let scroll_left = editor.widget_layout_scroll_left();
+    let scroll_top = editor.total_scroll_top();
     let _ = crate::widget_render::collect_metal_primitives(
         &layout,
         crate::widget_render::WidgetViewport {
@@ -12135,11 +12139,11 @@ fn register_active_layout_overlays(editor: &mut Editor) {
             focused_widget_id: None,
             focused_branch: false,
             overlay_viewport_bottom: 20.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
+            scroll_top,
+            scroll_left,
             inherited_hover: false,
         },
-        0.0,
+        scroll_top,
         20,
     );
 }
@@ -13743,11 +13747,52 @@ const CONTEXT_MENU_PROGRAM: &str = r#"
         0.5 (list :buf "*sequencer*" :hide-status true)))
 "#;
 
+/// Same shape, but with a panel far wider and taller than its tile so the
+/// tile can be panned/scrolled underneath the right-click.
+#[cfg(target_os = "macos")]
+const SCROLLED_CONTEXT_MENU_PROGRAM: &str = r#"
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (effect-buffer "*panel*"
+      (v-stack
+        (box :width 200 :height 30
+          :on-right-click (lambda (event)
+            (set! menu-col (get event :col))
+            (set! menu-row (get event :row))
+            (set! menu-open true)))
+        (context-menu :is-open menu-open
+                      :anchor-col menu-col
+                      :anchor-row menu-row
+                      :on-close (lambda () (set! menu-open false))
+          (menu-item "Rename" :shortcut "cmd-R"
+            :on-select (lambda (event) (set! selected "rename")))
+          (menu-separator)
+          (menu-item "Delete"
+            :on-select (lambda (event) (set! selected "delete"))))))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
 #[cfg(target_os = "macos")]
 fn context_menu_two_tile_editor() -> Editor {
+    context_menu_two_tile_editor_for(CONTEXT_MENU_PROGRAM)
+}
+
+#[cfg(target_os = "macos")]
+fn context_menu_two_tile_editor_for(program: &str) -> Editor {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
-    editor.runtime_mut().eval_str(CONTEXT_MENU_PROGRAM).unwrap();
+    editor.runtime_mut().eval_str(program).unwrap();
     editor.refresh_runtime_side_effects();
     editor.update_tile_rects(60, 20);
     let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
@@ -13859,6 +13904,44 @@ fn context_menu_flips_and_clamps_near_the_screen_edge() {
     assert!(
         entry.rect.row + entry.rect.height <= 20.001,
         "panel {:?} must stay inside the 20-row frame",
+        entry.rect
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
+    // eseq-05t: :col/:row reach the handler in tile CONTENT space (scroll
+    // folded in), while the frame viewport the panel is clamped against is
+    // fixed in frame space. Panning used to add the scroll to the anchor
+    // without ever subtracting it back, flipping the panel to the left of the
+    // pointer once the anchor ran past the frame's right edge.
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(SCROLLED_CONTEXT_MENU_PROGRAM);
+    {
+        let leaf = editor.active_leaf_mut();
+        leaf.widget_scroll_left = 55.0;
+        leaf.widget_scroll_top = 18.0;
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    assert_eq!(editor.widget_scroll_left(), 55.0, "pan must survive clamping");
+    assert_eq!(editor.total_scroll_top(), 18.0, "scroll must survive clamping");
+
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    assert!(
+        eval_bool(&mut editor, "menu-open"),
+        ":on-right-click must open the menu"
+    );
+    // The handler sees the content-space pointer, past the frame's right edge.
+    assert!(
+        (eval_number(editor.runtime_mut(), "menu-col") - 61.0).abs() < 0.5,
+        "anchor is reported in content space"
+    );
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert!(
+        (entry.rect.col - 6.0).abs() < 0.5 && (entry.rect.row - 1.5).abs() < 0.5,
+        "panel {:?} must open at the pointer despite the 55x18 tile scroll",
         entry.rect
     );
 }

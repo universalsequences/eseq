@@ -4225,6 +4225,14 @@ impl Editor {
         self.runtime.set_layout_frame_viewport(frame_viewport);
     }
 
+    /// Publish the active tile's content-scroll offsets to the layout engine
+    /// so frame-anchored widgets can express the frame viewport in the same
+    /// content space their own rects (and pointer anchors) live in.
+    pub fn sync_layout_content_scroll(&mut self) {
+        let content_scroll = (self.widget_layout_scroll_left(), self.total_scroll_top());
+        self.runtime.set_layout_content_scroll(content_scroll);
+    }
+
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);

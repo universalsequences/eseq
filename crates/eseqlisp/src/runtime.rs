@@ -1198,6 +1198,7 @@ pub struct Runtime {
     /// builder; `None` means frame-anchored widgets fall back to the tile's
     /// own root area.
     layout_frame_viewport: Option<crate::layout::Rect>,
+    layout_content_scroll: (f32, f32),
     widget_id_offset: u64,
     text_measurer: Option<Rc<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
@@ -1262,6 +1263,7 @@ impl Runtime {
             layout_cell_w: 1.0,
             layout_cell_h: 1.0,
             layout_frame_viewport: None,
+            layout_content_scroll: (0.0, 0.0),
             widget_id_offset: 0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
@@ -2606,6 +2608,17 @@ impl Runtime {
         self.layout_frame_viewport
     }
 
+    /// Set the tile's content-scroll offsets `(cols, rows)` for subsequent
+    /// layout passes (see `LayoutEngine::content_scroll`).
+    ///
+    /// Deliberately does NOT invalidate the layout: panning a tile would then
+    /// rebuild the whole widget layout every frame. Only frame-anchored
+    /// widgets read it, and scroll is trapped while one of those is open, so
+    /// the next relayout picks up the current value.
+    pub fn set_layout_content_scroll(&mut self, content_scroll: (f32, f32)) {
+        self.layout_content_scroll = content_scroll;
+    }
+
     /// Force a full relayout on the next render pass.
     /// Used when internal widget state (e.g. tree expand/collapse) changes
     /// the widget's size without changing the widget tree data.
@@ -3297,6 +3310,7 @@ impl Runtime {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
         engine.frame_viewport = frame_viewport;
+        engine.content_scroll = self.layout_content_scroll;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
@@ -3945,6 +3959,7 @@ impl Runtime {
             LayoutEngine::new_exact(self.layout_cols, self.layout_rows, self.layout_aspect)
         };
         engine.frame_viewport = self.layout_frame_viewport;
+        engine.content_scroll = self.layout_content_scroll;
         if let Some(layout) = engine.layout_with_id_offset(tree, self.widget_id_offset) {
             let geometry_changed = previous_layout
                 .as_ref()
