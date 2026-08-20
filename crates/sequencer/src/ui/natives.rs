@@ -2110,6 +2110,48 @@ pub(crate) fn toggle_rack_pad_arm(
     armed
 }
 
+fn register_track_range_selection_native(
+    runtime: &mut Runtime,
+    state: Arc<SequencerState>,
+    current_track: Arc<AtomicUsize>,
+    selected_tracks: Arc<Mutex<HashSet<usize>>>,
+) {
+    runtime.register_native("seq-select-track-range", move |args, _ctx| {
+        fn track_arg(value: Option<&Value>, name: &str) -> Result<usize, String> {
+            let Some(Value::Number(value)) = value else {
+                return Err(format!("seq-select-track-range: expected {name} track number"));
+            };
+            if !value.is_finite() || *value < 0.0 || value.fract() != 0.0 {
+                return Err(format!("seq-select-track-range: invalid {name} track {value}"));
+            }
+            Ok(*value as usize)
+        }
+
+        let anchor = track_arg(args.first(), "anchor")?;
+        let target = track_arg(args.get(1), "target")?;
+        let track_count = state.active_track_count();
+        if anchor >= track_count {
+            return Err(format!("seq-select-track-range: anchor track {anchor} out of range").into());
+        }
+        if target >= track_count {
+            return Err(format!("seq-select-track-range: target track {target} out of range").into());
+        }
+
+        let (start, end) = if anchor <= target {
+            (anchor, target)
+        } else {
+            (target, anchor)
+        };
+        {
+            let mut selected = selected_tracks.lock().unwrap();
+            selected.clear();
+            selected.extend(start..=end);
+        }
+        current_track.store(target, Ordering::Relaxed);
+        Ok(Value::Number(target as f64))
+    });
+}
+
 pub(crate) fn init_runtime(
     app: &app::App,
     state: Arc<SequencerState>,
@@ -4036,6 +4078,17 @@ pub(crate) fn init_runtime(
         }
         Ok(Value::Number(track as f64))
     });
+
+    // seq-select-track-range — (seq-select-track-range anchor-idx target-idx)
+    // Replaces the selection atomically with the inclusive track-index range.
+    // Mixer groups do not change track identity or ordering, so their members
+    // participate exactly like loose tracks, including when a group is collapsed.
+    register_track_range_selection_native(
+        &mut runtime,
+        state.clone(),
+        current_track.clone(),
+        selected_tracks.clone(),
+    );
 
     // seq-toggle-track-selected — (seq-toggle-track-selected track-idx)
     // cmd-click multi-select: toggle this track's membership in the selection set.
@@ -7057,6 +7110,45 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_track_range_native_replaces_selection_and_supports_reverse_ranges() {
+        let state = Arc::new(SequencerState::new(7, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::from([0, 6])));
+        let mut runtime = Runtime::new();
+        register_track_range_selection_native(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::clone(&current_track),
+            Arc::clone(&selected_tracks),
+        );
+
+        runtime
+            .eval_str("(seq-select-track-range 2 6)")
+            .expect("select forward track range");
+        assert_eq!(
+            *selected_tracks.lock().unwrap(),
+            HashSet::from([2, 3, 4, 5, 6])
+        );
+        assert_eq!(current_track.load(Ordering::Relaxed), 6);
+
+        runtime
+            .eval_str("(seq-select-track-range 6 2)")
+            .expect("select reverse track range");
+        assert_eq!(
+            *selected_tracks.lock().unwrap(),
+            HashSet::from([2, 3, 4, 5, 6])
+        );
+        assert_eq!(current_track.load(Ordering::Relaxed), 2);
+
+        let _ = runtime.eval_str("(seq-select-track-range 2 7)");
+        assert_eq!(
+            *selected_tracks.lock().unwrap(),
+            HashSet::from([2, 3, 4, 5, 6]),
+            "an invalid range must not partially mutate selection"
+        );
+    }
 
     /// Drum rack v2 slice 3 (`docs/drum-rack-v2-spec.md`, "Arming & live
     /// play"): the rack header is one more armable target, exclusive with its

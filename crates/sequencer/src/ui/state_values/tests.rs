@@ -45641,6 +45641,8 @@
             "seq-toggle-track-solo",
             "seq-toggle-rack-arm",
             "seq-set-track",
+            "seq-select-track-range",
+            "seq-toggle-track-selected",
             "seq-set-track-volume",
             "seq-set-track-pan",
             "seq-toggle-bus-mute",
@@ -45681,6 +45683,59 @@
         editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
         editor.set_layout_viewport(120, 30);
         editor.refresh_runtime_side_effects();
+
+        calls.lock().unwrap().clear();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict) 0)")
+            .expect("plain body click establishes range anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict :shift true) 1)")
+            .expect("shift body click extends from anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict :shift true) 0)")
+            .expect("second shift body click re-extends from the same anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict :cmd true) 1)")
+            .expect("cmd body click toggles without moving anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-label-click (dict :shift true) 1)")
+            .expect("shift label click extends from the unchanged anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-label-click (dict) 1)")
+            .expect("plain label click resets range anchor and preserves delete gesture");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-label-click (dict :shift true) 0)")
+            .expect("shift label click supports a reverse range");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "seq-set-track:[0]",
+                "seq-select-track-range:[0, 1]",
+                "seq-select-track-range:[0, 0]",
+                "seq-toggle-track-selected:[1]",
+                "seq-select-track-range:[0, 1]",
+                "seq-set-track:[1]",
+                "seq-select-track-range:[1, 0]",
+            ],
+            "mixer body and label clicks should preserve the range anchor semantics"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target after range click"),
+            Some(Value::Bool(false)),
+            "shift-clicking a label must clear its plain-click delete target"
+        );
+        let reveals = editor.drain_host_commands();
+        assert_eq!(reveals.len(), 7, "each selection gesture reveals once");
 
         editor
             .runtime_mut()

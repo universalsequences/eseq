@@ -125,8 +125,13 @@
 (def %event-volume (event)
   (%pointer-volume (get event :sy)))
 
+;; Stable endpoint for Finder-style range extension. Cmd-click deliberately
+;; leaves it untouched; a plain selection starts a new range.
+(def %track-selection-anchor nil)
+
 (def select-track (i)
   (do
+    (set! %track-selection-anchor i)
     (set! eseq.seq-core-state/selected-bus -1)
     (%clear-delete-target)
     (seq-set-track i)
@@ -134,6 +139,7 @@
 
 (def select-track-delete-target (i)
   (do
+    (set! %track-selection-anchor i)
     (set! eseq.seq-core-state/selected-bus -1)
     (seq-set-track i)
     (host-command "reveal-sequencer-track" (dict :track i))
@@ -155,17 +161,34 @@
     (seq-toggle-track-selected i)
     (host-command "reveal-sequencer-track" (dict :track i))))
 
-;; Plain click = single-select; cmd-click = toggle membership in the set.
-(def %track-body-click (event i)
-  (if (%multi-select-click? event)
-    (%toggle-track-select i)
-    (select-track i)))
+(def %range-track-select (i)
+  (let ((anchor (if (= %track-selection-anchor nil)
+                  SEQ.current-track
+                  %track-selection-anchor)))
+    (do
+      (set! %track-selection-anchor anchor)
+      (set! eseq.seq-core-state/selected-bus -1)
+      (%clear-delete-target)
+      (seq-select-track-range anchor i)
+      (host-command "reveal-sequencer-track" (dict :track i)))))
 
-;; The label preserves its delete-target gesture on a plain click.
+;; Plain click = single-select; shift-click = replace with the anchored range;
+;; cmd-click = toggle membership without moving the range anchor.
+(def %track-body-click (event i)
+  (if (get event :shift)
+    (%range-track-select i)
+    (if (%multi-select-click? event)
+      (%toggle-track-select i)
+      (select-track i))))
+
+;; The label preserves its delete-target gesture on a plain click. Shift-click
+;; clears that target just like cmd-click and selects the anchored range.
 (def %track-label-click (event i)
-  (if (%multi-select-click? event)
-    (%toggle-track-select i)
-    (select-track-delete-target i)))
+  (if (get event :shift)
+    (%range-track-select i)
+    (if (%multi-select-click? event)
+      (%toggle-track-select i)
+      (select-track-delete-target i))))
 
 (def %select-bus (i)
   (do
