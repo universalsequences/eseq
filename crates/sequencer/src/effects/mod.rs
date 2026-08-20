@@ -79,6 +79,36 @@ pub fn builtin_effect_names() -> Vec<&'static str> {
     names
 }
 
+/// Canonical name a built-in effect is stored under in project/preset files:
+/// the `builtin:` prefix plus its canonical name. Covers *both* families in
+/// [`builtin_effect_names`] — native inserts and DGenLisp-hosted builtins
+/// (Filter Table, Convolution Reverb) — so a saved slot can always be told
+/// apart from a saved custom effect. Returns `None` for names that are not
+/// built-ins.
+pub fn builtin_effect_project_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
+        dgen_builtin::find(trimmed)
+            .map(|builtin| format!("{}{}", EffectDescriptor::BUILTIN_INSERT_PREFIX, builtin.name))
+    })
+}
+
+/// Inverse of [`builtin_effect_project_name`]: the built-in this saved name
+/// refers to, or `None` when the name belongs to a saved custom effect.
+///
+/// Bare (unprefixed) built-in names are accepted as well, which repairs files
+/// written before rack-slot chains qualified their built-ins — see
+/// `eseq-zck`.
+pub fn builtin_effect_name_from_project_name(name: &str) -> Option<&'static str> {
+    let trimmed = name.trim();
+    let bare = trimmed
+        .strip_prefix(EffectDescriptor::BUILTIN_INSERT_PREFIX)
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    EffectDescriptor::canonical_builtin_insert_name(bare)
+        .or_else(|| dgen_builtin::find(bare).map(|builtin| builtin.name))
+}
+
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
 

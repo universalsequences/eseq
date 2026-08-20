@@ -2683,6 +2683,98 @@
         graph.process_block();
     }
 
+    /// eseq-zck: a DGenLisp-hosted builtin (Filter Table) in a rack-slot
+    /// chain used to be saved under its bare name, indistinguishable from a
+    /// saved custom effect, so the preset failed to reload. Both builtin
+    /// families must round-trip, and a pre-fix file with the bare name must
+    /// still load.
+    #[test]
+    fn rack_preset_round_trips_dgen_hosted_builtins() {
+        let graph = TestLiveGraph::new("rack-preset-dgen-builtin-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        app.add_builtin_rack_slot_effect_sync(0, 0, crate::effects::filter_table::NAME)
+            .expect("rack slot should accept Filter Table");
+        app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("rack slot should accept OTT");
+
+        let live = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("live rack state");
+        assert_eq!(
+            live.slots[0].custom_effect_names[0].as_deref(),
+            Some("builtin:Filter Table"),
+            "a DGenLisp builtin must be qualified in live rack-slot state"
+        );
+
+        let preset_name = format!("rack-dgen-builtin-test-{}", std::process::id());
+        let preset_path = app
+            .save_rack_preset(0, &preset_name, true)
+            .expect("rack preset should save");
+        let _preset_guard = TestProjectFile(preset_path);
+        let sound_path = app
+            .promote_preset_to_sound(0, &preset_name)
+            .expect("rack preset should promote to Sound");
+        let _sound_guard = TestProjectFile(sound_path.clone());
+        let sound = crate::project::load_sound_preset(&sound_path)
+            .expect("promoted Sound should be readable");
+        assert_eq!(
+            sound.rack.slots[0].custom_effects[0].as_deref(),
+            Some("builtin:Filter Table")
+        );
+        assert_eq!(
+            sound.rack.slots[0].custom_effects[1].as_deref(),
+            Some("builtin:OTT")
+        );
+        let live_params = live.slots[0].effect_slots[0].num_params;
+        assert_eq!(
+            sound.rack.slots[0].effect_slots[0].num_params, live_params,
+            "the saved param table must match the live descriptor"
+        );
+
+        app.delete_rack_slot_effect_slot(0, 0, 1)
+            .expect("live rack effect should be removable");
+        app.delete_rack_slot_effect_slot(0, 0, 0)
+            .expect("live rack effect should be removable");
+        app.load_rack_preset_onto_track(0, &preset_name)
+            .expect("rack preset should restore");
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("restored rack state");
+        assert_eq!(
+            restored.slots[0].effect_descriptors[0].name,
+            crate::effects::filter_table::NAME
+        );
+        assert_eq!(restored.slots[0].effect_descriptors[1].name, "OTT");
+        assert_ne!(restored.slots[0].effect_slots[0].node_id, 0);
+        assert_ne!(restored.slots[0].effect_slots[1].node_id, 0);
+
+        // A file written before the fix stores the bare name; it must still
+        // resolve to the builtin rather than a missing custom effect.
+        let mut legacy = crate::project::load_rack_preset(&preset_name)
+            .expect("rack preset should be readable");
+        legacy.rack.slots[0].custom_effects[0] =
+            Some(crate::effects::filter_table::NAME.to_string());
+        let legacy_name = format!("{preset_name}-legacy");
+        let legacy_path =
+            crate::project::save_rack_preset(&legacy_name, &legacy).expect("legacy preset write");
+        let _legacy_guard = TestProjectFile(legacy_path);
+        app.load_rack_preset_onto_track(0, &legacy_name)
+            .expect("a pre-fix rack preset must still load");
+        let repaired = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("repaired rack state");
+        assert_eq!(
+            repaired.slots[0].effect_descriptors[0].name,
+            crate::effects::filter_table::NAME
+        );
+        assert_ne!(repaired.slots[0].effect_slots[0].node_id, 0);
+        graph.process_block();
+    }
+
     #[test]
     fn deleting_rack_slot_with_fx_removes_chain_state_and_lease_host() {
         let graph = TestLiveGraph::new("delete-rack-slot-fx-test");

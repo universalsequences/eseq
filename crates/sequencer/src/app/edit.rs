@@ -470,10 +470,16 @@ impl App {
                     runtime.apply_authoring_values(&values)?;
                     saved.effect_descriptors[slot] = instance.descriptor.clone();
                     saved.effect_slots[slot] = runtime;
-                    saved.custom_effect_names[slot] = Some(match &instance.source {
+                    // Retained sources carry bare descriptor names; rack-slot
+                    // chains are saved verbatim, so qualify built-ins here or
+                    // they reload as missing custom effects (eseq-zck).
+                    let name = match &instance.source {
                         RetainedEffectSource::NativeBuiltin { name } => name.clone(),
                         RetainedEffectSource::Compiled { name, .. } => name.clone(),
-                    });
+                    };
+                    saved.custom_effect_names[slot] = Some(
+                        crate::effects::builtin_effect_project_name(&name).unwrap_or(name),
+                    );
                 } else {
                     saved.effect_descriptors[slot] = EffectDescriptor::empty_custom_slot();
                     saved.effect_slots[slot] = EffectSlotSnapshot::new_empty();

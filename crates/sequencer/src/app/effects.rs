@@ -2309,6 +2309,24 @@ impl App {
         self.apply_filter_table_to_node(node_id, source_path, reference)
     }
 
+    /// Rack-slot twin of [`Self::set_filter_table_source`].
+    pub fn set_filter_table_source_rack_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        source_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let node_id = self
+            .rack_slot_effect_snapshot(track, rack_slot)?
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack-slot effect not found".to_string())?;
+        self.apply_filter_table_to_node(node_id, source_path, reference)
+    }
+
     pub fn set_filter_table_source_bus(
         &mut self,
         bus_idx: usize,
@@ -4262,13 +4280,19 @@ impl App {
             node_ids.effect_node_id as u32,
             node_ids.modulator_node_id.unwrap_or(0) as u32,
         );
+        // DGenLisp-hosted builtins (Filter Table, Convolution Reverb) compile
+        // through here too. Rack-slot names are saved verbatim, so store the
+        // qualified `builtin:` form or the slot reloads as a missing custom
+        // effect (eseq-zck). Saved custom effects keep their bare name.
+        let stored_name =
+            crate::effects::builtin_effect_project_name(name).unwrap_or_else(|| name.to_string());
         self.write_rack_slot_effect(
             track,
             rack_slot,
             effect_slot,
             descriptor,
             snapshot,
-            Some(name.to_string()),
+            Some(stored_name),
         )?;
         self.push_rack_slot_effect_defaults(track, rack_slot, effect_slot);
         self.push_all_delay_bpm();

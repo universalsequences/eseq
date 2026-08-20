@@ -318,30 +318,11 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
 }
 
 fn project_builtin_effect_name_for_save(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    crate::effects::EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
-        crate::effects::dgen_builtin::find(trimmed).map(|builtin| {
-            format!(
-                "{}{}",
-                crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX,
-                builtin.name
-            )
-        })
-    })
+    crate::effects::builtin_effect_project_name(name)
 }
 
 fn project_builtin_effect_name_for_load(name: &str) -> Option<String> {
-    if let Some(builtin_name) =
-        crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name)
-    {
-        return Some(builtin_name.to_string());
-    }
-    let stripped = name
-        .trim()
-        .strip_prefix(crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX)?
-        .trim();
-    crate::effects::dgen_builtin::find(stripped)
-        .map(|builtin| builtin.name.to_string())
+    crate::effects::builtin_effect_name_from_project_name(name).map(str::to_string)
 }
 
 fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
@@ -1602,6 +1583,20 @@ impl App {
             } else {
                 self.load_rack_slot_effect_to_slot_sync(track, rack_slot, effect_slot, &name)?;
             }
+            // Before the param restore below pins node ids: a Filter Table
+            // engine change recompiles the slot onto a new node.
+            self.restore_conv_reverb_ir_rack_slot_ref(
+                track,
+                rack_slot,
+                effect_slot,
+                saved.ir.as_deref(),
+            );
+            self.restore_filter_table_rack_slot(
+                track,
+                rack_slot,
+                effect_slot,
+                saved.table.as_deref(),
+            );
             let live = self
                 .state
                 .pattern
@@ -3139,6 +3134,71 @@ impl App {
         }
     }
 
+    /// Rack-slot counterpart of `restore_filter_table_track`. A Filter Table
+    /// inside a rack slot saves its table reference like any other host, but
+    /// nothing used to re-apply it, so the reloaded rack ran the default table
+    /// (eseq-zck).
+    fn restore_filter_table_rack_slot(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        table_ref: Option<&str>,
+    ) {
+        let Some(table_ref) = table_ref else { return };
+        let (table_ref, engine) = crate::effects::filter_table::split_engine_ref(table_ref);
+        if engine != crate::effects::filter_table::TableEngine::default() {
+            if let Err(error) =
+                self.set_rack_filter_table_engine(track, rack_slot, effect_slot, engine)
+            {
+                eprintln!(
+                    "project-load: rack Filter Table engine '{}' not restored: {error}",
+                    engine.tag()
+                );
+            }
+        }
+        let (sample_name, _mode) = crate::effects::filter_table::decode_table_ref(table_ref);
+        if table_ref.is_empty() || sample_name == crate::effects::filter_table::DEFAULT_TABLE_REF {
+            return;
+        }
+        if let Some(path) = self.resolve_filter_table_source_path(sample_name) {
+            if let Err(error) = self.set_filter_table_source_rack_slot(
+                track,
+                rack_slot,
+                effect_slot,
+                &path,
+                table_ref,
+            ) {
+                eprintln!("project-load: rack Filter Table '{table_ref}' not restored: {error}");
+            }
+        } else {
+            eprintln!("project-load: rack Filter Table '{table_ref}' could not be resolved");
+        }
+    }
+
+    /// Rack-slot counterpart of `restore_conv_reverb_ir_track`.
+    fn restore_conv_reverb_ir_rack_slot_ref(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        ir_ref: Option<&str>,
+    ) {
+        let Some(ir_ref) = ir_ref else { return };
+        if ir_ref.is_empty() || ir_ref == crate::effects::conv_reverb::DEFAULT_IR_REF {
+            return;
+        }
+        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
+            if let Err(error) =
+                self.set_conv_reverb_ir_rack_slot(track, rack_slot, effect_slot, &path, ir_ref)
+            {
+                eprintln!("project-load: rack conv reverb IR '{ir_ref}' not restored: {error}");
+            }
+        } else {
+            eprintln!("project-load: rack conv reverb IR '{ir_ref}' could not be resolved");
+        }
+    }
+
     /// Bus counterpart of `restore_conv_reverb_ir_track`.
     fn restore_conv_reverb_ir_bus(
         &mut self,
@@ -3476,6 +3536,20 @@ impl App {
                                         &name,
                                     )?;
                                 }
+                                // Ahead of the param restore: a Filter Table
+                                // engine change recompiles onto a new node.
+                                self.restore_conv_reverb_ir_rack_slot_ref(
+                                    track_idx,
+                                    rack_slot,
+                                    effect_slot,
+                                    saved.ir.as_deref(),
+                                );
+                                self.restore_filter_table_rack_slot(
+                                    track_idx,
+                                    rack_slot,
+                                    effect_slot,
+                                    saved.table.as_deref(),
+                                );
                                 let graph_slot = self
                                     .state
                                     .pattern

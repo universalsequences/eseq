@@ -1125,7 +1125,11 @@ impl GraphController<'_> {
                     .load(Ordering::Relaxed)
                     != 0;
                 active.then(|| {
-                    EffectDescriptor::builtin_insert_project_name(&descriptor.name)
+                    // Every built-in — native insert or DGenLisp-hosted, e.g.
+                    // Filter Table — has to carry the `builtin:` prefix into
+                    // rack-slot state; the bare name reloads as a missing
+                    // custom effect (eseq-zck).
+                    crate::effects::builtin_effect_project_name(&descriptor.name)
                         .unwrap_or_else(|| descriptor.name.clone())
                 })
             })

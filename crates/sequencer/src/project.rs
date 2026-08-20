@@ -2318,7 +2318,20 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
                 .iter()
                 .map(ProjectEffectSlot::from)
                 .collect(),
-            custom_effects: value.custom_effect_names,
+            // Rack-slot chains are the one FX host whose live names reach the
+            // file verbatim (tracks and buses re-derive theirs at capture), and
+            // several live writers store a built-in under its bare descriptor
+            // name. Qualify them here so a saved slot is never mistaken for a
+            // custom effect on load — eseq-zck.
+            custom_effects: value
+                .custom_effect_names
+                .into_iter()
+                .map(|name| {
+                    name.map(|name| {
+                        crate::effects::builtin_effect_project_name(&name).unwrap_or(name)
+                    })
+                })
+                .collect(),
             track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
             sample_path,
             sample_name,
