@@ -142,7 +142,9 @@ pub struct Compiler {
     /// Namespaces made known by qualified `def` targets in this unit (the
     /// §3 escape hatch may define into a module before it exists).
     known_namespaces: std::collections::HashSet<String>,
-    /// Non-fatal compile diagnostics (`%`-privacy references, escape-hatch
+    /// Export visibility of modules already evaluated by this VM.
+    module_exports: super::modules::ModuleExportRegistry,
+    /// Non-fatal compile diagnostics (visibility references, escape-hatch
     /// defs). Drained by the VM into the diagnostics channel.
     warnings: Vec<String>,
     /// Fatal resolution errors (unknown alias/namespace, malformed module
@@ -288,6 +290,7 @@ impl Compiler {
             import_aliases: HashMap::new(),
             refers: HashMap::new(),
             known_namespaces: std::collections::HashSet::new(),
+            module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
             macros: HashMap::new(),
@@ -324,6 +327,7 @@ impl Compiler {
             import_aliases: HashMap::new(),
             refers: HashMap::new(),
             known_namespaces: std::collections::HashSet::new(),
+            module_exports: super::modules::ModuleExportRegistry::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
             macros,
@@ -360,6 +364,29 @@ impl Compiler {
 
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    pub fn set_module_exports(&mut self, exports: super::modules::ModuleExportRegistry) {
+        self.module_exports = exports;
+    }
+
+    /// Validate `:refer` contracts after the import segment has executed and
+    /// therefore made the imported module's export set available.
+    pub fn validate_refers(
+        &self,
+        exports: &super::modules::ModuleExportRegistry,
+    ) -> Result<(), String> {
+        for (bare, qualified) in &self.refers {
+            let Some((module, name)) = super::modules::split_qualified(qualified) else {
+                continue;
+            };
+            if super::modules::exported_from(exports, module, name) == Some(false) {
+                return Err(format!(
+                    "import {module}: cannot :refer non-exported symbol '{bare}'"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn macros(&self) -> &HashMap<String, MacroDef> {
@@ -1272,12 +1299,23 @@ impl Compiler {
                 .get(ns)
                 .cloned()
                 .unwrap_or_else(|| ns.to_string());
-            if super::modules::is_private_name(base) && full_ns != self.current_module {
-                self.warn_once(format!(
-                    "warning: {full_ns}/{base} is internal to {full_ns} (%-private, spec §2); \
-                     referencing it from {} may break on update",
-                    self.current_module
-                ));
+            if full_ns != self.current_module
+                && let Some(exports) = self.module_exports.get(&full_ns)
+                && !exports.exports(base)
+            {
+                if exports.explicit {
+                    self.warn_once(format!(
+                        "warning: {full_ns}/{base} is not exported by {full_ns}; \
+                         referencing it from {} may break on update",
+                        self.current_module
+                    ));
+                } else {
+                    self.warn_once(format!(
+                        "warning: {full_ns}/{base} is internal to {full_ns} (%-private, spec §2); \
+                         referencing it from {} may break on update",
+                        self.current_module
+                    ));
+                }
             }
             if !self.namespace_is_known(&full_ns) {
                 if full_ns.contains('.') {
@@ -1884,6 +1922,48 @@ impl Compiler {
                 self.emit(OpCode::PushNil);
                 return Ok(());
             }
+            // (export sym …) — top-level, named-module-only declaration.
+            // Runtime registration makes the same form append at the REPL;
+            // file loads replace their set up front in eval_module_source.
+            if s == "export" {
+                if self.scopes.len() > 1 {
+                    self.errors.push(
+                        "(export …) must appear at top level, not inside a function".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                if !self.module_declared {
+                    self.errors.push(
+                        "(export …) requires a named module; declare a module first".to_string(),
+                    );
+                    self.emit(OpCode::PushNil);
+                    return Ok(());
+                }
+                let mut register = vec![
+                    Expression::Symbol("__module-export".to_string()),
+                    Expression::String(self.current_module.clone()),
+                ];
+                for entry in &list[1..] {
+                    let Expression::Symbol(name) = entry else {
+                        let message = if matches!(entry, Expression::List(_)) {
+                            "(export …) list-shaped entries are reserved for re-export"
+                        } else {
+                            "(export …) expects bare symbol names"
+                        };
+                        self.errors.push(message.to_string());
+                        continue;
+                    };
+                    if name.contains('/') {
+                        self.errors.push(format!(
+                            "export name '{name}' must be a bare, unqualified symbol"
+                        ));
+                        continue;
+                    }
+                    register.push(Expression::String(name.clone()));
+                }
+                return self.compile_expression(&Expression::List(register));
+            }
             // (import NAME :as ALIAS) / (import NAME :refer (sym …)) —
             // load-once + alias/refer registration (spec §2 decision 2, §4).
             if s == "import" {
@@ -1976,11 +2056,20 @@ impl Compiler {
                     .cloned()
                     .unwrap_or_else(|| namespace.to_string());
                 let target = super::modules::qualify(&namespace, base);
-                if super::modules::is_private_name(base) {
-                    self.warn_once(format!(
-                        "warning: overriding {target}, which is %-private to {namespace}; \
-                         this override may break on update"
-                    ));
+                if let Some(exports) = self.module_exports.get(&namespace)
+                    && !exports.exports(base)
+                {
+                    if exports.explicit {
+                        self.warn_once(format!(
+                            "warning: overriding {target}, which is not exported by {namespace}; \
+                             this override may break on update"
+                        ));
+                    } else {
+                        self.warn_once(format!(
+                            "warning: overriding {target}, which is %-private to {namespace}; \
+                             this override may break on update"
+                        ));
+                    }
                 }
 
                 let (kind, callback) = match list.get(2) {

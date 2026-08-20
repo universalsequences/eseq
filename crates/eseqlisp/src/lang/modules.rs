@@ -10,12 +10,127 @@
 //! sync: `Compiler::use_global` (compile-time name→index) and
 //! `VM::resolve_global_read_index` (runtime by-name lookups).
 
+use crate::parser::{ExprKind, Parser, SpannedASTParser};
+use std::collections::{HashMap, HashSet};
+
 /// The module every headerless file belongs to (spec §10, slice 0).
 pub const IMPLICIT_MODULE: &str = "eseq.vanilla";
 
 /// Blessed always-resolvable namespaces (spec §3 "Core namespaces"):
 /// referencing them, bare or qualified, needs no `import`.
 pub const CORE_NAMESPACES: &[&str] = &["sdf", "eseq.core"];
+
+/// Visibility declared by one named module. `explicit == false` is the
+/// migration-era legacy mode: every name except a `%`-prefixed one is public.
+/// The first `(export …)` switches the module to explicit export semantics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleExports {
+    pub explicit: bool,
+    names: HashSet<String>,
+}
+
+impl ModuleExports {
+    pub fn explicit(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            explicit: true,
+            names: names.into_iter().collect(),
+        }
+    }
+
+    pub fn append(&mut self, names: impl IntoIterator<Item = String>) {
+        self.explicit = true;
+        self.names.extend(names);
+    }
+
+    pub fn exports(&self, name: &str) -> bool {
+        if self.explicit {
+            self.names.contains(name)
+        } else {
+            !is_private_name(name)
+        }
+    }
+
+    pub fn names(&self) -> &HashSet<String> {
+        &self.names
+    }
+}
+
+pub type ModuleExportRegistry = HashMap<String, ModuleExports>;
+
+/// Return a visibility decision when `module` is loaded. Implicit/core
+/// namespaces are always public; an absent named module has no checkable set.
+pub fn exported_from(
+    registry: &ModuleExportRegistry,
+    module: &str,
+    name: &str,
+) -> Option<bool> {
+    if module == IMPLICIT_MODULE || CORE_NAMESPACES.contains(&module) {
+        return Some(true);
+    }
+    registry.get(module).map(|exports| exports.exports(name))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportDeclaration {
+    pub name: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+/// Read the named module and valid top-level export entries from a source
+/// unit. Grammar errors remain the compiler's responsibility; this metadata
+/// drives reload replacement and end-of-unit definition validation.
+pub fn inspect_exports(
+    source: &str,
+) -> Result<(Option<String>, bool, Vec<ExportDeclaration>), String> {
+    let tokens = Parser::new(source.to_string())
+        .parse_spanned()
+        .map_err(|error| format!("parse error: {error:?}"))?;
+    let expressions = SpannedASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("AST parse error: {error:?}"))?;
+    let mut module = None;
+    let mut has_export_form = false;
+    let mut exports = Vec::new();
+    for expression in expressions {
+        let ExprKind::List(items) = expression.kind else {
+            continue;
+        };
+        match items.as_slice() {
+            [head, name] if matches!(&head.kind, ExprKind::Symbol(form) if form == "module") => {
+                if let ExprKind::Symbol(name) = &name.kind {
+                    module = Some(name.clone());
+                }
+            }
+            [head, names @ ..]
+                if matches!(&head.kind, ExprKind::Symbol(form) if form == "export") =>
+            {
+                has_export_form = true;
+                let (line, column) = line_column(source, expression.origin.primary_span.start_byte);
+                for name in names {
+                    if let ExprKind::Symbol(name) = &name.kind
+                        && !name.contains('/')
+                    {
+                        exports.push(ExportDeclaration {
+                            name: name.clone(),
+                            line,
+                            column,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((module, has_export_form, exports))
+}
+
+fn line_column(source: &str, byte: usize) -> (usize, usize) {
+    let prefix = &source[..byte.min(source.len())];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix.rsplit_once('\n').map_or(prefix.len(), |(_, tail)| tail.len()) + 1;
+    (line, column)
+}
 
 /// Split a qualified name at the first `/` into (namespace, base name).
 /// Returns None for unqualified names (see `is_qualified`).
@@ -138,5 +253,37 @@ mod tests {
         assert_eq!(strip_implicit("foo"), "foo");
         assert_eq!(strip_implicit("sdf/circle"), "sdf/circle");
         assert_eq!(strip_implicit("eseq.vanillaX/foo"), "eseq.vanillaX/foo");
+    }
+
+    #[test]
+    fn explicit_exports_replace_legacy_percent_visibility() {
+        let legacy = ModuleExports::default();
+        assert!(legacy.exports("public"));
+        assert!(!legacy.exports("%private"));
+
+        let mut explicit = ModuleExports::default();
+        explicit.append(["%published".to_string()]);
+        explicit.append(["also-public".to_string()]);
+        assert!(explicit.exports("%published"));
+        assert!(explicit.exports("also-public"));
+        assert!(!explicit.exports("ordinary-private"));
+
+        let mut empty = ModuleExports::default();
+        empty.append(Vec::<String>::new());
+        assert!(empty.explicit);
+        assert!(!empty.exports("formerly-public"));
+    }
+
+    #[test]
+    fn export_inspection_unions_forms_and_records_form_locations() {
+        let source = "(module test.exports)\n(export first)\n(def first 1)\n(export second)";
+        let (module, explicit, exports) = inspect_exports(source).expect("inspect exports");
+        assert_eq!(module.as_deref(), Some("test.exports"));
+        assert!(explicit);
+        assert_eq!(
+            exports.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!((exports[1].line, exports[1].column), (4, 1));
     }
 }
