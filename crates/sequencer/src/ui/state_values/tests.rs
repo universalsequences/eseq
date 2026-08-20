@@ -26890,6 +26890,54 @@
     }
 
     #[test]
+    fn metal_seq_mixer_group_context_menu_actions_distinguish_plain_groups_and_racks() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let group = |id: f64, rack: bool| {
+            map_value([("id", Value::Number(id)), ("rack", Value::Bool(rack))])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "groups",
+            test_list(vec![group(7.0, false), group(8.0, true)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        fn menu_action_ids(editor: &mut Editor, group_id: f64) -> Vec<String> {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(set! eseq.mixer/%track-menu-group-id {group_id})",
+                ))
+                .expect("select group context-menu target");
+            let Some(Value::List(actions)) = editor.runtime_mut()
+                .eval_str("(eseq.mixer/%track-context-menu-actions)")
+                .expect("evaluate group context-menu actions")
+            else {
+                panic!("group context-menu actions should be a list");
+            };
+            actions
+                .into_iter()
+                .map(|action| {
+                    let Value::Map(action) = action.borrow().clone() else {
+                        panic!("group context-menu action should be a map");
+                    };
+                    let id = action.get("id").expect("menu action id").borrow().clone();
+                    let Value::Keyword(id) = id else {
+                        panic!("group context-menu action id should be a keyword");
+                    };
+                    id
+                })
+                .collect()
+        }
+
+        assert_eq!(
+            menu_action_ids(&mut editor, 7.0),
+            vec!["rename", "convert-drum-rack"],
+        );
+        assert_eq!(menu_action_ids(&mut editor, 8.0), vec!["rename"]);
+    }
+
+    #[test]
     fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
@@ -46129,6 +46177,9 @@
             .expect("open plain group context menu");
         editor.refresh_runtime_side_effects();
         let menu_layout = editor.widget_layout().expect("plain group context menu layout");
+        let rename_item = find_layout_node_by_text(&menu_layout, "Rename")
+            .expect("plain group should offer rename");
+        assert_finite_nonzero_rect(rename_item, "rename group menu item");
         let convert_item = find_layout_node_by_text(
             &menu_layout,
             "Convert to Drum Rack",
@@ -46209,8 +46260,55 @@
             find_layout_node_by_text(&rack_menu_layout, "Convert to Drum Rack").is_none(),
             "an existing drum rack must not offer conversion",
         );
-        editor.runtime_mut().eval_str("(set! eseq.mixer/%track-menu-open false)")
-            .expect("close rack context menu");
+        let rack_rename = find_layout_node_by_text(&rack_menu_layout, "Rename")
+            .expect("drum rack should offer rename");
+        assert_finite_nonzero_rect(rack_rename, "drum rack rename menu item");
+        let select_rename = rack_rename.props.get("on-select").cloned()
+            .expect("rack rename item should expose a select callback");
+        editor.runtime_mut().invoke(select_rename, vec![Value::Nil])
+            .expect("select drum rack rename");
+        editor.refresh_runtime_side_effects();
+        let rename_layout = editor.widget_layout().expect("rack rename layout");
+        let rename_input = find_layout_node_by_stable_key_suffix(
+            &rename_layout,
+            "/group-rename-input-7",
+        ).expect("rack group name should become an inline input");
+        assert_eq!(rename_input.widget_type, "text-input");
+        assert_finite_nonzero_rect(rename_input, "drum rack rename input");
+        assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
+        assert_eq!(
+            rename_input.props.get("select-all-on-focus"),
+            Some(&Value::Bool(true)),
+        );
+        let on_change = rename_input.props.get("on-change").cloned()
+            .expect("rack rename input should expose a change callback");
+        editor.runtime_mut().invoke(
+            on_change,
+            vec![Value::String("Night Kit".to_string())],
+        ).expect("edit rack name");
+        let on_submit = rename_input.props.get("on-submit").cloned()
+            .expect("rack rename input should expose a submit callback");
+        editor.runtime_mut().invoke(on_submit, Vec::new())
+            .expect("submit rack rename");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "rename-group");
+                let Value::Map(payload) = payload else {
+                    panic!("rename payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0)),
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Night Kit".to_string())),
+                );
+            }
+            other => panic!("expected group rename host command, got {other:?}"),
+        }
         editor.refresh_runtime_side_effects();
         let rack_arm_click = rack_arm
             .props

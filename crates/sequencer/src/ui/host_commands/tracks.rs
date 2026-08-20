@@ -3,6 +3,7 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "reveal-sequencer-track",
     "rename-track",
+    "rename-group",
     "convert-group-to-drum-rack",
     "add-track-sampler",
     "add-track-rack",
@@ -20,6 +21,18 @@ pub(super) const COMMANDS: &[&str] = &[
     "move-track-to-group",
     "remove-track-from-group",
 ];
+
+pub(crate) fn apply_rename_group_host_command(
+    app: &mut app::App,
+    payload: &Value,
+) -> Result<(), String> {
+    let group_id = extract_usize_from_payload(payload, "group-id")
+        .map(|group_id| group_id as u64)
+        .ok_or_else(|| "Rename group requires a group id and name".to_string())?;
+    let name = extract_string_from_payload(payload, "name")
+        .ok_or_else(|| "Rename group requires a group id and name".to_string())?;
+    app.rename_group_recorded(group_id, name)
+}
 
 fn sync_after_track_topology_delete(
     app: &mut app::App,
@@ -134,6 +147,22 @@ pub(super) fn handle(
                 _ => editor.handle_host_event(HostEvent::Error(
                     "Track rename requires a track and name".to_string(),
                 )),
+            }
+        }
+        "rename-group" => {
+            match apply_rename_group_host_command(&mut app, &payload) {
+                Ok(()) => {
+                    *track_groups.lock().unwrap() = app.groups.clone();
+                    *bus_state.lock().unwrap() = app.buses.clone();
+                    let rt = editor.runtime_mut();
+                    sync_groups_bindings(rt, &app.groups);
+                    sync_bus_mixer_state(rt, &app);
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.show_transient_message("Rename track group".to_string());
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
         }
         "convert-group-to-drum-rack" => {

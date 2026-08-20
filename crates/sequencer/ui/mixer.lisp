@@ -22,6 +22,8 @@
 (defstate %track-menu-group-id -1)
 (defstate %track-renaming -1)
 (defstate %track-rename-draft "")
+(defstate %group-renaming -1)
+(defstate %group-rename-draft "")
 
 ;; Data, rather than menu-specific control flow, is the extension seam for
 ;; Duplicate/Delete/Group/color actions added later.
@@ -29,7 +31,12 @@
   (list (dict :id :rename :label "Rename")))
 
 (def %group-menu-actions
-  (list (dict :id :convert-drum-rack :label "Convert to Drum Rack")))
+  (list
+    (dict :id :rename :label "Rename")
+    (dict :id :convert-drum-rack :label "Convert to Drum Rack")))
+
+(def %rack-group-menu-actions
+  (list (dict :id :rename :label "Rename")))
 
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))
@@ -889,17 +896,41 @@
       (set! %track-rename-draft ""))
     nil))
 
+(def %begin-group-rename (group-id)
+  (let ((gidx (%group-index-by-id group-id)))
+    (if (>= gidx 0)
+      (do
+        (set! %track-menu-open false)
+        (set! %group-renaming group-id)
+        (set! %group-rename-draft (get (nth SEQ.groups gidx) :name)))
+      nil)))
+
+(def %finish-group-rename (group-id commit)
+  (if (= %group-renaming group-id)
+    (do
+      (if commit
+        (host-command "rename-group"
+          (dict :group-id group-id :name %group-rename-draft))
+        nil)
+      (set! %group-renaming -1)
+      (set! %group-rename-draft ""))
+    nil))
+
 (def %track-context-menu-actions ()
   (if (>= %track-menu-group-id 0)
     (let ((gidx (%group-index-by-id %track-menu-group-id)))
-      (if (or (< gidx 0) (get (nth SEQ.groups gidx) :rack))
+      (if (< gidx 0)
         (list)
-        %group-menu-actions))
+        (if (get (nth SEQ.groups gidx) :rack)
+          %rack-group-menu-actions
+          %group-menu-actions)))
     %track-menu-actions))
 
 (def %select-track-menu-action (action)
   (if (= (get action :id) :rename)
-    (%begin-track-rename %track-menu-track)
+    (if (>= %track-menu-group-id 0)
+      (%begin-group-rename %track-menu-group-id)
+      (%begin-track-rename %track-menu-track))
     (if (= (get action :id) :convert-drum-rack)
       (do
         (set! %track-menu-open false)
@@ -917,17 +948,31 @@
         :key (str "track-menu-" (get action :id))
         :on-select (lambda (event) (%select-track-menu-action action))))))
 
-(def %track-rename-input (i key-prefix width font-size)
+(def %rename-input (key width font-size value on-change on-submit on-cancel)
   (text-input
-    :key (str key-prefix i)
+    :key key
     :width width :height 1.0 :font-size font-size
-    :value %track-rename-draft
+    :value value
     :auto-focus true
     :select-all-on-focus true
-    :on-change (lambda (name) (set! %track-rename-draft name))
-    :on-submit (lambda () (%finish-track-rename i true))
-    :on-cancel (lambda () (%finish-track-rename i false))
-    :on-blur (lambda () (%finish-track-rename i true))))
+    :on-change on-change
+    :on-submit on-submit
+    :on-cancel on-cancel
+    :on-blur on-submit))
+
+(def %track-rename-input (i key-prefix width font-size)
+  (%rename-input
+    (str key-prefix i) width font-size %track-rename-draft
+    (lambda (name) (set! %track-rename-draft name))
+    (lambda () (%finish-track-rename i true))
+    (lambda () (%finish-track-rename i false))))
+
+(def %group-rename-input (group-id)
+  (%rename-input
+    (str "group-rename-input-" group-id) 6.8 9 %group-rename-draft
+    (lambda (name) (set! %group-rename-draft name))
+    (lambda () (%finish-group-rename group-id true))
+    (lambda () (%finish-group-rename group-id false))))
 
 ;; Name label in its own subtree: rename/mute changes rerun just the label.
 (def %strip-label (i)
@@ -1374,17 +1419,19 @@
                 (do
                   (%select-group gidx)
                   (%toggle-group-collapsed (get group :id)))))
-            (label (substring (get group :name) 0 10)
-              :key (str "group-name-label-" (get group :id))
-              :font-size 11
-              :height 0.9
-              :h-align :center
-              :background-color :transparent
-              :border-color :transparent
-              :highlight-color :transparent
-              :shadow-color :transparent
-              :color :black
-              :bg :transparent))        )))))
+            (if (= %group-renaming (get group :id))
+              (%group-rename-input (get group :id))
+              (label (substring (get group :name) 0 10)
+                :key (str "group-name-label-" (get group :id))
+                :font-size 11
+                :height 0.9
+                :h-align :center
+                :background-color :transparent
+                :border-color :transparent
+                :highlight-color :transparent
+                :shadow-color :transparent
+                :color :black
+                :bg :transparent)))        )))))
 
 (def %drop-new-track-into-group (event gidx)
   (let ((payload (get event :payload))

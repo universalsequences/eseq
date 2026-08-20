@@ -67,6 +67,55 @@
     }
 
     #[test]
+    fn rename_group_host_command_trims_rejects_empty_and_is_undoable() {
+        let (_state, mut app) = history_test_app();
+        let bus = app.buses[0].id;
+        app.buses[0].name = "Original Kit".to_string();
+        app.groups.push(sequencer::project::ProjectTrackGroup {
+            id: 41,
+            name: "Original Kit".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0],
+            bus_id: bus.0,
+            rack: Some(sequencer::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        });
+
+        let rename = history_value_map([
+            ("group-id", Value::Number(41.0)),
+            ("name", Value::String("  Night Kit  ".to_string())),
+        ]);
+        super::host_commands::apply_rename_group_host_command(&mut app, &rename)
+            .expect("rename group through host command seam");
+        assert_eq!(app.groups[0].name, "Night Kit");
+        assert_eq!(
+            app.buses.iter().find(|item| item.id == bus).unwrap().name,
+            "Night Kit"
+        );
+
+        let empty = history_value_map([
+            ("group-id", Value::Number(41.0)),
+            ("name", Value::String("   ".to_string())),
+        ]);
+        assert!(super::host_commands::apply_rename_group_host_command(
+            &mut app,
+            &empty,
+        ).is_err());
+        assert_eq!(app.groups[0].name, "Night Kit");
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.groups[0].name, "Original Kit");
+        assert_eq!(
+            app.buses.iter().find(|item| item.id == bus).unwrap().name,
+            "Original Kit"
+        );
+    }
+
+    #[test]
     fn shared_bus_pull_copies_only_mixer_scalars_when_topology_is_unchanged() {
         let (_state, mut app) = history_test_app();
         app.buses = sequencer::app::BusChannelState::default_buses();
