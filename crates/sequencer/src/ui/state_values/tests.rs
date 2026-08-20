@@ -49117,6 +49117,81 @@
     }
 
     #[test]
+    fn metal_seq_visible_track_order_matches_nested_group_rendering_and_collapse() {
+        let mut parent = regular_group_fixture(false);
+        parent.id = 3;
+        parent.members = vec![1, 7];
+        parent.rack_members = vec![7];
+
+        let mut child = rack_group_fixture(false);
+        child.members = vec![10, 11];
+
+        let mut collapsed_group = regular_group_fixture(true);
+        collapsed_group.id = 9;
+        collapsed_group.members = vec![5, 6];
+        collapsed_group.rack_members.clear();
+
+        let mut editor = sequencer_perf_editor(14, 16);
+        apply_groups_bindings(&mut editor, &[parent, child, collapsed_group]);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[
+                false, false, false, false, false, false, false, false, true, false, false,
+                false, false, false,
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/visible-track-order)")
+                .expect("visible track order should evaluate"),
+            Some(test_number_list(&[
+                0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 9.0, 12.0, 13.0,
+            ])),
+            "navigation must flatten the exact order drawn by the group blocks",
+        );
+
+        for (track, delta, expected) in [
+            (7, 1, 10),
+            (10, -1, 7),
+            (13, 1, 0),
+            (0, -1, 13),
+            (5, 1, 9),
+            (5, -1, 4),
+            (8, 1, 9),
+            (8, -1, 4),
+        ] {
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str(&format!(
+                        "(eseq.drum-rack-v2/track-relative {track} {delta})"
+                    ))
+                    .expect("relative navigation should evaluate"),
+                Some(Value::Number(expected as f64)),
+                "track {track} should move by {delta} to the nearest visible row",
+            );
+        }
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[true; 14]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/track-relative 7 1)")
+                .expect("empty visual order should be safe"),
+            Some(Value::Nil),
+        );
+    }
+
+    #[test]
     fn metal_seq_groups_value_carries_rack_pad_map() {
         let groups = [rack_group_fixture(false)];
         let Value::List(items) = build_groups_value(&groups) else {

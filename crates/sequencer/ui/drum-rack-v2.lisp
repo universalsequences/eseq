@@ -155,7 +155,7 @@
     (list)
     (range 0 (len SEQ.groups))))
 
-(def grid-render-items ()
+(def %grid-render-items (include-collapsed-tracks)
   (append
     (reduce |acc i|
       (let ((gidx (group-anchored-at i)))
@@ -163,12 +163,74 @@
           (append acc (list (dict :kind "group" :gidx gidx)))
           (if (>= (group-of-track i) 0)
             acc
-            (if (eseq.track-collapse/collapsed? i)
+            (if (and (not include-collapsed-tracks)
+                     (eseq.track-collapse/collapsed? i))
               acc
               (append acc (list (dict :kind "track" :track i)))))))
       (list)
       (range 0 SEQ.num-tracks))
     (%unanchored-group-items)))
+
+(def grid-render-items ()
+  (%grid-render-items false))
+
+;; Flatten a group in exactly the order `%group-block` draws it: direct members
+;; first, then each nested rack. The structural form includes hidden rows and is
+;; used only to locate a selection that has become invisible.
+(def %group-track-order (gidx visible-only)
+  (if (and visible-only (collapsed? gidx))
+    (list)
+    (reduce |acc child|
+      (append acc (%group-track-order child visible-only))
+      (if visible-only (visible-members gidx) (members gidx))
+      (child-racks gidx))))
+
+(def %flatten-track-order (items visible-only)
+  (reduce |acc item|
+    (append acc
+      (if (= (get item :kind) "track")
+        (list (get item :track))
+        (%group-track-order (get item :gidx) visible-only)))
+    (list)
+    items))
+
+;; Selectable track rows in their rendered order. Group headers and buses are
+;; deliberately absent: they retain their click-only selection path.
+(def visible-track-order ()
+  (%flatten-track-order (grid-render-items) true))
+
+(def %index-of (xs value)
+  (reduce |found i|
+    (if (>= found 0) found (if (= (nth xs i) value) i found))
+    -1
+    (range 0 (len xs))))
+
+;; Return the adjacent visible track in `delta`'s direction. When `track` is
+;; hidden, walk from its position in the same structural row order until a
+;; visible row is found. This handles collapsed groups, collapsed loose tracks,
+;; and nested racks without reconstructing any ordering in the host.
+(def track-relative (track delta)
+  (let ((visible (visible-track-order)))
+    (if (= (len visible) 0)
+      nil
+      (let ((visible-pos (%index-of visible track)))
+        (if (>= visible-pos 0)
+          (nth visible (mod (+ visible-pos delta (len visible)) (len visible)))
+          (let ((structural
+                  (%flatten-track-order (%grid-render-items true) false)))
+            (let ((structural-pos (%index-of structural track)))
+              (if (< structural-pos 0)
+                nil
+                (reduce |found distance|
+                  (if (= found nil)
+                    (let ((candidate
+                            (nth structural
+                              (mod (+ structural-pos (* delta distance) (len structural))
+                                   (len structural)))))
+                      (if (%contains? visible candidate) candidate found))
+                    found)
+                  nil
+                  (range 1 (+ (len structural) 1)))))))))))
 
 ;; ── Pad map (slice 6 polish) ────────────────────────────────────────────
 ;; The pad map is the rack's whole curation layer: an ordered list of pads,

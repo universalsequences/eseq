@@ -197,6 +197,39 @@ fn select_track_for_edit(editor: &mut Editor, track: usize) {
     }
 }
 
+fn select_track_relative(
+    editor: &mut Editor,
+    current: usize,
+    delta: isize,
+    track_count: usize,
+) {
+    if let Some(callable) = editor
+        .runtime_mut()
+        .global_value("eseq.drum-rack-v2/track-relative")
+    {
+        let next = editor.runtime_mut().invoke(
+            callable,
+            vec![
+                Value::Number(current as f64),
+                Value::Number(delta as f64),
+            ],
+        );
+        if let Ok(Some(Value::Number(next))) = next {
+            if next.is_finite() && next >= 0.0 && next.fract() == 0.0 && next < track_count as f64 {
+                select_track_for_edit(editor, next as usize);
+            }
+        }
+        return;
+    }
+
+    let next = if delta < 0 {
+        if current == 0 { track_count - 1 } else { current - 1 }
+    } else {
+        (current + 1) % track_count
+    };
+    select_track_for_edit(editor, next);
+}
+
 fn focused_widget_is(editor: &Editor, stable_key: &str, widget_type: &str) -> bool {
     editor.focused_widget_node().is_some_and(|node| {
         node.stable_key.as_deref() == Some(stable_key) && node.widget_type == widget_type
@@ -1277,16 +1310,8 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     return true;
                 }
                 let current = current_track.load(Ordering::Relaxed).min(track_count - 1);
-                let next = if key.code == KeyCode::Up {
-                    if current == 0 {
-                        track_count - 1
-                    } else {
-                        current - 1
-                    }
-                } else {
-                    (current + 1) % track_count
-                };
-                select_track_for_edit(editor, next);
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                select_track_relative(editor, current, delta, track_count);
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
@@ -2612,6 +2637,61 @@ mod live_keyboard_tests {
             &step_clipboard,
         ));
         assert_eq!(current_track.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn up_down_uses_lisp_visual_track_order_for_non_contiguous_group_members() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate eseq.seq-core-state/selected-bus -1)
+                (def eseq.drum-rack-v2/track-relative (track delta)
+                  (if (= track 7)
+                    (if (> delta 0) 10 1)
+                    (if (= track 10)
+                      (if (< delta 0) 7 11)
+                      nil)))
+                "#,
+            )
+            .expect("install visual-order navigation fixture");
+        let current_track = Arc::new(AtomicUsize::new(7));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(Value::Number(*track))
+            });
+        let state = Arc::new(SequencerState::new(12, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 10);
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 7);
     }
 
     #[test]
