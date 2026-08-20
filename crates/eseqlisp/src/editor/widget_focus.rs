@@ -22,7 +22,10 @@ impl Editor {
         let newly_focused = previous_id != Some(node.widget_id) && !remapped_same_widget;
         if node.widget_type == "text-input" {
             if newly_focused
-                && matches!(node.props.get("select-all-on-focus"), Some(Value::Bool(true)))
+                && matches!(
+                    node.props.get("select-all-on-focus"),
+                    Some(Value::Bool(true))
+                )
             {
                 let text = crate::widget_render::text_input::get_text(&node.props);
                 crate::widget_render::text_input::select_all(node.widget_id, &text);
@@ -43,7 +46,8 @@ impl Editor {
     }
 
     fn blur_focused_widget(&mut self) {
-        let callback = self.focused_widget_node()
+        let callback = self
+            .focused_widget_node()
             .and_then(|node| node.props.get("on-blur").cloned())
             .filter(|value| !matches!(value, Value::Nil | Value::Bool(false)));
         self.clear_focused_widget();
@@ -108,11 +112,23 @@ impl Editor {
             self.clear_focused_widget();
             return;
         };
+        // `:auto-focus` is a one-shot per appearance of the widget: honouring
+        // it marks it consumed, so a deliberate focus-clear (dismissing an
+        // inline rename, Esc) stays cleared across the relayouts that follow.
+        // The mark is dropped as soon as the auto-focus widget disappears or a
+        // different one takes its place, so the next genuine appearance fires
+        // again. Kept in sync on every remap, not just the unfocused path.
+        let mut consumed_auto_focus = self.active_leaf().consumed_auto_focus.clone();
+        let pending_auto_focus = pending_auto_focus_target(&layout, &mut consumed_auto_focus);
         let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
-            if let Some(node) = find_auto_focus_node(&layout) {
+            if let Some(node) = pending_auto_focus {
+                consumed_auto_focus = Some(AutoFocusMark::of(&node));
+                self.active_leaf_mut().consumed_auto_focus = consumed_auto_focus;
                 self.set_focused_widget(node);
                 self.clear_focus_on_other_tiles();
                 self.mark_needs_redraw();
+            } else {
+                self.active_leaf_mut().consumed_auto_focus = consumed_auto_focus;
             }
             return;
         };
@@ -143,11 +159,17 @@ impl Editor {
                     .and_then(|id| find_node_by_id(&layout, id))
                     .filter(|node| same_focus_identity(&previous, node))
             });
-        if let Some(node) = remapped.or_else(|| find_auto_focus_node(&layout)) {
+        // A failed remap means the widget the user was on is gone: leave focus
+        // cleared rather than redirecting it into an unrelated `:auto-focus`
+        // widget that happens to be on screen.
+        if let Some(node) = remapped {
             self.set_focused_widget(node);
         } else {
             self.clear_focused_widget();
         }
+        // Persist the re-armed/cleared one-shot even on the focused path, so a
+        // vanished or replaced auto-focus target fires again next appearance.
+        self.active_leaf_mut().consumed_auto_focus = consumed_auto_focus;
     }
 
     /// Ensure only the active tile has widget focus (clear focus on all others).
@@ -953,10 +975,74 @@ pub(super) fn collect_focusable_nodes(node: &LayoutNode, out: &mut Vec<(u64, f32
     }
 }
 
+/// Identity of the `:auto-focus` widget that has already been honoured, so it
+/// is not re-focused on every subsequent relayout. Stable across the id churn
+/// of a relayout: matched by stable id / stable key / subtree root when the
+/// node carries one, by raw widget id otherwise.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AutoFocusMark {
+    stable_widget_id: Option<u64>,
+    stable_key: Option<String>,
+    subtree_root_id: Option<u64>,
+    widget_type: String,
+    widget_id: u64,
+}
+
+impl AutoFocusMark {
+    fn of(node: &LayoutNode) -> Self {
+        Self {
+            stable_widget_id: node.stable_widget_id,
+            stable_key: node.stable_key.clone(),
+            subtree_root_id: node.subtree_root_id,
+            widget_type: node.widget_type.clone(),
+            widget_id: node.widget_id,
+        }
+    }
+
+    fn matches(&self, node: &LayoutNode) -> bool {
+        if self.widget_type != node.widget_type {
+            return false;
+        }
+        if self.stable_widget_id.is_some() {
+            return self.stable_widget_id == node.stable_widget_id;
+        }
+        if self.stable_key.is_some() {
+            return self.stable_key == node.stable_key;
+        }
+        if self.subtree_root_id.is_some() {
+            return self.subtree_root_id == node.subtree_root_id;
+        }
+        self.widget_id == node.widget_id
+    }
+}
+
+/// The layout's `:auto-focus` widget if it has not been honoured yet.
+///
+/// Also re-syncs the consumed mark: it is dropped when the auto-focus widget
+/// leaves the layout, or when a different widget becomes the auto-focus
+/// target, so the one-shot re-arms for the next genuine appearance.
+fn pending_auto_focus_target(
+    layout: &LayoutNode,
+    consumed: &mut Option<AutoFocusMark>,
+) -> Option<LayoutNode> {
+    match find_auto_focus_node(layout) {
+        None => {
+            *consumed = None;
+            None
+        }
+        Some(node) => {
+            if consumed.as_ref().is_some_and(|mark| mark.matches(&node)) {
+                None
+            } else {
+                *consumed = None;
+                Some(node)
+            }
+        }
+    }
+}
+
 fn find_auto_focus_node(node: &LayoutNode) -> Option<LayoutNode> {
-    if node.focusable
-        && matches!(node.props.get("auto-focus"), Some(Value::Bool(true)))
-    {
+    if node.focusable && matches!(node.props.get("auto-focus"), Some(Value::Bool(true))) {
         return Some(node.clone());
     }
     node.children.iter().find_map(find_auto_focus_node)
@@ -1020,5 +1106,132 @@ fn collect_patcher_nodes_with_selected_cable(node: &LayoutNode, out: &mut Vec<La
     }
     for child in &node.children {
         collect_patcher_nodes_with_selected_cable(child, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::{Editor, EditorConfig, ViewMode};
+    use crate::runtime::Runtime;
+
+    /// An inline-rename style fixture: a plain focusable button plus a
+    /// text-input that only exists while `renaming` is true and carries
+    /// `:auto-focus`.
+    fn rename_fixture_editor() -> Editor {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def renaming (state false))
+                (def other-visible (state true))
+                (def tick (state 0))
+                (effect
+                  (v-stack :width 30 :height 8
+                    (if other-visible
+                      (text-input :key "other" :width 10 :value "Other")
+                      (label "other gone"))
+                    (if renaming
+                      (text-input :key "rename-input" :width 20 :value "Track"
+                        :auto-focus true :select-all-on-focus true)
+                      (label (str "idle " tick)))))
+                "#,
+            )
+            .expect("build rename fixture");
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_layout_viewport(40, 10);
+        editor.refresh_runtime_side_effects();
+        editor
+    }
+
+    fn relayout(editor: &mut Editor) {
+        editor
+            .runtime_mut()
+            .eval_str("(set! tick (+ tick 1))")
+            .expect("bump tick");
+        editor.refresh_runtime_side_effects();
+        // Belt and braces: exercise the post-layout remap directly, so the
+        // test does not depend on which internal path happens to call it.
+        editor.remap_focused_widget_after_layout_change();
+    }
+
+    fn stable_key_of_focused(editor: &Editor) -> Option<String> {
+        editor
+            .focused_widget_node()
+            .and_then(|node| node.stable_key.clone())
+    }
+
+    #[test]
+    fn auto_focus_fires_on_first_appearance() {
+        let mut editor = rename_fixture_editor();
+        assert_eq!(
+            editor.focused_widget_id(),
+            None,
+            "nothing has auto-focus before the rename input appears"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! renaming true)")
+            .expect("open rename");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            stable_key_of_focused(&editor).as_deref(),
+            Some("rename-input"),
+            "auto-focus must focus the rename input the first time it appears"
+        );
+    }
+
+    #[test]
+    fn cleared_focus_stays_cleared_across_relayout() {
+        let mut editor = rename_fixture_editor();
+        editor
+            .runtime_mut()
+            .eval_str("(set! renaming true)")
+            .expect("open rename");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            stable_key_of_focused(&editor).as_deref(),
+            Some("rename-input"),
+            "precondition: auto-focus fired"
+        );
+
+        // Deliberate focus-clear (Esc / dismiss), auto-focus widget still on
+        // screen.
+        editor.clear_focused_widget();
+        relayout(&mut editor);
+
+        assert_eq!(
+            editor.focused_widget_id(),
+            None,
+            "auto-focus is a one-shot: a cleared focus must survive relayout"
+        );
+    }
+
+    #[test]
+    fn failed_remap_does_not_steal_focus_into_auto_focus_widget() {
+        let mut editor = rename_fixture_editor();
+        assert!(
+            editor.focus_widget_by_stable_key("other", Some("text-input")),
+            "focus the unrelated widget"
+        );
+        assert_eq!(stable_key_of_focused(&editor).as_deref(), Some("other"));
+
+        // The focused widget disappears in the same relayout that introduces
+        // the auto-focus widget: the remap fails and must NOT redirect.
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! other-visible false) (set! renaming true))")
+            .expect("swap widgets");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.focused_widget_id(),
+            None,
+            "a failed remap must leave focus cleared, not jump into :auto-focus"
+        );
     }
 }

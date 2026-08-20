@@ -1161,23 +1161,36 @@ impl ProjectRackConfig {
     /// The domain check migrates projects saved when pad notes spanned 0..127
     /// (before eseq-4b5.15 shrank the domain to C1..D#8): a pad at a note no
     /// page can render would be invisible and un-nudgeable forever, so it is
-    /// dropped here and `map_unmapped_members` re-lands its member on the next
-    /// free in-domain note.
+    /// *moved* to the next free in-domain note rather than dropped. Moving it
+    /// in place is what keeps the parallel `choke_groups` entry attached to the
+    /// pad: dropping it and letting `map_unmapped_members` re-land the member
+    /// would silently reset the pad's choke group to `None`, so an open hat
+    /// would stop choking its closed hat after a load. A pad only disappears
+    /// when the rack has no free note left to move it to.
     pub fn sanitize(&mut self, member_count: usize) {
         self.choke_groups.resize(self.pads.len(), None);
         let mut seen_notes: Vec<i32> = Vec::with_capacity(self.pads.len());
         let mut seen_members: Vec<usize> = Vec::with_capacity(self.pads.len());
         let mut keep: Vec<bool> = Vec::with_capacity(self.pads.len());
+        // Parallel to the surviving pads: the pad sat outside the current pad
+        // domain and needs a fresh in-domain note once the survivors are known.
+        let mut needs_note: Vec<bool> = Vec::with_capacity(self.pads.len());
         for pad in &self.pads {
+            let in_domain =
+                (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad.pad_note);
+            // Out-of-domain notes are about to be replaced, so they cannot
+            // collide with anything; only in-domain notes must be unique.
             let valid = pad.member < member_count
-                && (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad.pad_note)
-                && !seen_notes.contains(&pad.pad_note)
-                && !seen_members.contains(&pad.member);
+                && !seen_members.contains(&pad.member)
+                && (!in_domain || !seen_notes.contains(&pad.pad_note));
             if valid {
-                seen_notes.push(pad.pad_note);
+                if in_domain {
+                    seen_notes.push(pad.pad_note);
+                }
                 seen_members.push(pad.member);
             }
             keep.push(valid);
+            needs_note.push(valid && !in_domain);
         }
         let mut index = 0;
         self.pads.retain(|_| {
@@ -1191,6 +1204,29 @@ impl ProjectRackConfig {
             index += 1;
             keep_this
         });
+        let mut index = 0;
+        needs_note.retain(|_| {
+            let keep_this = keep[index];
+            index += 1;
+            keep_this
+        });
+
+        // Re-land the migrated pads, lowest free note first, carrying their
+        // choke groups with them. A pad that finds no free note is dropped —
+        // an unreachable note is worse than a missing pad.
+        let mut orphans: Vec<usize> = Vec::new();
+        for pad_index in 0..self.pads.len() {
+            if !needs_note[pad_index] {
+                continue;
+            }
+            match self.next_free_pad_note() {
+                Some(pad_note) => self.pads[pad_index].pad_note = pad_note,
+                None => orphans.push(pad_index),
+            }
+        }
+        for pad_index in orphans.into_iter().rev() {
+            self.remove_pad(pad_index);
+        }
     }
 }
 
@@ -4150,8 +4186,7 @@ mod tests {
 
     /// eseq-4b5.15 shrank the pad-note domain from 0..127 to C1..D#8. A pad
     /// saved outside it would be invisible to every grid page and un-nudgeable,
-    /// so sanitize drops it and the load-time repair re-lands its member on the
-    /// next free in-domain note.
+    /// so sanitize moves it onto the next free in-domain note.
     #[test]
     fn rack_sanitize_migrates_out_of_domain_pad_notes() {
         let mut rack = ProjectRackConfig {
@@ -4163,14 +4198,71 @@ mod tests {
             choke_groups: vec![Some(1), Some(2)],
         };
         rack.sanitize(2);
-        assert_eq!(rack.pads, vec![ProjectRackPad { pad_note: 36, member: 0 }]);
-        assert_eq!(rack.choke_groups, vec![Some(1)]);
-        assert_eq!(rack.map_unmapped_members(2), 1);
         assert_eq!(
-            rack.pads[1],
-            ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 1 },
-            "the orphaned member lands on the next free in-domain note"
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 1 },
+            ],
+            "the out-of-domain pad lands on the next free in-domain note"
         );
+        assert_eq!(rack.choke_groups, vec![Some(1), Some(2)]);
+        assert_eq!(rack.map_unmapped_members(2), 0, "no member is left padless");
+    }
+
+    /// Regression: the migration used to drop the out-of-domain pad and let
+    /// `map_unmapped_members` re-land its member, which appended `None` to the
+    /// parallel `choke_groups` vec. A pre-eseq-4b5.15 kit with a closed hat at
+    /// 90 and an open hat at 91 in choke group 1 then loaded with both pads
+    /// remapped but no choke at all — the open hat silently stopped cutting the
+    /// closed one.
+    #[test]
+    fn rack_sanitize_preserves_choke_groups_across_the_pad_note_migration() {
+        let mut rack = ProjectRackConfig {
+            pads: vec![
+                ProjectRackPad { pad_note: 90, member: 0 },
+                ProjectRackPad { pad_note: 91, member: 1 },
+            ],
+            choke_groups: vec![Some(1), Some(1)],
+        };
+        rack.sanitize(2);
+        assert_eq!(rack.map_unmapped_members(2), 0);
+
+        for pad in &rack.pads {
+            assert!(
+                (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad.pad_note),
+                "pad {pad:?} should be migrated into the pad-note domain",
+            );
+        }
+        let closed = rack.pad_index_for_member(0).expect("closed hat keeps a pad");
+        let open = rack.pad_index_for_member(1).expect("open hat keeps a pad");
+        assert_eq!(rack.choke_group(closed), Some(1));
+        assert_eq!(
+            rack.choke_group(open),
+            rack.choke_group(closed),
+            "both hats stay in their original choke group",
+        );
+        assert_eq!(rack.choke_groups.len(), rack.pads.len(), "arrays stay parallel");
+    }
+
+    /// A rack with no free in-domain note left cannot re-land a migrated pad,
+    /// so that pad is dropped — with its choke entry, keeping the arrays
+    /// parallel.
+    #[test]
+    fn rack_sanitize_drops_a_migrated_pad_when_no_free_note_remains() {
+        let mut rack = ProjectRackConfig::default();
+        for (member, pad_note) in (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).enumerate() {
+            rack.push_pad(ProjectRackPad { pad_note, member });
+        }
+        let full = rack.pads.len();
+        rack.push_pad(ProjectRackPad { pad_note: 120, member: full });
+        rack.set_choke_group(full, Some(3));
+
+        rack.sanitize(full + 1);
+
+        assert_eq!(rack.pads.len(), full);
+        assert_eq!(rack.choke_groups.len(), full);
+        assert_eq!(rack.pad_index_for_member(full), None);
     }
 
     /// eseq-4b5.8: projects saved before every attach path mapped a pad hold

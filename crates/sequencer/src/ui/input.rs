@@ -3799,6 +3799,41 @@ mod live_keyboard_tests {
         )));
     }
 
+    /// Cmd/Ctrl+G belongs to track grouping now, so Agent Mode's entry point
+    /// is the `C-x a` chord registered by ui/agent.lisp. Prove the chord is
+    /// not swallowed by the live-keyboard/`a` handling and reaches the
+    /// `agent-open` handler.
+    #[test]
+    fn control_x_a_chord_opens_the_agent_panel() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (module eseq.agent)
+                (def agent-open ()
+                  (host-command "agent-open-probe" (dict)))
+                (bind-key "C-x a" "agent-open")
+                "#,
+            )
+            .expect("install agent-open binding");
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, .. } if name == "agent-open-probe"
+            )),
+            "C-x a should reach agent-open, got {commands:?}"
+        );
+    }
+
     #[test]
     fn command_i_queues_new_instrument_editor() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());

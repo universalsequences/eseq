@@ -278,7 +278,7 @@
 ;; cell exist but no page can show them, and a nudge must never strand a pad
 ;; where the grid cannot render it.
 (def nudge-pad-note (gidx pad delta)
-  (let ((note (max 0 (min (max-grid-pad-note) (+ (get pad :pad-note) delta)))))
+  (let ((note (%clamp-pad-note (+ (get pad :pad-note) delta))))
     (if (= note (get pad :pad-note))
       nil
       (host-command "set-rack-pad-note"

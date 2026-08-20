@@ -1,7 +1,7 @@
 mod commands;
 mod minibuffer;
 mod natives;
-mod widget_focus;
+pub(crate) mod widget_focus;
 mod widget_interaction;
 
 use std::collections::{HashMap, HashSet};
@@ -2521,14 +2521,18 @@ impl Editor {
                     return;
                 }
 
-                let modal_id = editor
+                // Same rule one level down the modal family: a context menu
+                // opened inside a modal is the topmost panel and closes
+                // first, so resolve the innermost open panel rather than the
+                // first one in tree order (which is the outer modal).
+                let panel_id = editor
                     .runtime
                     .current_layout
                     .as_deref()
-                    .and_then(widget_focus::find_open_modal_node)
-                    .map(|modal| modal.widget_id);
-                if let Some(modal_id) = modal_id {
-                    editor.fire_modal_on_close(modal_id);
+                    .and_then(topmost_open_overlay_panel)
+                    .map(|panel| panel.widget_id);
+                if let Some(panel_id) = panel_id {
+                    editor.fire_modal_on_close(panel_id);
                 }
                 return;
             }
@@ -9507,6 +9511,33 @@ fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
         }
     }
 
+    None
+}
+
+/// The topmost open modal-family overlay panel (modal or context menu) in a
+/// layout — the one a dismissal gesture reaches first.
+///
+/// Stacking order follows nesting: a context menu opened inside a modal is
+/// laid out as its descendant and draws above it, so the innermost open panel
+/// is on top. Among siblings the later one wins, matching draw order.
+/// `widget_focus::find_open_modal_node` answers in tree order instead, which
+/// returns the outer modal and would close the whole modal while its context
+/// menu is still up.
+fn topmost_open_overlay_panel(
+    node: &crate::layout::LayoutNode,
+) -> Option<&crate::layout::LayoutNode> {
+    if let Some(found) = node
+        .children
+        .iter()
+        .rev()
+        .find_map(topmost_open_overlay_panel)
+    {
+        return Some(found);
+    }
+    if crate::widget_render::is_overlay_panel_widget(&node.widget_type) && !node.children.is_empty()
+    {
+        return Some(node);
+    }
     None
 }
 

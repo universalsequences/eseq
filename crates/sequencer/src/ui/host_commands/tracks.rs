@@ -528,12 +528,19 @@ pub(super) fn handle(
                 let groups_before = app.groups.clone();
                 match app.graph_controller().add_track(path) {
                     Ok(idx) => {
-                        host_commands::add_new_track_to_group(
+                        let attach = host_commands::add_new_track_to_group(
                             &mut app,
                             idx,
                             group_id,
                             rack_pad_note,
                         );
+                        if let Some(status) = attach.rejection_status("Error adding track") {
+                            // Report why the pad rejected the track; the track
+                            // itself was already rolled back by the attach.
+                            *track_groups.lock().unwrap() = app.groups.clone();
+                            editor.handle_host_event(HostEvent::Status(status));
+                            return;
+                        }
                         if let Err(error) = app.commit_created_track(idx, "Add sample track") {
                             app.groups = groups_before;
                             *track_groups.lock().unwrap() = app.groups.clone();

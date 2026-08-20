@@ -317,7 +317,15 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     } = ctx;
 
     let groups_before = app.groups.clone();
-    add_new_track_to_group(app, idx, group_id, pad_note);
+    let attach = add_new_track_to_group(app, idx, group_id, pad_note);
+    if let Some(status) = attach.rejection_status("Error adding instrument track") {
+        // The attach failed. `add_new_track_to_group` already dropped the new
+        // track when it could, so there is nothing to commit — reporting
+        // success here is what used to strand a loose, padless track.
+        *track_groups.lock().unwrap() = app.groups.clone();
+        editor.handle_host_event(HostEvent::Status(status));
+        return;
+    }
     if let Err(error) = app.commit_created_track(idx, "Add instrument track") {
         app.groups = groups_before;
         *track_groups.lock().unwrap() = app.groups.clone();
@@ -542,22 +550,97 @@ pub(crate) fn selection_after_added_track(
     )
 }
 
+/// What became of a freshly created track that was offered to a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NewTrackGroupOutcome {
+    /// No group was asked for: the new track stays loose, as intended.
+    Loose,
+    /// The track joined the group (and, for a rack, claimed its pad).
+    Attached,
+    /// The group refused the track — an out-of-domain pad note, an occupied
+    /// pad, a full rack or a missing group. `rolled_back` reports whether the
+    /// just-created track was deleted again; when it is, the caller must
+    /// abandon the rest of the add-track flow because `track` no longer exists.
+    Rejected { reason: String, rolled_back: bool },
+}
+
+impl NewTrackGroupOutcome {
+    /// User-facing status for a rejection, or `None` when nothing went wrong.
+    pub(crate) fn rejection_status(&self, action: &str) -> Option<String> {
+        match self {
+            NewTrackGroupOutcome::Loose | NewTrackGroupOutcome::Attached => None,
+            NewTrackGroupOutcome::Rejected { reason, rolled_back } => Some(if *rolled_back {
+                format!("{action}: {reason}")
+            } else {
+                format!("{action}: {reason} (the new track was left ungrouped)")
+            }),
+        }
+    }
+
+    pub(crate) fn is_rejected(&self) -> bool {
+        matches!(self, NewTrackGroupOutcome::Rejected { .. })
+    }
+}
+
 /// Adds a freshly created track to `group_id`. With `pad_note`, the group must
 /// be a drum rack and the track becomes the member backing that pad — this is
 /// the lazy-pad path: a pad claims a track only when a sound lands on it.
+///
+/// The attach legitimately fails (out-of-domain pad note, occupied pad, full
+/// rack), and by then the track already exists. It cannot be pre-checked before
+/// creation — `attach_track_to_group` validates against a live track index — so
+/// a rejection rolls the track back here instead, before any caller commits it
+/// to history. Callers get the reason to show the user.
 pub(crate) fn add_new_track_to_group(
     app: &mut app::App,
     track: usize,
     group_id: Option<u64>,
     pad_note: Option<i32>,
-) -> bool {
-    if new_track_group_target(&app.groups, track, group_id).is_none() {
-        return false;
-    }
+) -> NewTrackGroupOutcome {
+    add_new_track_to_group_with_rollback(app, track, group_id, pad_note, |app, track| {
+        app.graph_controller().delete_track(track).map(|_| ())
+    })
+}
+
+/// Rollback-injectable core of [`add_new_track_to_group`] so the rejection
+/// paths are testable without a live audio graph.
+fn add_new_track_to_group_with_rollback<R>(
+    app: &mut app::App,
+    track: usize,
+    group_id: Option<u64>,
+    pad_note: Option<i32>,
+    rollback: R,
+) -> NewTrackGroupOutcome
+where
+    R: FnOnce(&mut app::App, usize) -> Result<(), String>,
+{
     let Some(group_id) = group_id else {
-        return false;
+        return NewTrackGroupOutcome::Loose;
     };
-    app.attach_track_to_group(track, group_id, pad_note).is_ok()
+    let attached = if new_track_group_target(&app.groups, track, Some(group_id)).is_some() {
+        app.attach_track_to_group(track, group_id, pad_note)
+    } else {
+        Err(format!(
+            "Track group {group_id} cannot take track {}",
+            track + 1
+        ))
+    };
+    let Err(reason) = attached else {
+        return NewTrackGroupOutcome::Attached;
+    };
+    // Nothing has been committed to history yet — every caller commits the
+    // created track after this returns — so dropping the track here leaves no
+    // half-transaction on the undo stack.
+    match rollback(app, track) {
+        Ok(()) => NewTrackGroupOutcome::Rejected {
+            reason,
+            rolled_back: true,
+        },
+        Err(rollback_error) => NewTrackGroupOutcome::Rejected {
+            reason: format!("{reason}; rolling the new track back also failed ({rollback_error})"),
+            rolled_back: false,
+        },
+    }
 }
 
 fn new_track_group_target(
@@ -645,6 +728,167 @@ mod tests {
         assert_eq!(new_track_group_target(&groups, 4, Some(99)), None);
         assert_eq!(new_track_group_target(&groups, 4, None), None);
         assert_eq!(new_track_group_target(&groups, 3, Some(27)), None);
+    }
+
+    /// A drum rack whose only pad (note 36) is already taken by member track 0.
+    fn rack_group() -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig {
+                pads: vec![sequencer::project::ProjectRackPad {
+                    pad_note: 36,
+                    member: 0,
+                }],
+                choke_groups: vec![None],
+            }),
+            rack_members: Vec::new(),
+        }
+    }
+
+    /// Two tracks: track 0 already backs the rack pad, track 1 stands in for a
+    /// track that was just created and is about to be offered to the rack.
+    fn rack_attach_test_app() -> app::App {
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            2,
+            vec![
+                sequencer::sequencer::default_empty_effect_chain(),
+                sequencer::sequencer::default_empty_effect_chain(),
+            ],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Kick".to_string(), "New".to_string()];
+        app.track_registry = sequencer::sequencer::TrackRegistry::for_legacy_track_count(2)
+            .expect("test track registry");
+        app.groups = vec![rack_group()];
+        app
+    }
+
+    /// Stands in for `graph_controller().delete_track`, which needs a live
+    /// audio graph: drop the last track the way a real rollback would.
+    fn stub_rollback(app: &mut app::App, track: usize) -> Result<(), String> {
+        assert_eq!(track, app.tracks.len() - 1, "only the new track rolls back");
+        app.tracks.remove(track);
+        Ok(())
+    }
+
+    fn is_stranded(app: &app::App, track: usize) -> bool {
+        app.tracks.len() > track
+            && !app.groups.iter().any(|group| group.members.contains(&track))
+    }
+
+    #[test]
+    fn attaching_a_new_track_to_an_occupied_pad_rolls_the_track_back() {
+        let mut app = rack_attach_test_app();
+        let outcome = add_new_track_to_group_with_rollback(
+            &mut app,
+            1,
+            Some(7),
+            Some(36),
+            stub_rollback,
+        );
+
+        assert!(outcome.is_rejected(), "occupied pad must not report success");
+        let status = outcome
+            .rejection_status("Error adding instrument track")
+            .expect("a rejection has a user-facing status");
+        assert!(
+            status.contains("already occupied"),
+            "status should say why the pad refused the track: {status}"
+        );
+        assert_eq!(app.tracks.len(), 1, "the created track was rolled back");
+        assert!(!is_stranded(&app, 1), "no loose ungrouped track is left behind");
+        assert_eq!(
+            app.groups[0].rack.as_ref().expect("rack").pads.len(),
+            1,
+            "the occupied pad still belongs to its original member",
+        );
+    }
+
+    #[test]
+    fn attaching_a_new_track_to_an_out_of_domain_pad_note_rolls_the_track_back() {
+        let mut app = rack_attach_test_app();
+        let outcome = add_new_track_to_group_with_rollback(
+            &mut app,
+            1,
+            Some(7),
+            Some(200),
+            stub_rollback,
+        );
+
+        assert!(outcome.is_rejected(), "an out-of-domain note must not report success");
+        let status = outcome
+            .rejection_status("Error adding instrument track")
+            .expect("a rejection has a user-facing status");
+        assert!(
+            status.contains("200"),
+            "status should name the rejected pad note: {status}"
+        );
+        assert_eq!(app.tracks.len(), 1, "the created track was rolled back");
+        assert!(!is_stranded(&app, 1), "no loose ungrouped track is left behind");
+        assert!(
+            app.groups[0].members == vec![0],
+            "the rack keeps exactly its original member",
+        );
+    }
+
+    #[test]
+    fn a_failed_rollback_is_reported_as_a_left_behind_track() {
+        let mut app = rack_attach_test_app();
+        let outcome = add_new_track_to_group_with_rollback(&mut app, 1, Some(7), Some(36), |_, _| {
+            Err("Cannot delete the last remaining track".to_string())
+        });
+
+        let status = outcome
+            .rejection_status("Error adding instrument track")
+            .expect("a rejection has a user-facing status");
+        assert!(status.contains("already occupied"), "{status}");
+        assert!(status.contains("left ungrouped"), "{status}");
+        assert!(
+            is_stranded(&app, 1),
+            "the stranded track is exactly what the status now admits to",
+        );
+    }
+
+    #[test]
+    fn attaching_a_new_track_to_a_free_pad_succeeds() {
+        let mut app = rack_attach_test_app();
+        let outcome =
+            add_new_track_to_group_with_rollback(&mut app, 1, Some(7), Some(38), stub_rollback);
+
+        assert_eq!(outcome, NewTrackGroupOutcome::Attached);
+        assert_eq!(outcome.rejection_status("Error adding instrument track"), None);
+        assert_eq!(app.tracks.len(), 2, "the new track survives a good attach");
+        assert_eq!(app.groups[0].members, vec![0, 1]);
+    }
+
+    #[test]
+    fn no_group_requested_leaves_the_track_loose_without_an_error() {
+        let mut app = rack_attach_test_app();
+        let outcome = add_new_track_to_group_with_rollback(&mut app, 1, None, None, stub_rollback);
+
+        assert_eq!(outcome, NewTrackGroupOutcome::Loose);
+        assert_eq!(outcome.rejection_status("Error adding instrument track"), None);
+        assert_eq!(app.tracks.len(), 2);
     }
 
     #[test]

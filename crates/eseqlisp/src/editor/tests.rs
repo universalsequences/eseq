@@ -14086,3 +14086,79 @@ fn context_menu_escape_closes_without_firing_items() {
     );
     assert_eq!(eval_string(&mut editor, "selected"), "");
 }
+
+/// A modal whose body can open a context menu inside itself — the nested
+/// modal-family stack Escape has to unwind one panel at a time.
+#[cfg(target_os = "macos")]
+const MODAL_WITH_CONTEXT_MENU_PROGRAM: &str = r#"
+    (def modal-open (state true))
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (effect-buffer "*panel*"
+      (modal :is-open modal-open
+             :on-close (lambda () (set! modal-open false))
+        (v-stack
+          (box :width 30 :height 6
+            :on-right-click (lambda (event)
+              (set! menu-col (get event :col))
+              (set! menu-row (get event :row))
+              (set! menu-open true)))
+          (context-menu :is-open menu-open
+                        :anchor-col menu-col
+                        :anchor-row menu-row
+                        :on-close (lambda () (set! menu-open false))
+            (menu-item "Rename"
+              :on-select (lambda (event) (set! selected "rename")))))))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn escape_closes_the_context_menu_first_then_the_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(MODAL_WITH_CONTEXT_MENU_PROGRAM);
+    register_active_layout_overlays(&mut editor);
+    assert!(eval_bool(&mut editor, "modal-open"), "modal starts open");
+
+    // Right-click a spot inside the modal panel to raise the context menu.
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let target = find_widget_of_type(&layout, "box")
+        .expect("modal body box")
+        .clone();
+    right_click_at(
+        &mut editor,
+        target.rect.col + target.rect.width * 0.5,
+        target.rect.row + target.rect.height * 0.5,
+    );
+    assert!(eval_bool(&mut editor, "menu-open"), "right-click opens menu");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "first escape closes the context menu"
+    );
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "first escape must leave the modal open"
+    );
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    register_active_layout_overlays(&mut editor);
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "second escape reaches the modal"
+    );
+}

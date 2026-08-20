@@ -831,6 +831,58 @@ mod tests {
         assert_eq!(EffectSlotSnapshot::capture(&live).node_param_idx(0), Some(20));
     }
 
+    // eseq-ur4 follow-up: the layout guard above declines to adopt a missing
+    // layout, but `num_params` was still stored unconditionally — so a snapshot
+    // claiming more params than the live device left the tail params mapped to
+    // node param 0 (`STATE_ENABLED`), silently bypassing the effect.
+    #[test]
+    fn restoring_a_snapshot_without_a_layout_clamps_num_params_to_the_live_layout() {
+        let params: Vec<ParamDescriptor> = (0..15)
+            .map(|i| ParamDescriptor {
+                name: format!("p{i}"),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                // Non-positional node layout, as on Space Echo.
+                node_param_idx: i + 1,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            })
+            .collect();
+        let desc = EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params,
+        };
+        let live = EffectSlotState::new(&desc, 42);
+
+        // A stale snapshot claiming 20 params while carrying no layout at all.
+        let mut stale = EffectSlotSnapshot::capture(&live);
+        stale.param_node_indices.clear();
+        stale.num_params = 20;
+        stale.restore(&live);
+
+        assert_eq!(live.num_params.load(Ordering::Relaxed), 15);
+
+        let recaptured = EffectSlotSnapshot::capture(&live);
+        assert_eq!(recaptured.num_params, 15);
+        assert_eq!(recaptured.param_node_indices.len(), 15);
+        for i in 0..15 {
+            assert_eq!(recaptured.node_param_idx(i), Some(i as u32 + 1));
+        }
+        for i in 15..20 {
+            // Never `Some(0)`: node param 0 is STATE_ENABLED.
+            assert_eq!(recaptured.node_param_idx(i), None);
+        }
+    }
+
     #[test]
     fn sync_to_descriptor_rebinds_loaded_plock_and_key_lock_ids_to_live_node_id() {
         let desc = EffectDescriptor {
@@ -9458,10 +9510,27 @@ impl EffectSlotSnapshot {
         slot.node_id.store(self.node_id, Ordering::Relaxed);
         slot.modulator_node_id
             .store(self.modulator_node_id, Ordering::Relaxed);
-        slot.num_params.store(self.num_params, Ordering::Relaxed);
+        // `num_params` must never outrun the layout that will actually be in
+        // place after this restore. Params past the layout have no node param
+        // index, and `capture()` would then hand them a fabricated `0` — which
+        // is node param 0, `STATE_ENABLED` on most devices, so the effect
+        // silently switches itself off at the next param push.
+        //
+        // A param index ends up with a valid layout when either the snapshot
+        // supplies one (adopted below for `i < self.param_node_indices.len()`)
+        // or the live slot already had one (`i < live_num_params`, kept because
+        // the guard below declines to overwrite it). Both are prefixes, so the
+        // covered count is the larger of the two, capped by the slot's storage.
+        let live_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+        let covered = self
+            .param_node_indices
+            .len()
+            .max(live_num_params)
+            .min(slot.param_node_indices.len());
+        let np = (self.num_params as usize).min(covered);
+        slot.num_params.store(np as u32, Ordering::Relaxed);
         slot.transport_phase_param_idx
             .store(self.transport_phase_param_idx, Ordering::Relaxed);
-        let np = self.num_params as usize;
 
         for i in 0..np {
             if i < self.defaults.len() {

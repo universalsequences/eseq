@@ -406,21 +406,29 @@ fn apply_track_macro_overrides(
     }
 }
 
-fn apply_slot_macro_overrides(
+pub(in crate::sequencer) fn apply_slot_macro_overrides(
     slot: &mut EffectSlotSnapshot,
     overrides: &HashMap<MacroParamKey, f32>,
     key_for_param: impl Fn(usize, Option<crate::neural::ParamNodeId>) -> MacroParamKey,
 ) {
     let param_count = (slot.num_params as usize).min(slot.defaults.len());
     for param_idx in 0..param_count {
-        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
-            continue;
-        };
-        let param_id = crate::neural::ParamNodeId::from_slot_param(
-            slot.node_id,
-            slot.modulator_node_id,
-            raw_idx,
-        );
+        // A slot with no layout of its own (a stale or legacy pool copy whose
+        // `param_node_indices` is missing or short) has no node param id.
+        // `key_for_param` then falls back to the positional
+        // `Instrument`/`Effect` key — which is exactly the key the macro
+        // producer emits for such a slot, since `ParamNodeId::from_slot_param`
+        // also yields `None` there. Skipping the param instead would drop the
+        // override entirely: the knob moves and nothing changes. There is
+        // deliberately still no positional *node index* fallback; that is what
+        // wrote knob-scale values into unrelated device state.
+        let param_id = slot.node_param_idx(param_idx).and_then(|raw_idx| {
+            crate::neural::ParamNodeId::from_slot_param(
+                slot.node_id,
+                slot.modulator_node_id,
+                raw_idx,
+            )
+        });
         if let Some(value) = overrides.get(&key_for_param(param_idx, param_id)) {
             slot.defaults[param_idx] = *value;
         }

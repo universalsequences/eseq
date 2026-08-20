@@ -274,12 +274,14 @@ pub(super) fn collect_rack_choke_group_voice_releases(
 /// "Trigger routing"). A rack pad is a real track, so choke releases a whole
 /// track's sounding voices instead of a slot's. Modulator and v1 rack tracks
 /// are skipped, exactly as the per-slot version skips those slot types.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_track_active_voice_releases(
     state: &SequencerState,
     voice_pools: &mut [VoicePool],
     custom_engine_pools: &mut [CustomEnginePool],
     countdown_events: &mut Vec<CountdownEvent>,
     block_events: &mut Vec<BlockEvent>,
+    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
     track_idx: usize,
     release_sample: u64,
     note_offs: &mut Vec<RackSlotNoteOff>,
@@ -293,6 +295,10 @@ pub(super) fn collect_track_active_voice_releases(
                 return;
             }
             cancel_chops_for_track(countdown_events, block_events, track_idx);
+            // The choke recycles this track's voice lids, so any live-key
+            // entry here is stale: leaving it would make the eventual key
+            // release note-off a lid the sequencer has already re-triggered.
+            active_keyboard_notes[track_idx] = [None; MAX_VOICES];
             let num_voices = voice_pools[track_idx].num_voices;
             for voice_idx in 0..num_voices {
                 let voice = &voice_pools[track_idx].voices[voice_idx];
@@ -318,6 +324,7 @@ pub(super) fn collect_track_active_voice_releases(
                 return;
             }
             cancel_chops_for_track(countdown_events, block_events, track_idx);
+            active_keyboard_notes[track_idx] = [None; MAX_VOICES];
             let free_patch =
                 track_custom_run_mode(state, track_idx) == CustomInstrumentRunMode::FreePatch;
             let num_voices = custom_engine_pools[engine_id].num_voices;
@@ -348,12 +355,14 @@ pub(super) fn collect_track_active_voice_releases(
 /// at this very sample is left alone, so two pads of one choke group landing
 /// on the same frame (closed + open hat on one step) do not cut each other's
 /// brand-new voice.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_rack_choke_group_track_releases(
     state: &SequencerState,
     voice_pools: &mut [VoicePool],
     custom_engine_pools: &mut [CustomEnginePool],
     countdown_events: &mut Vec<CountdownEvent>,
     block_events: &mut Vec<BlockEvent>,
+    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
     last_trigger: &[u64; MAX_TRACKS],
     triggering_track: usize,
     release_sample: u64,
@@ -380,6 +389,7 @@ pub(super) fn collect_rack_choke_group_track_releases(
             custom_engine_pools,
             countdown_events,
             block_events,
+            active_keyboard_notes,
             track_idx,
             release_sample,
             note_offs,
@@ -410,6 +420,7 @@ pub(super) fn release_rack_choke_group_track_voices(
         &mut data.custom_engine_pools,
         &mut data.countdown_events,
         &mut data.block_events,
+        &mut data.active_keyboard_notes,
         &data.rack_choke_last_trigger,
         triggering_track,
         release_sample,

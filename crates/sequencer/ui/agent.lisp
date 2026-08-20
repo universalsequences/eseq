@@ -2,9 +2,9 @@
 ;; *agent-artifacts* side panel. Loaded by ui/main.lisp.
 ;;
 ;; MODULE NOTE (spec §10, S3b): this file is a RENDER ROOT — it registers two
-;; effect-buffers at top level. `import` EVALUATES its target, so NEVER import
-;; this module from a library file; that would drag a UI root into every VM that
-;; loads the importer.
+;; effect-buffers and a global key binding at top level. `import` EVALUATES its
+;; target, so NEVER import this module from a library file; that would drag a
+;; UI root into every VM that loads the importer.
 ;;
 ;; It adds NO imports of its own, and must not grow any: five Rust tests in
 ;; src/ui/state_values/tests.rs eval this whole file into a bare
@@ -28,7 +28,10 @@
 ;; outside this file. Nothing is renamed: every one of these is spelled flat
 ;; from somewhere that cannot import a render root.
 ;;
-;; `agent-open` — the Rust agent tests eval `(agent-open)` by flat name.
+;; `agent-open` — the Rust agent tests eval `(agent-open)` by flat name (it is
+;;   also this file's own `C-x a` bind-key handler, which needs no alias:
+;;   bind-key qualifies the handler string against the binding module and
+;;   finds it exactly here).
 ;; `agent-submit-current` — the busy/cancel test evals it by flat name.
 ;; `agent-current-conv` — the same tests seed it with a flat
 ;;   `(set! agent-current-conv 1)`. It is a `defstate`, so the write lands in
@@ -355,3 +358,10 @@
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))
     (%artifact-panel)))
+
+;; Entry point. `C-g` used to open this panel, but Cmd/Ctrl+G is now the
+;; track-group shortcut (eseq.mixer/seq-ctrl-g), so Agent Mode moves to the
+;; `C-x <letter>` panel-toggle family alongside `C-x m` (patch macros),
+;; `C-x p` (sound palette) and `C-x s` (sample browser). The handler string
+;; qualifies against this module, which is where `agent-open` lives.
+(bind-key "C-x a" "agent-open")

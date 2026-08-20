@@ -588,6 +588,7 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
     }];
 
     // Track 1 triggers: it chokes track 0 and nothing else.
+    let mut active_keyboard_notes = active_keyboard_notes_fixture();
     let mut note_offs = Vec::new();
     collect_rack_choke_group_track_releases(
         &state,
@@ -595,6 +596,7 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
         &mut custom_engine_pools,
         &mut countdown_events,
         &mut block_events,
+        &mut active_keyboard_notes,
         &[u64::MAX; MAX_TRACKS],
         1,
         1_000,
@@ -639,6 +641,7 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
         &mut custom_engine_pools,
         &mut countdown_events,
         &mut block_events,
+        &mut active_keyboard_notes,
         &last_trigger,
         0,
         2_000,
@@ -658,6 +661,7 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
         &mut custom_engine_pools,
         &mut countdown_events,
         &mut block_events,
+        &mut active_keyboard_notes,
         &last_trigger,
         0,
         2_001,
@@ -669,6 +673,78 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
         Some(2_001)
     );
     assert_eq!(note_offs, vec![RackSlotNoteOff::Custom { logical_id: 20 }]);
+}
+
+/// Drum rack v2 choke must forget the choked track's held-key entries: the
+/// pad's voice lids are recycled by the next trigger, so a stale
+/// `active_keyboard_notes` slot would make the eventual key release send a
+/// note-off on a lid the sequencer has already re-triggered, cutting a live
+/// hit mid-sample.
+#[test]
+fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
+    let state = SequencerState::new(
+        2,
+        (0..2).map(|_| crate::sequencer::default_empty_effect_chain()).collect(),
+    );
+    let key = crate::sequencer::rack_choke_key(3, 1);
+    state.runtime.rack_choke_keys[0].store(key, Ordering::Release);
+    state.runtime.rack_choke_keys[1].store(key, Ordering::Release);
+    state.runtime.instrument_type_flags[0]
+        .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+    state.runtime.instrument_type_flags[1]
+        .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+
+    let mut voice_pools: Vec<VoicePool> = (0..2).map(|_| VoicePool::new()).collect();
+    let mut custom_engine_pools: Vec<CustomEnginePool> = Vec::new();
+    voice_pools[0].add_voice(10, 100);
+    voice_pools[0].voices[0].active = true;
+
+    // The user is holding a key on pad 0, which sounds voice lid 10.
+    let mut active_keyboard_notes = active_keyboard_notes_fixture();
+    store_active_keyboard_note(
+        &mut active_keyboard_notes,
+        0,
+        3.0,
+        Some(63),
+        0.8,
+        &[ActiveKeyboardVoice {
+            logical_id: 10,
+            gatepitch_id: 0,
+            target: ActiveKeyboardVoiceTarget::Sampler { pool_id: 0 },
+        }],
+    );
+
+    let mut countdown_events = Vec::new();
+    let mut block_events = Vec::new();
+    let mut note_offs = Vec::new();
+
+    // Pad 1 hits and chokes pad 0.
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &mut active_keyboard_notes,
+        &[u64::MAX; MAX_TRACKS],
+        1,
+        1_000,
+        &mut note_offs,
+    );
+
+    assert!(
+        !voice_pools[0].voices[0].active,
+        "the choked pad's voice should be released"
+    );
+    assert_eq!(note_offs, vec![RackSlotNoteOff::Sampler { logical_id: 10 }]);
+    assert!(
+        active_keyboard_notes[0].iter().all(|slot| slot.is_none()),
+        "the choked track's held-key entries must be cleared"
+    );
+    assert!(
+        take_active_keyboard_note(&mut active_keyboard_notes, 0, 3.0).is_none(),
+        "releasing the held key after a choke must not emit a note-off on a recycled lid"
+    );
 }
 
 #[test]

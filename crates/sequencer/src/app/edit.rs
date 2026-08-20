@@ -3279,10 +3279,16 @@ impl App {
                 rack.remap_after_member_removed(position);
             }
         }
-        // A rack with no pads is still a rack (lazy pads); a plain group with
-        // no members is nothing at all.
-        self.groups
-            .retain(|group| group.is_rack() || !group.members.is_empty());
+        // A rack with no pads is still a rack (lazy pads); a plain group is
+        // still a group while it holds a child rack, whose bus chains into
+        // this group's bus. A plain group with neither is nothing at all.
+        // Mirrors the load-path predicate in `projects.rs` (see the group
+        // filter around `!group.rack_members.is_empty()`); the two must agree,
+        // or a group dropped here silently reroutes its racks to the mix on
+        // reload.
+        self.groups.retain(|group| {
+            group.is_rack() || !group.members.is_empty() || !group.rack_members.is_empty()
+        });
         self.publish_rack_choke_runtime();
     }
 
@@ -11589,6 +11595,77 @@ mod tests {
         assert_eq!(app.history.undo_len(), 2, "halve adds one undo step");
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(lengths(&app), vec![16, 2, MAX_STEPS]);
+    }
+
+    /// Regression: deleting the last loose track of a plain group that still
+    /// holds a child rack must NOT drop the group. Its bus is the rack bus's
+    /// output, so dropping it orphans that bus in-session and — because the
+    /// load path keeps such a group alive (`projects.rs`, the group filter on
+    /// `!group.rack_members.is_empty()`) — the rack would silently reroute to
+    /// the master mix on reload, losing the parent's fader and FX.
+    #[test]
+    fn deleting_the_last_loose_track_keeps_a_group_that_still_holds_a_rack() {
+        let mut app = test_app(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        app.tracks = vec!["Bass".to_string(), "Kick".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        let parent_bus = BusId(70);
+        let rack_bus = BusId(71);
+        app.buses.push(crate::app::BusChannelState::new(parent_bus, "Group"));
+        app.buses.push({
+            let mut bus = crate::app::BusChannelState::new(rack_bus, "Rack");
+            bus.output = crate::project::BusOutput::Bus(parent_bus.0);
+            bus
+        });
+        // A plain group: one loose track (0) plus a child rack holding track 1.
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 80,
+            name: "Group".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0],
+            bus_id: parent_bus.0,
+            rack: None,
+            rack_members: vec![81],
+        });
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 81,
+            name: "Rack".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![1],
+            bus_id: rack_bus.0,
+            rack: Some(crate::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        });
+
+        app.remap_groups_after_track_delete(0);
+
+        let parent = app
+            .groups
+            .iter()
+            .find(|group| group.id == 80)
+            .expect("a memberless plain group survives while it holds a rack");
+        assert!(parent.members.is_empty(), "the loose track is gone");
+        assert_eq!(parent.rack_members, vec![81], "the child rack remains");
+        assert_eq!(
+            app.buses
+                .iter()
+                .find(|bus| bus.id == rack_bus)
+                .expect("rack bus")
+                .output,
+            crate::project::BusOutput::Bus(parent_bus.0),
+            "the rack bus still chains into the surviving group bus",
+        );
+        let rack = app
+            .groups
+            .iter()
+            .find(|group| group.id == 81)
+            .expect("the rack itself survives");
+        assert_eq!(rack.members, vec![0], "the rack member reindexed down");
     }
 
     #[test]

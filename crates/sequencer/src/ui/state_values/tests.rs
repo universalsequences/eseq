@@ -49949,6 +49949,43 @@
         }
     }
 
+    /// A nudge clamps to the note-positional grid's range, not to raw MIDI 0.
+    /// `pad_note` is a transpose where 0 = C4, so the domain runs negative and
+    /// a `(max 0 ...)` lower bound would teleport every pad in the bottom three
+    /// octaves up to C4 instead of holding it still.
+    #[test]
+    fn metal_seq_rack_pad_note_nudge_clamps_to_the_grid_floor() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let eval = |editor: &mut eseqlisp::Editor, expr: &str| -> Option<Value> {
+            editor.runtime_mut().eval_str(expr).expect("expr evaluates")
+        };
+
+        // The floor is the grid's lowest note (C1 = -36), never 0.
+        let floor = match eval(&mut editor, "(eseq.drum-rack-v2/min-grid-pad-note)") {
+            Some(Value::Number(n)) => n,
+            other => panic!("min-grid-pad-note should be a number, got {other:?}"),
+        };
+        assert_eq!(floor, -36.0);
+        assert_eq!(
+            eval(&mut editor, "(eseq.drum-rack-v2/%clamp-pad-note -37)"),
+            Some(Value::Number(-36.0)),
+            "below the floor clamps to the floor, not to 0"
+        );
+
+        // Nudging a pad that already sits on the floor is a no-op: the clamped
+        // note equals the current one, so no host command is issued.
+        assert_eq!(
+            eval(
+                &mut editor,
+                "(eseq.drum-rack-v2/nudge-pad-note 0 (dict :pad-note -36) -1)"
+            ),
+            Some(Value::Nil),
+            "a pad on the grid floor must not move when nudged down"
+        );
+    }
+
     /// eseq-4b5.14: the pad grid is note-positional. A cell IS a MIDI note —
     /// derived from (page, row, col) alone — and it draws whichever pad answers
     /// to that note, so a pad's label and its position can never disagree. Pads

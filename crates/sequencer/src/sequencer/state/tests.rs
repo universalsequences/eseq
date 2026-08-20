@@ -6240,3 +6240,78 @@
             .expect("return to low-send scene");
         assert_eq!(state.pattern.track_params[0].sends()[0].amount, 0.15);
     }
+
+    /// A legacy pooled slot carries no `param_node_indices` at all (see the
+    /// "legacy pool copy carrying no param layout" path in
+    /// `sequencer_state/step_edit.rs`). It therefore has no node param id, and
+    /// the macro producer keys such a param positionally
+    /// (`MacroParamKey::for_instrument(track, param_idx, None)`). The snapshot
+    /// consumer must key it the same way instead of skipping the param, or the
+    /// macro knob moves and the parameter never changes.
+    #[test]
+    fn macro_overrides_reach_a_legacy_slot_with_no_param_layout() {
+        use crate::macro_engine::MacroParamKey;
+        use crate::sequencer::snapshot::apply_slot_macro_overrides;
+        use std::collections::HashMap;
+
+        let mut slot = EffectSlotSnapshot::new_empty();
+        slot.num_params = 3;
+        slot.defaults = vec![0.1, 0.2, 0.3];
+        // The legacy shape: no layout, hence no node param id for any param.
+        assert!(slot.param_node_indices.is_empty());
+        assert!(slot.node_param_idx(1).is_none());
+
+        let mut overrides: HashMap<MacroParamKey, f32> = HashMap::new();
+        overrides.insert(MacroParamKey::for_instrument(0, 1, None), 0.75);
+
+        apply_slot_macro_overrides(&mut slot, &overrides, |param_idx, param_id| {
+            MacroParamKey::for_instrument(0, param_idx, param_id)
+        });
+
+        assert_eq!(
+            slot.defaults[1], 0.75,
+            "macro override must reach a legacy slot with no param layout"
+        );
+        assert_eq!(slot.defaults[0], 0.1);
+        assert_eq!(slot.defaults[2], 0.3);
+    }
+
+    /// The same for an effect slot, and the guard's original purpose still
+    /// holds: a layout-less slot must never be keyed as if `param_idx` were a
+    /// node param index, so a `Node` key built from that fallback must not
+    /// match anything.
+    #[test]
+    fn legacy_effect_slot_ignores_positional_node_keys() {
+        use crate::macro_engine::MacroParamKey;
+        use crate::sequencer::snapshot::apply_slot_macro_overrides;
+        use std::collections::HashMap;
+
+        let mut slot = EffectSlotSnapshot::new_empty();
+        slot.node_id = 42;
+        slot.num_params = 2;
+        slot.defaults = vec![0.0, 0.0];
+
+        let mut overrides: HashMap<MacroParamKey, f32> = HashMap::new();
+        // A key built from the old `param_idx`-as-node-index fallback.
+        overrides.insert(
+            MacroParamKey::for_effect(
+                0,
+                1,
+                1,
+                ParamNodeId::from_slot_param(42, 0, 1),
+            ),
+            0.9,
+        );
+        // The positional key the producer actually emits for a layout-less slot.
+        overrides.insert(MacroParamKey::for_effect(0, 1, 0, None), 0.4);
+
+        apply_slot_macro_overrides(&mut slot, &overrides, |param_idx, param_id| {
+            MacroParamKey::for_effect(0, 1, param_idx, param_id)
+        });
+
+        assert_eq!(slot.defaults[0], 0.4, "positional override applies");
+        assert_eq!(
+            slot.defaults[1], 0.0,
+            "a node key from the positional fallback must not match"
+        );
+    }

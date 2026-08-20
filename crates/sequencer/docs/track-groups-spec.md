@@ -326,8 +326,9 @@ members for subsequent operations — see Open Questions.
 - `Ctrl+G` and `Cmd+G` both invoke the global `seq-ctrl-g` dispatcher. With at
   least two selected tracks it enqueues `group-selected-tracks`; otherwise it
   reports that two or more tracks are required.
-- The retired agent mode has no G-chord binding. Its panel remains reachable
-  through its UI entry points.
+- Agent mode has no G-chord binding. Its panel opens on the `C-x a` chord,
+  matching the other panel chords (`C-x m` patch macros, `C-x p` sound
+  palette, `C-x s` sample browser).
 
 ## Implementation Phases
 
