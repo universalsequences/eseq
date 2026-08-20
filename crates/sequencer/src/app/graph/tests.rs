@@ -2069,6 +2069,55 @@
         graph.process_block();
     }
 
+    fn assert_published_epochs_are_live(app: &App, context: &str) {
+        let snapshot = app.state.latest_scheduler_snapshot();
+        assert_eq!(
+            snapshot.transport.pattern_epoch,
+            app.state.transport.pattern_epoch.load(Ordering::Relaxed),
+            "{context} published a stale pattern epoch; the audio callback drops every event stamped with it, silencing all tracks"
+        );
+        assert_eq!(
+            snapshot.transport.topology_epoch,
+            app.state.transport.topology_epoch.load(Ordering::Relaxed),
+            "{context} published a stale topology epoch"
+        );
+    }
+
+    #[test]
+    fn rack_slot_edits_publish_the_bumped_transport_epochs() {
+        let graph = TestLiveGraph::new("rack-slot-epoch-publish-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("one-slot rack should load");
+        app.apply_recorded_rack_slot_add(0, "Add rack sample", |app| {
+            app.graph_controller().add_sampler_slot_to_rack(0, sample)
+        })
+        .expect("second sampler slot should append");
+        assert_published_epochs_are_live(&app, "rack slot append");
+
+        // The drag-drop audition path: dropping a sample onto an occupied
+        // rack slot replaces that layer's source.
+        app.apply_recorded_rack_slot_source_replacement(
+            0,
+            1,
+            "Replace rack sample",
+            |app| {
+                app.graph_controller()
+                    .replace_rack_slot_with_sampler(0, 1, sample)
+            },
+        )
+        .expect("rack slot should take the dropped sample");
+        assert_published_epochs_are_live(&app, "rack slot sample replacement");
+
+        app.graph_controller()
+            .delete_rack_slot(0, 1)
+            .expect("rack slot should delete cleanly");
+        assert_published_epochs_are_live(&app, "rack slot delete");
+        graph.process_block();
+    }
+
     #[test]
     fn same_engine_rack_rebuild_replaces_only_the_rack_route_generation() {
         let graph = TestLiveGraph::new("rack-deferred-engine-route-test");
