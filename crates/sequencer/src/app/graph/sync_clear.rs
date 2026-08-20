@@ -333,7 +333,7 @@ impl GraphController<'_> {
             self.app.editor.status_message = Some((error, std::time::Instant::now()));
         }
 
-        self.app.publish_bus_gate_runtime();
+        self.app.publish_bus_effect_runtime();
     }
 
 }

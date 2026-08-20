@@ -2677,19 +2677,6 @@ pub(crate) fn init_runtime(
                     ),
                 ),
                 ("bus-effects", build_bus_effects_value(&app)),
-                ("bus-steps", build_bus_steps_value(&app)),
-                ("bus-velocities", build_bus_param_lists(&app, "velocity")),
-                ("bus-durations", build_bus_param_lists(&app, "duration")),
-                ("bus-syncs", build_bus_param_lists(&app, "sync")),
-                ("bus-num-steps", build_bus_num_steps_value(&app)),
-                ("bus-timebases", build_bus_timebase_value(&app)),
-                ("bus-swings", build_bus_swing_value(&app)),
-                (
-                    "bus-swing-resolutions",
-                    build_bus_swing_resolution_value(&app),
-                ),
-                ("bus-step-has-plocks", build_bus_step_has_plocks(&app)),
-                ("bus-playheads", build_bus_playheads_value(&app)),
                 (
                     "effects",
                     if track_count == 0 {

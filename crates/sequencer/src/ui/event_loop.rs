@@ -97,7 +97,6 @@ pub(crate) fn run_event_loop(
         prev_modulator_levels: Vec::new(),
         prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
-        prev_bus_playheads: Vec::new(),
         prev_track_playheads: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
@@ -1372,7 +1371,6 @@ pub(crate) fn run_event_loop(
                         frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
                         frame.prev_modulator_phases = meters.cached_modulator_phases.clone();
                         frame.prev_modulator_levels = meters.cached_modulator_levels.clone();
-                        frame.prev_bus_playheads = bus_playhead_snapshot(&app);
                         frame.prev_track_playheads = track_playheads_snapshot(&shared.state, &app);
                         frame.prev_track_button_states = track_button_state_snapshot(&shared.state);
                         frame.prev_ui_epoch = shared.ui_epoch.load(Ordering::Relaxed);

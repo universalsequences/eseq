@@ -1,7 +1,7 @@
 ;; Step-grid pointer/cursor/selection interactions: paging, drag gestures, step param helpers.
 ;; Extracted from ui/main.lisp (module-system spec slice S2), converted in S3b.
 ;;
-;; This is the step-gesture hub: ui/bus-grid.lisp (still vanilla), ui/step-grid.lisp,
+;; This is the step-gesture hub: ui/step-grid.lisp,
 ;; ui/sequencer.lisp, ui/seq-grid-mode.lisp, ui/seqv-track-params.lisp and several
 ;; Rust call sites reach its names by their flat spellings, so it converts with NO
 ;; renames and a full set of *identity* compat aliases (the seq-core-state /
@@ -12,15 +12,13 @@
 ;;
 ;; TWO exceptions, both hazard (m)/(i):
 ;;
-;;   1. The eleven drag-state globals below are *mutable plain defs* that
-;;      ui/bus-grid.lisp — a headerless vanilla file — reads AND `set!`s by flat
-;;      spelling for the bus-lane gestures (they are genuinely one shared gesture
-;;      state: only one drag runs at a time). A compat alias cannot rescue that:
-;;      the late-binding heal repairs an *empty* slot and the next `set!` unlinks
-;;      it. They are pinned into `eseq.vanilla` with the §3 escape hatch, get no
-;;      alias, and EVERY in-file reference must use the `eseq.vanilla/` spelling —
-;;      a bare one here would intern this module's own slot, a different cell, and
-;;      the divergence is silent. They fold back in when bus-grid.lisp converts.
+;;   1. The eleven drag-state globals below are *mutable plain defs* shared with
+;;      vanilla callers that read AND `set!` them by flat spelling. A compat alias
+;;      cannot rescue that: the late-binding heal repairs an *empty* slot and the
+;;      next `set!` unlinks it. They are pinned into `eseq.vanilla` with the §3
+;;      escape hatch, get no alias, and EVERY in-file reference must use the
+;;      `eseq.vanilla/` spelling — a bare one here would intern this module's own
+;;      slot, a different cell, and the divergence is silent.
 ;;   2. `sequencer-cursor-step-changed` is a stub-then-override protocol:
 ;;      ui/sequencer.lisp pins its own `(def eseq.vanilla/sequencer-cursor-step-changed …)`
 ;;      override (see its comment at :304) which must land on the same slot the
@@ -47,8 +45,8 @@
 (def page-slot-width ()
   (+ page-button-width %page-button-gap))
 
-;; Private: no caller anywhere in the app (ui/bus-grid.lisp has its own
-;; `bus-page-panel-width`); kept as the track-grid twin of that helper.
+;; Private: no caller anywhere in the app; kept as the track-grid page-width
+;; helper.
 (def %page-panel-width ()
   (+ 0.4 (* (eseq.seq-core-state/page-count) (page-slot-width))))
 
@@ -63,9 +61,7 @@
     (do
       (eseq.seq-core-state/cool-off-follow)
       (set! eseq.vanilla/step-key-select-anchor nil)
-      (if (eseq.seq-core-state/seq-has-selected-bus?)
-        (eseq.bus-grid/bus-shift-selected-steps -1)
-        (seq-shift-selected-steps -1)))
+      (seq-shift-selected-steps -1))
     (do
       (eseq.seq-core-state/cool-off-follow)
       (set! eseq.vanilla/step-key-select-anchor nil)
@@ -80,9 +76,7 @@
     (do
       (eseq.seq-core-state/cool-off-follow)
       (set! eseq.vanilla/step-key-select-anchor nil)
-      (if (eseq.seq-core-state/seq-has-selected-bus?)
-        (eseq.bus-grid/bus-shift-selected-steps 1)
-        (seq-shift-selected-steps 1)))
+      (seq-shift-selected-steps 1))
     (do
       (eseq.seq-core-state/cool-off-follow)
       (set! eseq.vanilla/step-key-select-anchor nil)
@@ -92,14 +86,11 @@
             0
             (+ (eseq.seq-core-state/current-step) 1)))))))
 
-;; PINNED (hazard m): ui/bus-grid.lisp `set!`s this flat for the bus-lane
-;; gestures. See the file header.
+;; PINNED (hazard m): vanilla callers `set!` this flat. See the file header.
 (def eseq.vanilla/step-key-select-anchor nil)
 
 (def %cursor-select-step-range (start end)
-  (if (eseq.seq-core-state/seq-has-selected-bus?)
-    (eseq.bus-grid/bus-select-step-range start end)
-    (seq-select-step-range start end)))
+  (seq-select-step-range start end))
 
 (def %cursor-select-move (direction)
   (do
@@ -125,9 +116,7 @@
   (do
     (eseq.seq-core-state/cool-off-follow)
     (set! eseq.vanilla/step-key-select-anchor nil)
-    (if (eseq.seq-core-state/seq-has-selected-bus?)
-      (eseq.bus-grid/bus-toggle-step (eseq.bus-grid/bus-current-step))
-      (seq-toggle-step (eseq.seq-core-state/current-step)))))
+    (seq-toggle-step (eseq.seq-core-state/current-step))))
 
 (def selection-click? (evt)
   (or (get evt :shift)
@@ -154,8 +143,8 @@
     (eseq.seq-core-state/set-cursor-step-value step)
     (eseq.vanilla/sequencer-cursor-step-changed SEQ.current-track step)))
 
-;; PINNED (hazard m): the shared drag-gesture state. ui/bus-grid.lisp reads and
-;; `set!`s all eleven flat. See the file header.
+;; PINNED (hazard m): the shared drag-gesture state, read and `set!` flat by
+;; vanilla callers. See the file header.
 (def eseq.vanilla/step-drag-anchor nil)
 (def eseq.vanilla/step-click-pending nil)
 (def eseq.vanilla/step-move-last nil)
@@ -338,11 +327,6 @@
 (def step-double-click (step evt)
   (step-double-click-for-track SEQ.current-track step evt))
 
-(def bus-step-double-click (step evt)
-  (if (and (not (selection-click? evt)) (eseq.bus-grid/bus-step-active? step))
-    (eseq.bus-grid/bus-toggle-step step)
-    nil))
-
 (def seq-set-step-param-from-step (step param value)
   (if (step-selected? step)
     (seq-set-step-param-plock param value)
@@ -375,9 +359,7 @@
 (def select-all-steps ()
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (if (eseq.seq-core-state/seq-has-selected-bus?)
-      (eseq.bus-grid/bus-select-all-steps)
-      (seq-select-all-steps))))
+    (seq-select-all-steps)))
 
 (def seq-global-select-all-steps ()
   (if (and
@@ -398,9 +380,7 @@
 (def delete-selected-steps ()
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (if (eseq.seq-core-state/seq-has-selected-bus?)
-      (eseq.bus-grid/bus-delete-selected-steps)
-      (seq-delete-selected-steps))))
+    (seq-delete-selected-steps)))
 
 (def duration-slider-position (duration)
   (let ((d (max 0 (min duration 32))))

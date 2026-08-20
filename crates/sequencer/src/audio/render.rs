@@ -2,8 +2,7 @@
 Block rendering and per-block housekeeping around it.
 
 `render_chunk` asks the graph for the next block; around it live the
-metronome mix-in, interleaved peak metering, bus-gate parameter sync (gate
-sequences evaluated against the transport), snapshot effect-param dispatch
+metronome mix-in, interleaved peak metering, snapshot effect-param dispatch
 at step boundaries, and the host transport-clock broadcasts to instruments,
 effect modulators, and the DJ mixer.
 */
@@ -82,75 +81,6 @@ pub(super) fn publish_sampler_modulator_activity(data: &AudioCallbackData) {
     }
 }
 
-pub(super) fn bus_gate_state_at(
-    sequence: &crate::sequencer::BusGateSequence,
-    total_beats: f64,
-) -> (f32, usize) {
-    const EPS: f64 = 1e-9;
-    let ns = sequence.num_steps.clamp(1, crate::sequencer::MAX_STEPS);
-    let mut starts = [0.0f64; crate::sequencer::MAX_STEPS];
-    let mut durations = [0.0f64; crate::sequencer::MAX_STEPS];
-    let mut accum = 0.0f64;
-    for step in 0..ns {
-        let timebase = sequence.timebase_plocks[step].unwrap_or(sequence.timebase);
-        let duration = timebase.step_beats(ns).max(EPS);
-        let sync = sync_beats(sequence.syncs[step]);
-        if sync > EPS {
-            accum = ceil_to_grid(accum, sync);
-        }
-        starts[step] = accum;
-        durations[step] = duration;
-        accum += duration;
-    }
-    let sync0 = sync_beats(sequence.syncs[0]);
-    if sync0 > EPS {
-        accum = ceil_to_grid(accum, sync0).max(EPS);
-    }
-    if accum <= EPS {
-        return (1.0, 0);
-    }
-
-    let pos = total_beats.rem_euclid(accum);
-    let mut active_step = None;
-    for idx in 0..ns {
-        if pos + EPS >= starts[idx] && pos < starts[idx] + durations[idx] {
-            active_step = Some(idx);
-            break;
-        }
-    }
-    let step = active_step.unwrap_or_else(|| {
-        let idx = starts[..ns].partition_point(|&start| start <= pos);
-        idx.saturating_sub(1).min(ns - 1)
-    });
-    if active_step.is_none() {
-        return (0.0, step);
-    }
-
-    if !sequence.steps[step] {
-        return (0.0, step);
-    }
-    let local = pos - starts[step];
-    let gate_duration = durations[step] * sequence.durations[step].clamp(0.0, 1.0) as f64;
-    if local <= gate_duration + EPS {
-        (sequence.velocities[step].clamp(0.0, 1.0), step)
-    } else {
-        (0.0, step)
-    }
-}
-
-pub(super) fn bus_gate_target_at(sequence: &crate::sequencer::BusGateSequence, total_beats: f64) -> f32 {
-    bus_gate_state_at(sequence, total_beats).0
-}
-
-pub(super) fn ceil_to_grid(value: f64, grid: f64) -> f64 {
-    let rem = value % grid;
-    if rem > 1e-9 {
-        value + (grid - rem)
-    } else {
-        value
-    }
-}
-
 pub(super) unsafe fn dispatch_snapshot_effect_params_at_step(
     lg: *mut LiveGraph,
     effect_slots: &[EffectSlotSnapshot],
@@ -197,93 +127,6 @@ pub(super) unsafe fn dispatch_snapshot_effect_params_at_step(
             push_param_span(lg, logical_id, idx, span, value);
         }
     }
-}
-
-pub(super) fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sample: u64) {
-    let playing = data.state.transport.playing.load(Ordering::Relaxed);
-    let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
-    if playing && !data.bus_gate_was_playing {
-        data.bus_gate_play_start_sample = block_start_sample;
-        for clock in &mut data.bus_gate_clocks {
-            clock.last_target = f32::NAN;
-            clock.last_step = None;
-        }
-    }
-    if !playing && data.bus_gate_was_playing {
-        for clock in &mut data.bus_gate_clocks {
-            clock.last_target = f32::NAN;
-            clock.last_step = None;
-        }
-    }
-    data.bus_gate_was_playing = playing;
-
-    let elapsed_samples = block_start_sample.saturating_sub(data.bus_gate_play_start_sample);
-    let total_beats = elapsed_samples as f64 * bpm / (data.sample_rate * 60.0);
-    // Refresh the RT-side snapshot without deep-cloning: the UI publishes a
-    // whole new Arc, so a pointer compare detects changes and a failed
-    // try_lock just reuses last block's snapshot.
-    if let Ok(shared) = data.bus_gate_runtime.try_lock() {
-        if !Arc::ptr_eq(&shared, &data.bus_gate_cache) {
-            data.bus_gate_cache = Arc::clone(&shared);
-        }
-    }
-    let gates = Arc::clone(&data.bus_gate_cache);
-    let mut playheads = std::mem::take(&mut data.bus_gate_playheads_scratch);
-    playheads.clear();
-
-    data.bus_gate_clocks
-        .retain(|clock| gates.iter().any(|gate| gate.id == clock.id));
-
-    for gate in gates.iter() {
-        if gate.gate_id <= 0 {
-            continue;
-        }
-        let (target, step) = if playing {
-            bus_gate_state_at(&gate.sequence, total_beats)
-        } else {
-            (1.0, 0)
-        };
-        playheads.push((gate.id, step));
-        let clock_idx = data
-            .bus_gate_clocks
-            .iter()
-            .position(|clock| clock.id == gate.id)
-            .unwrap_or_else(|| {
-                data.bus_gate_clocks.push(BusGateClock {
-                    id: gate.id,
-                    last_target: f32::NAN,
-                    last_step: None,
-                });
-                data.bus_gate_clocks.len() - 1
-            });
-        let clock = &mut data.bus_gate_clocks[clock_idx];
-        if clock.last_step != Some(step) {
-            clock.last_step = Some(step);
-            unsafe {
-                dispatch_snapshot_effect_params_at_step(data.lg.0, &gate.effect_slots, step);
-            }
-        }
-        if (clock.last_target - target).abs() <= 0.0001 {
-            continue;
-        }
-        clock.last_target = target;
-        unsafe {
-            crate::audiograph::params_push_wrapper(
-                data.lg.0,
-                crate::audiograph::ParamMsg {
-                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
-                    logical_id: gate.gate_id as u64,
-                    fvalue: target,
-                },
-            );
-        }
-    }
-    if let Ok(mut shared_playheads) = data.bus_gate_playheads.try_lock() {
-        std::mem::swap(&mut *shared_playheads, &mut playheads);
-    }
-    // Keep whichever Vec we ended up with as next block's scratch buffer so
-    // steady-state publishing never allocates on the audio thread.
-    data.bus_gate_playheads_scratch = playheads;
 }
 
 pub(super) fn compute_host_transport_clock(
@@ -408,11 +251,11 @@ pub(super) fn sync_effect_modulator_transport_clock_params(
         }
     }
 
-    let Ok(gates) = data.bus_gate_runtime.try_lock() else {
+    let Ok(bus_effects) = data.bus_effect_runtime.try_lock() else {
         return;
     };
-    for gate in gates.iter() {
-        for slot in &gate.effect_slots {
+    for bus in bus_effects.iter() {
+        for slot in &bus.effect_slots {
             if slot.modulator_node_id == 0 {
                 continue;
             }
@@ -475,11 +318,11 @@ pub(super) fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData, block_
         }
     }
 
-    let Ok(gates) = data.bus_gate_runtime.try_lock() else {
+    let Ok(bus_effects) = data.bus_effect_runtime.try_lock() else {
         return;
     };
-    for gate in gates.iter() {
-        for slot in &gate.effect_slots {
+    for bus in bus_effects.iter() {
+        for slot in &bus.effect_slots {
             let param_idx = slot.transport_phase_param_idx;
             if param_idx == crate::effects::NO_TRANSPORT_PHASE_PARAM || slot.node_id == 0 {
                 continue;

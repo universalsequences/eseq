@@ -15,7 +15,7 @@ use crate::project::{
     ProjectScratchState, ProjectTrack, ProjectTrackKind,
 };
 use crate::sequencer::{
-    BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
+    BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
     PatternSnapshot, RackTrackSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
 };
 
@@ -761,85 +761,11 @@ fn is_generated_mod_runtime_param_name(name: &str) -> bool {
         || (name.starts_with("mod ") && name.contains(" slot ") && name.ends_with(" amt"))
 }
 
-fn project_bus_gate_sequence_from_ui(
-    sequence: &BusGateSequence,
-) -> project::ProjectBusGateSequence {
-    project::ProjectBusGateSequence {
-        steps: sequence.steps.to_vec(),
-        velocities: sequence.velocities.to_vec(),
-        durations: sequence.durations.to_vec(),
-        syncs: sequence.syncs.to_vec(),
-        num_steps: sequence.num_steps,
-        timebase: sequence.timebase as u8,
-        swing: sequence.swing,
-        swing_resolution: sequence.swing_resolution as u8,
-        timebase_plocks: sequence
-            .timebase_plocks
-            .iter()
-            .map(|value| value.map(|timebase| timebase as u32))
-            .collect(),
-        swing_plocks: sequence.swing_plocks.to_vec(),
-        swing_resolution_plocks: sequence
-            .swing_resolution_plocks
-            .iter()
-            .map(|value| value.map(|resolution| resolution as u32))
-            .collect(),
-    }
-}
-
-fn project_bus_gate_sequence_to_ui(sequence: project::ProjectBusGateSequence) -> BusGateSequence {
-    let mut restored = BusGateSequence::default();
-    for (idx, value) in sequence.steps.into_iter().take(MAX_STEPS).enumerate() {
-        restored.steps[idx] = value;
-    }
-    for (idx, value) in sequence.velocities.into_iter().take(MAX_STEPS).enumerate() {
-        restored.velocities[idx] = value.clamp(0.0, 1.0);
-    }
-    for (idx, value) in sequence.durations.into_iter().take(MAX_STEPS).enumerate() {
-        restored.durations[idx] = value.clamp(0.1, 2.0);
-    }
-    for (idx, value) in sequence.syncs.into_iter().take(MAX_STEPS).enumerate() {
-        restored.set_step_sync(idx, value);
-    }
-    restored.set_num_steps(sequence.num_steps);
-    restored.timebase = crate::sequencer::Timebase::from_index(sequence.timebase as u32);
-    restored.swing = sequence.swing.clamp(50.0, 75.0);
-    restored.swing_resolution =
-        crate::sequencer::SwingResolution::from_index(sequence.swing_resolution as u32);
-    for (idx, value) in sequence
-        .timebase_plocks
-        .into_iter()
-        .take(MAX_STEPS)
-        .enumerate()
-    {
-        restored.timebase_plocks[idx] = value.map(crate::sequencer::Timebase::from_index);
-    }
-    for (idx, value) in sequence
-        .swing_plocks
-        .into_iter()
-        .take(MAX_STEPS)
-        .enumerate()
-    {
-        restored.swing_plocks[idx] = value.map(|swing| swing.clamp(50.0, 75.0));
-    }
-    for (idx, value) in sequence
-        .swing_resolution_plocks
-        .into_iter()
-        .take(MAX_STEPS)
-        .enumerate()
-    {
-        restored.swing_resolution_plocks[idx] =
-            value.map(crate::sequencer::SwingResolution::from_index);
-    }
-    restored
-}
-
 fn project_bus_pattern_snapshot_from_ui(
     snapshot: &BusPatternSnapshot,
 ) -> ProjectBusPatternSnapshot {
     ProjectBusPatternSnapshot {
         id: snapshot.id.0,
-        gate_sequence: project_bus_gate_sequence_from_ui(&snapshot.gate_sequence),
         effect_slots: snapshot
             .effect_plocks
             .iter()
@@ -877,7 +803,6 @@ fn project_bus_pattern_snapshot_from_ui(
 fn project_bus_pattern_snapshot_to_ui(snapshot: ProjectBusPatternSnapshot) -> BusPatternSnapshot {
     BusPatternSnapshot {
         id: BusId(snapshot.id),
-        gate_sequence: project_bus_gate_sequence_to_ui(snapshot.gate_sequence),
         effect_defaults: snapshot
             .effect_slots
             .iter()
@@ -899,7 +824,6 @@ impl From<BusChannelState> for ProjectBusChannel {
             volume: value.volume,
             mute: value.mute,
             solo: value.solo,
-            gate_sequence: project_bus_gate_sequence_from_ui(&value.gate_sequence),
             custom_effects: value
                 .custom_effect_names
                 .into_iter()
@@ -925,7 +849,6 @@ impl From<ProjectBusChannel> for BusChannelState {
         bus.volume = value.volume.clamp(0.0, 1.0);
         bus.mute = value.mute;
         bus.solo = value.solo;
-        bus.gate_sequence = project_bus_gate_sequence_to_ui(value.gate_sequence);
         bus.output = value.output;
         for (idx, name) in value.custom_effects.into_iter().enumerate() {
             if idx < bus.custom_effect_names.len() {
@@ -1094,7 +1017,7 @@ impl App {
             self.graph_controller()
                 .ensure_bus_graph_node(bus.id, &bus.name);
         }
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         id
     }
 
@@ -1110,7 +1033,7 @@ impl App {
         let index = self.buses.len() - 1;
         let bus = self.buses[index].clone();
         self.graph_controller().ensure_bus_graph_node(bus.id, &bus.name);
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         Ok(index)
     }
 
@@ -1180,7 +1103,7 @@ impl App {
             }
         }
         self.graph_controller().delete_bus_graph_node(id);
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         self.state.remove_bus_references_from_all_track_patterns(id);
         true
     }
@@ -4050,7 +3973,7 @@ impl App {
                 );
             }
         }
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
 
         self.ui.cursor_track = current_track;
         self.ui.cursor_step = 0;

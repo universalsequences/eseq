@@ -147,7 +147,7 @@ impl GraphController<'_> {
             mod_in_clip_ids,
         });
         self.apply_bus_output_routing(id);
-        self.app.publish_bus_gate_runtime();
+        self.app.publish_bus_effect_runtime();
     }
 
     /// Disconnects a bus's post-fader tail from every destination it could be
@@ -321,7 +321,7 @@ impl GraphController<'_> {
                 .expect("graph bus membership was validated before sorting")
         });
         self.apply_all_bus_output_routing();
-        self.app.publish_bus_gate_runtime();
+        self.app.publish_bus_effect_runtime();
         self.app.refresh_latency_compensation();
         Ok(())
     }
@@ -412,7 +412,7 @@ impl GraphController<'_> {
                 crate::audiograph::delete_node(self.app.graph.lg.0, mod_in_clip_id);
             }
         }
-        self.app.publish_bus_gate_runtime();
+        self.app.publish_bus_effect_runtime();
     }
 
     pub(super) fn disconnect_delay_output_from_all(&self, delay_id: i32) {

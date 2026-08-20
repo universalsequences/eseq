@@ -1243,8 +1243,6 @@ pub struct ProjectBusChannel {
     pub mute: bool,
     #[serde(default)]
     pub solo: bool,
-    #[serde(default)]
-    pub gate_sequence: ProjectBusGateSequence,
     #[serde(default, skip_serializing)]
     pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
@@ -1255,62 +1253,6 @@ pub struct ProjectBusChannel {
     pub output: BusOutput,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ProjectBusGateSequence {
-    #[serde(default = "default_bus_gate_steps")]
-    pub steps: Vec<bool>,
-    #[serde(default = "default_bus_gate_values")]
-    pub velocities: Vec<f32>,
-    #[serde(default = "default_bus_gate_values")]
-    pub durations: Vec<f32>,
-    #[serde(default = "default_bus_gate_syncs")]
-    pub syncs: Vec<f32>,
-    #[serde(default = "default_num_steps")]
-    pub num_steps: usize,
-    #[serde(default = "default_timebase")]
-    pub timebase: u8,
-    #[serde(default = "default_swing")]
-    pub swing: f32,
-    #[serde(default = "default_swing_resolution")]
-    pub swing_resolution: u8,
-    #[serde(default)]
-    pub timebase_plocks: Vec<Option<u32>>,
-    #[serde(default)]
-    pub swing_plocks: Vec<Option<f32>>,
-    #[serde(default)]
-    pub swing_resolution_plocks: Vec<Option<u32>>,
-}
-
-impl Default for ProjectBusGateSequence {
-    fn default() -> Self {
-        Self {
-            steps: default_bus_gate_steps(),
-            velocities: default_bus_gate_values(),
-            durations: default_bus_gate_values(),
-            syncs: default_bus_gate_syncs(),
-            num_steps: default_num_steps(),
-            timebase: default_timebase(),
-            swing: default_swing(),
-            swing_resolution: default_swing_resolution(),
-            timebase_plocks: vec![None; MAX_STEPS],
-            swing_plocks: vec![None; MAX_STEPS],
-            swing_resolution_plocks: vec![None; MAX_STEPS],
-        }
-    }
-}
-
-fn default_bus_gate_steps() -> Vec<bool> {
-    vec![true; MAX_STEPS]
-}
-
-fn default_bus_gate_values() -> Vec<f32> {
-    vec![1.0; MAX_STEPS]
-}
-
-fn default_bus_gate_syncs() -> Vec<f32> {
-    vec![0.0; MAX_STEPS]
-}
-
 pub fn default_project_buses() -> Vec<ProjectBusChannel> {
     vec![
         ProjectBusChannel {
@@ -1319,7 +1261,6 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
             output: BusOutput::Mix,
@@ -1330,7 +1271,6 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
             output: BusOutput::Mix,
@@ -1341,7 +1281,6 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
             output: BusOutput::Mix,
@@ -1848,8 +1787,6 @@ fn default_midi_fx_position() -> ProjectMidiFxPosition {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ProjectBusPatternSnapshot {
     pub id: u64,
-    #[serde(default)]
-    pub gate_sequence: ProjectBusGateSequence,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
 }
@@ -3289,7 +3226,6 @@ mod tests {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
             output,
@@ -3322,6 +3258,26 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&chained).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(round_trip.output, BusOutput::Bus(9));
+    }
+
+    #[test]
+    fn bus_gate_sequence_from_older_files_is_dropped_without_failing_the_load() {
+        // The bus gate step sequencer is gone; files written while it existed
+        // still carry its `gate_sequence` blob on every bus and bus pattern.
+        // Both must deserialize as plain unknown fields.
+        let legacy = r#"{"id":7,"name":"Bus A","volume":0.8,
+            "gate_sequence":{"steps":[true,false],"velocities":[1.0,0.5],
+            "num_steps":2,"timebase":3,"swing":62.5}}"#;
+        let bus: ProjectBusChannel =
+            serde_json::from_str(legacy).expect("bus channels with gate data still parse");
+        assert_eq!(bus.id, 7);
+        assert_eq!(bus.output, BusOutput::Mix);
+
+        let legacy_pattern = r#"{"id":7,"gate_sequence":{"num_steps":4},"effect_slots":[]}"#;
+        let pattern: ProjectBusPatternSnapshot = serde_json::from_str(legacy_pattern)
+            .expect("bus pattern snapshots with gate data still parse");
+        assert_eq!(pattern.id, 7);
+        assert!(pattern.effect_slots.is_empty());
     }
 
     #[test]

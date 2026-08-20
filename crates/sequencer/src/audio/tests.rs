@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{
-    apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
+    apply_rack_macros_at_step, clear_active_keyboard_note_by_lid,
     collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
     for_each_custom_voice_route_update,
     free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
@@ -1634,45 +1634,6 @@ fn swing_delay_uses_full_pair_offset() {
 
     let straight = swing_delay_samples(48_000.0, 120.0, 50.0, SwingResolution::Sixteenth);
     assert_eq!(straight, 0.0);
-}
-
-#[test]
-fn bus_gate_default_sequence_stays_open_across_steps() {
-    let sequence = crate::sequencer::BusGateSequence::default();
-    assert_eq!(bus_gate_target_at(&sequence, 0.0), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 0.24), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 0.25), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.99), 1.0);
-}
-
-#[test]
-fn bus_gate_sequence_follows_step_activity_and_duration() {
-    let mut sequence = crate::sequencer::BusGateSequence::default();
-    sequence.num_steps = 4;
-    sequence.timebase = crate::sequencer::Timebase::Quarter;
-    sequence.steps = [false; crate::sequencer::MAX_STEPS];
-    sequence.steps[1] = true;
-    sequence.velocities[1] = 0.5;
-    sequence.durations[1] = 0.5;
-
-    assert_eq!(bus_gate_target_at(&sequence, 0.25), 0.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.10), 0.5);
-    assert_eq!(bus_gate_target_at(&sequence, 1.60), 0.0);
-    assert_eq!(bus_gate_target_at(&sequence, 2.10), 0.0);
-}
-
-#[test]
-fn bus_gate_sync_steps_snap_boundaries_to_grid() {
-    let mut sequence = crate::sequencer::BusGateSequence::default();
-    sequence.num_steps = 4;
-    sequence.timebase = crate::sequencer::Timebase::Sixteenth;
-    sequence.steps = [false; crate::sequencer::MAX_STEPS];
-    sequence.steps[1] = true;
-    sequence.syncs[1] = 3.0; // 1/4
-
-    assert_eq!(bus_gate_target_at(&sequence, 0.50), 0.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.01), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.30), 0.0);
 }
 
 #[test]

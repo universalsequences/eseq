@@ -24,7 +24,7 @@ use crate::lisp_host::{
 use crate::quantized_launch::{DuePatternLaunch, PatternLaunchTarget};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
+    BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
     KeyboardTrigger, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot, MAX_STEPS,
     STEPS_PER_PAGE,
 };
@@ -547,8 +547,7 @@ pub struct GraphState {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub bus_node_ids: Vec<BusNodeIds>,
-    pub bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    pub bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
     pub track_buffer_ids: Vec<i32>,
@@ -703,8 +702,7 @@ pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub default_bus_nodes: Vec<BusNodeIds>,
-    pub bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    pub bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
 }
@@ -726,10 +724,8 @@ pub struct BusNodeIds {
 }
 
 #[derive(Clone)]
-pub struct BusGateRuntimeState {
+pub struct BusEffectRuntimeState {
     pub id: BusId,
-    pub gate_id: i32,
-    pub sequence: BusGateSequence,
     pub effect_slots: Vec<EffectSlotSnapshot>,
 }
 
@@ -740,7 +736,6 @@ pub struct BusChannelState {
     pub volume: f32,
     pub mute: bool,
     pub solo: bool,
-    pub gate_sequence: BusGateSequence,
     pub effect_descriptors: Vec<EffectDescriptor>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub custom_effect_names: Vec<Option<String>>,
@@ -758,7 +753,6 @@ impl BusChannelState {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: BusGateSequence::default(),
             effect_descriptors: Self::default_effect_descriptors(),
             effect_slots: Self::default_effect_slots(),
             custom_effect_names: vec![None; crate::lisp_host::MAX_CUSTOM_FX],
@@ -2068,7 +2062,6 @@ impl App {
             .iter()
             .map(|bus| BusPatternSnapshot {
                 id: bus.id,
-                gate_sequence: bus.gate_sequence.clone(),
                 effect_plocks: bus
                     .effect_slots
                     .iter()
@@ -2086,7 +2079,6 @@ impl App {
     pub fn restore_bus_pattern_snapshot(&mut self, snapshot: &[BusPatternSnapshot]) {
         for bus in &mut self.buses {
             let Some(saved) = snapshot.iter().find(|saved| saved.id == bus.id) else {
-                bus.gate_sequence = BusGateSequence::default();
                 for slot in &mut bus.effect_slots {
                     slot.plocks = (0..MAX_STEPS)
                         .map(|_| vec![None; slot.num_params as usize])
@@ -2094,7 +2086,6 @@ impl App {
                 }
                 continue;
             };
-            bus.gate_sequence = saved.gate_sequence.clone();
             let descriptors = &bus.effect_descriptors;
             for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
                 // Recall per-scene base parameter values. Legacy snapshots (and
@@ -2140,9 +2131,9 @@ impl App {
                     .collect();
             }
         }
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         // Push the recalled base values to the live audio nodes so the scene's
-        // effect settings take immediately (not just on the next gate step).
+        // effect settings take immediately.
         for bus_idx in 0..self.buses.len() {
             let slot_count = self.buses[bus_idx].effect_slots.len();
             for slot_idx in 0..slot_count {
@@ -2226,13 +2217,12 @@ impl App {
         }
     }
 
-    pub fn publish_bus_gate_runtime(&self) {
+    pub fn publish_bus_effect_runtime(&self) {
         let runtime = self
             .buses
             .iter()
             .filter_map(|bus| {
-                let nodes = self
-                    .graph
+                self.graph
                     .bus_node_ids
                     .iter()
                     .find(|nodes| nodes.id == bus.id)?;
@@ -2256,30 +2246,13 @@ impl App {
                             .effective_value(&key, slot.defaults[param_idx]);
                     }
                 }
-                Some(BusGateRuntimeState {
+                Some(BusEffectRuntimeState {
                     id: bus.id,
-                    gate_id: nodes.gate_id,
-                    sequence: bus.gate_sequence.clone(),
                     effect_slots,
                 })
             })
             .collect();
-        *self.graph.bus_gate_runtime.lock().unwrap() = Arc::new(runtime);
-
-        let mut playheads = self.graph.bus_gate_playheads.lock().unwrap();
-        let next_playheads = self
-            .buses
-            .iter()
-            .map(|bus| {
-                let step = playheads
-                    .iter()
-                    .find(|(id, _)| *id == bus.id)
-                    .map(|(_, step)| *step)
-                    .unwrap_or(0);
-                (bus.id, step)
-            })
-            .collect();
-        *playheads = next_playheads;
+        *self.graph.bus_effect_runtime.lock().unwrap() = Arc::new(runtime);
     }
 
     pub fn new(
@@ -2476,8 +2449,7 @@ impl App {
                 bus_l_id: buses.bus_l_id,
                 bus_r_id: buses.bus_r_id,
                 bus_node_ids: buses.default_bus_nodes,
-                bus_gate_runtime: buses.bus_gate_runtime,
-                bus_gate_playheads: buses.bus_gate_playheads,
+                bus_effect_runtime: buses.bus_effect_runtime,
                 reverb_bus_id: buses.reverb_bus_id,
                 reverb_node_id: buses.reverb_node_id,
                 track_buffer_ids: Vec::new(),
@@ -2499,7 +2471,7 @@ impl App {
             },
         };
         app.ensure_bus_pattern_bank_len(1);
-        app.publish_bus_gate_runtime();
+        app.publish_bus_effect_runtime();
         app
     }
 

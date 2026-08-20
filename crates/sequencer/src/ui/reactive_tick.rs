@@ -206,7 +206,6 @@ pub(crate) fn reactive_tick_and_render(
         let output_latency_bits = output_latency_seconds.to_bits();
         let transport_playhead = ctx.shared.state.transport.playhead.load(Ordering::Relaxed);
         let playhead = ctx.shared.state.transport.track_playheads[ct].load(Ordering::Relaxed);
-        let bus_playheads = bus_playhead_snapshot(&app);
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
         let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
         let mixer_visible = editor_has_visible_mixer_buffer(&editor);
@@ -805,17 +804,6 @@ pub(crate) fn reactive_tick_and_render(
                 );
             }
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
-        }
-        if bus_playheads != ctx.frame.prev_bus_playheads {
-            if metal_visible {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "bus-playheads",
-                    build_bus_playheads_value(&app),
-                );
-                needs_reactive_cycle = true;
-            }
-            ctx.frame.prev_bus_playheads = bus_playheads;
         }
         if sequencer_visible {
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();

@@ -1416,8 +1416,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -1442,8 +1441,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -1527,8 +1525,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -2480,7 +2477,7 @@ mod tests {
             )));
         assert!((app.effective_bus_slot_param_value(0, 0, 0).unwrap() - 0.8).abs() < 1.0e-6);
         {
-            let runtime = app.graph.bus_gate_runtime.lock().unwrap();
+            let runtime = app.graph.bus_effect_runtime.lock().unwrap();
             assert!((runtime[0].effect_slots[0].defaults[0] - 0.8).abs() < 1.0e-6);
             assert_eq!(runtime[0].effect_slots[0].plocks[0][0], Some(0.33));
         }

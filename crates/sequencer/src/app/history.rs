@@ -88,7 +88,6 @@ pub struct BusStructureState {
     pub volume: f32,
     pub mute: bool,
     pub solo: bool,
-    pub gate_sequence: crate::sequencer::BusGateSequence,
     pub effects: BusEffectChainState,
     pub output: crate::project::BusOutput,
 }

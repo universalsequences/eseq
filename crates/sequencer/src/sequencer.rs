@@ -37,7 +37,7 @@ pub use state::{
     DEFAULT_ARRANGEMENT_END,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,
     remap_song_after_scene_delete, song_for_serialization, song_rows_referencing_scene,
-    song_rows_referencing_track_pattern, state_at_beat, BusGateSequence, BusPatternSnapshot,
+    song_rows_referencing_track_pattern, state_at_beat, BusPatternSnapshot,
     validate_track_take_pool, LaneClip, LaneSource, ProjectSong, ProjectSongRow,
     ProjectSongTrackOverride, SerializedSongContext, SongProjectContext, SongRowId, TakeId,
     TrackTake, TrackTakePool,

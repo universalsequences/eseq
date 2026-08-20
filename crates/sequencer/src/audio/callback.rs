@@ -62,7 +62,6 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     data.transport_was_playing = transport_playing;
     let host_transport_clock = compute_host_transport_clock(data, block_start_sample);
-    sync_bus_gate_params(data, block_start_sample);
     sync_instrument_host_clock_params(data, host_transport_clock);
     sync_effect_modulator_transport_clock_params(data, host_transport_clock);
     sync_dj_mixer_transport_phase(data, block_start_sample);

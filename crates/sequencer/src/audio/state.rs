@@ -127,17 +127,10 @@ pub(super) struct AudioCallbackData {
     pub(super) block_events_need_sort: bool,
     pub(super) current_callback_nframes: usize,
     pub(super) rendered_samples: Arc<AtomicU64>,
-    pub(super) bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    /// RT-side snapshot of `bus_gate_runtime`. Refreshed by pointer-comparing
-    /// under `try_lock`; a failed lock just means the callback keeps using the
-    /// previous snapshot for one block. Never deep-cloned on the audio thread.
-    pub(super) bus_gate_cache: Arc<Vec<BusGateRuntimeState>>,
-    pub(super) bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
-    /// Reused buffer for publishing playheads without per-block allocation.
-    pub(super) bus_gate_playheads_scratch: Vec<(BusId, usize)>,
-    pub(super) bus_gate_clocks: Vec<BusGateClock>,
-    pub(super) bus_gate_was_playing: bool,
-    pub(super) bus_gate_play_start_sample: u64,
+    /// Bus effect slots, published by the UI thread so the callback can reach
+    /// each bus effect's modulator node for the transport clock/phase
+    /// broadcasts. Read under `try_lock`; a failed lock just skips a block.
+    pub(super) bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
     pub(super) dropped_scheduled_events: u64,
     pub(super) late_scheduled_events: u64,
     pub(super) event_seq: u64,
@@ -199,13 +192,6 @@ pub(super) struct FreePatchTransportRouteTarget {
     pub(super) engine_id: usize,
     pub(super) route_hash: u64,
     pub(super) open: bool,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct BusGateClock {
-    pub(super) id: crate::sequencer::BusId,
-    pub(super) last_target: f32,
-    pub(super) last_step: Option<usize>,
 }
 
 pub(super) fn clear_active_keyboard_note_by_lid(

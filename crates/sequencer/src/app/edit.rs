@@ -758,7 +758,7 @@ impl App {
                     }
                 }
                 self.push_bus_effect_slot_defaults(bus_idx, slot);
-                self.publish_bus_gate_runtime();
+                self.publish_bus_effect_runtime();
                 return Err(error);
             }
         };
@@ -880,7 +880,6 @@ impl App {
                 self.buses[bus_idx].custom_effect_names[slot] = None;
             }
         }
-        self.buses[bus_idx].gate_sequence = target.live.gate_sequence.clone();
         let new_host = self.fx_chain_host(locator)?;
         let batch = FxGraphEditBatch::new(self.graph.lg.0);
         rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
@@ -919,7 +918,7 @@ impl App {
             .map_err(|error| format!("{error:?}"))?;
         self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
         self.refresh_effect_sidechain_labels();
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         for slot in 0..target.instances.len() {
             self.push_bus_effect_slot_defaults(bus_idx, slot);
         }
@@ -2072,14 +2071,8 @@ impl App {
         let mut buses = Vec::with_capacity(self.buses.len());
         for bus_idx in 0..self.buses.len() {
             let bus = &self.buses[bus_idx];
-            let (id, name, volume, mute, solo, gate_sequence) = (
-                bus.id,
-                bus.name.clone(),
-                bus.volume,
-                bus.mute,
-                bus.solo,
-                bus.gate_sequence.clone(),
-            );
+            let (id, name, volume, mute, solo) =
+                (bus.id, bus.name.clone(), bus.volume, bus.mute, bus.solo);
             let effects = self.capture_bus_effect_chain_state(bus_idx, None)?;
             buses.push(BusStructureState {
                 id,
@@ -2087,7 +2080,6 @@ impl App {
                 volume,
                 mute,
                 solo,
-                gate_sequence,
                 effects,
                 output: self.buses[bus_idx].output,
             });
@@ -2178,7 +2170,6 @@ impl App {
             bus.volume = target_bus.volume;
             bus.mute = target_bus.mute;
             bus.solo = target_bus.solo;
-            bus.gate_sequence.clone_from(&target_bus.gate_sequence);
             bus.output = target_bus.output;
         }
         self.groups = groups;
@@ -2191,7 +2182,7 @@ impl App {
             graph.apply_track_output_routing(track);
             graph.apply_track_bus_sends(track);
         }
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         self.publish_rack_choke_runtime();
         self.state.publish_scheduler_snapshot();
         Ok(())
@@ -8601,7 +8592,7 @@ fn replay_bus_effect_values_patch(
                 .map_err(EditError::ReplayFailed)?;
         }
         app.push_bus_effect_slot_defaults(bus_idx, slot);
-        app.publish_bus_gate_runtime();
+        app.publish_bus_effect_runtime();
     }
     app.state.publish_scheduler_snapshot();
     Ok(())
@@ -9467,8 +9458,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },

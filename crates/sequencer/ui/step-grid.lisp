@@ -25,13 +25,13 @@
 ;;   * `(set-buffer-mode-for "*metal*" "eseq.seq-grid-mode/seq-grid-mode")` at the bottom keeps
 ;;     its flat mode string: the reference qualifies against this module,
 ;;     misses, and lands on eseq.seq-grid-mode's identity alias rung.
-;;   * step-grid-interactions.lisp / bus-grid.lisp / transport.lisp names
-;;     (`step-index`, `bus-*`, `page-button-width`, `pattern-control-style`,
-;;     …) are left bare. transport.lisp is still a headerless owner (covered
-;;     by the stage-3 late-binding heal); step-grid-interactions.lisp and
-;;     bus-grid.lisp converted in S3b waves 8/9 and carry *identity* compat
-;;     aliases, which a converted module's bare reference reaches through the
-;;     base-name rung. All of them are write-once `def`s or functions.
+;;   * step-grid-interactions.lisp / transport.lisp names (`step-index`,
+;;     `page-button-width`, `pattern-control-style`, …) are left bare.
+;;     transport.lisp is still a headerless owner (covered by the stage-3
+;;     late-binding heal); step-grid-interactions.lisp converted in S3b wave 8
+;;     and carries *identity* compat aliases, which a converted module's bare
+;;     reference reaches through the base-name rung. All of them are
+;;     write-once `def`s or functions.
 
 (module eseq.step-grid)
 
@@ -110,167 +110,8 @@
                  (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
                  (rgba track-r track-g track-b 1.0)))))))))
 
-(def %bus-selection-panel ()
-  (v-stack
-    :padding 1
-    :gap 0.1
-
-    (h-stack :gap 0.5
-      (box :width 8 :height 2
-        :bg (if (= eseq.seq-core-state/param-mode 0) :blue :dark-gray)
-        :on-click |x y r| (set! eseq.seq-core-state/param-mode 0)
-        (label "gate" :font-size 12
-          :color (if (= eseq.seq-core-state/param-mode 0) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= eseq.seq-core-state/param-mode 1) :green :dark-gray)
-        :on-click |x y r| (set! eseq.seq-core-state/param-mode 1)
-        (label "dur" :font-size 12
-          :color (if (= eseq.seq-core-state/param-mode 1) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= eseq.seq-core-state/param-mode 2) :magenta :dark-gray)
-        :on-click |x y r| (set! eseq.seq-core-state/param-mode 2)
-        (label "syn" :font-size 12
-          :color (if (= eseq.seq-core-state/param-mode 2) :white :gray)
-          :bg :transparent))
-      (h-stack :align :center :gap 0.35
-        (dropdown :value (eseq.bus-grid/bus-seq-timebase)
-          :options st/seq-timebase-options
-          :on-change (lambda (v) (do (core/cool-off-follow) (eseq.bus-grid/bus-set-sequencer-label "timebase" v)))
-          :width 6 :height 1.45 :font-size 10)))
-
-    (grid :cols 16 :col-width 4
-      (each (range 0 core/page-size) |i|
-        (let ((step (eseq.bus-grid/bus-step-index i))
-              (visible (eseq.bus-grid/bus-step-visible? i))
-              (bus-steps (eseq.bus-grid/bus-seq-list SEQ.bus-steps))
-              (bus-plocks (eseq.bus-grid/bus-seq-list SEQ.bus-step-has-plocks)))
-          (box :padding 0.25
-            :background (if visible (if (= (eseq.bus-grid/bus-current-step) step) "cursor-highlight" nil) nil)
-            :active true
-            :selected true
-            :on-click (lambda (evt)
-              (if visible
-                (do
-                  (core/cool-off-follow)
-                  (core/set-cursor-step-value step)
-                  (if (eseq.step-grid-interactions/selection-click? evt)
-                    (eseq.bus-grid/bus-step-select-drag-start step evt)
-                    (seq-clear-selection)))
-                nil))
-            :on-drag (lambda (evt)
-              (if visible
-                (eseq.bus-grid/bus-step-select-drag-over step evt)
-                nil))
-            (v-stack :align :center :gap 0.5
-              (let ((step-on (and visible (nth bus-steps step))))
-                (if step-on
-                  (vslider :height 4
-                    :width 2
-                    :min (eseq.bus-grid/bus-seq-param-min) :max (eseq.bus-grid/bus-seq-param-max)
-                    :origin (eseq.bus-grid/bus-seq-param-min)
-                    :value (nth (eseq.bus-grid/bus-seq-param-values) step)
-                    :items (if (= eseq.seq-core-state/param-mode 2) SEQ.sync-labels '())
-                    :font-size 11
-                    :color :white
-                    :fill (rgba 0.20 0.20 0.92 1.0)
-                    :dot-color :dark-gray
-                    :material (eseq.materials/slider-material)
-                    :on-change (lambda (v)
-                      (if visible
-                        (do
-                          (core/cool-off-follow)
-                          (core/set-cursor-step-value step)
-                          (if (seq-has-selection?)
-                            (eseq.bus-grid/bus-set-selected-step-param v)
-                            (eseq.bus-grid/bus-set-step-param step v)))
-                        nil)))
-                  (vslider :height 4
-                    :width 2
-                    :min (eseq.bus-grid/bus-seq-param-min) :max (eseq.bus-grid/bus-seq-param-max)
-                    :origin (eseq.bus-grid/bus-seq-param-min)
-                    :value (nth (eseq.bus-grid/bus-seq-param-values) step)
-                    :items (if (= eseq.seq-core-state/param-mode 2) SEQ.sync-labels '())
-                    :font-size 11
-                    :color :dim
-                    :fill (rgba 0.08 0.08 0.25 0.45)
-                    :dot-color (rgba 0.25 0.25 0.30 0.45)
-                    :material (eseq.materials/slider-muted-material)
-                    :on-change (lambda (v)
-                      (if visible
-                        (do
-                          (core/cool-off-follow)
-                          (core/set-cursor-step-value step)
-                          (if (seq-has-selection?)
-                            (eseq.bus-grid/bus-set-selected-step-param v)
-                            (eseq.bus-grid/bus-set-step-param step v)))
-                        nil)))))
-              (box
-                :active (if visible (if (nth bus-steps step) 1 0) 0)
-                :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
-                :selected (if visible (bind-seq-nth "selected-steps" step) 0)
-                :background "aqua-button"
-                :align :center :width 3 :height 1.5
-                :on-mouse-down (lambda (evt)
-                  (if visible
-                    (eseq.bus-grid/bus-step-pointer-down step evt)
-                    nil))
-                :on-drag (lambda (evt)
-                  (if visible
-                    (eseq.bus-grid/bus-step-select-drag-over step evt)
-                    nil))
-                :on-mouse-up (lambda (evt)
-                  (if visible
-                    (eseq.bus-grid/bus-step-pointer-up step evt)
-                    nil))
-                :on-double-click (lambda (evt)
-                  (if visible
-                    (eseq.step-grid-interactions/bus-step-double-click step evt)
-                    nil))
-                (tick :active (if visible (if (nth bus-steps step) 1 0) 0)
-                      :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
-                      :selected (if visible (bind-seq-nth "selected-steps" step) 0)))
-              (label (if visible (str (+ step 1)) "")
-                :font-size 10 :bg :transparent
-                :active (if visible (bind-seq-nth "selected-steps" step) 0)
-                :active-color :yellow
-                :color (if (and visible SEQ.playing (= (eseq.bus-grid/bus-seq-playhead) step)) :white :dim))
-              (subtree :key (str "bus-step-playhead-probe-" step)
-                (step-playhead-dot
-                  :active (if (and visible SEQ.playing (= (eseq.bus-grid/bus-seq-playhead) step)) 1 0))))))))
-
-    (h-stack :gap 1 :align :center
-      (box :width 14 :height 1.3
-        (label (fmt "Bus Step {}  {}" (+ (eseq.bus-grid/bus-current-step) 1) (eseq.bus-grid/bus-seq-param-name))
-          :font-size 11 :width 14 :color :dim :bg :transparent))
-      (number-picker :value (nth (eseq.bus-grid/bus-seq-param-values) (eseq.bus-grid/bus-current-step))
-        :min (eseq.bus-grid/bus-seq-param-min) :max (eseq.bus-grid/bus-seq-param-max) :decimals (if (= eseq.seq-core-state/param-mode 2) 0 2)
-        :on-change (lambda (v)
-          (do
-            (core/cool-off-follow)
-            (eseq.bus-grid/bus-set-step-param (eseq.bus-grid/bus-current-step) v)))
-        :width 8 :height 1.3 :font-size 11)
-      (box :background "transport-btn-bg" :padding 0.2 :height 1.4
-        (h-stack :gap 0.1 :align :center
-          (each (range 0 (eseq.bus-grid/bus-page-count)) |page|
-            (box :width eseq.step-grid-interactions/page-button-width :height 1.1
-              :background "pattern-pill-bg"
-              :active (if (= page (eseq.bus-grid/bus-current-page)) 1 0)
-              :style eseq.transport/pattern-control-style
-              :on-click |x y r| (eseq.bus-grid/bus-goto-page page)
-              (v-stack :align :center
-                (label (fmt " {} " (+ page 1))
-                  :font-size 11
-                  :color (if (= page (eseq.bus-grid/bus-current-page)) :white :dim)
-                  :bg :transparent)))))))
-
-    ))
-
 (effect-buffer "*metal*"
-  (if (core/seq-has-selected-bus?)
-    (%bus-selection-panel)
-    (if (= SEQ.num-tracks 0)
+  (if (= SEQ.num-tracks 0)
     (%empty-track-fallback)
     (do
     (%sync-track-color-state)
@@ -490,7 +331,7 @@
                     :color (if (= page (core/visible-page)) :white :dim)
                     :bg :transparent))))))))
 
-    ))))))
+    )))))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
 (set-buffer-mode-for "*metal*" "eseq.seq-grid-mode/seq-grid-mode")

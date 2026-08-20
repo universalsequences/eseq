@@ -1083,7 +1083,7 @@ impl App {
             }
         }
         if bus_touched {
-            self.publish_bus_gate_runtime();
+            self.publish_bus_effect_runtime();
         }
     }
 

@@ -1267,11 +1267,8 @@
     }
 
     fn sample_bus_pattern_snapshot(marker: f32) -> Vec<BusPatternSnapshot> {
-        let mut gate_sequence = BusGateSequence::default();
-        gate_sequence.velocities[0] = marker;
         vec![BusPatternSnapshot {
             id: BusId::DEFAULT_A,
-            gate_sequence,
             effect_plocks: vec![
                 vec![vec![Some(marker)]],
                 vec![vec![Some(marker + 1.0)]],
@@ -1303,11 +1300,9 @@
             &[InstrumentType::Sampler],
         );
         let cloned = state.clone_bus_pattern_snapshot(0, new_scene, &first);
-        assert_eq!(cloned[0].gate_sequence.velocities[0], 0.25);
+        assert_eq!(cloned[0].effect_defaults[0][0], 0.25);
         assert_eq!(
-            state.bus_pattern_snapshot_or_default(new_scene, &first)[0]
-                .gate_sequence
-                .velocities[0],
+            state.bus_pattern_snapshot_or_default(new_scene, &first)[0].effect_defaults[0][0],
             0.25
         );
 
@@ -1331,7 +1326,7 @@
             )
             .unwrap();
         let restored = state.delete_bus_pattern_snapshot(0, 0, &first);
-        assert_eq!(restored[0].gate_sequence.velocities[0], 0.75);
+        assert_eq!(restored[0].effect_defaults[0][0], 0.75);
     }
 
     #[test]

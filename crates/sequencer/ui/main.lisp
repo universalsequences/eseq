@@ -47,13 +47,17 @@
   (host-command "evaluate-editor-source" (dict)))
 (bind-key "C-c C-c" "seq-eval-editor-code")
 
-;; Library anchors: nothing imports these three, but each one imports the
-;; layer below it, so they are what pulls in seq-layout, step-grid-
-;; interactions, seqv-track-params and seq-grid-mode. (seq-script-picker's
-;; read of eseq.seq-step-tabs `defstate`s is now its own declared import.)
+;; Library anchors: nothing imports these, but each one imports the layer
+;; below it, so they are what pulls in seq-layout and friends.
+;; (seq-script-picker's read of eseq.seq-step-tabs `defstate`s is now its own
+;; declared import.) step-grid-interactions / seqv-track-params /
+;; seq-grid-mode used to ride in on ui/bus-grid.lisp; that file is gone with
+;; the bus gate step sequencer, so they are anchored directly here.
 (import eseq.seq-script-picker)
 (import eseq.seq-macro-mapping-hooks)
-(import eseq.bus-grid)
+(import eseq.step-grid-interactions)
+(import eseq.seqv-track-params)
+(import eseq.seq-grid-mode)
 
 ;; ui/step-grid.lisp (the legacy *metal* step grid) is intentionally NOT
 ;; loaded: no tile shows it, but as a loaded effect-buffer its whole-list

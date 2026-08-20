@@ -21,8 +21,7 @@ pub fn build_output_stream(
     block_size: usize,
     master_recorder: Arc<MasterRecorder>,
     keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
-    bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
 ) -> Result<Stream, String> {
     // The DEVICE half of the record latency only. CPAL does not expose
     // portable output latency, so use the configured output block as the
@@ -120,13 +119,7 @@ pub fn build_output_stream(
         block_events_need_sort: false,
         current_callback_nframes: block_size,
         rendered_samples: Arc::clone(&rendered_samples),
-        bus_gate_runtime,
-        bus_gate_cache: Arc::new(Vec::new()),
-        bus_gate_playheads,
-        bus_gate_playheads_scratch: Vec::new(),
-        bus_gate_clocks: Vec::new(),
-        bus_gate_was_playing: false,
-        bus_gate_play_start_sample: 0,
+        bus_effect_runtime,
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
         event_seq: 0,

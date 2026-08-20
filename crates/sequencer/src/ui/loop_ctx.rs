@@ -113,7 +113,6 @@ pub(crate) struct FrameDiffState {
     /// decays from.
     pub(crate) prev_rack_pad_triggers: Vec<bool>,
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
-    pub(crate) prev_bus_playheads: Vec<usize>,
     pub(crate) prev_track_playheads: Vec<u32>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
     pub(crate) prev_current_track_playhead_visible: bool,

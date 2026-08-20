@@ -20,7 +20,6 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::instrument_params::COMMANDS.contains(&n) => super::instrument_params::handle(name, payload, app, editor, ctx),
         n if super::learn::COMMANDS.contains(&n) => super::learn::handle(name, payload, app, editor, ctx),
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),
-        n if super::bus_steps::COMMANDS.contains(&n) => super::bus_steps::handle(name, payload, app, editor, ctx),
         n if super::routing::COMMANDS.contains(&n) => super::routing::handle(name, payload, app, editor, ctx),
         n if super::samples::COMMANDS.contains(&n) => super::samples::handle(name, payload, app, editor, ctx),
         n if super::scripts::COMMANDS.contains(&n) => super::scripts::handle(name, payload, app, editor, ctx),

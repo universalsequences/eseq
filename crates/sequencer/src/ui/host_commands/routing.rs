@@ -387,7 +387,7 @@ pub(super) fn handle(
                         ),
                     ) {
                         Ok(()) => {
-                            app.publish_bus_gate_runtime();
+                            app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             sync_bus_effect_param_value_field(
                                 editor.runtime_mut(),
@@ -450,7 +450,7 @@ pub(super) fn handle(
                     );
                     match result {
                         Ok(()) => {
-                            app.publish_bus_gate_runtime();
+                            app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
                             sync_bus_mixer_state(rt, &app);
@@ -517,7 +517,7 @@ pub(super) fn handle(
                             },
                         ) {
                             Ok(()) => {
-                                app.publish_bus_gate_runtime();
+                                app.publish_bus_effect_runtime();
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 let rt = editor.runtime_mut();
                                 sync_bus_mixer_state(rt, &app);
@@ -590,7 +590,7 @@ pub(super) fn handle(
                         );
                         match result {
                             Ok(()) => {
-                                app.publish_bus_gate_runtime();
+                                app.publish_bus_effect_runtime();
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 let rt = editor.runtime_mut();
                                 sync_bus_mixer_state(rt, &app);
@@ -627,7 +627,7 @@ pub(super) fn handle(
                         |app| app.add_bus_effect_sync(bus_idx, &effect_name),
                     ) {
                         Ok(slot_idx) => {
-                            app.publish_bus_gate_runtime();
+                            app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
                             sync_bus_mixer_state(rt, &app);
@@ -675,7 +675,7 @@ pub(super) fn handle(
                         |app| app.add_builtin_bus_effect_sync(bus_idx, &effect_name),
                     ) {
                         Ok(slot_idx) => {
-                            app.publish_bus_gate_runtime();
+                            app.publish_bus_effect_runtime();
                             *bus_state.lock().unwrap() = app.buses.clone();
                             let rt = editor.runtime_mut();
                             sync_bus_mixer_state(rt, &app);
@@ -714,7 +714,7 @@ pub(super) fn handle(
                     ),
                 ) {
                     Ok(slot_idx) => {
-                        app.publish_bus_gate_runtime();
+                        app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
                         sync_bus_mixer_state(rt, &app);
@@ -751,7 +751,7 @@ pub(super) fn handle(
                     ),
                 ) {
                     Ok(slot_idx) => {
-                        app.publish_bus_gate_runtime();
+                        app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
                         sync_bus_mixer_state(rt, &app);
@@ -782,7 +782,7 @@ pub(super) fn handle(
                     |app| app.move_bus_effect_slot_sync(bus_idx, source_slot, target_slot),
                 ) {
                     Ok(slot_idx) => {
-                        app.publish_bus_gate_runtime();
+                        app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
                         sync_bus_mixer_state(rt, &app);
@@ -827,7 +827,7 @@ pub(super) fn handle(
                     |app| app.delete_bus_effect_slot(bus_idx, slot_idx),
                 ) {
                     Ok(()) => {
-                        app.publish_bus_gate_runtime();
+                        app.publish_bus_effect_runtime();
                         *bus_state.lock().unwrap() = app.buses.clone();
                         let rt = editor.runtime_mut();
                         sync_bus_mixer_state(rt, &app);

@@ -649,10 +649,9 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(
                     std::sync::Arc::new(Vec::new()),
                 )),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
