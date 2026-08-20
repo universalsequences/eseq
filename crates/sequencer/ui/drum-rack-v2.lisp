@@ -155,7 +155,7 @@
     (list)
     (range 0 (len SEQ.groups))))
 
-(def %grid-render-items (include-collapsed-tracks)
+(def %grid-render-items-with-collapsed-tracks (include-collapsed-tracks)
   (append
     (reduce |acc i|
       (let ((gidx (group-anchored-at i)))
@@ -172,7 +172,7 @@
     (%unanchored-group-items)))
 
 (def grid-render-items ()
-  (%grid-render-items false))
+  (%grid-render-items-with-collapsed-tracks false))
 
 ;; Flatten a group in exactly the order `%group-block` draws it: direct members
 ;; first, then each nested rack. The structural form includes hidden rows and is
@@ -205,7 +205,7 @@
 ;; collapsed tracks as narrow badges. Only a collapsed group removes tracks
 ;; from its visible order.
 (def mixer-visible-track-order ()
-  (%flatten-track-order (%grid-render-items true) true false))
+  (%flatten-track-order (%grid-render-items-with-collapsed-tracks true) true false))
 
 (def %index-of (xs value)
   (reduce |found i|
@@ -225,7 +225,8 @@
         (if (>= visible-pos 0)
           (nth visible (mod (+ visible-pos delta (len visible)) (len visible)))
           (let ((structural
-                  (%flatten-track-order (%grid-render-items true) false false)))
+                  (%flatten-track-order
+                    (%grid-render-items-with-collapsed-tracks true) false false)))
             (let ((structural-pos (%index-of structural track)))
               (if (< structural-pos 0)
                 nil
