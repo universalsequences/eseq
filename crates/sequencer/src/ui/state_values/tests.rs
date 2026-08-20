@@ -26965,6 +26965,71 @@
     }
 
     #[test]
+    fn metal_seq_mixer_track_context_menu_only_groups_the_clicked_multi_selection() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        fn track_menu_action_ids(editor: &mut Editor, target: usize, selected: &[f64]) -> Vec<String> {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "selected-tracks",
+                test_number_list(selected),
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.runtime_mut().eval_str(&format!(
+                "(do (set! eseq.mixer/%track-menu-group-id -1) (set! eseq.mixer/%track-menu-track {target}))",
+            )).expect("select track context-menu target");
+            let Some(Value::List(actions)) = editor.runtime_mut()
+                .eval_str("(eseq.mixer/%track-context-menu-actions)")
+                .expect("evaluate track context-menu actions")
+            else {
+                panic!("track context-menu actions should be a list");
+            };
+            actions.into_iter().map(|action| {
+                let Value::Map(action) = action.borrow().clone() else {
+                    panic!("track context-menu action should be a map");
+                };
+                let Value::Keyword(id) = action.get("id")
+                    .expect("menu action id").borrow().clone()
+                else {
+                    panic!("track context-menu action id should be a keyword");
+                };
+                id
+            }).collect()
+        }
+
+        assert_eq!(
+            track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]),
+            vec!["rename", "group"],
+        );
+        assert_eq!(
+            track_menu_action_ids(&mut editor, 2, &[0.0, 1.0]),
+            vec!["rename"],
+            "right-clicking outside the multi-selection keeps the single-track menu",
+        );
+        assert_eq!(
+            track_menu_action_ids(&mut editor, 0, &[0.0]),
+            vec!["rename"],
+        );
+
+        track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]);
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(do (set! eseq.mixer/%track-menu-open true) (eseq.mixer/%select-track-menu-action (dict :id :group)))",
+        ).expect("select Group Tracks");
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            Some(Value::Bool(false)),
+        );
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            eseqlisp::host::HostCommand::Custom { name, .. }
+                if name == "group-selected-tracks"
+        ));
+    }
+
+    #[test]
     fn metal_seq_mixer_group_context_menu_actions_distinguish_plain_groups_and_racks() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let group = |id: f64, rack: bool| {
@@ -27007,9 +27072,36 @@
 
         assert_eq!(
             menu_action_ids(&mut editor, 7.0),
-            vec!["rename", "convert-drum-rack"],
+            vec!["rename", "convert-drum-rack", "ungroup"],
         );
-        assert_eq!(menu_action_ids(&mut editor, 8.0), vec!["rename"]);
+        assert_eq!(
+            menu_action_ids(&mut editor, 8.0),
+            vec!["rename", "ungroup"],
+        );
+
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(do (set! eseq.mixer/%track-menu-open true) (eseq.mixer/%select-track-menu-action (dict :id :ungroup)))",
+        ).expect("select Ungroup");
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            Some(Value::Bool(false)),
+        );
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "ungroup-tracks");
+                let Value::Map(payload) = payload else {
+                    panic!("ungroup payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(8.0)),
+                );
+            }
+            command => panic!("expected custom ungroup command, got {command:?}"),
+        }
     }
 
     #[test]

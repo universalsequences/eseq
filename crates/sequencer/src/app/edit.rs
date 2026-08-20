@@ -2541,6 +2541,55 @@ impl App {
         })
     }
 
+    /// Dissolves a group without deleting any of its member tracks. Direct
+    /// members move into the enclosing plain group when dissolving a nested
+    /// rack, or back to the master mix otherwise. Child racks follow the same
+    /// scope. The group bus and rack-only pad metadata disappear in the same
+    /// recorded topology edit, so undo restores the complete group identity.
+    pub fn ungroup_tracks_recorded(&mut self, group_id: u64) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Ungroup tracks", |app| {
+            let group_index = app.groups.iter().position(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let group = app.groups[group_index].clone();
+            let parent_id = app.rack_parent_group(group_id)
+                .map(|parent| app.groups[parent].id);
+
+            if parent_id.is_some() {
+                app.detach_rack_member(group_id);
+            }
+            app.groups.remove(group_index);
+
+            let destination = if let Some(parent_id) = parent_id {
+                let parent = app.groups.iter_mut().find(|parent| parent.id == parent_id)
+                    .ok_or_else(|| format!("Parent track group {parent_id} disappeared"))?;
+                parent.members.extend(group.members.iter().copied());
+                parent.rack_members.extend(group.rack_members.iter().copied());
+                crate::sequencer::TrackOutput::Bus(BusId(parent.bus_id))
+            } else {
+                crate::sequencer::TrackOutput::Mix
+            };
+
+            for track in &group.members {
+                app.set_track_output_all_scenes_unrecorded(*track, destination.clone());
+            }
+            let parent_bus = match destination {
+                crate::sequencer::TrackOutput::Bus(bus) => Some(bus),
+                _ => None,
+            };
+            for rack in &group.rack_members {
+                app.set_rack_bus_output(*rack, parent_bus)?;
+            }
+
+            if !app.delete_bus_channel(BusId(group.bus_id)) {
+                return Err("Could not delete the track group's backing bus".to_string());
+            }
+            if let Some(parent_id) = parent_id {
+                app.dissolve_group_if_undersized(parent_id)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn delete_group_recorded(&mut self, group_id: u64) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Delete track group", |app| {
             let group = app.groups.iter().position(|group| group.id == group_id)

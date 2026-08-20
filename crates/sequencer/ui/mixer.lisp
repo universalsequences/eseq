@@ -33,10 +33,13 @@
 (def %group-menu-actions
   (list
     (dict :id :rename :label "Rename")
-    (dict :id :convert-drum-rack :label "Convert to Drum Rack")))
+    (dict :id :convert-drum-rack :label "Convert to Drum Rack")
+    (dict :id :ungroup :label "Ungroup")))
 
 (def %rack-group-menu-actions
-  (list (dict :id :rename :label "Rename")))
+  (list
+    (dict :id :rename :label "Rename")
+    (dict :id :ungroup :label "Ungroup")))
 
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))
@@ -939,6 +942,9 @@
       (set! %group-rename-draft ""))
     nil))
 
+(def %track-menu-target-selected? ()
+  (> (len (filter (lambda (track) (= track %track-menu-track)) SEQ.selected-tracks)) 0))
+
 (def %track-context-menu-actions ()
   (if (>= %track-menu-group-id 0)
     (let ((gidx (%group-index-by-id %track-menu-group-id)))
@@ -947,7 +953,9 @@
         (if (get (nth SEQ.groups gidx) :rack)
           %rack-group-menu-actions
           %group-menu-actions)))
-    %track-menu-actions))
+    (if (and (>= (len SEQ.selected-tracks) 2) (%track-menu-target-selected?))
+      (append %track-menu-actions (list (dict :id :group :label "Group Tracks")))
+      %track-menu-actions)))
 
 (def %select-track-menu-action (action)
   (if (= (get action :id) :rename)
@@ -959,7 +967,16 @@
         (set! %track-menu-open false)
         (host-command "convert-group-to-drum-rack"
           (dict :group-id %track-menu-group-id)))
-      nil)))
+      (if (= (get action :id) :group)
+        (do
+          (set! %track-menu-open false)
+          (%group-selected))
+        (if (= (get action :id) :ungroup)
+          (do
+            (set! %track-menu-open false)
+            (host-command "ungroup-tracks"
+              (dict :group-id %track-menu-group-id)))
+          nil)))))
 
 (def %track-context-menu ()
   (context-menu :is-open %track-menu-open
