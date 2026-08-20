@@ -1750,7 +1750,7 @@ mod tests {
     /// cargo test -p sequencer dgen_compile_succeeds_with_foreign_cwd -- --ignored
     /// ```
     #[test]
-    #[ignore = "chdirs the whole process; run alone with -- --ignored"]
+    #[ignore = "eseq-4tl: chdirs the whole process; run alone with -- --ignored"]
     fn dgen_compile_succeeds_with_foreign_cwd() {
         if !dgenlisp_tool_path().exists() {
             eprintln!(

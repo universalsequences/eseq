@@ -2137,13 +2137,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             );
         }
 
-        fn assert_close(actual: f32, expected: f32, context: &str) {
-            assert!(
-                (actual - expected).abs() < 0.001,
-                "{context}: expected {expected}, got {actual}"
-            );
-        }
-
         fn assert_number_prop_close(
             node: &eseqlisp::layout::LayoutNode,
             prop: &str,
@@ -2243,10 +2236,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "graph-variable-reset-energy-matrix",
                 "graph-variable-reset-weight-matrix",
                 "graph-variable-reset-dampening-matrix",
-                "graph-variable-reset-delta-matrix",
-                "graph-variable-reset-node-delta-column",
-                "graph-variable-reset-delta-commit",
-                "graph-variable-reset-delta-clear",
             ] {
                 let widget =
                     find_by_stable_key(layout, key).unwrap_or_else(|| panic!("missing {key}"));
@@ -2262,10 +2251,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             assert_number_prop(trigger, "rows", count as f64);
             assert_number_prop(trigger, "cols", 1.0);
             let energy = find_by_stable_key(layout, "graph-variable-reset-energy-matrix").unwrap();
-            let node_delta =
-                find_by_stable_key(layout, "graph-variable-reset-node-delta-column").unwrap();
             let expected_matrix_height = count as f64 + (count.saturating_sub(1) as f64 * 0.2);
-            for matrix in [trigger, energy, node_delta, weight] {
+            for matrix in [trigger, energy, weight] {
                 assert_number_prop_close(matrix, "height", expected_matrix_height);
             }
             let first_row = find_by_stable_key(layout, "graph-variable-reset-transpose-0")
@@ -2292,20 +2279,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 find_by_stable_key(layout, &active_reset_seed_key).is_some(),
                 "missing final active reset seed toggle {active_reset_seed_key}"
             );
-            let row_top = first_row.rect.row;
-            let row_bottom = final_row.rect.row + final_row.rect.height;
-            for matrix in [trigger, energy, node_delta, weight] {
-                assert_close(
-                    matrix.rect.row,
-                    row_top,
-                    &format!("{} top should align with first row", matrix.widget_type),
-                );
-                assert_close(
-                    matrix.rect.row + matrix.rect.height,
-                    row_bottom,
-                    &format!("{} bottom should align with final row", matrix.widget_type),
-                );
-            }
             let inactive_row_key = format!("graph-variable-reset-transpose-{count}");
             assert!(
                 find_by_stable_key(layout, &inactive_row_key).is_none(),

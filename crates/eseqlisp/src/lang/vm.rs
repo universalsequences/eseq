@@ -6776,7 +6776,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "override global-read microbenchmark; run explicitly in release mode"]
+    #[ignore = "eseq-4tl: override global-read microbenchmark; run explicitly in release mode"]
     fn override_empty_registry_global_read_cost() {
         let mut vm = module_test_vm();
         vm.set_global_value("benchmark-global", Value::Number(1.0));
@@ -8368,6 +8368,7 @@ counter
         (Value::Map(root), label_cell)
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "widget-tree freeze violation")]
     fn mutating_a_frozen_tree_cell_panics_in_debug() {
@@ -8392,6 +8393,7 @@ counter
         debug_assert_cell_not_frozen(&children[0], "test mutation");
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn shallow_clone_of_a_frozen_tree_shares_frozen_cells() {
         let (tree, label_cell) = tree_with_label("frozen");

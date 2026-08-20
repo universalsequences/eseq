@@ -2064,7 +2064,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "eseq-4tl: manual diagnostic or benchmark; excluded from the default correctness suite"]
     fn dump_motion_metrics() {
         for preset in factory_presets() {
             let table = bake(&preset.recipe).expect(preset.stem);

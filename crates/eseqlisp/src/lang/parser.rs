@@ -457,7 +457,7 @@ impl Parser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Expression {
     Symbol(String),
     Keyword(String), // :foo
@@ -468,6 +468,79 @@ pub enum Expression {
     List(Vec<Expression>),
     Quasiquote(Box<Expression>), // `expr
     Unquote(Box<Expression>),    // ,expr
+}
+
+impl Clone for Expression {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a Expression),
+            BuildList { len: usize, quoted: bool },
+            BuildQuasiquote,
+            BuildUnquote,
+        }
+
+        let mut tasks = vec![Task::Visit(self)];
+        let mut values = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(Expression::Symbol(value)) => {
+                    values.push(Expression::Symbol(value.clone()));
+                }
+                Task::Visit(Expression::Keyword(value)) => {
+                    values.push(Expression::Keyword(value.clone()));
+                }
+                Task::Visit(Expression::String(value)) => {
+                    values.push(Expression::String(value.clone()));
+                }
+                Task::Visit(Expression::QuoteSymbol(value)) => {
+                    values.push(Expression::QuoteSymbol(value.clone()));
+                }
+                Task::Visit(Expression::Number(value)) => {
+                    values.push(Expression::Number(*value));
+                }
+                Task::Visit(Expression::QuoteList(items)) => {
+                    tasks.push(Task::BuildList {
+                        len: items.len(),
+                        quoted: true,
+                    });
+                    tasks.extend(items.iter().rev().map(Task::Visit));
+                }
+                Task::Visit(Expression::List(items)) => {
+                    tasks.push(Task::BuildList {
+                        len: items.len(),
+                        quoted: false,
+                    });
+                    tasks.extend(items.iter().rev().map(Task::Visit));
+                }
+                Task::Visit(Expression::Quasiquote(value)) => {
+                    tasks.push(Task::BuildQuasiquote);
+                    tasks.push(Task::Visit(value));
+                }
+                Task::Visit(Expression::Unquote(value)) => {
+                    tasks.push(Task::BuildUnquote);
+                    tasks.push(Task::Visit(value));
+                }
+                Task::BuildList { len, quoted } => {
+                    let items = values.split_off(values.len() - len);
+                    values.push(if quoted {
+                        Expression::QuoteList(items)
+                    } else {
+                        Expression::List(items)
+                    });
+                }
+                Task::BuildQuasiquote => {
+                    let value = values.pop().expect("quasiquote clone operand");
+                    values.push(Expression::Quasiquote(Box::new(value)));
+                }
+                Task::BuildUnquote => {
+                    let value = values.pop().expect("unquote clone operand");
+                    values.push(Expression::Unquote(Box::new(value)));
+                }
+            }
+        }
+        debug_assert_eq!(values.len(), 1);
+        values.pop().expect("expression clone result")
+    }
 }
 
 pub struct ASTParser {
@@ -861,6 +934,30 @@ mod tests {
     fn parse_spanned_str(input: &str) -> Vec<Expr> {
         let tokens = Parser::new(input.to_string()).parse_spanned().unwrap();
         SpannedASTParser::new(tokens).parse().unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_expression_clone_uses_bounded_stack() {
+        let mut expression = Expression::Symbol("leaf".to_string());
+        for _ in 0..4096 {
+            expression = Expression::List(vec![expression]);
+        }
+
+        let cloned = expression.clone();
+        let mut cursor = &cloned;
+        for _ in 0..4096 {
+            let Expression::List(items) = cursor else {
+                panic!("expected nested list");
+            };
+            assert_eq!(items.len(), 1);
+            cursor = &items[0];
+        }
+        assert!(matches!(cursor, Expression::Symbol(value) if value == "leaf"));
+
+        // Recursive drop glue is independent of Clone and would obscure what
+        // this regression measures on platforms with small test stacks.
+        std::mem::forget(expression);
+        std::mem::forget(cloned);
     }
 
     #[test]

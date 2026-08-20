@@ -143,7 +143,7 @@
       (current (get entry :current)))
     (box :key (str "entry-" (get entry :patch-id))
       :width :fill
-      :height 6.8
+      :height 9.0
       :padding 0.35
       :on-click |x y r| (apply-entry entry)
       :corner-radius 12
@@ -305,6 +305,6 @@
             :min-item-width 10 :min-columns 3 :max-columns 6
             ;; Explicit row height: without it the grid falls back to
             ;; slot-width * row-aspect and cells balloon to near-square.
-            :row-height 8.0
+            :row-height 9.0
             (each (entries) |entry idx|
               (%entry-row entry))))))))

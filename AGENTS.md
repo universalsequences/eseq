@@ -31,6 +31,45 @@ nextest notes: use `--no-capture` where a `cargo test` command would use
 doctests (this repo's tests are all unit/integration tests, so that does not
 matter here).
 
+### Cheap clean-HEAD check
+
+Do not stash and do not cold-clone the repository to determine whether one test
+fails at HEAD. Reuse one isolated worktree, the current checkout's compiled
+target directory, and its staged (gitignored) DGen toolchain:
+
+```sh
+root=$PWD; wt=/tmp/eseq-head-test
+[ -e "$wt/.git" ] || git worktree add --detach "$wt" HEAD
+git -C "$wt" checkout --detach HEAD
+(cd "$wt" && \
+  CARGO_TARGET_DIR="$root/target" \
+  ESEQ_DGEN_TOOLCHAIN_ROOT="$root/crates/sequencer/tools/dgen-toolchain" \
+  cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)')
+```
+
+The worktree is disposable and isolated, so resetting it never touches the
+working checkout. Remove it with `git worktree remove /tmp/eseq-head-test` when
+it is no longer useful.
+
+### Test stack budget
+
+`.cargo/config.toml` applies one 16 MiB `RUST_MIN_STACK` budget automatically to
+Cargo-launched test processes. The same number is
+`sequencer::REQUIRED_THREAD_STACK_SIZE` for explicitly spawned scheduler/UI test
+threads. Do not add local 32/64 MiB literals or rely on a remembered shell
+prefix.
+
+LLDB investigation for eseq-4tl found that debug overflows while loading the UI
+run through recursive `Expression::clone` and then
+`Compiler::compile_expression -> compile_list -> compile_if_statement /
+compile_let_statement / compile_function`. Expression cloning is now iterative.
+Compiler traversal is still proportional to authored Lisp nesting and is
+tracked as `eseq-4tl.1`; release builds load the checked-in UI on a normal stack,
+but adversarially deep user source remains a production crash risk until that
+bead is complete. With the configured budget, any remaining overflow is
+isolated by nextest and reported as the named test rather than aborting a shared
+test binary.
+
 Do not run any of the following unless the user explicitly requests exhaustive
 testing, or the change is genuinely cross-cutting and no narrower validation
 exists:
@@ -56,19 +95,15 @@ failing test's subject overlaps your diff at all; if it does not, verify the
 failure pre-exists by running that one test in a temporary `git worktree` of
 HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
-Known pre-existing failures:
+Known pre-existing failures: **none**.
 
-- `state_values::tests::metal_seq_piano_roll_lisp_loads` expects the empty
-  piano-roll lane scroll to be 40, while the current fit formula produces 39.
-  Reproduced on 2026-07-29 with the exact nextest target in an isolated worktree
-  at clean HEAD `c4fcf064`.
-
-As of 2026-07-28 the full suite (`cargo nextest run -p sequencer -p eseqlisp`)
-was green: 3310 passed, 18 skipped (`#[ignore]`d benchmarks/captures). If a
-broader run fails, treat it as a real signal — verify against a clean-HEAD
-worktree as described above, and if a failure genuinely pre-exists your change,
-update this list with the test name and evidence rather than leaving it
-undocumented.
+As of 2026-08-20 both full workspace profiles are green: debug has 4,272 passed
+and 32 skipped; release has 4,270 passed and 32 skipped (the two-test difference
+is intentional `cfg(debug_assertions)` coverage). Commands and timings are in
+`docs/test-suite-performance.md`. If a broader run fails, treat it as a real
+signal — verify against the reusable clean-HEAD worktree described above, and if
+a failure genuinely pre-exists your change, update this list with the test name
+and evidence rather than leaving it undocumented.
 
 ## Working tree safety
 

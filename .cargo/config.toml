@@ -1,0 +1,7 @@
+# The debug ESeqLisp compiler and scheduler need the repository's documented
+# 16 MiB stack budget. Cargo propagates this to libtest/nextest processes, so a
+# stack overflow is reported against the named test instead of aborting an
+# otherwise unrelated test binary. See `sequencer::REQUIRED_THREAD_STACK_SIZE`
+# and bead eseq-4tl.1 (iterative compiler traversal).
+[env]
+RUST_MIN_STACK = { value = "16777216", force = false }

@@ -1590,6 +1590,10 @@
     /// one loop later. Untouched params and other tracks stay untouched.
     #[test]
     fn scheduler_lookahead_substitutes_armed_step_print_values() {
+        run_with_scheduler_stack(scheduler_lookahead_substitutes_armed_step_print_values_body);
+    }
+
+    fn scheduler_lookahead_substitutes_armed_step_print_values_body() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         state.pattern.patterns[0].set_step_active(0, true);
         state.pattern.step_data[0].set(0, StepParam::Velocity, 0.7);
@@ -2441,7 +2445,7 @@
     }
 
     #[test]
-    #[ignore = "manual release-mode performance profile"]
+    #[ignore = "eseq-4tl: manual release-mode performance profile"]
     fn profile_invoke_process_cascade_project_performance_lanes() {
         let (uncached, uncached_invocations) = profile_project_performance_cascade(false);
         let (cached, cached_invocations) = profile_project_performance_cascade(true);

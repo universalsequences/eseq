@@ -59,9 +59,9 @@ use crate::sequencer::{
 use crate::audio::MAX_VOICES;
 
 // The scheduler lookahead pass carries sizeable event values in debug builds, and
-// tests call the same extracted production pass. Keep the stack budget explicit
-// instead of depending on platform thread defaults.
-const SCHEDULER_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+// Tests call the same extracted production pass. Use the same documented stack
+// budget as Lisp UI compilation instead of depending on platform defaults.
+const SCHEDULER_THREAD_STACK_SIZE: usize = crate::REQUIRED_THREAD_STACK_SIZE;
 const PROCESS_EVENT_CASCADE_LIMIT: usize = 1024;
 
 #[cfg(test)]

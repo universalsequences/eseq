@@ -1581,8 +1581,11 @@ mod tests {
             state[ST_MODE] = mode;
             state[ST_MIX] = 1.0;
             state[ST_DECAY] = 0.4;
-            let _ = impulse_render(&mut state, 30.0, fs);
-            // After 30 s at a short decay the tail must be effectively silent
+            // Ten seconds is over twenty times the configured decay time: far
+            // enough into silence to exercise denormal handling without making
+            // a debug test synthesize two unnecessary minutes of audio.
+            let _ = impulse_render(&mut state, 10.0, fs);
+            // At this short decay the tail must be effectively silent
             // and every state slot finite.
             let mut in_l = vec![0.0f32; 256];
             let mut in_r = vec![0.0f32; 256];

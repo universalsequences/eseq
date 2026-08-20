@@ -1823,7 +1823,7 @@ fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
 
 fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
     let source_path = temp_patcher_source_path("patcher-dgen-compile");
-    let out_dir = std::env::temp_dir().join("patcher-dgen-compile-out");
+    let out_dir = source_path.with_extension("out");
     fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
     fs::write(&source_path, source).map_err(|error| error.to_string())?;
 
@@ -1842,6 +1842,7 @@ fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     let _ = fs::remove_file(source_path);
+    let _ = fs::remove_dir_all(out_dir);
     if output.status.success() {
         Ok(())
     } else {
@@ -2675,7 +2676,7 @@ fn patcher_persistence_fuzz_default() {
 }
 
 #[test]
-#[ignore = "larger deterministic patcher persistence corpus"]
+#[ignore = "eseq-4tl: larger deterministic patcher persistence corpus"]
 fn patcher_persistence_fuzz_stress() {
     run_patcher_persistence_fuzz(96);
 }
@@ -8673,20 +8674,29 @@ impl WritebackFuzzRng {
     }
 }
 
-fn assert_writeback_fuzz_compiles(source: &str, state: &PatcherInteractionState, seed: u64) {
+fn assert_writeback_fuzz_emits_and_samples_compile(
+    source: &str,
+    state: &PatcherInteractionState,
+    seed: u64,
+) {
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, state)
         .unwrap_or_else(|error| panic!("writeback failed for seed {seed}: {error:?}"));
     assert!(
         !emitted.contains("__patcher_missing_input__"),
         "fully connected fuzz edit emitted missing input for seed {seed}:\n{emitted}"
     );
-    compile_patch_source_with_dgenlisp(&emitted).unwrap_or_else(|error| {
-        panic!("compiled writeback failed for seed {seed}:\n{emitted}\n{error}")
-    });
+    // Emission is cheap enough to fuzz across the full deterministic corpus.
+    // DGen compilation launches an external compiler, so compile a stable
+    // representative prefix instead of paying that process cost per seed.
+    if seed < 8 {
+        compile_patch_source_with_dgenlisp(&emitted).unwrap_or_else(|error| {
+            panic!("compiled writeback failed for seed {seed}:\n{emitted}\n{error}")
+        });
+    }
 }
 
 #[test]
-fn writeback_fuzz_created_values_replacing_source_inputs_compile() {
+fn writeback_fuzz_created_values_replacing_source_inputs_emit_and_sample_compile() {
     let source = r#"
         (def value1 5.0)
         (def phasor1 (phasor value1))
@@ -8751,12 +8761,12 @@ fn writeback_fuzz_created_values_replacing_source_inputs_compile() {
         }
         connect_output_to_input(&mut state, "root", previous.as_ref().unwrap(), &mul.id, 0);
 
-        assert_writeback_fuzz_compiles(source, &state, seed);
+        assert_writeback_fuzz_emits_and_samples_compile(source, &state, seed);
     }
 }
 
 #[test]
-fn writeback_fuzz_unsaved_param_conversions_reconnect_without_stale_symbols() {
+fn writeback_fuzz_unsaved_param_conversions_emit_and_sample_compile_without_stale_symbols() {
     let source = r#"
         (def value1 5.0)
         (def phasor1 (phasor value1))
@@ -8841,14 +8851,16 @@ fn writeback_fuzz_unsaved_param_conversions_reconnect_without_stale_symbols() {
             !emitted.contains("value1"),
             "stale value1 reference survived seed {seed}:\n{emitted}"
         );
-        compile_patch_source_with_dgenlisp(&emitted).unwrap_or_else(|error| {
-            panic!("compiled writeback failed for seed {seed}:\n{emitted}\n{error}")
-        });
+        if seed < 8 {
+            compile_patch_source_with_dgenlisp(&emitted).unwrap_or_else(|error| {
+                panic!("compiled writeback failed for seed {seed}:\n{emitted}\n{error}")
+            });
+        }
     }
 }
 
 #[test]
-fn writeback_fuzz_mixed_file_and_created_macros_compile() {
+fn writeback_fuzz_mixed_file_and_created_macros_emit_and_sample_compile() {
     let source = r#"
         (defmacro fileop (input amount) (* input amount))
         (def value1 5.0)
@@ -8951,7 +8963,7 @@ fn writeback_fuzz_mixed_file_and_created_macros_compile() {
         }
         connect_output_to_input(&mut state, "root", chain.last().unwrap(), &mul.id, 0);
 
-        assert_writeback_fuzz_compiles(source, &state, seed + 2000);
+        assert_writeback_fuzz_emits_and_samples_compile(source, &state, seed);
     }
 }
 

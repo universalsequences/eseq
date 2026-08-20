@@ -1685,7 +1685,7 @@ mod cpu_bench {
     use std::os::raw::c_void;
 
     #[test]
-    #[ignore]
+    #[ignore = "eseq-4tl: manual diagnostic or benchmark; excluded from the default correctness suite"]
     fn bench_modes() {
         const SR: i32 = 48_000;
         const BLOCK: usize = 128;

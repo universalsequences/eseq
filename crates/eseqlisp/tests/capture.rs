@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 
 #[test]
-#[ignore = "writes /tmp/eseqlisp-patcher-lexilush.png for visual inspection"]
+#[ignore = "eseq-4tl: writes /tmp/eseqlisp-patcher-lexilush.png for visual inspection"]
 fn capture_patcher_lexilush_png() {
     let out = std::env::temp_dir().join("eseqlisp-patcher-lexilush.png");
     let exe = env!("CARGO_BIN_EXE_eseqlisp_capture");
@@ -43,7 +43,7 @@ fn capture_patcher_lexilush_png() {
 }
 
 #[test]
-#[ignore = "writes /tmp/eseqlisp-eq8-spectrum.png for visual inspection"]
+#[ignore = "eseq-4tl: writes /tmp/eseqlisp-eq8-spectrum.png for visual inspection"]
 fn capture_eq8_editor_spectrum_png() {
     let out = std::path::PathBuf::from("/tmp/eseqlisp-eq8-spectrum.png");
     let exe = env!("CARGO_BIN_EXE_eseqlisp_capture");
@@ -129,7 +129,7 @@ fn assert_eq8_capture_has_spectrum_pixels(path: &std::path::Path) {
 }
 
 #[test]
-#[ignore = "writes /tmp/eseqlisp-patcher-segmented-simple.png for visual inspection"]
+#[ignore = "eseq-4tl: writes /tmp/eseqlisp-patcher-segmented-simple.png for visual inspection"]
 fn capture_patcher_segmented_simple_png() {
     let out = std::env::temp_dir().join("eseqlisp-patcher-segmented-simple.png");
     let dsp = std::env::temp_dir().join("eseqlisp-patcher-segmented-simple-dsp.lisp");

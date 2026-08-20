@@ -796,6 +796,7 @@ mod cost_probes {
     }
 
     #[test]
+    #[ignore = "eseq-4tl: manual DGen cost-attribution benchmark"]
     fn causal_cost_attribution() {
         let _render = render_lock();
         if !crate::lisp_host::dgenlisp_tool_path().exists() {

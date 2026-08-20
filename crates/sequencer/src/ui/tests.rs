@@ -1771,11 +1771,11 @@
     }
 
     #[test]
-    #[ignore = "perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    #[ignore = "eseq-4tl: perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
     fn project_92_mixer_track_badge_switch_reports_layout_work() {
         std::thread::Builder::new()
             .name("project-92-track-switch-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(project_92_mixer_track_badge_switch_reports_layout_work_impl)
             .expect("spawn project 92 track switch probe")
             .join()
@@ -2202,11 +2202,11 @@
     }
 
     #[test]
-    #[ignore = "perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    #[ignore = "eseq-4tl: perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
     fn project_92_scene_switch_reports_layout_work() {
         std::thread::Builder::new()
             .name("project-92-scene-switch-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::SceneSwitch))
             .expect("spawn project 92 scene switch probe")
             .join()
@@ -2214,11 +2214,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: focuses a non-sequencer tile, sends Escape through the real binding and invalidation path, builds the tiled frame, and refreshes the retained Metal primitive scene"]
+    #[ignore = "eseq-4tl: release-mode perf probe: focuses a non-sequencer tile, sends Escape through the real binding and invalidation path, builds the tiled frame, and refreshes the retained Metal primitive scene"]
     fn project_92_escape_clears_48_of_64_selected_steps_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-escape-selection-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::EscapeDeselect))
             .expect("spawn project 92 Escape selection probe")
             .join()
@@ -2226,11 +2226,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: compares a three-target instrument-rack macro with a direct rack number-picker through the real mouse, host-command, reactive, tiled-frame, and retained-render paths"]
+    #[ignore = "eseq-4tl: release-mode perf probe: compares a three-target instrument-rack macro with a direct rack number-picker through the real mouse, host-command, reactive, tiled-frame, and retained-render paths"]
     fn project_92_rack_macro_drag_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-rack-macro-drag-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::RackMacroDrag))
             .expect("spawn project 92 rack macro drag probe")
             .join()
@@ -2238,11 +2238,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: exercises sequencer Cmd+A and real step pointer gestures through host mutation, targeted invalidation, tiled-frame, and retained-render paths"]
+    #[ignore = "eseq-4tl: release-mode perf probe: exercises sequencer Cmd+A and real step pointer gestures through host mutation, targeted invalidation, tiled-frame, and retained-render paths"]
     fn project_92_step_interactions_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-step-interactions-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::StepInteractions))
             .expect("spawn project 92 step interaction probe")
             .join()
@@ -2250,11 +2250,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: Cmd+A select-all and Escape unselect-all under the real production multi-pane layout (eseq.seq-layout/apply-fx-layout), with retained Metal updates for every visible tile"]
+    #[ignore = "eseq-4tl: release-mode perf probe: Cmd+A select-all and Escape unselect-all under the real production multi-pane layout (eseq.seq-layout/apply-fx-layout), with retained Metal updates for every visible tile"]
     fn project_92_full_layout_step_interactions_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-full-layout-step-interactions-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 project_92_ui_performance_probe_impl(Project92UiProbe::StepInteractionsFullLayout)
             })
@@ -2264,11 +2264,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: step interactions with a realistic committed arrangement (scene lane + clip lanes) present, exercising the per-tick song-state sync the real event loop runs"]
+    #[ignore = "eseq-4tl: release-mode perf probe: step interactions with a realistic committed arrangement (scene lane + clip lanes) present, exercising the per-tick song-state sync the real event loop runs"]
     fn project_92_arranged_step_interactions_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-arranged-step-interactions-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::ArrangedStepInteractions))
             .expect("spawn project 92 arranged step interaction probe")
             .join()
@@ -2276,11 +2276,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: Seq-view selection gestures (Cmd+A, shift-drag range, cmd-drag multi-select, toggle drag) on the real saved pianohold project (takes, use_arrangement, ~137 clips)"]
+    #[ignore = "eseq-4tl: release-mode perf probe: Seq-view selection gestures (Cmd+A, shift-drag range, cmd-drag multi-select, toggle drag) on the real saved pianohold project (takes, use_arrangement, ~137 clips)"]
     fn pianohold_step_selection_end_to_end_perf() {
         std::thread::Builder::new()
             .name("pianohold-step-selection-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::PianoholdSelection))
             .expect("spawn pianohold step selection probe")
             .join()
@@ -2288,11 +2288,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: instrument knob drag with and without a selected step (p-lock write) under the real production multi-pane layout, with retained Metal updates for every visible tile"]
+    #[ignore = "eseq-4tl: release-mode perf probe: instrument knob drag with and without a selected step (p-lock write) under the real production multi-pane layout, with retained Metal updates for every visible tile"]
     fn project_92_full_layout_instrument_plock_knob_drag_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-full-layout-plock-knob-drag-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 project_92_ui_performance_probe_impl(Project92UiProbe::InstrumentPlockKnobDrag)
             })
@@ -2302,11 +2302,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: response-curve-editor drag versus a plain knob drag on the same builtin Filter params (no step selected) under the real production multi-pane layout"]
+    #[ignore = "eseq-4tl: release-mode perf probe: response-curve-editor drag versus a plain knob drag on the same builtin Filter params (no step selected) under the real production multi-pane layout"]
     fn project_92_full_layout_response_curve_editor_drag_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-full-layout-response-curve-drag-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 project_92_ui_performance_probe_impl(Project92UiProbe::ResponseCurveEditorDrag)
             })
@@ -2316,11 +2316,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: *step*-buffer Transpose/Velocity/Duration number-picker drags (real mouse -> lisp -> set-step-param-history handler) under the production multi-pane layout"]
+    #[ignore = "eseq-4tl: release-mode perf probe: *step*-buffer Transpose/Velocity/Duration number-picker drags (real mouse -> lisp -> set-step-param-history handler) under the production multi-pane layout"]
     fn project_92_full_layout_step_buffer_param_drag_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-full-layout-step-buffer-param-drag-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::StepBufferParamDrag))
             .expect("spawn project 92 full-layout step-buffer param drag probe")
             .join()
@@ -2328,11 +2328,11 @@
     }
 
     #[test]
-    #[ignore = "release-mode perf probe: scene launch (transport scene pill) and track-clip launch (mixer pattern cell) through the real dispatch_custom_host_command seam, on project 92 with every track's pattern pool grown to 20 clips, under the production multi-pane layout"]
+    #[ignore = "eseq-4tl: release-mode perf probe: scene launch (transport scene pill) and track-clip launch (mixer pattern cell) through the real dispatch_custom_host_command seam, on project 92 with every track's pattern pool grown to 20 clips, under the production multi-pane layout"]
     fn project_92_full_layout_scene_and_clip_launch_end_to_end_perf() {
         std::thread::Builder::new()
             .name("project-92-full-layout-launch-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::SceneAndClipLaunch))
             .expect("spawn project 92 full-layout launch probe")
             .join()
@@ -9512,11 +9512,11 @@
     /// application, song read-surface publish, reactive cycle, tiled-frame
     /// build and retained Metal primitive refresh.
     #[test]
-    #[ignore = "release-mode perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/pianohold.json"]
+    #[ignore = "eseq-4tl: release-mode perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/pianohold.json"]
     fn arrangement_view_interactions_end_to_end_perf() {
         std::thread::Builder::new()
             .name("arrangement-interactions-probe".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(arrangement_view_interactions_end_to_end_perf_impl)
             .expect("spawn arrangement interaction probe")
             .join()

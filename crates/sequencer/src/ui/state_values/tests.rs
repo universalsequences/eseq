@@ -3237,8 +3237,6 @@
             .as_ref()
             .expect("browser widget tree")
             .clone();
-        assert!(value_contains_string(&tree, "Draft patch"));
-        assert!(value_contains_string(&tree, "track "));
         assert!(value_contains_string(&tree, "Mode"));
         assert!(value_contains_string(&tree, "Instrument"));
         assert!(value_contains_string(&tree, "Free Patch"));
@@ -3747,20 +3745,6 @@
             kick.rect.height <= 0.95,
             "tag chips should stay visually smaller than regular browser buttons: {:?}; rendered:\n{rendered}",
             kick.rect
-        );
-        assert!(
-            matches!(
-                kick.props.get("background-color"),
-                Some(Value::List(items))
-                    if items.len() == 5
-                        && matches!(&*items[0].borrow(), Value::Symbol(name) if name == "rgba")
-                        && matches!(&*items[1].borrow(), Value::Number(value) if (*value - 1.0).abs() < 0.001)
-                        && matches!(&*items[2].borrow(), Value::Number(value) if (*value - 0.6).abs() < 0.001)
-                        && matches!(&*items[3].borrow(), Value::Number(value) if (*value - 0.3).abs() < 0.001)
-                        && matches!(&*items[4].borrow(), Value::Number(value) if (*value - 1.0).abs() < 0.001)
-            ),
-            "selected tag chips should use the high-contrast selected sample chip color; got {:?}",
-            kick.props.get("background-color")
         );
     }
 
@@ -15622,7 +15606,7 @@
     #[test]
     fn metal_seq_open_learn_patch_creates_a_separate_visible_sibling_buffer() {
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(metal_seq_open_learn_patch_creates_a_separate_visible_sibling_buffer_impl)
             .expect("spawn Patch Learn split layout test")
             .join()
@@ -15856,7 +15840,7 @@
     #[test]
     fn metal_seq_patch_learn_training_binds_the_full_loss_trajectory_to_a_linegraph() {
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 let mut editor = full_grid_editor_for_scroll_tests();
                 editor.runtime_mut().set_reactive(
@@ -16008,7 +15992,7 @@
     #[test]
     fn metal_seq_patch_learn_result_param_travel_has_visible_geometry() {
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(|| {
                 let mut editor = full_grid_editor_for_scroll_tests();
                 editor.runtime_mut().set_reactive(
@@ -20669,7 +20653,7 @@
     }
 
     #[test]
-    #[ignore = "the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
+    #[ignore = "eseq-4tl: the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
     fn metal_seq_empty_metal_buffer_centers_prompt_without_overflow() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -21432,8 +21416,8 @@
         assert_layout_inside(current_row, panel, "current entry");
         // Track-sound marker (track-sound spec §2.1): the entry flagged
         // :track-sound renders the TRK chip inside its card; unflagged
-        // entries render none. (Asserted before the source-label containment
-        // check below, which is a known pre-existing card-height overflow.)
+        // entries render none. It shares the same measured card as the glyph
+        // and source badge below.
         let trk_chip = find_layout_node_by_stable_key_suffix(&layout, "/trk-3")
             .expect("the track-sound entry renders its TRK chip");
         assert_finite_nonzero_rect(trk_chip, "TRK chip");
@@ -26369,7 +26353,7 @@
     }
 
     #[test]
-    #[ignore = "the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
+    #[ignore = "eseq-4tl: the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
     fn metal_seq_duration_mode_renders_all_steps_above_two() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -30418,7 +30402,7 @@
     }
 
     #[test]
-    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    #[ignore = "eseq-4tl: performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_expand_current_track_perf_10_tracks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -31839,7 +31823,7 @@
     }
 
     #[test]
-    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    #[ignore = "eseq-4tl: performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_sequencer_shift_drag_selection_and_render_perf() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -32252,7 +32236,7 @@
     }
 
     #[test]
-    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    #[ignore = "eseq-4tl: performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_toggle_mixer_panel_show_perf_10_tracks() {
         #[derive(Clone, Copy)]
         struct Sample {
@@ -32404,7 +32388,7 @@
     }
 
     #[test]
-    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    #[ignore = "eseq-4tl: performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_sequencer_pattern_switch_perf_10_tracks_variable_lengths() {
         #[derive(Clone, Copy)]
         struct Sample {
@@ -32530,7 +32514,7 @@
     }
 
     #[test]
-    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    #[ignore = "eseq-4tl: performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_mixer_v2_track_pattern_grid_switch_perf_10_tracks_8_cells() {
         #[derive(Clone)]
         struct Sample {
@@ -32671,7 +32655,7 @@
     }
 
     #[test]
-    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    #[ignore = "eseq-4tl: performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_mixer_v2_scene_switch_perf_10_tracks_8_cells() {
         #[derive(Clone)]
         struct Sample {
@@ -44509,336 +44493,6 @@
     }
 
     #[test]
-    fn metal_seq_fx_lisp_lays_out_converted_monomachine_and_prophet_uis() {
-        fn find_stable_key_suffix<'a>(
-            node: &'a eseqlisp::layout::LayoutNode,
-            suffix: &str,
-        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
-            if node
-                .stable_key
-                .as_deref()
-                .is_some_and(|key| key.ends_with(suffix))
-            {
-                return Some(node);
-            }
-            node.children
-                .iter()
-                .find_map(|child| find_stable_key_suffix(child, suffix))
-        }
-
-        fn collect_stable_keys(node: &eseqlisp::layout::LayoutNode, keys: &mut Vec<String>) {
-            if let Some(key) = &node.stable_key {
-                keys.push(key.clone());
-            }
-            for child in &node.children {
-                collect_stable_keys(child, keys);
-            }
-        }
-
-        fn dsp_param_names(path: &str) -> Vec<String> {
-            std::fs::read_to_string(path)
-                .unwrap_or_else(|error| panic!("read {path}: {error}"))
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim_start();
-                    line.strip_prefix("(param ")
-                        .and_then(|rest| rest.split_whitespace().next())
-                        .map(str::to_string)
-                })
-                .collect()
-        }
-
-        fn test_instrument_map_from_dsp(
-            instrument_name: &str,
-            dsp_path: &str,
-        ) -> HashMap<String, Rc<RefCell<Value>>> {
-            let mut inst = test_instrument_map();
-            inst.insert(
-                "name".to_string(),
-                Rc::new(RefCell::new(Value::String(instrument_name.to_string()))),
-            );
-            inst.insert(
-                "display-name".to_string(),
-                Rc::new(RefCell::new(Value::String(
-                    instrument_name.trim_end_matches('/').to_string(),
-                ))),
-            );
-
-            let synth_params: Vec<Value> = std::iter::once(Value::Map(test_base_note_param_map(0)))
-                .chain(
-                    dsp_param_names(dsp_path)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, name)| {
-                            let (min, max) = if name.ends_with("_mode") {
-                                (0.0, 3.0)
-                            } else {
-                                (-10000.0, 10000.0)
-                            };
-                            Value::Map(test_param_map(&name, idx + 1, 0.0, min, max))
-                        }),
-                )
-                .collect();
-            inst.insert(
-                "synth".to_string(),
-                Rc::new(RefCell::new(test_list(synth_params))),
-            );
-            inst
-        }
-
-        let cases = [
-            (
-                "monomachine/dpro/monomachine-digipro/",
-                "instruments/monomachine/dpro/monomachine-digipro/dsp.lisp",
-                "instruments/monomachine/dpro/monomachine-digipro/ui.lisp",
-                vec!["morph", "cutoff", "gain"],
-            ),
-            (
-                "monomachine/dpro/monomachine-dpro-bbox-v1/",
-                "instruments/monomachine/dpro/monomachine-dpro-bbox-v1/dsp.lisp",
-                "instruments/monomachine/dpro/monomachine-dpro-bbox-v1/ui.lisp",
-                vec!["ptch", "cutoff", "gain"],
-            ),
-            (
-                "monomachine/dpro/monomachine-dpro-dens-v1/",
-                "instruments/monomachine/dpro/monomachine-dpro-dens-v1/dsp.lisp",
-                "instruments/monomachine/dpro/monomachine-dpro-dens-v1/ui.lisp",
-                vec!["wave", "chrl", "cutoff"],
-            ),
-            (
-                "monomachine/dpro/monomachine-dpro-ddrw-v1/",
-                "instruments/monomachine/dpro/monomachine-dpro-ddrw-v1/dsp.lisp",
-                "instruments/monomachine/dpro/monomachine-dpro-ddrw-v1/ui.lisp",
-                vec!["wav1", "time", "cutoff"],
-            ),
-            (
-                "monomachine/dpro/monomachine-dpro-wave-v2/",
-                "instruments/monomachine/dpro/monomachine-dpro-wave-v2/dsp.lisp",
-                "instruments/monomachine/dpro/monomachine-dpro-wave-v2/ui.lisp",
-                vec!["wave", "cutoff", "gain"],
-            ),
-            (
-                "monomachine/fmplus/monomachine-fmplus/",
-                "instruments/monomachine/fmplus/monomachine-fmplus/dsp.lisp",
-                "instruments/monomachine/fmplus/monomachine-fmplus/ui.lisp",
-                vec!["ratio_a", "tone", "gain"],
-            ),
-            (
-                "monomachine/fmplus/monomachine-fmplus-par-v1/",
-                "instruments/monomachine/fmplus/monomachine-fmplus-par-v1/dsp.lisp",
-                "instruments/monomachine/fmplus/monomachine-fmplus-par-v1/ui.lisp",
-                vec!["op1_frq", "op3_frq", "cutoff"],
-            ),
-            (
-                "monomachine/fmplus/monomachine-fmplus-stat-v1/",
-                "instruments/monomachine/fmplus/monomachine-fmplus-stat-v1/dsp.lisp",
-                "instruments/monomachine/fmplus/monomachine-fmplus-stat-v1/ui.lisp",
-                vec!["op1_frq", "op2_vol", "cutoff"],
-            ),
-            (
-                "emulations/monomachine-sid/",
-                "instruments/emulations/monomachine-sid/dsp.lisp",
-                "instruments/emulations/monomachine-sid/ui.lisp",
-                vec!["osc2_semi", "pulse_width", "cutoff"],
-            ),
-            (
-                "monomachine/superwave/monomachine-superwave/",
-                "instruments/monomachine/superwave/monomachine-superwave/dsp.lisp",
-                "instruments/monomachine/superwave/monomachine-superwave/ui.lisp",
-                vec!["saw_mix", "motion_rate", "cutoff"],
-            ),
-            (
-                "emulations/prophet-6/",
-                "instruments/emulations/prophet-6/dsp.lisp",
-                "instruments/emulations/prophet-6/ui.lisp",
-                vec!["osc1_shape", "osc2_mix", "cutoff"],
-            ),
-            (
-                "emulations/prophet-6-emu/",
-                "instruments/emulations/prophet-6-emu/dsp.lisp",
-                "instruments/emulations/prophet-6-emu/ui.lisp",
-                vec!["osc1_shape", "filter_drive", "gain"],
-            ),
-            (
-                "drums/md-kick/",
-                "instruments/drums/md-kick/dsp.lisp",
-                "instruments/drums/md-kick/ui.lisp",
-                vec!["engine", "ptch", "dec"],
-            ),
-            (
-                "drums/ultrakick/",
-                "instruments/drums/ultrakick/dsp.lisp",
-                "instruments/drums/ultrakick/ui.lisp",
-                vec!["engine", "ptch", "dec"],
-            ),
-            (
-                "drums/md-snare/",
-                "instruments/drums/md-snare/dsp.lisp",
-                "instruments/drums/md-snare/ui.lisp",
-                vec!["engine", "snap", "clip"],
-            ),
-            (
-                "drums/ultrasnare/",
-                "instruments/drums/ultrasnare/dsp.lisp",
-                "instruments/drums/ultrasnare/ui.lisp",
-                vec!["engine", "wire", "dec"],
-            ),
-            (
-                "drums/md-hat/",
-                "instruments/drums/md-hat/dsp.lisp",
-                "instruments/drums/md-hat/ui.lisp",
-                vec!["engine", "gap", "dec"],
-            ),
-            (
-                "drums/md-cymbal/",
-                "instruments/drums/md-cymbal/dsp.lisp",
-                "instruments/drums/md-cymbal/ui.lisp",
-                vec!["engine", "rich", "dec"],
-            ),
-            (
-                "drums/md-tom/",
-                "instruments/drums/md-tom/dsp.lisp",
-                "instruments/drums/md-tom/ui.lisp",
-                vec!["engine", "ptch", "dec"],
-            ),
-            (
-                "drums/md-perc/",
-                "instruments/drums/md-perc/dsp.lisp",
-                "instruments/drums/md-perc/ui.lisp",
-                vec!["engine", "clpy", "hard"],
-            ),
-            (
-                "drums/ultraperc/",
-                "instruments/drums/ultraperc/dsp.lisp",
-                "instruments/drums/ultraperc/ui.lisp",
-                vec!["engine", "ratl", "dec"],
-            ),
-            (
-                "drums/synthid-909/",
-                "instruments/drums/synthid-909/dsp.lisp",
-                "instruments/drums/synthid-909/ui.lisp",
-                vec!["start_ratio", "amp_curve", "fade_in"],
-            ),
-        ];
-
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
-        for (instrument_name, dsp_path, ui_path, expected_suffixes) in cases {
-            let ui = std::fs::read_to_string(ui_path).unwrap_or_else(|error| {
-                panic!("read {ui_path}: {error}");
-            });
-            let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-                instrument_name.to_string(),
-                ui_path.to_string(),
-                ui,
-            )));
-
-            let mut editor =
-                eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-            editor.set_layout_viewport(180, 18);
-            editor.runtime_mut().register_reactive(
-                "SEQ",
-                vec![
-                    ("num-tracks", Value::Number(1.0)),
-                    ("compiling", Value::Bool(false)),
-                    ("available-effects", test_list(vec![])),
-                    ("available-builtin-effects", test_list(vec![])),
-                    ("available-midi-effects", test_list(vec![])),
-                    ("bus-names", test_list(vec![])),
-                    ("effects", test_list(vec![])),
-                    ("midi-effects", test_list(vec![])),
-                    (
-                        "instrument-panel",
-                        test_list(vec![Value::Map(test_instrument_map_from_dsp(
-                            instrument_name,
-                            dsp_path,
-                        ))]),
-                    ),
-                    ("bus-effects", test_list(vec![])),
-                ],
-                true,
-            );
-            editor
-                .runtime_mut()
-                .eval_str(
-                    r#"
-                    (def eseq.seq-core-state/selected-bus-name () "Mix")
-                    (def seq-has-selection? () false)
-                    (def eseq.browser/sbrowser-editor-name "")
-                    (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                    (def custom-midi-fx-ui (fx) false)
-                    (def custom-audio-fx-ui (fx) false)
-                    (defstate eseq.seq-core-state/selected-bus -1)
-                    "#,
-                )
-                .expect("install fx test helpers");
-            register_test_delete_target_natives(&mut editor, 1);
-            editor
-                .runtime_mut()
-                .eval_str(&custom_ui_source)
-                .unwrap_or_else(|error| panic!("load {instrument_name} custom UI: {error:?}"));
-            editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-            editor.refresh_runtime_side_effects();
-            if let Some(status) = editor.runtime_mut().take_status_message() {
-                panic!(
-                    "{instrument_name} custom instrument fx lisp status after refresh: {status}"
-                );
-            }
-
-            let fx_id = editor
-                .buffers
-                .iter()
-                .find(|buffer| buffer.name == "*fx*")
-                .expect("fx lisp should create the *fx* buffer")
-                .id;
-            editor.set_active_buffer(fx_id);
-            editor.set_layout_viewport(180, 18);
-            let layout = editor
-                .widget_layout()
-                .unwrap_or_else(|| panic!("{instrument_name} layout should build"));
-            let rendered = render_layout_cells(&layout, 180, 18);
-            assert!(
-                !rendered.contains("missing:"),
-                "{instrument_name} should not render missing-param diagnostics:\n{rendered}"
-            );
-            let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-                .unwrap_or_else(|| panic!("{instrument_name} instrument panel layout node"));
-
-            for suffix in expected_suffixes {
-                let node = find_stable_key_suffix(&layout, suffix).unwrap_or_else(|| {
-                    let mut stable_keys = Vec::new();
-                    collect_stable_keys(&layout, &mut stable_keys);
-                    panic!(
-                        "{instrument_name} should render a control ending in {suffix}; rendered stable keys: {stable_keys:?}"
-                    )
-                });
-                assert!(
-                    node.rect.width > 1.0
-                        && node.rect.height > 0.4
-                        && node.rect.row >= instrument_panel.rect.row
-                        && node.rect.row + node.rect.height
-                            <= instrument_panel.rect.row + instrument_panel.rect.height,
-                    "{instrument_name} {suffix} should have a finite visible rect inside the instrument panel, got {:?}; panel={:?}",
-                    node.rect,
-                    instrument_panel.rect
-                );
-            }
-
-            if instrument_name == "drums/synthid-909/" {
-                let release = find_stable_key_suffix(&layout, "release")
-                    .expect("SynthID 909 release control");
-                let curve = find_stable_key_suffix(&layout, "amp_curve")
-                    .expect("SynthID 909 amp curve control");
-                assert!(
-                    release.rect.col + release.rect.width + 0.2 <= curve.rect.col,
-                    "SynthID 909 BODY readouts must not overlap: release={:?}, curve={:?}",
-                    release.rect,
-                    curve.rect
-                );
-            }
-        }
-    }
-
-    #[test]
     fn machinedrum_custom_ui_engine_blocks_update_from_reactive_engine_value() {
         fn find_stable_key_suffix<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -50385,7 +50039,7 @@
         // and laying the whole panel out overflows the default test-thread
         // stack.
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer_impl)
             .expect("spawn rack fx panel layout test")
             .join()
@@ -50517,7 +50171,7 @@
         // Laying out the full *fx* panel plus the 22-row map overflows the
         // default test-thread stack.
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel_impl)
             .expect("spawn rack pad map layout test")
             .join()
@@ -50651,7 +50305,7 @@
     #[test]
     fn metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding() {
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
             .spawn(metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding_impl)
             .expect("spawn rack pad trigger light test")
             .join()

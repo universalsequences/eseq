@@ -60,13 +60,52 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Prefer `cargo nextest run` and select the narrowest exact test that validates a
+change. Full workspace runs are reserved for explicitly exhaustive work such as
+eseq-4tl; see `AGENTS.md` for selection examples and runtime policy.
+
+### Cheap clean-HEAD check
+
+Do not stash and do not cold-clone the repository to determine whether one test
+fails at HEAD. Reuse one isolated worktree, the current checkout's compiled
+target directory, and its staged (gitignored) DGen toolchain:
 
 ```bash
-# Example:
-# npm install
-# npm test
+root=$PWD; wt=/tmp/eseq-head-test
+[ -e "$wt/.git" ] || git worktree add --detach "$wt" HEAD
+git -C "$wt" checkout --detach HEAD
+(cd "$wt" && \
+  CARGO_TARGET_DIR="$root/target" \
+  ESEQ_DGEN_TOOLCHAIN_ROOT="$root/crates/sequencer/tools/dgen-toolchain" \
+  cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)')
 ```
+
+The worktree is disposable and isolated, so resetting it never touches the
+working checkout. Remove it with `git worktree remove /tmp/eseq-head-test` when
+it is no longer useful.
+
+### Test stack budget
+
+`.cargo/config.toml` applies one 16 MiB `RUST_MIN_STACK` budget automatically to
+Cargo-launched test processes. The same number is
+`sequencer::REQUIRED_THREAD_STACK_SIZE` for explicitly spawned scheduler/UI test
+threads. Do not add local 32/64 MiB literals or rely on a remembered shell
+prefix.
+
+LLDB investigation for eseq-4tl found that debug overflows while loading the UI
+run through recursive `Expression::clone` and then
+`Compiler::compile_expression -> compile_list -> compile_if_statement /
+compile_let_statement / compile_function`. Expression cloning is now iterative.
+Compiler traversal is still proportional to authored Lisp nesting and is
+tracked as `eseq-4tl.1`; release builds load the checked-in UI on a normal stack,
+but adversarially deep user source remains a production crash risk until that
+bead is complete. With the configured budget, any remaining overflow is
+isolated by nextest and reported as the named test rather than aborting a shared
+test binary.
+
+As of 2026-08-20 there are no known pre-existing failures: full debug is 4,272
+passed / 32 skipped and full release is 4,270 passed / 32 skipped. Commands and
+timings are recorded in `docs/test-suite-performance.md`.
 
 ## Architecture Overview
 

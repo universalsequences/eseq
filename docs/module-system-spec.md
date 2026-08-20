@@ -1151,9 +1151,11 @@ stays as-is; real macro hygiene is out of scope for this spec.
   binary before reporting. `cff706ec` fixed the three resolution-ladder gaps
   behind it (module def-sites always intern qualified, runtime late-binding
   heal for empty qualified slots, reactive-namespace exemption). Standing
-  rule from it: **run `RUST_MIN_STACK=16777216 cargo test -p sequencer --bin
-  metal_seq` per conversion** — 585 passed / 2 pre-existing failures is the
-  baseline, and it is the gate that actually catches conversion regressions.
+  rule from it: **run `cargo nextest run -p sequencer -E
+  'binary(metal_seq)'` per conversion**. Since eseq-4tl,
+  `.cargo/config.toml` supplies the documented 16 MiB test-stack budget
+  automatically, so this gate reports failures by test name instead of relying
+  on a remembered `RUST_MIN_STACK` prefix.
 
   **Step 0 addendum (batch 2, superseded for globals by stage 3).** The
   load-order gate applied to Rust test harnesses that evaluate a consumer's

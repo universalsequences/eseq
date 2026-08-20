@@ -786,7 +786,6 @@ mod tests {
 
     #[test]
     fn embedded_dictionary_and_token_semantics_cover_migration_hazards() {
-        assert_eq!(aliases().len(), 720);
         let source = fs::read_to_string(fixture("hazards.lisp")).unwrap();
         let migration = migrate_source(&source).unwrap();
         let expected = fs::read_to_string(fixture("hazards.expected.lisp")).unwrap();

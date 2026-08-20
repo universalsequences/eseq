@@ -41,6 +41,16 @@
     clippy::useless_format
 )]
 
+/// Stack budget for threads that compile the checked-in ESeqLisp UI or carry
+/// scheduler event snapshots in debug builds.
+///
+/// LLDB investigation for eseq-4tl found the limiting chain in recursive
+/// `Compiler::compile_expression` traversal of nested `if`/`let`/function
+/// forms. `Expression::clone` is now iterative, but compiler traversal remains
+/// recursive (eseq-4tl.1). Release builds fit the platform stack; debug frames
+/// need this explicit budget until that traversal is made iterative.
+pub const REQUIRED_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 #[allow(dead_code)]
 pub mod agent;
 pub mod analysis;

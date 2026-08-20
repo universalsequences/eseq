@@ -2876,7 +2876,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "profiling harness; run explicitly while optimizing compiler/runtime speed"]
+    #[ignore = "eseq-4tl: profiling harness; run explicitly while optimizing compiler/runtime speed"]
     fn profile_sdf_lighting_v2_demo_eval_speed() {
         let rounds = std::env::var("ESEQLISP_PROFILE_ITERS")
             .ok()
