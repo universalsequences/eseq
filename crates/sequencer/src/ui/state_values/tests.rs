@@ -49165,9 +49165,10 @@
             Some(&Value::Keyword("mixer-strip-selected-border".to_string())),
             "selected rack containers should use the track selection border"
         );
-        assert!(
-            !block.props.contains_key("selected-background-color"),
-            "rack selection must not brighten the container background"
+        assert_eq!(
+            block.props.get("selected-background-color"),
+            block.props.get("background-color"),
+            "rack selection must retain the normal container background"
         );
         assert!(
             find_layout_node_by_stable_key_suffix(block, "/rack-arm-7").is_some(),
@@ -49243,9 +49244,18 @@
             Some(&Value::Keyword("mixer-strip-selected-border".to_string())),
             "selected regular groups should use the track selection border"
         );
-        assert!(
-            !block.props.contains_key("selected-background-color"),
-            "regular group selection must not brighten the container background"
+        assert_eq!(
+            block.props.get("selected-background-color"),
+            block.props.get("background-color"),
+            "regular group selection must retain the normal container background"
+        );
+        let Some(Value::List(group_bg)) = block.props.get("background-color") else {
+            panic!("regular group background should be an RGBA color");
+        };
+        assert_eq!(
+            group_bg.last().map(|channel| channel.borrow().clone()),
+            Some(Value::Number(1.0)),
+            "group background must be opaque so the selected border cannot show through it"
         );
         editor
             .runtime_mut()
@@ -49261,8 +49271,9 @@
             Some(&Value::Bool(true)),
             "selecting group chrome should select its backing bus and activate the border"
         );
-        assert!(
-            !selected_block.props.contains_key("selected-background-color"),
+        assert_eq!(
+            selected_block.props.get("selected-background-color"),
+            selected_block.props.get("background-color"),
             "selected group layout should retain the normal background"
         );
         for key in [

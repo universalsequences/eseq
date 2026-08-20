@@ -1677,6 +1677,13 @@
 (def %group-element-key (gidx element)
   (str (%group-ui-kind gidx) "-" element "-" (eseq.drum-rack-v2/group-id gidx)))
 
+;; Keep group fills opaque because the rounded-box renderer draws its border
+;; behind the inset fill. The old alpha-0.22 color let a selected border show
+;; through the whole container; pre-multiplying RGB preserves the intended dark
+;; tint while making selection strictly a border change.
+(def %group-container-bg (c)
+  (rgba (* (nth c 0) 0.22) (* (nth c 1) 0.22) (* (nth c 2) 0.22) 1.0))
+
 (def %group-bus-volume-from-event (bus-idx event)
   (let ((sx (get event :sx)))
     (if (= sx nil)
@@ -2171,7 +2178,8 @@
     (box :width :fill
       :key (%group-element-key gidx "block")
       :selected (%group-selected? gidx)
-      :background-color (rgba (nth c 0) (nth c 1) (nth c 2) 0.22)
+      :background-color (%group-container-bg c)
+      :selected-background-color (%group-container-bg c)
       :border-width 2
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
