@@ -341,3 +341,24 @@ full re-evaluation on a genuine owner switch rebuilds every builtin panel
 (~30 ms for the 5-effect bus chain — keyed subtrees do not survive being
 absent from a flush), and every real track switch re-renders the *samples*
 sidebar (~35 ms) because `%sync-track-search` runs inside the browser root.
+
+### eseq-4kd: keyed subtrees now survive absence
+
+The first follow-up is fixed in the VM (`eseqlisp::vm`): a top-level effect
+rerun now *detaches* the context's keyed subtree owners instead of removing
+them, so an absent panel keeps its dag node, its dependency edges (dirtiness
+still accrues offscreen), and a memoized copy of its last render. When a
+later rerun re-registers the same key with the same body chunk, equal
+captured inputs (deep-compared against a snapshot; any captured callable
+disqualifies), and no dirty dependency, the cached tree is re-emitted
+without invoking the panel body. The cache is dropped on import passes,
+symbol redefinition, transactional-eval rollback, and the explicit
+`clear_*` teardowns; a standalone subtree rerender invalidates its
+ancestors' cached trees so they can never resurrect a stale child.
+
+Post-fix medians (same probe, same machine): rack track -> group fell from
+45.6 ms to **11.5 ms** (input phase 42.5 -> ~8 ms — the *fx* bus-chain
+rebuild is gone on repeated toggles); the other three transitions are
+unchanged within noise. VM-level regression tests:
+`keyed_subtree_reused_across_absence_when_dependencies_unchanged` and
+`keyed_subtree_rerenders_when_captured_inputs_change` (eseqlisp).

@@ -2416,6 +2416,172 @@ mod tests {
         );
     }
 
+    /// Recursively finds the first `label` text in a rendered widget tree.
+    fn first_label_text(value: &Value) -> Option<String> {
+        let Value::Map(map) = value else {
+            return None;
+        };
+        if let Some(Value::String(text)) = map.get("text").map(|cell| cell.borrow().clone()) {
+            return Some(text);
+        }
+        if let Some(children) = map.get("children") {
+            if let Value::List(children) = &*children.borrow() {
+                for child in children {
+                    if let Some(text) = first_label_text(&child.borrow()) {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// eseq-4kd: a keyed subtree absent from one buffer rerun (an fx-owner
+    /// toggle) keeps its node and render cache; toggling back reuses the
+    /// cached render without re-invoking the body — unless a reactive
+    /// dependency changed while it was offscreen.
+    #[test]
+    fn keyed_subtree_reused_across_absence_when_dependencies_unchanged() {
+        let mut runtime = Runtime::new();
+        let renders: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+        let renders_for_native = Rc::clone(&renders);
+        runtime.register_native("count-render", move |_args, _ctx| {
+            *renders_for_native.borrow_mut() += 1;
+            Ok(Value::Bool(true))
+        });
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("owner", Value::Number(0.0)),
+                ("panel-value", Value::Number(1.0)),
+            ],
+            false,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*owner*"
+                  (if (= APP.owner 0)
+                    (v-stack
+                      (subtree :key "panel"
+                        (if (count-render)
+                          (label (fmt "value: {}" APP.panel-value))
+                          (label "unreachable"))))
+                    (label "other owner")))
+                "#,
+            )
+            .expect("eval owner-switch effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(*renders.borrow(), 1, "initial render runs the body");
+
+        // Owner switches away: the panel leaves the tree but stays cached.
+        runtime.set_reactive("APP", "owner", Value::Number(1.0));
+        runtime.run_reactive_cycle();
+        let _ = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(*renders.borrow(), 1, "absence must not render the panel");
+
+        // Owner switches back with the panel's dependency unchanged: the
+        // cached render is reused, the body is not re-invoked.
+        runtime.set_reactive("APP", "owner", Value::Number(0.0));
+        runtime.run_reactive_cycle();
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(*renders.borrow(), 1, "clean re-registration reuses cache");
+        let crate::vm::PendingUiUpdate::FullTree(update) = &pending[0] else {
+            panic!("expected full tree update");
+        };
+        assert_eq!(
+            first_label_text(&update.tree).as_deref(),
+            Some("value: 1"),
+            "reused panel keeps its rendered content"
+        );
+
+        // Owner switches away again and the panel's dependency changes while
+        // it is offscreen: the detached node collects the dirty mark without
+        // emitting an update for the absent panel.
+        runtime.set_reactive("APP", "owner", Value::Number(1.0));
+        runtime.run_reactive_cycle();
+        let _ = runtime.take_pending_buffer_widget_trees();
+        runtime.set_reactive("APP", "panel-value", Value::Number(2.0));
+        runtime.run_reactive_cycle();
+        assert_eq!(
+            runtime.take_pending_buffer_widget_trees().len(),
+            0,
+            "a detached panel must not emit updates"
+        );
+        assert_eq!(*renders.borrow(), 1);
+
+        // Toggling back now must re-render: the cached tree is stale.
+        runtime.set_reactive("APP", "owner", Value::Number(0.0));
+        runtime.run_reactive_cycle();
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(*renders.borrow(), 2, "dirty dependency forces a rerender");
+        let crate::vm::PendingUiUpdate::FullTree(update) = &pending[0] else {
+            panic!("expected full tree update");
+        };
+        assert_eq!(first_label_text(&update.tree).as_deref(), Some("value: 2"));
+    }
+
+    /// eseq-4kd: reuse is refused when the subtree body's captured inputs
+    /// changed, even though no reactive dependency of the subtree itself is
+    /// dirty (the parent read the value; the body only captured it).
+    #[test]
+    fn keyed_subtree_rerenders_when_captured_inputs_change() {
+        let mut runtime = Runtime::new();
+        let renders: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+        let renders_for_native = Rc::clone(&renders);
+        runtime.register_native("count-render", move |_args, _ctx| {
+            *renders_for_native.borrow_mut() += 1;
+            Ok(Value::Bool(true))
+        });
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("owner", Value::Number(0.0)),
+                ("parent-value", Value::Number(1.0)),
+            ],
+            false,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*capture*"
+                  (if (= APP.owner 0)
+                    (let ((captured APP.parent-value))
+                      (v-stack
+                        (subtree :key "panel"
+                          (if (count-render)
+                            (label (fmt "captured: {}" captured))
+                            (label "unreachable")))))
+                    (label "other owner")))
+                "#,
+            )
+            .expect("eval capture effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(*renders.borrow(), 1);
+
+        // Change the captured input while the panel is offscreen. The panel
+        // never read it reactively, so its node stays clean — the input
+        // snapshot comparison is what must catch this.
+        runtime.set_reactive("APP", "owner", Value::Number(1.0));
+        runtime.run_reactive_cycle();
+        let _ = runtime.take_pending_buffer_widget_trees();
+        runtime.set_reactive("APP", "parent-value", Value::Number(7.0));
+        runtime.run_reactive_cycle();
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime.set_reactive("APP", "owner", Value::Number(0.0));
+        runtime.run_reactive_cycle();
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(*renders.borrow(), 2, "changed capture forces a rerender");
+        let crate::vm::PendingUiUpdate::FullTree(update) = &pending[0] else {
+            panic!("expected full tree update");
+        };
+        assert_eq!(
+            first_label_text(&update.tree).as_deref(),
+            Some("captured: 7")
+        );
+    }
+
     #[test]
     fn nested_subtree_reactive_update_emits_replace_subtree() {
         let mut runtime = Runtime::new();

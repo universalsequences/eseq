@@ -331,6 +331,73 @@ struct RegisteredSubtreeOwner {
     callable: Value,
 }
 
+/// Last render of a keyed subtree owner, kept so a parent rerun (an *fx*
+/// owner switch, a buffer-root rerender) can re-emit an unchanged panel
+/// without re-invoking its body. Valid only while the owner node is clean:
+/// the same body chunk, equal captured inputs, and no dirty reactive
+/// dependency mean the render is reproducible.
+struct SubtreeRenderCache {
+    value: Value,
+    chunk_idx: usize,
+    /// Deep-cloned captured upvalues from render time. Live cells can be
+    /// mutated in place by reactive writes, so the snapshot must not share
+    /// Rcs with the closure.
+    upvalues: Vec<Value>,
+    parent_root_id: Option<u64>,
+    /// Every reactive field read during the render, descendants included,
+    /// replayed into the enclosing effect capture on reuse.
+    reactive_reads: HashSet<ReactiveFieldKey>,
+    /// Every global symbol read during the render, descendants included.
+    symbol_reads: HashSet<String>,
+}
+
+/// Equality for cached subtree captured inputs. Deliberately stricter than
+/// `Value::PartialEq`: callables compare by chunk index only there, which
+/// would treat two closures over different data as equal, so any callable
+/// (or otherwise opaque value) makes the inputs "changed" and forces a
+/// fresh render.
+fn subtree_input_value_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Nil, Value::Nil) => true,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Symbol(x), Value::Symbol(y)) => x == y,
+        (Value::Keyword(x), Value::Keyword(y)) => x == y,
+        (Value::NodeRef(x), Value::NodeRef(y)) => x == y,
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(a, b)| subtree_input_value_equal(&a.borrow(), &b.borrow()))
+        }
+        (Value::Map(x), Value::Map(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(key, a)| {
+                    y.get(key)
+                        .is_some_and(|b| subtree_input_value_equal(&a.borrow(), &b.borrow()))
+                })
+        }
+        (
+            Value::ReactiveRef {
+                namespace: a_ns,
+                field: a_field,
+                index: a_index,
+                kind: a_kind,
+                ..
+            },
+            Value::ReactiveRef {
+                namespace: b_ns,
+                field: b_field,
+                index: b_index,
+                kind: b_kind,
+                ..
+            },
+        ) => a_ns == b_ns && a_field == b_field && a_index == b_index && a_kind == b_kind,
+        _ => false,
+    }
+}
+
 /// Sentinel "index" recorded when a dependent reads a list's length.
 pub const LEN_READ_SENTINEL: usize = usize::MAX;
 
@@ -603,6 +670,10 @@ pub struct ReactiveDag {
     subtree_children: HashMap<u64, HashSet<NodeId>>,
     /// dependent -> (dependency -> read scope). Missing entries mean All.
     dependency_scopes: HashMap<NodeId, HashMap<NodeId, ReadScope>>,
+    /// Keyed subtree owners absent from their parent's latest run. Their
+    /// nodes and dependency edges stay in the dag so dirtiness accrues while
+    /// they are offscreen, but dirty processing must not rerender them.
+    detached_subtree_effects: HashSet<NodeId>,
 }
 
 pub fn format_lisp_value(value: &Value) -> String {
@@ -2020,6 +2091,10 @@ pub struct VM {
     current_effect_symbol_reads: Option<HashSet<String>>,
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
     current_subtree_reactive_reads: HashMap<u64, HashSet<ReactiveFieldKey>>,
+    /// subtree_root_id -> last render, reused when a parent rerun
+    /// re-registers a clean keyed subtree with unchanged inputs. Never
+    /// snapshotted: transactional-eval rollback clears it instead.
+    subtree_render_cache: HashMap<u64, SubtreeRenderCache>,
     pub macros: HashMap<String, MacroDef>,
     pub source_manager: SourceManager,
     pub(crate) source_load_errors: Vec<String>,
@@ -3090,6 +3165,7 @@ impl ReactiveDag {
             subtree_effects: HashMap::new(),
             subtree_children: HashMap::new(),
             dependency_scopes: HashMap::new(),
+            detached_subtree_effects: HashSet::new(),
         }
     }
 
@@ -3161,7 +3237,22 @@ impl ReactiveDag {
             self.index_source_node(source, id);
         }
         self.index_subtree_effect_node(&node);
+        self.detached_subtree_effects.remove(&id);
         self.nodes.insert(id, node);
+    }
+
+    pub fn detach_subtree_effect(&mut self, id: NodeId) {
+        if self.nodes.contains_key(&id) {
+            self.detached_subtree_effects.insert(id);
+        }
+    }
+
+    pub fn attach_subtree_effect(&mut self, id: NodeId) {
+        self.detached_subtree_effects.remove(&id);
+    }
+
+    pub fn is_detached_subtree_effect(&self, id: NodeId) -> bool {
+        self.detached_subtree_effects.contains(&id)
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
@@ -3172,6 +3263,7 @@ impl ReactiveDag {
             self.unindex_subtree_effect_node(&node);
         }
         self.dirty_nodes.remove(&id);
+        self.detached_subtree_effects.remove(&id);
         self.dependency_scopes.remove(&id);
         if let Some(dependents) = self.edges.remove(&id) {
             for dependent in dependents {
@@ -3226,7 +3318,15 @@ impl ReactiveDag {
     }
 
     pub fn topo_sort_dirty(&self) -> Vec<NodeId> {
-        let dirty = self.dirty_nodes.clone();
+        // Detached subtree owners keep their dirty flag (it records that a
+        // dependency changed while they were offscreen) but must not run
+        // until they are re-registered by a parent render.
+        let dirty = self
+            .dirty_nodes
+            .iter()
+            .copied()
+            .filter(|id| !self.detached_subtree_effects.contains(id))
+            .collect::<HashSet<_>>();
 
         if dirty.is_empty() {
             return vec![];
@@ -3592,6 +3692,7 @@ impl VM {
             current_effect_symbol_reads: None,
             current_subtree_capture_stack: Vec::new(),
             current_subtree_reactive_reads: HashMap::new(),
+            subtree_render_cache: HashMap::new(),
             macros: HashMap::new(),
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
@@ -3987,6 +4088,9 @@ impl VM {
     }
 
     pub fn restore_state(&mut self, snapshot: VmStateSnapshot) {
+        // Rolling back may resurrect dag nodes whose cached renders were
+        // taken against the failed timeline; memoization restarts cold.
+        self.subtree_render_cache.clear();
         self.chunks = snapshot.chunks;
         self.current_chunk = snapshot.current_chunk;
         self.globals = snapshot.globals;
@@ -4391,6 +4495,7 @@ impl VM {
     }
 
     pub fn clear_effects_for_owner(&mut self, owner_buffer_id: Option<BufferId>) {
+        self.subtree_render_cache.clear();
         for id in self.dag.effect_ids_for_owner(owner_buffer_id) {
             self.dag.remove_node(id);
         }
@@ -4399,6 +4504,7 @@ impl VM {
     }
 
     pub fn clear_subtree_effects_for_named_target(&mut self, target_name: &str) {
+        self.subtree_render_cache.clear();
         let target = EffectTarget::BufferName(target_name.to_string());
         let ids = self
             .dag
@@ -4426,6 +4532,7 @@ impl VM {
     }
 
     pub fn clear_effects_for_module(&mut self, module: &std::path::Path) {
+        self.subtree_render_cache.clear();
         let ids = self
             .dag
             .nodes
@@ -4535,6 +4642,11 @@ impl VM {
         if symbols.is_empty() {
             return Vec::new();
         }
+        // Cached subtree renders that read a redefined symbol are stale even
+        // though no reactive dependency changed; the parent rerun this
+        // triggers must rebuild them.
+        self.subtree_render_cache
+            .retain(|_, entry| entry.symbol_reads.is_disjoint(symbols));
         let mut rerendered = Vec::new();
         let ids = self
             .dag
@@ -4569,14 +4681,20 @@ impl VM {
         self.process_dirty_reactive()
     }
 
-    fn clear_subtree_effects_for_current_context(&mut self) {
+    /// A top-level effect rerun re-registers the keyed subtrees its body
+    /// still contains. Detach (rather than remove) the context's subtree
+    /// owners first: a subtree absent from the rerun keeps its node,
+    /// dependency edges, and render cache, so a later rerun that brings it
+    /// back (an *fx* owner toggle) can reuse the cached render when nothing
+    /// it depends on changed while it was offscreen (eseq-4kd).
+    fn detach_subtree_effects_for_current_context(&mut self) {
         let owner_buffer_id = self.current_effect_source_buffer_id;
         let target = self.current_effect_target.clone();
         for id in self
             .dag
             .subtree_effect_ids_for_context(owner_buffer_id, &target)
         {
-            self.dag.remove_node(id);
+            self.dag.detach_subtree_effect(id);
         }
     }
 
@@ -4595,6 +4713,9 @@ impl VM {
     /// imported child and the edit would never land.
     pub fn begin_import_pass(&mut self) {
         self.import_pass_epoch = self.import_pass_epoch.wrapping_add(1);
+        // A reload can redefine any global a cached subtree render read
+        // through its unchanged chunk; drop every memoized render.
+        self.subtree_render_cache.clear();
     }
 
     pub fn begin_inline_widget_capture(&mut self) {
@@ -4875,9 +4996,157 @@ impl VM {
             &self.current_effect_target,
             stable_key,
         );
+        if let Some(cached) = self.try_reuse_cached_subtree(root_id, parent_root_id, &callable) {
+            // Refresh the owner node with the fresh registration (which also
+            // re-attaches it), then re-attach the nested subtrees embedded in
+            // the cached tree so their dirty processing resumes.
+            self.sync_subtree_owner_node(
+                root_id,
+                parent_root_id,
+                stable_key.to_string(),
+                callable,
+            );
+            for id in self.dag.descendant_subtree_effect_ids(root_id) {
+                self.dag.attach_subtree_effect(id);
+            }
+            return Ok(cached);
+        }
         let owner =
             self.sync_subtree_owner_node(root_id, parent_root_id, stable_key.to_string(), callable);
-        self.render_registered_subtree_owner(&owner)
+        let (rendered, reactive_reads, symbol_reads) =
+            self.render_subtree_owner_capturing_reads(&owner)?;
+        self.dag.clear_dirty(owner.node_id);
+        self.store_subtree_render_cache(&owner, &rendered, reactive_reads, symbol_reads);
+        Ok(rendered)
+    }
+
+    /// Returns the cached rendered tree for a keyed subtree when it is safe
+    /// to skip re-invoking the body: the owner node exists and is clean (no
+    /// reactive dependency changed since its last render, including while it
+    /// was detached), the parent is unchanged, and the fresh closure is the
+    /// same body chunk over equal captured inputs. Replays the cached
+    /// reactive/symbol reads into the enclosing effect capture so parent
+    /// dependency sets match a real render.
+    fn try_reuse_cached_subtree(
+        &mut self,
+        root_id: u64,
+        parent_root_id: Option<u64>,
+        callable: &Value,
+    ) -> Option<Value> {
+        let node_id = self.dag.effect_id_for_subtree_root(root_id)?;
+        if self.dag.is_dirty(node_id) {
+            return None;
+        }
+        self.registered_subtree_owner(root_id)?;
+        let cached = self.subtree_render_cache.get(&root_id)?;
+        if cached.parent_root_id != parent_root_id {
+            return None;
+        }
+        let Value::Closure(chunk_idx, upvalues) = callable else {
+            return None;
+        };
+        if *chunk_idx != cached.chunk_idx || upvalues.len() != cached.upvalues.len() {
+            return None;
+        }
+        if !upvalues
+            .iter()
+            .zip(cached.upvalues.iter())
+            .all(|(live, snapshot)| subtree_input_value_equal(&live.borrow(), snapshot))
+        {
+            return None;
+        }
+        let value = cached.value.clone();
+        let reactive_reads = cached.reactive_reads.clone();
+        let symbol_reads = cached.symbol_reads.clone();
+        if let Some(reads) = self.current_effect_reactive_reads.as_mut() {
+            reads.extend(reactive_reads);
+        }
+        if let Some(symbols) = self.current_effect_symbol_reads.as_mut() {
+            symbols.extend(symbol_reads);
+        }
+        Some(value)
+    }
+
+    /// Renders a subtree owner while capturing the flat reactive/symbol read
+    /// sets of the render (descendants included), then merges them back into
+    /// the enclosing capture exactly as an uncaptured render would have.
+    fn render_subtree_owner_capturing_reads(
+        &mut self,
+        owner: &RegisteredSubtreeOwner,
+    ) -> Result<(Value, HashSet<ReactiveFieldKey>, HashSet<String>), VMError> {
+        let previous_reactive_reads = self
+            .current_effect_reactive_reads
+            .replace(HashSet::new());
+        let previous_symbol_reads = self.current_effect_symbol_reads.replace(HashSet::new());
+        let result = self.render_registered_subtree_owner(owner);
+        let captured_reactive_reads = self.current_effect_reactive_reads.take().unwrap_or_default();
+        let captured_symbol_reads = self.current_effect_symbol_reads.take().unwrap_or_default();
+        self.current_effect_reactive_reads = previous_reactive_reads.map(|mut reads| {
+            reads.extend(captured_reactive_reads.iter().cloned());
+            reads
+        });
+        self.current_effect_symbol_reads = previous_symbol_reads.map(|mut symbols| {
+            symbols.extend(captured_symbol_reads.iter().cloned());
+            symbols
+        });
+        result.map(|value| (value, captured_reactive_reads, captured_symbol_reads))
+    }
+
+    fn store_subtree_render_cache(
+        &mut self,
+        owner: &RegisteredSubtreeOwner,
+        rendered: &Value,
+        reactive_reads: HashSet<ReactiveFieldKey>,
+        symbol_reads: HashSet<String>,
+    ) {
+        let Value::Closure(chunk_idx, upvalues) = &owner.callable else {
+            self.subtree_render_cache.remove(&owner.root_id);
+            return;
+        };
+        let upvalues = upvalues
+            .iter()
+            .map(|cell| cell.borrow().deep_clone())
+            .collect();
+        self.subtree_render_cache.insert(
+            owner.root_id,
+            SubtreeRenderCache {
+                value: rendered.clone(),
+                chunk_idx: *chunk_idx,
+                upvalues,
+                parent_root_id: owner.parent_root_id,
+                reactive_reads,
+                symbol_reads,
+            },
+        );
+    }
+
+    /// A standalone rerender of one subtree leaves every ancestor's cached
+    /// tree holding the stale embedded copy; drop those entries so an
+    /// ancestor cannot resurrect it.
+    fn invalidate_ancestor_subtree_render_caches(&mut self, root_id: u64) {
+        let mut current = root_id;
+        let mut hops = 0usize;
+        while hops < 64 {
+            hops += 1;
+            let Some(node_id) = self.dag.effect_id_for_subtree_root(current) else {
+                break;
+            };
+            let parent = match self.dag.nodes.get(&node_id) {
+                Some(ReactiveNode::Effect {
+                    parent_subtree_root_id,
+                    ..
+                }) => *parent_subtree_root_id,
+                _ => None,
+            };
+            let Some(parent) = parent else {
+                break;
+            };
+            if parent == current {
+                break;
+            }
+            self.subtree_render_cache.remove(&parent);
+            current = parent;
+        }
     }
 
     fn sorted_current_reactive_reads(&self) -> Vec<ReactiveFieldKey> {
@@ -5337,6 +5606,12 @@ impl VM {
                     if !self.dag.is_dirty(node_id) {
                         continue;
                     }
+                    // A top-level effect earlier in this pass may have
+                    // detached this subtree (its panel left the tree); leave
+                    // it dirty for a future re-registration to see.
+                    if self.dag.is_detached_subtree_effect(node_id) {
+                        continue;
+                    }
                     let Some(chunk_idx) = self.dag.chunk_idx(node_id) else {
                         continue;
                     };
@@ -5403,6 +5678,23 @@ impl VM {
                                 error
                             })?;
                             let render_elapsed = started.elapsed();
+                            let captured_reactive_reads = self
+                                .current_effect_reactive_reads
+                                .clone()
+                                .unwrap_or_default();
+                            let captured_symbol_reads = self
+                                .current_effect_symbol_reads
+                                .clone()
+                                .unwrap_or_default();
+                            self.store_subtree_render_cache(
+                                &owner,
+                                &rendered_tree,
+                                captured_reactive_reads,
+                                captured_symbol_reads,
+                            );
+                            // Ancestors' cached trees now embed a stale copy
+                            // of this subtree; they must re-render if reused.
+                            self.invalidate_ancestor_subtree_render_caches(root_id);
                             let mut path = Vec::new();
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
@@ -5488,7 +5780,7 @@ impl VM {
                         self.tracking_stack.push(node_id);
                     }
                     if is_top_level_effect {
-                        self.clear_subtree_effects_for_current_context();
+                        self.detach_subtree_effects_for_current_context();
                     }
                     let label = self.reactive_node_label(node_id);
                     let started = Instant::now();
