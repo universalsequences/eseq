@@ -71,9 +71,12 @@ pub const NO_TRANSPORT_PHASE_PARAM: u32 = u32::MAX;
 /// Names of every effect presented through the built-in effect path.
 ///
 /// This combines native and DGenLisp-backed effects and sorts the result for
-/// direct use by user-facing effect lists.
+/// direct use by user-facing effect lists. Retired built-ins
+/// ([`EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES`]) are omitted: they stay
+/// loadable for saved projects but are no longer offered when picking a new
+/// effect.
 pub fn builtin_effect_names() -> Vec<&'static str> {
-    let mut names = EffectDescriptor::builtin_insert_names().to_vec();
+    let mut names = EffectDescriptor::listable_builtin_insert_names();
     names.extend_from_slice(dgen_builtin::NAMES);
     names.sort_by_key(|name| name.to_ascii_lowercase());
     names
@@ -438,8 +441,9 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        builtin_effect_names, tensor_param_descriptors_from_manifest, EffectDescriptor,
-        EffectSlotSnapshot, EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        builtin_effect_name_from_project_name, builtin_effect_names,
+        tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
+        EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
         TensorParamDescriptor,
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
@@ -1632,13 +1636,33 @@ mod tests {
                 "Tape"
             ]
         );
+        // Retired built-ins are absent from every user-facing listing…
+        assert_eq!(
+            EffectDescriptor::listable_builtin_insert_names(),
+            vec![
+                "Compressor",
+                "Dimension",
+                "DJ Mixer",
+                "EQ8",
+                "Filter",
+                "Filterbank",
+                "Glue Compressor",
+                "Limiter",
+                "Multiverb",
+                "OTT",
+                "Phaser-Flanger",
+                "Reverb",
+                "Roar",
+                "Space Echo",
+                "Str8 Delay",
+                "Tape"
+            ]
+        );
         assert_eq!(
             builtin_effect_names(),
             vec![
-                "444 Compressor",
                 "Compressor",
                 "Convolution Reverb",
-                "Delay",
                 "Dimension",
                 "DJ Mixer",
                 "EQ8",
@@ -1657,6 +1681,31 @@ mod tests {
                 "Tape"
             ]
         );
+        // …but still resolve and instantiate by name, so saved projects load.
+        for retired in EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES {
+            assert!(EffectDescriptor::is_retired_builtin_insert_name(retired));
+            assert_eq!(
+                EffectDescriptor::canonical_builtin_insert_name(retired),
+                Some(*retired)
+            );
+            assert_eq!(
+                EffectDescriptor::builtin_insert(retired)
+                    .unwrap_or_else(|| panic!("retired {retired} should still load"))
+                    .name,
+                *retired
+            );
+            assert_eq!(
+                builtin_effect_name_from_project_name(&format!(
+                    "{}{retired}",
+                    EffectDescriptor::BUILTIN_INSERT_PREFIX
+                )),
+                Some(*retired)
+            );
+        }
+        assert!(!EffectDescriptor::is_retired_builtin_insert_name(
+            "Str8 Delay"
+        ));
+        assert!(EffectDescriptor::is_retired_builtin_insert_name("Dynamics"));
         assert_eq!(
             EffectDescriptor::canonical_builtin_insert_name("404 Compressor"),
             Some("444 Compressor")
@@ -2555,6 +2604,14 @@ impl EffectDescriptor {
         }
     }
 
+    /// Built-ins that are still loadable but no longer offered in any
+    /// add-effect picker: superseded by newer builtins (see `eseq-wyu`).
+    /// "444 Compressor" is replaced by "Compressor"/"Glue Compressor" and
+    /// "Delay" by "Str8 Delay".
+    pub const RETIRED_BUILTIN_INSERT_NAMES: &'static [&'static str] = &["444 Compressor", "Delay"];
+
+    /// Every built-in insert that can be instantiated, including retired ones.
+    /// User-facing pickers want [`Self::listable_builtin_insert_names`].
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
             "444 Compressor",
@@ -2576,6 +2633,22 @@ impl EffectDescriptor {
             "Str8 Delay",
             "Tape",
         ]
+    }
+
+    /// True when `name` (canonical or legacy alias) names a retired built-in.
+    pub fn is_retired_builtin_insert_name(name: &str) -> bool {
+        Self::canonical_builtin_insert_name(name)
+            .is_some_and(|canonical| Self::RETIRED_BUILTIN_INSERT_NAMES.contains(&canonical))
+    }
+
+    /// Built-in inserts offered when picking a new effect: everything in
+    /// [`Self::builtin_insert_names`] minus the retired ones.
+    pub fn listable_builtin_insert_names() -> Vec<&'static str> {
+        Self::builtin_insert_names()
+            .iter()
+            .copied()
+            .filter(|name| !Self::RETIRED_BUILTIN_INSERT_NAMES.contains(name))
+            .collect()
     }
 
     pub fn builtin_insert_project_name(name: &str) -> Option<String> {

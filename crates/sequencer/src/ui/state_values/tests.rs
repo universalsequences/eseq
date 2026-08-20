@@ -3032,6 +3032,23 @@
     }
 
     #[test]
+    fn metal_seq_audio_effect_tree_omits_retired_builtins() {
+        let tree = build_audio_effect_tree("");
+        let labels = top_level_tree_field_strings(&tree, "label");
+        let label = |name: &str| labels.iter().any(|l| l.as_deref() == Some(name));
+
+        for retired in sequencer::effects::EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES {
+            assert!(
+                !label(retired),
+                "retired built-in {retired} should not be pickable: {tree:?}"
+            );
+        }
+        for kept in ["Str8 Delay", "Space Echo", "Compressor", "Glue Compressor"] {
+            assert!(label(kept), "{kept} should still be pickable: {tree:?}");
+        }
+    }
+
+    #[test]
     fn metal_seq_audio_effect_tree_search_has_no_headers_or_sections() {
         let tree = build_audio_effect_tree("filter");
         let labels = top_level_tree_field_strings(&tree, "label");
