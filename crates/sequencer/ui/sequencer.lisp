@@ -414,7 +414,7 @@
     (sdf/fill (sdf/rounded-rect width height 0.45)
       (rgba 0 0 0 0))))
 
-(defwidget drum-rack-indicator
+(defwidget group-track-indicator
   :width 1.5 :height 1.5
   :state ()
   :shader
@@ -1710,9 +1710,9 @@
       (set! eseq.seq-core-state/selected-bus bus-idx)
       false)))
 
-;; ── Rack-specific member chrome (docs/drum-rack-v2-spec.md, "UI") ───────
-;; Member rows are exactly the normal track UI; the ONLY rack additions are
-;; the pad-note badge and the choke-group selector rendered beside the row.
+;; ── Group member chrome ─────────────────────────────────────────────────
+;; Every group member gets the same indented prefix used by drum racks. It
+;; visually connects the ordinary track row to the containing group header.
 
 (def %rack-pad-badge (gidx pad)
   (h-stack :gap 0.08 :align :center
@@ -1740,16 +1740,15 @@
       :color :dim
       :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad 1))))
 
-(def %rack-member-chrome (gidx i)
-  (drum-rack-indicator)
+(def %group-member-chrome (gidx i)
+  (group-track-indicator
+    :key (str "group-track-indicator-" (eseq.drum-rack-v2/group-id gidx) "-" i))
   )
 
 (def %group-member-row (gidx i)
-  (if (eseq.drum-rack-v2/rack? gidx)
-    (h-stack :width :fill :gap 0.15 :align :start
-      (%rack-member-chrome gidx i)
-      (box :width 0 :flex 1 (%track-row i)))
-    (%track-row i)))
+  (h-stack :width :fill :gap 0.15 :align :start
+    (%group-member-chrome gidx i)
+    (box :width 0 :flex 1 (%track-row i))))
 
 ;; ── Pad grid performance view ───────────────────────────────────────────
 ;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It

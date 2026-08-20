@@ -49248,6 +49248,14 @@
                 1,
                 "regular group member track {member} should be nested in its block"
             );
+            let indicator = find_layout_node_by_stable_key_suffix(
+                block,
+                &format!("/group-track-indicator-8-{member}"),
+            )
+            .unwrap_or_else(|| {
+                panic!("regular group member {member} should have a group prefix")
+            });
+            assert_finite_nonzero_rect(indicator, "regular group member prefix");
         }
 
         apply_group_bindings(&mut editor, regular_group_fixture(true));
