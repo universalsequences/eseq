@@ -83,6 +83,12 @@ fn sync_after_track_topology_delete(
     *ctx.shared.record_armed.lock().unwrap() = app.graph.record_armed.clone();
     *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
     *ctx.shared.bus_state.lock().unwrap() = app.buses.clone();
+    natives::prune_stale_group_references(
+        &ctx.shared.armed_rack,
+        &ctx.shared.active_delete_target,
+        &ctx.shared.active_delete_target_version,
+        &app.groups,
+    );
     *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
 
     let rt = editor.runtime_mut();

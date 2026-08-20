@@ -284,34 +284,66 @@ impl App {
     /// graph question rather than a flag test: soloing a parent group has to
     /// keep its upstream rack buses audible, and soloing a rack has to keep the
     /// downstream parent bus open or the rack's own audio never reaches the
-    /// mix. So the audible set is every soloed bus plus everything reachable
-    /// from it along `BusOutput::Bus` edges in *either* direction.
+    /// mix. So the audible set is every soloed bus, everything reachable from
+    /// it walking *only* destination edges, and everything reachable walking
+    /// *only* feeder edges. The two walks are kept strictly separate: a single
+    /// shared worklist would let a feeder hop follow a destination hop, so
+    /// soloing one rack inside a group would drag every sibling rack of that
+    /// group back into the audible set and solo would do nothing.
     pub(crate) fn solo_audible_buses(&self) -> Vec<crate::sequencer::BusId> {
-        let mut audible: Vec<crate::sequencer::BusId> =
+        let soloed: Vec<crate::sequencer::BusId> =
             self.buses.iter().filter(|bus| bus.solo).map(|bus| bus.id).collect();
+        let mut audible = soloed.clone();
+
+        // Destination walk: from each soloed bus down the chain toward the mix,
+        // so every bus that carries its audio stays open.
+        let mut seen = soloed.clone();
+        let mut queue = soloed.clone();
         let mut cursor = 0;
-        while cursor < audible.len() {
-            let current = audible[cursor];
+        while cursor < queue.len() {
+            let current = queue[cursor];
             cursor += 1;
-            // Downstream: the bus this one feeds.
-            let downstream = self
+            let destination = self
                 .buses
                 .iter()
                 .find(|bus| bus.id == current)
                 .and_then(|bus| bus.output.destination())
                 .map(crate::sequencer::BusId);
-            // Upstream: every bus feeding this one.
-            let upstream = self
+            if let Some(id) = destination {
+                if !seen.contains(&id) {
+                    seen.push(id);
+                    queue.push(id);
+                    if !audible.contains(&id) {
+                        audible.push(id);
+                    }
+                }
+            }
+        }
+
+        // Feeder walk: from each soloed bus up into the buses that feed it, so
+        // soloing a group keeps its members audible.
+        let mut seen = soloed.clone();
+        let mut queue = soloed;
+        let mut cursor = 0;
+        while cursor < queue.len() {
+            let current = queue[cursor];
+            cursor += 1;
+            let feeders = self
                 .buses
                 .iter()
                 .filter(|bus| bus.output.destination() == Some(current.0))
                 .map(|bus| bus.id);
-            for id in downstream.into_iter().chain(upstream) {
-                if !audible.contains(&id) {
-                    audible.push(id);
+            for id in feeders {
+                if !seen.contains(&id) {
+                    seen.push(id);
+                    queue.push(id);
+                    if !audible.contains(&id) {
+                        audible.push(id);
+                    }
                 }
             }
         }
+
         audible
     }
 

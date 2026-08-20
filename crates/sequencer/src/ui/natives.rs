@@ -2183,6 +2183,63 @@ pub(crate) fn toggle_rack_pad_arm(
     armed
 }
 
+/// Whether `armed_rack` still names a live drum rack. Group ids are recycled
+/// (`max(id) + 1` in `app::edit`), so a stale arm is worse than a dangling
+/// reference: the next group created inherits the dead id and comes up
+/// pad-armed, stealing the keyboard from the sequencer's bare-key shortcuts.
+/// Ungrouping or converting a rack away is the same staleness — the id lives
+/// on, but no longer as a rack.
+pub(crate) fn armed_rack_still_live(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    armed_rack: Option<u64>,
+) -> bool {
+    let Some(rack_id) = armed_rack else {
+        return true;
+    };
+    groups
+        .iter()
+        .any(|group| group.id == rack_id && group.is_rack())
+}
+
+/// Whether the armed delete target still names something that exists. Only
+/// the group-addressed variant can be invalidated by a group edit; the
+/// track-addressed ones are reindexed (and cleared) on their own paths.
+pub(crate) fn delete_target_still_live(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    target: Option<&ActiveDeleteTarget>,
+) -> bool {
+    match target {
+        Some(ActiveDeleteTarget::MixerGroup { group_id }) => {
+            groups.iter().any(|group| group.id == *group_id)
+        }
+        _ => true,
+    }
+}
+
+/// Drops shared group references that the just-applied topology edit killed.
+/// Called from the two group-topology sync choke points
+/// (`sync_after_track_topology_delete`, `sync_after_rack_structure_change`),
+/// so delete/ungroup/convert/audition all get the same invalidation without
+/// each handler remembering to clear.
+pub(crate) fn prune_stale_group_references(
+    armed_rack: &Arc<Mutex<Option<u64>>>,
+    active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: &Arc<AtomicUsize>,
+    groups: &[sequencer::project::ProjectTrackGroup],
+) {
+    {
+        let mut guard = armed_rack.lock().unwrap();
+        if !armed_rack_still_live(groups, *guard) {
+            *guard = None;
+        }
+    }
+    let mut guard = active_delete_target.lock().unwrap();
+    if !delete_target_still_live(groups, guard.as_ref()) {
+        *guard = None;
+        bump_delete_target_version(active_delete_target_version);
+    }
+}
+
 fn arm_selected_tracks_delete_target(
     selected: &HashSet<usize>,
     active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
@@ -7442,6 +7499,154 @@ mod tests {
             None,
             "an out-of-range track toggles nothing"
         );
+    }
+
+    /// A plain (non-rack) group with the same id shape as `arm_test_rack`,
+    /// for the ungroup/convert-away cases and for id recycling.
+    fn plain_test_group(id: u64) -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            rack: None,
+            id,
+            ..arm_test_rack()
+        }
+    }
+
+    fn shared_group_state(
+        armed_rack: Option<u64>,
+        target: Option<ActiveDeleteTarget>,
+    ) -> (
+        Arc<Mutex<Option<u64>>>,
+        Arc<Mutex<Option<ActiveDeleteTarget>>>,
+        Arc<AtomicUsize>,
+    ) {
+        (
+            Arc::new(Mutex::new(armed_rack)),
+            Arc::new(Mutex::new(target)),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    /// Group ids are recycled (`max(id) + 1`), so an arm left behind by a
+    /// deleted rack does not merely dangle — the next group created inherits
+    /// the id and would come up pad-armed, swallowing the bare-key sequencer
+    /// shortcuts.
+    #[test]
+    fn deleting_an_armed_rack_clears_the_arm_so_a_recycled_id_is_not_armed() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(Some(7), None);
+
+        // The rack is deleted: no group carries id 7 any more.
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[],
+        );
+        assert_eq!(*armed_rack.lock().unwrap(), None);
+
+        // A brand-new group recycles id 7 and must not inherit the arm.
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[plain_test_group(7)],
+        );
+        assert_eq!(
+            *armed_rack.lock().unwrap(),
+            None,
+            "a recycled group id must not revive a dead rack's pad arm"
+        );
+    }
+
+    /// Ungroup and convert-to-plain leave the id alive but no longer a rack;
+    /// pad routing has nothing to answer with, so the arm must go too.
+    #[test]
+    fn an_armed_group_that_stops_being_a_rack_is_disarmed() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(Some(7), None);
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[arm_test_rack()],
+        );
+        assert_eq!(
+            *armed_rack.lock().unwrap(),
+            Some(7),
+            "a live rack keeps its arm across unrelated topology edits"
+        );
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[plain_test_group(7)],
+        );
+        assert_eq!(*armed_rack.lock().unwrap(), None);
+    }
+
+    /// Same recycling hazard on the delete target: a stale group id turns one
+    /// stray Delete into the destruction of a brand-new, unrelated group.
+    #[test]
+    fn deleting_the_targeted_group_clears_the_delete_target() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(None, Some(ActiveDeleteTarget::MixerGroup { group_id: 7 }));
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[arm_test_rack()],
+        );
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerGroup { group_id: 7 }),
+            "a live group keeps its delete target"
+        );
+        assert_eq!(delete_target_version.load(Ordering::Relaxed), 0);
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[],
+        );
+        assert_eq!(*delete_target.lock().unwrap(), None);
+        assert_eq!(
+            delete_target_version.load(Ordering::Relaxed),
+            1,
+            "clearing the target must republish the delete-target read surfaces"
+        );
+
+        // Recycling id 7 onto a new group must not re-aim Delete at it.
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[plain_test_group(7)],
+        );
+        assert_eq!(*delete_target.lock().unwrap(), None);
+    }
+
+    /// Track-addressed delete targets are reindexed on their own paths; a
+    /// group edit must not clear them out from under the mixer.
+    #[test]
+    fn group_pruning_leaves_track_addressed_delete_targets_alone() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(None, Some(ActiveDeleteTarget::MixerTracks { tracks: vec![1, 2] }));
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[],
+        );
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks { tracks: vec![1, 2] })
+        );
+        assert_eq!(delete_target_version.load(Ordering::Relaxed), 0);
     }
 
     fn def_song_value_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> f64 {

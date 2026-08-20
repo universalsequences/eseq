@@ -6975,6 +6975,48 @@ mod tests {
         graph.process_block();
     }
 
+    /// Selecting one pad in each of two racks folds both racks into `racks`
+    /// and leaves the loose-member list empty, so the group color has no track
+    /// to come from. It must fall back instead of indexing an empty list.
+    #[test]
+    fn grouping_two_racks_with_no_loose_tracks_succeeds() {
+        let graph = TestLiveGraph::new("two-racks-group-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (first_id, first_bus) = app
+            .create_drum_rack_recorded(Some("Kit A".to_string()))
+            .expect("first drum rack");
+        let (second_id, second_bus) = app
+            .create_drum_rack_recorded(Some("Kit B".to_string()))
+            .expect("second drum rack");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.assign_rack_pad_track_recorded(first_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(second_id, 38, snare).expect("snare pad");
+        let first_color = app.groups.iter().find(|group| group.id == first_id)
+            .expect("first rack").color;
+
+        let parent_bus = app
+            .group_tracks_and_racks_recorded(Vec::new(), vec![first_id, second_id])
+            .expect("two racks group with no loose tracks");
+
+        let parent = app.groups.iter().find(|group| group.bus_id == parent_bus.0)
+            .expect("parent group");
+        assert!(parent.members.is_empty());
+        assert_eq!(parent.rack_members, vec![first_id, second_id]);
+        assert_eq!(parent.color, first_color, "the color falls back to the first rack's");
+        let bus_output = |app: &App, bus: crate::app::BusId| {
+            app.buses.iter().find(|channel| channel.id == bus).expect("bus").output
+        };
+        for rack_bus in [first_bus, second_bus] {
+            assert_eq!(
+                bus_output(&app, rack_bus),
+                crate::project::BusOutput::Bus(parent_bus.0),
+                "both rack buses chain into the parent bus",
+            );
+        }
+        graph.process_block();
+    }
+
     /// Solo has to follow `BusOutput::Bus` edges in both directions, or a
     /// chained rack is silent when its parent is soloed (and inaudible when it
     /// is soloed itself, because the parent gates its only path to the mix).
@@ -7020,6 +7062,45 @@ mod tests {
         set_solo(&mut app, other_bus, true);
         let audible = app.solo_audible_buses();
         assert_eq!(audible, vec![other_bus], "an unchained solo mutes the chain");
+        graph.process_block();
+    }
+
+    /// The two `BusOutput::Bus` walks must not chain through each other: from a
+    /// soloed rack we may walk to its parent bus, but never back down from that
+    /// parent into the rack's siblings, or solo leaves every sibling unmuted.
+    #[test]
+    fn soloing_one_rack_in_a_group_mutes_its_sibling_rack() {
+        let graph = TestLiveGraph::new("sibling-rack-solo-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (first_id, first_bus) = app
+            .create_drum_rack_recorded(None)
+            .expect("first drum rack");
+        let (second_id, second_bus) = app
+            .create_drum_rack_recorded(None)
+            .expect("second drum rack");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.assign_rack_pad_track_recorded(first_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(second_id, 38, snare).expect("snare pad");
+        let parent_bus = app
+            .group_tracks_and_racks_recorded(Vec::new(), vec![first_id, second_id])
+            .expect("two racks group under one parent bus");
+
+        let index = app.buses.iter().position(|channel| channel.id == first_bus)
+            .expect("first rack bus");
+        app.buses[index].solo = true;
+        app.push_bus_solo_mutes();
+
+        let audible = app.solo_audible_buses();
+        assert!(audible.contains(&first_bus), "the soloed rack stays audible");
+        assert!(
+            audible.contains(&parent_bus),
+            "the parent bus stays open so the soloed rack reaches the mix",
+        );
+        assert!(
+            !audible.contains(&second_bus),
+            "the sibling rack must not leak back in through the shared parent bus",
+        );
         graph.process_block();
     }
 

@@ -76,10 +76,10 @@
       (reactive-set "SEQ" "fx-step-value-velocity" (nth SEQ.velocities parameter-step))
       (reactive-set "SEQ" "fx-step-value-duration" (nth SEQ.durations parameter-step)))))
 
-(def cursor-num-steps ()
-  (if (seq-has-selected-bus?)
-    (nth SEQ.bus-num-steps selected-bus)
-    SEQ.tp-num-steps))
+;; The step cursor always tracks the current track's pattern length.  The old
+;; bus-gate step sequencer (and its `SEQ.bus-num-steps` reactive list) is gone,
+;; so a selected bus/group no longer implies a separate step count.
+(def cursor-num-steps () SEQ.tp-num-steps)
 
 (def current-step ()
   (mod eseq.vanilla/cursor-step (max 1 (cursor-num-steps))))

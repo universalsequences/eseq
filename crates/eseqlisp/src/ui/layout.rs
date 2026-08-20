@@ -756,6 +756,13 @@ impl<'a> LayoutEngine<'a> {
                 "font-size".to_string(),
                 Value::Number(inherited_font_size as f64),
             );
+            // Mark it as *inherited* rather than authored: popup-menu chrome
+            // deliberately keeps its own font size and must be able to tell the
+            // two apart (see widget_render::menu_style).
+            props.insert(
+                crate::widget_render::menu_style::INHERITED_FONT_SIZE_MARKER.to_string(),
+                Value::Bool(true),
+            );
         }
 
         // For scroll containers, inject content/viewport dimensions so the

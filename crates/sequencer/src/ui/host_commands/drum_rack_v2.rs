@@ -258,6 +258,12 @@ pub(super) fn sync_after_rack_structure_change(
     *ctx.shared.bus_state.lock().unwrap() = app.buses.clone();
     *ctx.shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
     *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
+    natives::prune_stale_group_references(
+        &ctx.shared.armed_rack,
+        &ctx.shared.active_delete_target,
+        &ctx.shared.active_delete_target_version,
+        &app.groups,
+    );
     push_solo_mutes(ctx.shared.lg_raw, &state);
     ctx.meters.cached_track_peak_levels =
         read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);

@@ -2311,8 +2311,14 @@ impl App {
             for track in &members {
                 app.set_track_output_all_scenes_unrecorded(*track, crate::sequencer::TrackOutput::Bus(bus));
             }
-            let color = app.track_colors.get(members[0])
+            // With only racks selected there is no loose member to take a color
+            // from, so fall back to the first rack's own group color.
+            let color = members.first()
+                .and_then(|track| app.track_colors.get(*track))
                 .map(|color| [color.r, color.g, color.b])
+                .or_else(|| racks.first().and_then(|rack| {
+                    app.groups.iter().find(|group| group.id == *rack).map(|group| group.color)
+                }))
                 .unwrap_or([0.5, 0.5, 0.5]);
             let group_id = app.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
             app.groups.push(crate::project::ProjectTrackGroup {

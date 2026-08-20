@@ -54,11 +54,6 @@ const MIN_CONTENT_WIDTH: f32 = 8.0;
 const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 /// Inner horizontal padding of a `menu-item` row (label inset / shortcut inset).
 const ITEM_PADDING_COLS: f32 = super::menu_style::TEXT_PADDING_H;
-/// Font size of a `menu-item` row when the call site gives none. Shared with
-/// the dropdown popup so the two menus render identical typography regardless
-/// of the tile font the context menu happens to be opened from.
-const ITEM_FONT_SIZE: f32 = super::menu_style::MENU_FONT_SIZE;
-
 pub struct ContextMenuWidget;
 pub struct MenuItemWidget;
 pub struct MenuSeparatorWidget;
@@ -330,9 +325,7 @@ impl WidgetDefinition for MenuItemWidget {
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        let font_size = get_prop_num(node, "font-size")
-            .map(f64_to_f32)
-            .unwrap_or(ITEM_FONT_SIZE);
+        let font_size = super::menu_style::menu_font_size_from_node(node);
         let text = get_prop_str(node, "text").unwrap_or_default();
         let mut width = ITEM_PADDING_COLS * 2.0 + measured_text_width(&text, font_size, ctx);
         if let Some(shortcut) = get_prop_str(node, "shortcut")
@@ -412,7 +405,7 @@ impl WidgetDefinition for MenuItemWidget {
                 ),
             }));
         }
-        let font_size = super::get_f32_prop(&node.props, "font-size", ITEM_FONT_SIZE);
+        let font_size = super::menu_style::menu_font_size_from_props(&node.props);
         let text_row = node.rect.row + (ITEM_ROW_HEIGHT - 1.0) * 0.5;
         if let Some(Value::String(text)) = node.props.get("text") {
             prims.push(MetalPrimitive::ProportionalText(
@@ -546,6 +539,102 @@ mod tests {
         assert!((rect.height - FRAME.height).abs() < 0.001);
         assert!((rect.col - FRAME.col).abs() < 0.001);
         assert!((rect.row - FRAME.row).abs() < 0.001);
+    }
+
+
+    fn widget_node(kind: &str, props: &[(&str, Value)], children: Vec<Value>) -> Value {
+        let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        map.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String(kind.to_string()))),
+        );
+        for (key, value) in props {
+            map.insert(key.to_string(), Rc::new(RefCell::new(value.clone())));
+        }
+        if !children.is_empty() {
+            map.insert(
+                "children".to_string(),
+                Rc::new(RefCell::new(Value::List(
+                    children
+                        .into_iter()
+                        .map(|child| Rc::new(RefCell::new(child)))
+                        .collect(),
+                ))),
+            );
+        }
+        Value::Map(map)
+    }
+
+    fn find_widget<'a>(node: &'a LayoutNode, widget_type: &str) -> Option<&'a LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    /// Regression (eseq-swo follow-up): the measure pass sized the panel from
+    /// the shared popup font while the render pass drew the label at the tile's
+    /// *inherited* font, so labels clipped (or the panel sat over-wide).
+    /// Both sides must now resolve the same size.
+    #[test]
+    fn panel_width_and_row_font_agree_under_a_non_default_tile_font() {
+        const LABEL: &str = "Rename this drum rack pad";
+        let tile_font = 12.0_f32;
+        assert!((tile_font - DEFAULT_FONT_SIZE).abs() > 0.01);
+        assert!((tile_font - super::super::menu_style::MENU_FONT_SIZE).abs() > 0.01);
+
+        let tree = widget_node(
+            "box",
+            &[("font-size", Value::Number(tile_font as f64))],
+            vec![widget_node(
+                "context-menu",
+                &[
+                    ("is-open", Value::Bool(true)),
+                    ("anchor-col", Value::Number(2.0)),
+                    ("anchor-row", Value::Number(2.0)),
+                ],
+                vec![widget_node(
+                    "menu-item",
+                    &[("text", Value::String(LABEL.to_string()))],
+                    vec![],
+                )],
+            )],
+        );
+
+        let layout = crate::layout::LayoutEngine::new(120, 40, 1.0)
+            .layout(&tree)
+            .expect("layout");
+        let item = find_widget(&layout, "menu-item").expect("menu-item laid out");
+
+        // The layout pass really did inject the inherited tile font — without
+        // it this test would pass vacuously.
+        assert!(
+            matches!(item.props.get("font-size"), Some(Value::Number(n)) if (*n as f32 - tile_font).abs() < 0.01),
+            "expected the inherited tile font to be injected into the row props"
+        );
+
+        // Render side resolves to the shared popup font, not the tile font.
+        let rendered = super::super::menu_style::menu_font_size_from_props(&item.props);
+        assert!(
+            (rendered - super::super::menu_style::MENU_FONT_SIZE).abs() < 0.001,
+            "render font {rendered} should be the shared popup font"
+        );
+
+        // Measure side (which drives the panel width) used the same value.
+        let width_at = |font_size: f32| {
+            ITEM_PADDING_COLS * 2.0
+                + LABEL.chars().count() as f32 * APPROX_CHAR_WIDTH * (font_size / DEFAULT_FONT_SIZE)
+        };
+        let expected = width_at(rendered);
+        assert!(expected > MIN_CONTENT_WIDTH, "label must clear the min width");
+        assert!(
+            (item.rect.width - expected).abs() < 0.001,
+            "panel row width {} should come from the rendered font ({expected}), not the tile font ({})",
+            item.rect.width,
+            width_at(tile_font)
+        );
     }
 
     fn menu_item_node(props: &[(&str, Value)]) -> Value {

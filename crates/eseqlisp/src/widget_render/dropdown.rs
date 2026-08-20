@@ -33,10 +33,6 @@ const SCROLLBAR_WIDTH: f32 = 0.4;
 const SCROLLBAR_MARGIN: f32 = 0.15;
 /// Approximate cell width per character for proportional text width estimation.
 const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
-/// Font size of the popup option rows when the call site gives none. Shared
-/// with `menu-item` so a dropdown popup and a context menu render identical
-/// typography; the trigger control keeps the ordinary text default.
-const MENU_FONT_SIZE: f32 = super::menu_style::MENU_FONT_SIZE;
 // Round action-menu glyphs sit optically below the midpoint when placed at
 // the font baseline's mathematical center.
 const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
@@ -576,9 +572,7 @@ impl WidgetDefinition for DropdownWidget {
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
-        let menu_font_size = get_prop_num(node, "font-size")
-            .map(f64_to_f32)
-            .unwrap_or(MENU_FONT_SIZE);
+        let menu_font_size = super::menu_style::menu_font_size_from_node(node);
         let props = props_from_node(node);
         let action_menu = is_action_menu(&props);
         let selected = get_selected(&props);
@@ -842,7 +836,7 @@ impl WidgetDefinition for DropdownWidget {
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
-        let menu_font_size = get_f32_prop(&node.props, "font-size", MENU_FONT_SIZE);
+        let menu_font_size = super::menu_style::menu_font_size_from_props(&node.props);
 
         let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
         let plocked = plock_active(&node.props);

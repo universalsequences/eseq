@@ -114,3 +114,36 @@ pub(crate) fn emit_row_highlight(
         viewport,
     );
 }
+
+/// Marker prop stamped by the layout pass next to an *inherited* `font-size`
+/// injection (see `ui::layout::build_layout_node`). Popup rows use it to tell
+/// "the tile around me happens to use this font" apart from "the call site
+/// explicitly asked for this font", which the raw pre-layout node the measure
+/// pass sees can distinguish for free.
+pub(crate) const INHERITED_FONT_SIZE_MARKER: &str = "_font-size-inherited";
+
+/// Popup-row font size resolved from the raw widget node — the measure pass.
+///
+/// Measurement drives the panel width, so it MUST agree with
+/// [`menu_font_size_from_props`], which the render pass uses for the draw call.
+pub(crate) fn menu_font_size_from_node(node: &crate::vm::Value) -> f32 {
+    crate::layout::get_prop_num(node, "font-size")
+        .map(crate::layout::f64_to_f32)
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(MENU_FONT_SIZE)
+}
+
+/// Popup-row font size resolved from laid-out props — the render pass.
+///
+/// An inherited (injected) `font-size` is deliberately ignored so popup chrome
+/// keeps one size everywhere; only an explicit `:font-size` at the call site
+/// overrides. Must stay in lockstep with [`menu_font_size_from_node`].
+pub(crate) fn menu_font_size_from_props(
+    props: &std::collections::HashMap<String, crate::vm::Value>,
+) -> f32 {
+    if props.contains_key(INHERITED_FONT_SIZE_MARKER) {
+        return MENU_FONT_SIZE;
+    }
+    let size = super::get_f32_prop(props, "font-size", MENU_FONT_SIZE);
+    if size > 0.0 { size } else { MENU_FONT_SIZE }
+}
