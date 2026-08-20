@@ -33,6 +33,10 @@ const SCROLLBAR_WIDTH: f32 = 0.4;
 const SCROLLBAR_MARGIN: f32 = 0.15;
 /// Approximate cell width per character for proportional text width estimation.
 const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
+/// Font size of the popup option rows when the call site gives none. Shared
+/// with `menu-item` so a dropdown popup and a context menu render identical
+/// typography; the trigger control keeps the ordinary text default.
+const MENU_FONT_SIZE: f32 = super::menu_style::MENU_FONT_SIZE;
 // Round action-menu glyphs sit optically below the midpoint when placed at
 // the font baseline's mathematical center.
 const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
@@ -572,6 +576,9 @@ impl WidgetDefinition for DropdownWidget {
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
+        let menu_font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(MENU_FONT_SIZE);
         let props = props_from_node(node);
         let action_menu = is_action_menu(&props);
         let selected = get_selected(&props);
@@ -582,6 +589,7 @@ impl WidgetDefinition for DropdownWidget {
             }
             for option in &options {
                 cache_text_widths(&option, font_size, ctx);
+                cache_text_widths(&option, menu_font_size, ctx);
             }
         }
         let height = get_prop_num(node, "height")
@@ -834,6 +842,7 @@ impl WidgetDefinition for DropdownWidget {
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
+        let menu_font_size = get_f32_prop(&node.props, "font-size", MENU_FONT_SIZE);
 
         let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
         let plocked = plock_active(&node.props);
@@ -1028,7 +1037,7 @@ impl WidgetDefinition for DropdownWidget {
             };
             let max_option_width = options
                 .iter()
-                .map(|o| text_width_cells(o, font_size))
+                .map(|o| text_width_cells(o, menu_font_size))
                 .fold(0.0_f32, f32::max);
             let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
             let menu_width = content_width.max(node.rect.width);
@@ -1105,7 +1114,7 @@ impl WidgetDefinition for DropdownWidget {
                             align_width: 0.0,
                             h_align: 0.0,
                             text: "✓".to_string(),
-                            font_size,
+                            font_size: menu_font_size,
                             scale: 1.0,
                             fg: check_color,
                             bg: transparent,
@@ -1114,7 +1123,8 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Option label
-                let option_display = truncate_text_to_width(option, item_text_width, font_size);
+                let option_display =
+                    truncate_text_to_width(option, item_text_width, menu_font_size);
                 if option_display.is_empty() {
                     continue;
                 }
@@ -1125,7 +1135,7 @@ impl WidgetDefinition for DropdownWidget {
                         align_width: 0.0,
                         h_align: 0.0,
                         text: option_display,
-                        font_size,
+                        font_size: menu_font_size,
                         scale: 1.0,
                         fg: text_color,
                         bg: transparent,

@@ -4,6 +4,11 @@
 //! placement policies, but their panel chrome and rows intentionally share this
 //! style so the two renderers cannot drift apart.
 
+/// Font size (px) for popup-menu rows — dropdown options and `menu-item`
+/// labels alike. Popup rows are chrome, not tile content, so they deliberately
+/// ignore the surrounding tile's inherited font size; an explicit `:font-size`
+/// prop still overrides this.
+pub(crate) const MENU_FONT_SIZE: f32 = 10.0;
 pub(crate) const ROW_HEIGHT: f32 = 1.4;
 pub(crate) const PANEL_PADDING_V: f32 = 0.3;
 pub(crate) const TEXT_PADDING_H: f32 = 0.6;

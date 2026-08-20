@@ -54,6 +54,10 @@ const MIN_CONTENT_WIDTH: f32 = 8.0;
 const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 /// Inner horizontal padding of a `menu-item` row (label inset / shortcut inset).
 const ITEM_PADDING_COLS: f32 = super::menu_style::TEXT_PADDING_H;
+/// Font size of a `menu-item` row when the call site gives none. Shared with
+/// the dropdown popup so the two menus render identical typography regardless
+/// of the tile font the context menu happens to be opened from.
+const ITEM_FONT_SIZE: f32 = super::menu_style::MENU_FONT_SIZE;
 
 pub struct ContextMenuWidget;
 pub struct MenuItemWidget;
@@ -328,7 +332,7 @@ impl WidgetDefinition for MenuItemWidget {
     ) -> Option<Size> {
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
-            .unwrap_or(ctx.inherited_font_size);
+            .unwrap_or(ITEM_FONT_SIZE);
         let text = get_prop_str(node, "text").unwrap_or_default();
         let mut width = ITEM_PADDING_COLS * 2.0 + measured_text_width(&text, font_size, ctx);
         if let Some(shortcut) = get_prop_str(node, "shortcut")
@@ -408,7 +412,7 @@ impl WidgetDefinition for MenuItemWidget {
                 ),
             }));
         }
-        let font_size = super::get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
+        let font_size = super::get_f32_prop(&node.props, "font-size", ITEM_FONT_SIZE);
         let text_row = node.rect.row + (ITEM_ROW_HEIGHT - 1.0) * 0.5;
         if let Some(Value::String(text)) = node.props.get("text") {
             prims.push(MetalPrimitive::ProportionalText(
@@ -542,6 +546,66 @@ mod tests {
         assert!((rect.height - FRAME.height).abs() < 0.001);
         assert!((rect.col - FRAME.col).abs() < 0.001);
         assert!((rect.row - FRAME.row).abs() < 0.001);
+    }
+
+    fn menu_item_node(props: &[(&str, Value)]) -> Value {
+        let mut map = HashMap::new();
+        for (key, value) in props {
+            map.insert(key.to_string(), Rc::new(RefCell::new(value.clone())));
+        }
+        Value::Map(map)
+    }
+
+    fn measure_menu_item(node: &Value, inherited_font_size: f32) -> Size {
+        let ctx = MeasureCtx {
+            text_measurer: None,
+            cell_w: 0.0,
+            cell_h: 0.0,
+            inherited_font_size,
+        };
+        MENU_ITEM_WIDGET
+            .measure(
+                node,
+                &[],
+                Constraints {
+                    min_width: 0.0,
+                    max_width: f32::INFINITY,
+                    min_height: 0.0,
+                    max_height: f32::INFINITY,
+                    aspect: 1.0,
+                },
+                &ctx,
+                &mut |_, _| None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn menu_item_ignores_the_inherited_tile_font_size() {
+        // The context menu is chrome: it must match a dropdown popup whatever
+        // font the tile it was opened from happens to use.
+        let node = menu_item_node(&[("text", Value::String("Rename".to_string()))]);
+        let small = measure_menu_item(&node, 8.0);
+        let large = measure_menu_item(&node, 24.0);
+        assert!((small.width - large.width).abs() < 0.001);
+
+        let expected = ITEM_PADDING_COLS * 2.0
+            + "Rename".chars().count() as f32
+                * APPROX_CHAR_WIDTH
+                * (super::super::menu_style::MENU_FONT_SIZE / DEFAULT_FONT_SIZE);
+        assert!((small.width - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn explicit_font_size_still_overrides_the_shared_menu_default() {
+        let node = menu_item_node(&[
+            ("text", Value::String("Rename".to_string())),
+            ("font-size", Value::Number(20.0)),
+        ]);
+        let measured = measure_menu_item(&node, 8.0);
+        let expected = ITEM_PADDING_COLS * 2.0
+            + "Rename".chars().count() as f32 * APPROX_CHAR_WIDTH * (20.0 / DEFAULT_FONT_SIZE);
+        assert!((measured.width - expected).abs() < 0.001);
     }
 
     #[test]
