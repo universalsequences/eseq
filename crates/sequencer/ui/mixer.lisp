@@ -14,6 +14,7 @@
 ;; that src/ui/input.rs evals by name.  Deleted as each consumer converts.
 
 (import eseq.track-collapse)
+(import eseq.drum-rack-v2)
 
 (defstate %track-menu-open false)
 (defstate %track-menu-col 0)
@@ -163,6 +164,23 @@
     (seq-toggle-track-selected i)
     (host-command "reveal-sequencer-track" (dict :track i))))
 
+(def %track-position (order track)
+  (reduce |found pos|
+    (if (>= found 0) found (if (= (nth order pos) track) pos found))
+    -1
+    (range 0 (len order))))
+
+(def %visual-track-range (anchor target)
+  (let ((order (eseq.drum-rack-v2/mixer-visible-track-order)))
+    (let ((anchor-pos (%track-position order anchor))
+        (target-pos (%track-position order target)))
+      (if (or (< anchor-pos 0) (< target-pos 0))
+        (list target)
+        (reduce |tracks pos|
+          (append tracks (list (nth order pos)))
+          (list)
+          (range (min anchor-pos target-pos) (+ (max anchor-pos target-pos) 1)))))))
+
 (def %range-track-select (i)
   (let ((anchor (if (= %track-selection-anchor nil)
                   SEQ.current-track
@@ -170,7 +188,7 @@
     (do
       (set! %track-selection-anchor anchor)
       (set! eseq.seq-core-state/selected-bus -1)
-      (seq-select-track-range anchor i)
+      (seq-select-tracks (%visual-track-range anchor i) i)
       (host-command "reveal-sequencer-track" (dict :track i)))))
 
 ;; Plain click = single-select; shift-click = replace with the anchored range;

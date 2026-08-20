@@ -45986,17 +45986,18 @@
         }
 
         let selected_tracks = Arc::new(Mutex::new(std::collections::HashSet::from([0usize])));
-        for (name, range) in [
-            ("seq-select-track-range", true),
-            ("seq-toggle-track-selected", false),
+        for name in [
+            "seq-select-track-range",
+            "seq-select-tracks",
+            "seq-toggle-track-selected",
         ] {
             let calls = Arc::clone(&calls);
             let selected_tracks = Arc::clone(&selected_tracks);
             let active_delete_target = Arc::clone(&active_delete_target);
             editor.runtime_mut().register_native(name, move |args, _ctx| {
-                calls.lock().unwrap().push(format!("{name}:{args:?}"));
                 let mut selected = selected_tracks.lock().unwrap();
-                if range {
+                if name == "seq-select-track-range" {
+                    calls.lock().unwrap().push(format!("{name}:{args:?}"));
                     let (Some(Value::Number(anchor)), Some(Value::Number(target))) =
                         (args.first(), args.get(1))
                     else {
@@ -46007,7 +46008,27 @@
                         (*anchor as usize).min(*target as usize)
                             ..=(*anchor as usize).max(*target as usize),
                     );
+                } else if name == "seq-select-tracks" {
+                    let (Some(Value::List(values)), Some(Value::Number(target))) =
+                        (args.first(), args.get(1))
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let tracks: Vec<usize> = values
+                        .iter()
+                        .filter_map(|value| match &*value.borrow() {
+                            Value::Number(track) => Some(*track as usize),
+                            _ => None,
+                        })
+                        .collect();
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("{name}:{tracks:?}:{}", *target as usize));
+                    selected.clear();
+                    selected.extend(tracks);
                 } else if let Some(Value::Number(track)) = args.first() {
+                    calls.lock().unwrap().push(format!("{name}:{args:?}"));
                     let track = *track as usize;
                     if !selected.remove(&track) {
                         selected.insert(track);
@@ -46061,6 +46082,25 @@
         editor.set_layout_viewport(120, 30);
         editor.refresh_runtime_side_effects();
 
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(def eseq.drum-rack-v2/mixer-visible-track-order () (list 1 7 10 11 2))",
+            )
+            .expect("install non-contiguous mixer order fixture");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.mixer/%visual-track-range 7 11)")
+                .expect("build visual mixer range"),
+            Some(test_number_list(&[7.0, 10.0, 11.0])),
+            "shift ranges must contain the badges between their visual endpoints",
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(def eseq.drum-rack-v2/mixer-visible-track-order () (list 0 1))")
+            .expect("restore the two-track mixer fixture order");
+
         calls.lock().unwrap().clear();
         editor
             .runtime_mut()
@@ -46094,12 +46134,12 @@
             calls.lock().unwrap().as_slice(),
             [
                 "seq-set-track:[0]",
-                "seq-select-track-range:[0, 1]",
-                "seq-select-track-range:[0, 0]",
+                "seq-select-tracks:[0, 1]:1",
+                "seq-select-tracks:[0]:0",
                 "seq-toggle-track-selected:[1]",
-                "seq-select-track-range:[0, 1]",
+                "seq-select-tracks:[0, 1]:1",
                 "seq-set-track:[1]",
-                "seq-select-track-range:[1, 0]",
+                "seq-select-tracks:[0, 1]:0",
             ],
             "mixer body and label clicks should preserve the range anchor semantics"
         );
@@ -49306,6 +49346,16 @@
                 0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 9.0, 12.0, 13.0,
             ])),
             "navigation must flatten the exact order drawn by the group blocks",
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/mixer-visible-track-order)")
+                .expect("mixer track order should evaluate"),
+            Some(test_number_list(&[
+                0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 8.0, 9.0, 12.0, 13.0,
+            ])),
+            "mixer order keeps collapsed track badges but skips collapsed groups",
         );
 
         for (track, delta, expected) in [

@@ -2198,7 +2198,7 @@ fn arm_selected_tracks_delete_target(
     }
 }
 
-fn register_track_range_selection_native(
+fn register_track_selection_natives(
     runtime: &mut Runtime,
     state: Arc<SequencerState>,
     current_track: Arc<AtomicUsize>,
@@ -2206,20 +2206,25 @@ fn register_track_range_selection_native(
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
 ) {
-    runtime.register_native("seq-select-track-range", move |args, _ctx| {
-        fn track_arg(value: Option<&Value>, name: &str) -> Result<usize, String> {
-            let Some(Value::Number(value)) = value else {
-                return Err(format!("seq-select-track-range: expected {name} track number"));
-            };
-            if !value.is_finite() || *value < 0.0 || value.fract() != 0.0 {
-                return Err(format!("seq-select-track-range: invalid {name} track {value}"));
-            }
-            Ok(*value as usize)
+    fn track_arg(value: Option<&Value>, name: &str, native: &str) -> Result<usize, String> {
+        let Some(Value::Number(value)) = value else {
+            return Err(format!("{native}: expected {name} track number"));
+        };
+        if !value.is_finite() || *value < 0.0 || value.fract() != 0.0 {
+            return Err(format!("{native}: invalid {name} track {value}"));
         }
+        Ok(*value as usize)
+    }
 
-        let anchor = track_arg(args.first(), "anchor")?;
-        let target = track_arg(args.get(1), "target")?;
-        let track_count = state.active_track_count();
+    let range_state = Arc::clone(&state);
+    let range_current_track = Arc::clone(&current_track);
+    let range_selected_tracks = Arc::clone(&selected_tracks);
+    let range_delete_target = Arc::clone(&active_delete_target);
+    let range_delete_target_version = Arc::clone(&active_delete_target_version);
+    runtime.register_native("seq-select-track-range", move |args, _ctx| {
+        let anchor = track_arg(args.first(), "anchor", "seq-select-track-range")?;
+        let target = track_arg(args.get(1), "target", "seq-select-track-range")?;
+        let track_count = range_state.active_track_count();
         if anchor >= track_count {
             return Err(format!("seq-select-track-range: anchor track {anchor} out of range").into());
         }
@@ -2233,9 +2238,46 @@ fn register_track_range_selection_native(
             (target, anchor)
         };
         {
-            let mut selected = selected_tracks.lock().unwrap();
+            let mut selected = range_selected_tracks.lock().unwrap();
             selected.clear();
             selected.extend(start..=end);
+            arm_selected_tracks_delete_target(
+                &selected,
+                &range_delete_target,
+                &range_delete_target_version,
+            );
+        }
+        range_current_track.store(target, Ordering::Relaxed);
+        Ok(Value::Number(target as f64))
+    });
+
+    runtime.register_native("seq-select-tracks", move |args, _ctx| {
+        let Some(Value::List(values)) = args.first() else {
+            return Err("seq-select-tracks: expected a track list".to_string());
+        };
+        if values.is_empty() {
+            return Err("seq-select-tracks: track list cannot be empty".to_string());
+        }
+        let track_count = state.active_track_count();
+        let mut replacement = HashSet::with_capacity(values.len());
+        for value in values {
+            let value = value.borrow();
+            let track = track_arg(Some(&value), "selected", "seq-select-tracks")?;
+            if track >= track_count {
+                return Err(format!("seq-select-tracks: track {track} out of range"));
+            }
+            if !replacement.insert(track) {
+                return Err(format!("seq-select-tracks: duplicate track {track}"));
+            }
+        }
+        let target = track_arg(args.get(1), "target", "seq-select-tracks")?;
+        if !replacement.contains(&target) {
+            return Err(format!("seq-select-tracks: target track {target} is not selected"));
+        }
+
+        {
+            let mut selected = selected_tracks.lock().unwrap();
+            *selected = replacement;
             arm_selected_tracks_delete_target(
                 &selected,
                 &active_delete_target,
@@ -4215,11 +4257,10 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(track as f64))
     });
 
-    // seq-select-track-range — (seq-select-track-range anchor-idx target-idx)
-    // Replaces the selection atomically with the inclusive track-index range.
-    // Mixer groups do not change track identity or ordering, so their members
-    // participate exactly like loose tracks, including when a group is collapsed.
-    register_track_range_selection_native(
+    // Atomic replacement primitives for contiguous model-index ranges and for
+    // an explicit ordered UI range. The latter lets grouped surfaces select the
+    // tracks they actually draw without teaching Rust their visual topology.
+    register_track_selection_natives(
         &mut runtime,
         state.clone(),
         current_track.clone(),
@@ -7254,14 +7295,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn select_track_range_native_replaces_selection_and_supports_reverse_ranges() {
+    fn track_selection_natives_replace_selection_atomically() {
         let state = Arc::new(SequencerState::new(7, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_tracks = Arc::new(Mutex::new(HashSet::from([0, 6])));
         let delete_target = Arc::new(Mutex::new(None));
         let delete_target_version = Arc::new(AtomicUsize::new(0));
         let mut runtime = Runtime::new();
-        register_track_range_selection_native(
+        register_track_selection_natives(
             &mut runtime,
             Arc::clone(&state),
             Arc::clone(&current_track),
@@ -7300,6 +7341,31 @@ mod tests {
             HashSet::from([2, 3, 4, 5, 6]),
             "an invalid range must not partially mutate selection"
         );
+
+        runtime
+            .eval_str("(seq-select-tracks (list 1 6 3) 6)")
+            .expect("select explicit visual range");
+        assert_eq!(*selected_tracks.lock().unwrap(), HashSet::from([1, 3, 6]));
+        assert_eq!(current_track.load(Ordering::Relaxed), 6);
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks {
+                tracks: vec![1, 3, 6],
+            })
+        );
+
+        for invalid in [
+            "(seq-select-tracks (list 1 1 3) 1)",
+            "(seq-select-tracks (list 1 7 3) 1)",
+            "(seq-select-tracks (list 1 3) 6)",
+        ] {
+            let _ = runtime.eval_str(invalid);
+            assert_eq!(
+                *selected_tracks.lock().unwrap(),
+                HashSet::from([1, 3, 6]),
+                "an invalid explicit selection must not partially mutate selection"
+            );
+        }
     }
 
     /// Drum rack v2 slice 3 (`docs/drum-rack-v2-spec.md`, "Arming & live

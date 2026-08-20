@@ -177,27 +177,35 @@
 ;; Flatten a group in exactly the order `%group-block` draws it: direct members
 ;; first, then each nested rack. The structural form includes hidden rows and is
 ;; used only to locate a selection that has become invisible.
-(def %group-track-order (gidx visible-only)
-  (if (and visible-only (collapsed? gidx))
+(def %group-track-order (gidx respect-group-collapse hide-collapsed-tracks)
+  (if (and respect-group-collapse (collapsed? gidx))
     (list)
     (reduce |acc child|
-      (append acc (%group-track-order child visible-only))
-      (if visible-only (visible-members gidx) (members gidx))
+      (append acc
+        (%group-track-order child respect-group-collapse hide-collapsed-tracks))
+      (if hide-collapsed-tracks (visible-members gidx) (members gidx))
       (child-racks gidx))))
 
-(def %flatten-track-order (items visible-only)
+(def %flatten-track-order (items respect-group-collapse hide-collapsed-tracks)
   (reduce |acc item|
     (append acc
       (if (= (get item :kind) "track")
         (list (get item :track))
-        (%group-track-order (get item :gidx) visible-only)))
+        (%group-track-order
+          (get item :gidx) respect-group-collapse hide-collapsed-tracks)))
     (list)
     items))
 
-;; Selectable track rows in their rendered order. Group headers and buses are
-;; deliberately absent: they retain their click-only selection path.
+;; Selectable sequencer track rows in their rendered order. Group headers and
+;; buses are deliberately absent: they retain their click-only selection path.
 (def visible-track-order ()
-  (%flatten-track-order (grid-render-items) true))
+  (%flatten-track-order (grid-render-items) true true))
+
+;; The mixer shares the same group topology but still draws individually
+;; collapsed tracks as narrow badges. Only a collapsed group removes tracks
+;; from its visible order.
+(def mixer-visible-track-order ()
+  (%flatten-track-order (%grid-render-items true) true false))
 
 (def %index-of (xs value)
   (reduce |found i|
@@ -217,7 +225,7 @@
         (if (>= visible-pos 0)
           (nth visible (mod (+ visible-pos delta (len visible)) (len visible)))
           (let ((structural
-                  (%flatten-track-order (%grid-render-items true) false)))
+                  (%flatten-track-order (%grid-render-items true) false false)))
             (let ((structural-pos (%index-of structural track)))
               (if (< structural-pos 0)
                 nil
