@@ -249,10 +249,38 @@ becomes one line per root, not a repo-wide grep.
    near the code) vs. sharing the real `~/Library/Application Support/eseq`
    even in dev (one project set everywhere, but dev experiments pollute
    it). Leaning `.local/` + an env override.
-2. **`sounds/` and `samples/`**: pool-referenced by existing projects —
-   moving them requires a project-path migration or a resolve-time
-   fallback chain. Decide before T2.
+2. ~~`sounds/` and `samples/` project-path migration~~ — **resolved
+   2026-08-20 (eseq-tiers.2), and smaller than it looked.** Measured over
+   all 262 saved projects:
+   - **`sounds/` is not referenced by projects at all** (zero hits). It is
+     a browsable library directory — `list_sound_presets` reads it
+     (`project.rs:2636`), `save_container_preset` writes it. Moving it is
+     one constant in T1; no migration, no fallback.
+   - **`samples/` is referenced only as `sample_path`, and it is already
+     content-addressed**: `samples/<sha256>.wav` (366 occurrences in the
+     first 80 projects). The sibling `sample_name` (`"Kick72.wav"`) is
+     display metadata and is not used for resolution.
+
+   **Decision: no project migration, and no fallback chain either.**
+   `sample_path` is an identity with a directory prefix stapled on, so the
+   resolver takes one rule — *strip the directory, resolve the hash
+   against the sample store* — rather than a chain of guesses. This is the
+   permanent design, not legacy compat: it makes projects portable across
+   machines and tiers for free, which is what §4.0 already promises for
+   packages. New saves may stamp an honest form (`sample:<hash>`); that is
+   a save-side change, never a rewrite pass over existing files.
+
+   Noted while measuring: `project.rs:2635` calls
+   `create_dir_all(SOUNDS_DIR)` on a **relative** content path — exactly
+   the forbidden runtime-write pattern in §4.1, and a hard failure inside
+   a signed bundle. Audit target for T1.
 3. ~~Instrument name collisions across tiers~~ — resolved, see §4.1:
    instruments do not shadow; projects record tier-qualified ids.
-4. **Naming**: `assets/` vs `content/` for the repo dir; `~/.eseq.d` is
-   locked by the module spec.
+4. ~~Naming: `assets/` vs `content/`~~ — **resolved 2026-08-20:
+   `content/`.** `assets/` is already taken with a narrower meaning:
+   `crates/sequencer/assets/` holds filter-tables and IRs (binary blobs),
+   and `crates/sequencer/sample-assets/` holds artwork. Reusing "assets"
+   for the whole factory tree collides with that established local sense,
+   and this document's own vocabulary is *content* throughout (content
+   tiers, factory content, user content). `~/.eseq.d` stays locked by the
+   module spec.

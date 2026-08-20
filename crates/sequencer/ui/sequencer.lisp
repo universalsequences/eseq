@@ -541,14 +541,18 @@
   :state (expanded)
   :shader
   (sdf/layer
-    (sdf/fill (sdf/rounded-rect width height 0.98)
+    (sdf/fill (sdf/rounded-rect width (* 0.99 height) 0.98)
+      :mixer-strip-selected-bg)
+    
+    (sdf/fill (sdf/rounded-rect (* 0.96 width) (* 0.93 height) 0.98)
       (material
         :lighting (lighting :edge-min -0.45 :edge-max 0.4
           :light (vec3 0.1 -1.2 2.4) :shininess 24.0)
         :color 
         (if expanded 
           (rgba 0.18 0.18 0.20 1.0) 
-          :bg)))
+          :bg) 
+        ))
     (sdf/fill
       (sdf/translate -0.48 0
         (sdf/circle 0.12))
