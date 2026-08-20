@@ -36,12 +36,13 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Horizontal content padding inside the panel, in columns.
-pub(crate) const PANEL_PADDING_COLS: f32 = 0.9;
+/// Menu rows span the panel width; text and hover insets come from the shared
+/// popup-menu style rather than an additional context-menu-only gutter.
+pub(crate) const PANEL_PADDING_COLS: f32 = 0.0;
 /// Vertical content padding inside the panel, in rows.
-pub(crate) const PANEL_PADDING_ROWS: f32 = 0.35;
+pub(crate) const PANEL_PADDING_ROWS: f32 = super::menu_style::PANEL_PADDING_V;
 /// Height of a `menu-item` row.
-const ITEM_ROW_HEIGHT: f32 = 1.4;
+const ITEM_ROW_HEIGHT: f32 = super::menu_style::ROW_HEIGHT;
 /// Height of a `menu-separator` row.
 const SEPARATOR_ROW_HEIGHT: f32 = 0.6;
 /// Minimum gap between an item's label and its right-aligned shortcut hint.
@@ -50,11 +51,9 @@ const SHORTCUT_GAP_COLS: f32 = 2.5;
 const MIN_CONTENT_WIDTH: f32 = 8.0;
 /// Fallback per-character width (cells at DEFAULT_FONT_SIZE) when no text
 /// measurer is available (layout tests, TUI).
-const APPROX_CHAR_WIDTH: f32 = 0.55;
-#[cfg(target_os = "macos")]
-const PANEL_CORNER_RADIUS_PX: f32 = 10.0;
+const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 /// Inner horizontal padding of a `menu-item` row (label inset / shortcut inset).
-const ITEM_PADDING_COLS: f32 = 0.4;
+const ITEM_PADDING_COLS: f32 = super::menu_style::TEXT_PADDING_H;
 
 pub struct ContextMenuWidget;
 pub struct MenuItemWidget;
@@ -195,25 +194,10 @@ pub(crate) fn emit_menu_chrome(
     panel_rect: Rect,
     viewport: WidgetViewport,
 ) {
-    let border_px = 1.0;
-    let border_row = border_px / viewport.cell_h.max(1.0);
-    let border_col = border_px / viewport.cell_w.max(1.0);
-    let border_rect = Rect {
-        row: panel_rect.row - border_row,
-        col: panel_rect.col - border_col,
-        width: panel_rect.width + border_col * 2.0,
-        height: panel_rect.height + border_row * 2.0,
-    };
     let border_color =
         resolve_named_color(props, "border-color", crate::theme::DROPDOWN_MENU_BORDER());
-    super::modal::emit_rounded_rect_overlay(
-        border_rect,
-        border_color,
-        PANEL_CORNER_RADIUS_PX + border_px,
-        viewport,
-    );
     let panel_bg = resolve_named_color(props, "background-color", crate::theme::DROPDOWN_MENU_BG());
-    super::modal::emit_rounded_rect_overlay(panel_rect, panel_bg, PANEL_CORNER_RADIUS_PX, viewport);
+    super::menu_style::emit_panel_chrome(panel_rect, panel_bg, border_color, viewport);
 }
 
 impl WidgetDefinition for ContextMenuWidget {
@@ -416,7 +400,7 @@ impl WidgetDefinition for MenuItemWidget {
         };
         if !disabled && super::pointer_hovered(node.widget_id) {
             prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
-                rect: node.rect,
+                rect: super::menu_style::row_highlight_rect(node.rect),
                 color: resolve_named_color(
                     &node.props,
                     "hover-color",
@@ -501,8 +485,8 @@ impl WidgetDefinition for MenuSeparatorWidget {
         vec![MetalPrimitive::Rect(MetalRectPrimitive {
             rect: Rect {
                 row: node.rect.row + (node.rect.height - line_height) * 0.5,
-                col: node.rect.col,
-                width: node.rect.width,
+                col: node.rect.col + ITEM_PADDING_COLS,
+                width: (node.rect.width - ITEM_PADDING_COLS * 2.0).max(0.0),
                 height: line_height,
             },
             color: resolve_named_color(&node.props, "color", crate::theme::DROPDOWN_MENU_BORDER()),

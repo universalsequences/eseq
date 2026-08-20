@@ -23,16 +23,16 @@ use crate::backend::Color;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PADDING_H: f32 = 0.6;
-const MENU_ROW_HEIGHT: f32 = 1.4;
-const MENU_PADDING_V: f32 = 0.3;
+const PADDING_H: f32 = super::menu_style::TEXT_PADDING_H;
+const MENU_ROW_HEIGHT: f32 = super::menu_style::ROW_HEIGHT;
+const MENU_PADDING_V: f32 = super::menu_style::PANEL_PADDING_V;
 const CHEVRON_RIGHT_PAD: f32 = 0.35;
 const TEXT_CHEVRON_GAP: f32 = 0.4;
 /// Extra right-side padding in the menu when a scrollbar is visible.
 const SCROLLBAR_WIDTH: f32 = 0.4;
 const SCROLLBAR_MARGIN: f32 = 0.15;
 /// Approximate cell width per character for proportional text width estimation.
-const APPROX_CHAR_WIDTH: f32 = 0.55;
+const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 // Round action-menu glyphs sit optically below the midpoint when placed at
 // the font baseline's mathematical center.
 const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
@@ -1051,27 +1051,17 @@ impl WidgetDefinition for DropdownWidget {
             // Register overlay for hit-testing (visible rect only)
             super::set_overlay(node.widget_id, menu_rect);
 
-            // Menu border: expand by a real pixel in each axis so the stroke stays even
-            // regardless of cell aspect ratio.
-            let border_px = 1.0;
-            let border_row = border_px / viewport.cell_h.max(1.0);
-            let border_col = border_px / viewport.cell_w.max(1.0);
-            let border_rect = Rect {
-                row: menu_rect.row - border_row,
-                col: menu_rect.col - border_col,
-                width: menu_rect.width + border_col * 2.0,
-                height: menu_rect.height + border_row * 2.0,
-            };
             let border_color = resolve_named_color(
                 &node.props,
                 "menu-border-color",
                 theme::DROPDOWN_MENU_BORDER(),
             );
-            emit_rounded_rect_overlay(border_rect, border_color, 11.0, viewport);
-
-            // Menu background. The matching pixel radii avoid the "lumpy" corners that
-            // came from using normalized radii plus a cell-based inset.
-            emit_rounded_rect_overlay(menu_rect, menu_bg, 10.0, viewport);
+            super::menu_style::emit_panel_chrome(
+                menu_rect,
+                menu_bg,
+                border_color,
+                viewport,
+            );
             super::push_overlay_primitive(MetalPrimitive::PushClipRect(menu_rect));
 
             // Menu items — only emit those within the visible scroll window
@@ -1099,11 +1089,11 @@ impl WidgetDefinition for DropdownWidget {
                 if is_hovered {
                     let hl_rect = Rect {
                         row: item_y,
-                        col: menu_col + 0.15,
-                        width: menu_width - 0.3,
+                        col: menu_col,
+                        width: menu_width,
                         height: MENU_ROW_HEIGHT,
                     };
-                    emit_rounded_rect_overlay(hl_rect, hover_bg, 0.0, viewport);
+                    super::menu_style::emit_row_highlight(hl_rect, hover_bg, viewport);
                 }
 
                 // Check mark for selected item
@@ -1169,7 +1159,12 @@ impl WidgetDefinition for DropdownWidget {
                     "scrollbar-color",
                     theme::DROPDOWN_SCROLLBAR(),
                 );
-                emit_rounded_rect_overlay(thumb_rect, thumb_color, 3.0, viewport);
+                super::menu_style::emit_rounded_rect_overlay(
+                    thumb_rect,
+                    thumb_color,
+                    3.0,
+                    viewport,
+                );
             }
         } else if !state.open {
             // Ensure this dropdown's overlay entry is removed when closed
@@ -1227,34 +1222,6 @@ fn emit_rounded_rect(
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background,
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn emit_rounded_rect_overlay(rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport) {
-    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
-    let px_w = rect.width * viewport.cell_w;
-    let px_h = rect.height * viewport.cell_h;
-    super::push_overlay_primitive(MetalPrimitive::WidgetInstance {
-        widget_type: "dropdown".to_string(),
-        instance: WidgetInstance {
-            ndc_min,
-            ndc_max,
-            value_t: 0.0,
-            orientation: 0.0,
-            itime: viewport.time_seconds,
-            uniform_a: [0.0; 4],
-            uniform_b: [0.0; 4],
-            uniform_c: [0.0; 4],
-            uniform_d: [0.0; 4],
-            color_a: [color.r, color.g, color.b, color.a],
-            color_b: [0.0; 4],
-            color_c: [0.0; 4],
-            color_d: [0.0; 4],
-            corner_radius: normalized_corner_radius(rect, viewport, radius_px),
-            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-        },
-        is_background: true,
     });
 }
 

@@ -21,6 +21,7 @@ pub mod lane_preview;
 pub mod live_audio;
 pub mod linegraph;
 pub mod matrix;
+pub(crate) mod menu_style;
 pub mod mixer_meter;
 pub mod modal;
 pub mod modulator_curve;
