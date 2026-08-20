@@ -454,6 +454,8 @@ pub(super) fn handle(
         "swap-track-builtin-instrument" => {
             let track = extract_usize_from_payload(&payload, "track");
             let instrument = extract_string_from_payload(&payload, "name");
+            let preserve_track_selection =
+                extract_bool_from_payload(&payload, "preserve-track-selection");
             match (track, instrument.as_deref()) {
                 (Some(track), Some("sampler")) => {
                     match load_or_convert_sampler_track(
@@ -466,6 +468,7 @@ pub(super) fn handle(
                         lg_raw,
                         track,
                         None,
+                        preserve_track_selection,
                     ) {
                         Ok(result) => {
                             let _ = editor
@@ -672,6 +675,8 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            let preserve_track_selection =
+                extract_bool_from_payload(&payload, "preserve-track-selection");
             let target = if name == "swap-track-instrument" {
                 let Some(track) = extract_usize_from_payload(&payload, "track") else {
                     let _ = editor
@@ -682,7 +687,11 @@ pub(super) fn handle(
                     ));
                     return;
                 };
-                match capture_instrument_swap_target(&app, track) {
+                match capture_instrument_swap_target(
+                    &app,
+                    track,
+                    preserve_track_selection,
+                ) {
                     Ok(target) => target,
                     Err(error) => {
                         let _ = editor
@@ -768,10 +777,16 @@ pub(super) fn handle(
                             },
                         )
                     }
-                    Ok(SavedInstrumentLoadApply::Swapped { summary }) => {
+                    Ok(SavedInstrumentLoadApply::Swapped {
+                        track,
+                        summary,
+                        preserve_track_selection,
+                    }) => {
                         finish_swapped_instrument_track(
                             &instrument_name,
+                            track,
                             summary,
+                            preserve_track_selection,
                             SwapTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,
@@ -1027,6 +1042,8 @@ pub(super) fn handle(
             }
         }
         "load-sound-onto-track" => {
+            let preserve_track_selection =
+                extract_bool_from_payload(&payload, "preserve-track-selection");
             let track = extract_usize_from_payload(&payload, "track")
                 .or_else(|| current_track_for_app(&mut app, &current_track));
             let path = extract_path_from_payload(&payload);
@@ -1034,7 +1051,7 @@ pub(super) fn handle(
                 (Some(track), Some(path)) => {
                     match app.load_sound_onto_track(track, Path::new(&path)) {
                         Ok(()) => {
-                            sync_after_instrument_track_apply(
+                            sync_after_instrument_track_apply_with_selection(
                                 &mut app,
                                 &mut editor,
                                 &state,
@@ -1049,6 +1066,7 @@ pub(super) fn handle(
                                 &ctx.meters.cached_bus_peak_levels,
                                 &ui_epoch,
                                 lg_raw,
+                                preserve_track_selection,
                             );
                             fx_epoch.fetch_add(1, Ordering::Relaxed);
                             editor.handle_host_event(HostEvent::Status(

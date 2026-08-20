@@ -1451,10 +1451,16 @@ pub(crate) fn run_event_loop(
                         );
                         editor.mark_needs_redraw();
                     }
-                    Ok(SavedInstrumentLoadApply::Swapped { summary }) => {
+                    Ok(SavedInstrumentLoadApply::Swapped {
+                        track,
+                        summary,
+                        preserve_track_selection,
+                    }) => {
                         finish_swapped_instrument_track(
                             &pending.name,
+                            track,
                             summary,
+                            preserve_track_selection,
                             SwapTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,

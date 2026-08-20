@@ -230,17 +230,23 @@ pub(super) enum SavedInstrumentLoadTarget {
     },
     SwapTrack {
         track_id: TrackId,
+        preserve_track_selection: bool,
     },
 }
 
 pub(super) enum SavedInstrumentLoadApply {
     Added { track: usize, group_id: Option<u64>, pad_note: Option<i32> },
-    Swapped { summary: InstrumentSlotResetSummary },
+    Swapped {
+        track: usize,
+        summary: InstrumentSlotResetSummary,
+        preserve_track_selection: bool,
+    },
 }
 
 pub(super) fn capture_instrument_swap_target(
     app: &app::App,
     track: usize,
+    preserve_track_selection: bool,
 ) -> Result<SavedInstrumentLoadTarget, String> {
     match app.graph.track_instrument_types.get(track) {
         Some(InstrumentType::Custom) => {
@@ -270,6 +276,7 @@ pub(super) fn capture_instrument_swap_target(
         .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
     Ok(SavedInstrumentLoadTarget::SwapTrack {
         track_id,
+        preserve_track_selection,
     })
 }
 
@@ -297,13 +304,18 @@ pub(super) fn try_apply_cached_saved_instrument(
             }),
         SavedInstrumentLoadTarget::SwapTrack {
             track_id,
+            preserve_track_selection,
         } => {
             let track = match resolve_instrument_swap_target(app, track_id) {
                 Ok(track) => track,
                 Err(error) => return Some(Err(error)),
             };
             app.try_swap_track_to_cached_saved_instrument_sync(track, name, source, run_mode)
-                .map(|result| result.map(|summary| SavedInstrumentLoadApply::Swapped { summary }))
+                .map(|result| result.map(|summary| SavedInstrumentLoadApply::Swapped {
+                    track,
+                    summary,
+                    preserve_track_selection,
+                }))
         }
     }
 }
@@ -322,10 +334,15 @@ pub(super) fn apply_compiled_saved_instrument(
             .map(|track| SavedInstrumentLoadApply::Added { track, group_id, pad_note }),
         SavedInstrumentLoadTarget::SwapTrack {
             track_id,
+            preserve_track_selection,
         } => {
             let track = resolve_instrument_swap_target(app, track_id)?;
             app.swap_track_to_compiled_saved_instrument_sync(track, name, source, run_mode, result)
-                .map(|summary| SavedInstrumentLoadApply::Swapped { summary })
+                .map(|summary| SavedInstrumentLoadApply::Swapped {
+                    track,
+                    summary,
+                    preserve_track_selection,
+                })
         }
     }
 }

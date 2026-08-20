@@ -52,6 +52,7 @@ pub(super) fn handle(
                     lg_raw,
                     track,
                     Some(path),
+                    false,
                 ) {
                     Ok(result) => {
                         let status = result.reset_summary.map_or_else(
@@ -189,6 +190,8 @@ pub(super) fn handle(
             let track = extract_usize_from_payload(&payload, "track");
             let preserve_browser_context =
                 extract_bool_from_payload(&payload, "preserve-browser-context");
+            let preserve_track_selection =
+                extract_bool_from_payload(&payload, "preserve-track-selection");
             eprintln!(
                 "sample-host-command: load-sample-into-track payload={payload:?}; extracted_path={path_str:?}; extracted_track={track:?}; preserve_browser_context={preserve_browser_context}"
             );
@@ -211,6 +214,7 @@ pub(super) fn handle(
                         lg_raw,
                         track,
                         Some(path),
+                        preserve_track_selection,
                     ) {
                         Ok(result) => {
                             let status = result.reset_summary.map_or_else(

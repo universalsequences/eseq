@@ -216,17 +216,19 @@
   (host-command "add-track-instrument" (dict :name name))
   (status (str "Loading instrument: " name)))
 
-(def %swap-track-instrument (track name)
+(def %swap-track-instrument (track name preserve-track-selection)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
     (if (eseq.track-collapse/replaceable-instrument? track)
       (do
         (set! sbrowser-loading-instrument-name name)
-        (host-command "swap-track-instrument" (dict :track track :name name))
+        (host-command "swap-track-instrument"
+          (dict :track track :name name
+            :preserve-track-selection preserve-track-selection))
         (status (str "Loading instrument swap: " name)))
       (status "Saved instruments can replace sampler or custom instrument tracks"))))
 
-(def %swap-track-builtin-instrument (track name)
+(def %swap-track-builtin-instrument (track name preserve-track-selection)
   ;; Only the sampler has an in-place conversion. A modulator rewrite would be a
   ;; different engine on a track that may already carry pattern data, and the
   ;; racks are group/slot entities with no single track to become — so a drop
@@ -234,7 +236,9 @@
   ;; (eseq-mj8).
   (if (and (= name "sampler") (eseq.track-collapse/replaceable-instrument? track))
     (do
-      (host-command "swap-track-builtin-instrument" (dict :track track :name name))
+      (host-command "swap-track-builtin-instrument"
+        (dict :track track :name name
+          :preserve-track-selection preserve-track-selection))
       (set! sbrowser-tab "samples")
       (status "Loading sampler"))
     (add-builtin-instrument-track name)))
@@ -257,13 +261,16 @@
 (def drop-instrument-on-track (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
-    (if (= (get payload :kind) "builtin-instrument")
-      (%swap-track-builtin-instrument
-        (get target :track)
-        (get payload :name))
-      (%swap-track-instrument
-        (get target :track)
-        (get payload :name)))))
+    (let ((preserve-track-selection (get target :from-pad)))
+      (if (= (get payload :kind) "builtin-instrument")
+        (%swap-track-builtin-instrument
+          (get target :track)
+          (get payload :name)
+          preserve-track-selection)
+        (%swap-track-instrument
+          (get target :track)
+          (get payload :name)
+          preserve-track-selection)))))
 
 (def drop-sample-on-track (event)
   (let ((payload (get event :payload))
@@ -273,16 +280,19 @@
       (if path
         (if (eseq.track-collapse/custom-instrument? track)
           (host-command "convert-track-to-sampler"
-            (dict :track track :path path :preserve-browser-context true))
+            (dict :track track :path path :preserve-browser-context true
+              :preserve-track-selection (get target :from-pad)))
           (host-command "load-sample-into-track"
-            (dict :track track :path path :preserve-browser-context true)))
+            (dict :track track :path path :preserve-browser-context true
+              :preserve-track-selection (get target :from-pad))))
         (status "Drop a sample file, not a folder")))))
 
 (def drop-sound-on-track (event)
   (if (= (get event :drag-type) "sound")
     (host-command "load-sound-onto-track"
       (dict :track (get (get event :target) :track)
-            :path (get (get event :payload) :path)))
+            :path (get (get event :payload) :path)
+            :preserve-track-selection (get (get event :target) :from-pad)))
     (if (= (get event :drag-type) "instrument")
       (drop-instrument-on-track event)
       (drop-sample-on-track event))))
@@ -291,7 +301,7 @@
   (if (>= (%selected-drum-rack-id) 0)
     (status "Saved instruments cannot replace a selected drum rack")
     (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
-      (%swap-track-instrument SEQ.current-track name)
+      (%swap-track-instrument SEQ.current-track name false)
       (do
         (%add-instrument-track name)
         (status (str "Adding instrument track: " name))))))
@@ -872,7 +882,7 @@
   (if (and (= name "sampler")
            (< (%selected-drum-rack-id) 0)
            (eseq.track-collapse/replaceable-instrument? SEQ.current-track))
-    (%swap-track-builtin-instrument SEQ.current-track name)
+    (%swap-track-builtin-instrument SEQ.current-track name false)
     (add-builtin-instrument-track name)))
 
 (def select-create-item (item)

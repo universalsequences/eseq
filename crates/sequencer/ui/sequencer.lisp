@@ -377,7 +377,8 @@
           (track (get target :track)))
       (if path
         (do
-          (%activate-track-for-edit track)
+          (if (not (get target :from-pad))
+            (%activate-track-for-edit track))
           (eseq.browser/drop-sample-on-track event))
         (status "Drop a sample file, not a folder")))))
 
@@ -1879,7 +1880,7 @@
 (def %pad-cell-drop-meta (gidx cell pad)
   (let ((track (%pad-cell-track pad)))
     (if (and (>= track 0) (< track SEQ.num-tracks))
-      (dict :kind "track" :track track)
+      (dict :kind "track" :track track :from-pad true)
       (dict :kind "rack-pad"
         :group-id (eseq.drum-rack-v2/group-id gidx)
         :cell cell

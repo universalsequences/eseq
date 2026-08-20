@@ -49786,27 +49786,32 @@
             .eval_str("(eseq.sequencer/%set-pad-page 0 3)")
             .expect("paging back should evaluate");
 
-        // An occupied cell is the member track's own drop target: the meta it
-        // hands the drop system is the member track, and the drop replaces that
-        // track's sound instead of creating a second member.
+        // An occupied cell is the member track's own drop target. It also marks
+        // that this track-shaped target came from a pad so the shared browser
+        // replacement commands preserve the selected track.
         // Pad 36 is the page's lowest note, so it renders bottom-left: cell 12.
+        let occupied_meta =
+            "(eseq.sequencer/%pad-cell-drop-meta 0 12 (eseq.sequencer/%pad-at 0 12))";
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (eseq.sequencer/%pad-cell-drop-meta 0 12 (eseq.sequencer/%pad-at 0 12)) :track)")
-                .expect("occupied pad drop meta should evaluate"),
+                .eval_str(&format!("(get {occupied_meta} :track)"))
+                .expect("occupied pad track metadata should evaluate"),
             Some(Value::Number(1.0)),
             "the bottom-left cell addresses the member track behind pad 36"
         );
-        // The occupied path runs the ordinary track-row drop: focus the track,
-        // then hand the event to the browser's single-track sample replacement.
-        // The perf editor loads neither, so stub both and record the target.
-        for native in ["seq-clear-selection", "seq-set-track"] {
+        assert_eq!(
             editor
                 .runtime_mut()
-                .register_native(native, |_args, _ctx| Ok(Value::Bool(true)));
-        }
-        let replaced = Arc::new(Mutex::new(Vec::<f64>::new()));
+                .eval_str(&format!("(get {occupied_meta} :from-pad)"))
+                .expect("occupied pad origin metadata should evaluate"),
+            Some(Value::Bool(true)),
+            "occupied-pad metadata must preserve the user's selected track"
+        );
+        // The occupied path hands the event to the browser's single-track
+        // replacement without creating a member. The perf editor loads no
+        // samples, so stub the browser call and record the target.
+        let replaced = Arc::new(Mutex::new(Vec::<(f64, bool)>::new()));
         {
             let replaced = Arc::clone(&replaced);
             editor.runtime_mut().register_native(
@@ -49828,7 +49833,20 @@
                             }),
                         _ => None,
                     };
-                    replaced.lock().unwrap().push(track.unwrap_or(-1.0));
+                    let from_pad = match args.first() {
+                        Some(Value::Map(event)) => event
+                            .get("target")
+                            .map(|cell| cell.borrow().clone())
+                            .and_then(|target| match target {
+                                Value::Map(target) => target
+                                    .get("from-pad")
+                                    .map(|cell| cell.borrow().clone()),
+                                _ => None,
+                            })
+                            .is_some_and(|value| value == Value::Bool(true)),
+                        _ => false,
+                    };
+                    replaced.lock().unwrap().push((track.unwrap_or(-1.0), from_pad));
                     Ok(Value::Bool(true))
                 },
             );
@@ -49840,14 +49858,14 @@
                     (dict
                       :drag-type "sample"
                       :payload (dict :path "samples/hat.wav")
-                      :target (dict :kind "track" :track 1))
+                      :target (dict :kind "track" :track 1 :from-pad true))
                     0 12)"#,
             )
             .expect("sample drop on an occupied pad should evaluate");
         assert_eq!(
             *replaced.lock().unwrap(),
-            vec![1.0],
-            "an occupied pad replaces the sound on its existing member track"
+            vec![(1.0, true)],
+            "an occupied pad replaces its member and carries the selection-preserving discriminant"
         );
         assert!(
             !editor.drain_host_commands().iter().any(|command| matches!(
@@ -49857,6 +49875,71 @@
             )),
             "replacing a pad's sound must not create a second member"
         );
+    }
+
+    #[test]
+    fn metal_seq_occupied_pad_replacements_preserve_track_selection_in_host_payloads() {
+        fn assert_preserves_selection(editor: &mut eseqlisp::Editor, command_name: &str) {
+            let commands = editor.drain_host_commands();
+            assert!(matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == command_name
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(1.0))
+                        && map.get("preserve-track-selection").is_some_and(|value| *value.borrow() == Value::Bool(true)))
+            ), "{command_name} should preserve selection for an occupied-pad target, got {commands:?}");
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 3, 16);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom", "sampler", "rack"]),
+        );
+        let cases = [
+            (
+                "sample",
+                r#"(eseq.browser/drop-sample-on-track
+                    (dict :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "load-sample-into-track",
+            ),
+            (
+                "Sound",
+                r#"(eseq.browser/drop-sound-on-track
+                    (dict :drag-type "sound"
+                      :payload (dict :path "sounds/kick.sound")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "load-sound-onto-track",
+            ),
+            (
+                "saved instrument",
+                r#"(eseq.browser/drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                      :payload (dict :kind "instrument" :name "core/drift")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "swap-track-instrument",
+            ),
+            (
+                "builtin instrument",
+                r#"(eseq.browser/drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                      :payload (dict :kind "builtin-instrument" :name "sampler")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "swap-track-builtin-instrument",
+            ),
+        ];
+        for (kind, expression, command_name) in cases {
+            let _ = editor.drain_host_commands();
+            editor
+                .runtime_mut()
+                .eval_str(expression)
+                .unwrap_or_else(|error| panic!("{kind} occupied-pad drop should evaluate: {error:?}"));
+            assert_preserves_selection(&mut editor, command_name);
+        }
     }
 
     /// eseq-4b5.14: the pad grid is note-positional. A cell IS a MIDI note —

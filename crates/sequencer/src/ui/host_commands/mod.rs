@@ -401,7 +401,9 @@ pub(crate) struct SwapTrackInstrumentCtx<'a> {
 
 pub(crate) fn finish_swapped_instrument_track(
     name: &str,
+    track: usize,
     summary: sequencer::sequencer::InstrumentSlotResetSummary,
+    preserve_track_selection: bool,
     ctx: SwapTrackInstrumentCtx<'_>,
 ) {
     let SwapTrackInstrumentCtx {
@@ -414,11 +416,17 @@ pub(crate) fn finish_swapped_instrument_track(
         fx_epoch,
         ui_epoch,
     } = ctx;
-    let selected_track = current_track
-        .load(Ordering::Relaxed)
-        .min(app.tracks.len().saturating_sub(1));
+    let selected_track = selection_after_track_apply(
+        track,
+        preserve_track_selection,
+        current_track,
+        app.tracks.len(),
+    );
+    current_track.store(selected_track, Ordering::Relaxed);
+    app.ui.cursor_track = selected_track;
     if !app.tracks.is_empty() {
         let rt = editor.runtime_mut();
+        set_current_track_reactive(rt, app.tracks.len(), selected_track);
         sync_track_name_state(rt, track_names, app);
         sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
         rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
@@ -493,6 +501,27 @@ pub(crate) fn instrument_swap_status(
     }
 }
 
+/// Track the panel should follow after applying an instrument to a track.
+///
+/// A drum-pad drop edits a rack member without navigating away from the rack;
+/// direct track drops navigate to the changed track.
+pub(crate) fn selection_after_track_apply(
+    applied_track: usize,
+    preserve_track_selection: bool,
+    current_track: &AtomicUsize,
+    track_count: usize,
+) -> usize {
+    if !preserve_track_selection {
+        return applied_track;
+    }
+    let current = current_track.load(Ordering::Relaxed);
+    if current < track_count {
+        current
+    } else {
+        applied_track
+    }
+}
+
 /// Track the panel should follow once `new_track` has been added.
 ///
 /// Filling an empty drum-rack pad is an in-place edit of the rack the user is
@@ -505,15 +534,12 @@ pub(crate) fn selection_after_added_track(
     current_track: &AtomicUsize,
     track_count: usize,
 ) -> usize {
-    if pad_note.is_none() {
-        return new_track;
-    }
-    let current = current_track.load(Ordering::Relaxed);
-    if current < track_count {
-        current
-    } else {
-        new_track
-    }
+    selection_after_track_apply(
+        new_track,
+        pad_note.is_some(),
+        current_track,
+        track_count,
+    )
 }
 
 /// Adds a freshly created track to `group_id`. With `pad_note`, the group must
@@ -574,6 +600,24 @@ mod tests {
             rack: None,
             rack_members: Vec::new(),
         }
+    }
+
+    #[test]
+    fn occupied_pad_replacement_keeps_the_current_track_selected() {
+        let current = AtomicUsize::new(1);
+        assert_eq!(selection_after_track_apply(4, true, &current, 5), 1);
+    }
+
+    #[test]
+    fn direct_track_replacement_selects_the_applied_track() {
+        let current = AtomicUsize::new(1);
+        assert_eq!(selection_after_track_apply(4, false, &current, 5), 4);
+    }
+
+    #[test]
+    fn occupied_pad_replacement_falls_back_when_selection_is_out_of_range() {
+        let current = AtomicUsize::new(9);
+        assert_eq!(selection_after_track_apply(4, true, &current, 5), 4);
     }
 
     #[test]
