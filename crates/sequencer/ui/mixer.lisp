@@ -1054,7 +1054,7 @@
           :height 1.0
           :padding 0
           :font-size 10
-          :h-align :center
+          :h-align :left
           :background-color :transparent
           :border-color :transparent
           :highlight-color :transparent

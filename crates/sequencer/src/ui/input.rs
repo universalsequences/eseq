@@ -97,10 +97,17 @@ fn focused_number_picker_is_editing(editor: &Editor) -> bool {
 
 /// Whether the editor currently permits sequencer live-keyboard shortcuts.
 ///
-/// Major modes opt in explicitly. Even in an opted-in mode, focus supersedes
-/// mode: prompts and focused text or numeric editors retain ownership of keys.
+/// Two ways in. Text-bearing buffers must opt in through their major mode, so
+/// source and special text modes keep ownership of their bare keys. Widget-only
+/// buffers (`ViewMode::UiOnly` — piano roll, browser, arrangement, transport…)
+/// are admitted without an opt-in: they have no text pane, so there is nothing
+/// for the keys to be stolen from, and requiring each to declare a mode meant
+/// every GUI buffer that never called `set-buffer-mode-for` silently went mute.
+///
+/// Either way focus supersedes mode: prompts and focused text or numeric
+/// editors retain ownership of keys, including inside a UiOnly buffer.
 fn editor_accepts_live_keyboard_input(editor: &Editor) -> bool {
-    editor.active_mode_accepts_live_keys()
+    (editor.active_mode_accepts_live_keys() || active_buffer_accepts_global_ui_shortcuts(editor))
         && editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
         && !focused_widget_captures_text_input(editor)
@@ -2179,6 +2186,34 @@ mod live_keyboard_tests {
             &held,
             true,
         ));
+    }
+
+    /// A widget-only buffer has no text pane, so it gets live keys without
+    /// declaring a `:live-keys` major mode. Requiring the opt-in muted every
+    /// GUI buffer that never called `set-buffer-mode-for` (piano roll, sample
+    /// browser, arrangement, transport).
+    #[test]
+    fn widget_only_buffers_accept_live_keys_without_a_mode_opt_in() {
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let note_key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        let mut editor = live_keyboard_routing_editor(false);
+        assert!(
+            !should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "a text-bearing buffer still needs its mode to opt in",
+        );
+
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        assert!(
+            should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "widget-only buffers route live keys without a mode opt-in",
+        );
+
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        assert!(
+            !should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "showing the text pane hands the keys back to the editor",
+        );
     }
 
     #[test]
