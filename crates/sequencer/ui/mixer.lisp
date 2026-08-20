@@ -1355,7 +1355,7 @@
               )
             )
           (box :width 0.0 :height 0.0 :bg :transparent))
-            (%group-control-buttons gidx bus-idx)
+        (%group-control-buttons gidx bus-idx)
         (%bus-mod-port-row (get group :bus-id))
         (box :corner-radius 34 :background-color c :width 9.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
@@ -1366,17 +1366,18 @@
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")
               :width 2.0 :height 0.9 :padding 0 :font-size 14
-              :background-color '(rgba 0.1 0.1 0.1 0.5)
-              :border-color '(rgba 0.8 0.8 0.8 0.9)
+              :corner-radius 16
+              :background-color '(rgba 0.1 0.1 0.1 0.35)
+              :border-color :transparent
               :color :white
               :on-click (lambda (event)
                 (do
                   (%select-group gidx)
                   (%toggle-group-collapsed (get group :id)))))
-            (badge (substring (get group :name) 0 10)
+            (label (substring (get group :name) 0 10)
               :key (str "group-name-label-" (get group :id))
-              :icon (eseq.track-collapse/group-type-icon group)
               :font-size 11
+              :height 0.9
               :h-align :center
               :background-color :transparent
               :border-color :transparent
