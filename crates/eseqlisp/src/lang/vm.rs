@@ -2552,7 +2552,10 @@ pub fn register_core_natives(vm: &mut VM) {
             };
             names.push(name.clone());
         }
-        vm.module_exports.entry(module.clone()).or_default().append(names);
+        vm.module_exports
+            .entry(module.clone())
+            .or_default()
+            .append(names);
         Value::Nil
     });
 
@@ -2623,15 +2626,13 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         vm.extension_hooks.entry(name.clone()).or_default();
         let hook_name = name.clone();
-        let module = vm.current_module_name();
-        let global_name = if module == crate::modules::IMPLICIT_MODULE
-            || crate::modules::is_qualified(&name)
-        {
-            name.clone()
-        } else {
-            crate::modules::qualify(module, &name)
-        };
-        vm.register_native_with_vm(&global_name, move |args, vm| {
+        // Hook names are a flat keyspace and the caller-facing native keeps
+        // that flat spelling (module-system-spec.md §11 e). `export` still
+        // accepts a hook name — the export-set check treats `(defhook "x")`
+        // as defining `x` in the enclosing module — but the native itself
+        // does not qualify, so in-module call sites still reach it through
+        // `run-hook`.
+        vm.register_native_with_vm(&name, move |args, vm| {
             run_extension_hook(vm, &hook_name, args)
         });
         Value::Nil
@@ -3955,7 +3956,11 @@ impl VM {
                 if !defined {
                     self.source_load_errors.push(format!(
                         "{}:{}:{}: export '{}' is not defined in module {}",
-                        path.display(), export.line, export.column, export.name, module
+                        path.display(),
+                        export.line,
+                        export.column,
+                        export.name,
+                        module
                     ));
                     result = Err(VMError::CompileError);
                     break;
@@ -7131,7 +7136,10 @@ mod tests {
         assert!(exports.exports("after"));
         assert!(exports.exports("%published"));
         assert!(exports.exports("published-hook"));
-        assert!(vm.has_global("test.exports/published-hook"));
+        // A hook name may be exported; its caller-facing native stays flat
+        // (module-system-spec.md §11 e), which is what makes `run-hook` the
+        // in-module call form.
+        assert!(vm.has_global("published-hook"));
         assert!(!exports.exports("private"));
     }
 
@@ -7154,7 +7162,10 @@ mod tests {
         ];
         for (source, expected) in cases {
             let mut vm = module_test_vm();
-            assert!(matches!(vm.eval_str(source), Err(super::VMError::CompileError)));
+            assert!(matches!(
+                vm.eval_str(source),
+                Err(super::VMError::CompileError)
+            ));
             let errors = vm.take_source_load_errors();
             assert!(
                 errors.iter().any(|error| error.contains(expected)),
@@ -7189,9 +7200,7 @@ mod tests {
         let helper = std::env::temp_dir().join(format!("{module}.lisp"));
         std::fs::write(
             &helper,
-            format!(
-                "(module {module})\n(export public)\n(def public () 1)\n(def private () 2)"
-            ),
+            format!("(module {module})\n(export public)\n(def public () 1)\n(def private () 2)"),
         )
         .expect("write visibility module");
         let consumer = helper.with_file_name(format!(
@@ -7225,13 +7234,86 @@ mod tests {
         ))
         .expect("private override remains allowed");
         let diagnostics = vm.source_manager.diagnostics();
-        assert!(diagnostics.iter().any(|warning| {
-            warning.contains(&format!("{module}/private is not exported"))
-        }));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|warning| { warning.contains(&format!("{module}/private is not exported")) })
+        );
         assert!(diagnostics.iter().any(|warning| {
             warning.contains(&format!("overriding {module}/private"))
                 && warning.contains("not exported")
         }));
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn legacy_modules_without_export_forms_keep_percent_visibility() {
+        // Spec §6 step 1: opt-in coexistence. A module that declares no
+        // `export` form keeps the migration-era `%` rules, so unprefixed
+        // names stay public and `%`-names stay warn-but-callable.
+        let mut vm = module_test_vm();
+        let module = format!("test.legacy-{}", std::process::id());
+        let helper = std::env::temp_dir().join(format!("{module}.lisp"));
+        std::fs::write(
+            &helper,
+            format!("(module {module})\n(def public () 1)\n(def %hidden () 2)"),
+        )
+        .expect("write legacy module");
+        let consumer = helper.with_file_name(format!(
+            "eseqlisp-legacy-consumer-{}.lisp",
+            std::process::id()
+        ));
+        assert_eq!(
+            vm.eval_module_source(
+                consumer,
+                &format!("(import {module} :refer (public))\n(public)"),
+                1,
+            )
+            .expect("legacy :refer of an unprefixed name stays allowed"),
+            Some(Value::Number(1.0))
+        );
+        assert!(!vm.module_exports[&module].explicit);
+        assert_eq!(
+            vm.eval_str(&format!("({module}/%hidden)"))
+                .expect("qualified %-access remains callable"),
+            Some(Value::Number(2.0))
+        );
+        vm.eval_str(&format!(
+            "(module test.legacy-user)\n(override {module}/%hidden () 9)"
+        ))
+        .expect("%-private override remains allowed");
+        // The `%` rule is textual, so it also covers a module this unit has
+        // never seen loaded — there is no export set to consult there.
+        vm.eval_str("(module test.legacy-user)\n(override test.never-loaded/%absent () 9)")
+            .expect("escape-hatch override compiles");
+        let diagnostics = vm.source_manager.diagnostics();
+        assert!(
+            diagnostics.iter().any(|warning| {
+                warning.contains(&format!("{module}/%hidden is internal to"))
+                    && warning.contains("%-private")
+            }),
+            "expected legacy %-privacy warning, got {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|warning| {
+                warning.contains(&format!("overriding {module}/%hidden"))
+                    && warning.contains("%-private")
+            }),
+            "expected legacy %-override warning, got {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|warning| {
+                warning.contains("overriding test.never-loaded/%absent")
+                    && warning.contains("%-private")
+            }),
+            "expected %-warning for an unloaded module, got {diagnostics:?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|warning| warning.contains(&format!("{module}/public"))),
+            "unprefixed legacy names must not warn, got {diagnostics:?}"
+        );
         let _ = std::fs::remove_file(helper);
     }
 
@@ -7261,7 +7343,10 @@ mod tests {
         );
         assert!(matches!(stale, Err(super::VMError::CompileError)));
         let exports = &vm.module_exports["test.reload-exports"];
-        assert!(!exports.exports("old"), "failed reload must restore the prior set");
+        assert!(
+            !exports.exports("old"),
+            "failed reload must restore the prior set"
+        );
         assert!(exports.exports("new"));
 
         vm.eval_str(

@@ -389,6 +389,27 @@ impl Compiler {
         Ok(())
     }
 
+    /// `Some(explicit)` when `module` keeps `base` to itself, where the flag
+    /// says which regime made that call: `true` = the module declared
+    /// `export` forms and this name is not among them, `false` = the
+    /// migration-era `%` convention (spec §6 step 1 coexistence). A module
+    /// this unit has not seen loaded has no export set to consult (spec §3
+    /// load order), so only the textual `%` rule applies there.
+    fn hidden_by(&self, module: &str, base: &str) -> Option<bool> {
+        match self.module_exports.get(module) {
+            Some(exports) => (!exports.exports(base)).then_some(exports.explicit),
+            None => super::modules::is_private_name(base).then_some(false),
+        }
+    }
+
+    fn visibility_reason(module: &str, base: &str, explicit: bool) -> String {
+        if explicit {
+            format!("{module}/{base} is not exported by {module}")
+        } else {
+            format!("{module}/{base} is internal to {module} (%-private, spec §2)")
+        }
+    }
+
     pub fn macros(&self) -> &HashMap<String, MacroDef> {
         &self.macros
     }
@@ -1300,22 +1321,13 @@ impl Compiler {
                 .cloned()
                 .unwrap_or_else(|| ns.to_string());
             if full_ns != self.current_module
-                && let Some(exports) = self.module_exports.get(&full_ns)
-                && !exports.exports(base)
+                && let Some(explicit) = self.hidden_by(&full_ns, base)
             {
-                if exports.explicit {
-                    self.warn_once(format!(
-                        "warning: {full_ns}/{base} is not exported by {full_ns}; \
-                         referencing it from {} may break on update",
-                        self.current_module
-                    ));
-                } else {
-                    self.warn_once(format!(
-                        "warning: {full_ns}/{base} is internal to {full_ns} (%-private, spec §2); \
-                         referencing it from {} may break on update",
-                        self.current_module
-                    ));
-                }
+                let reason = Self::visibility_reason(&full_ns, base, explicit);
+                self.warn_once(format!(
+                    "warning: {reason}; referencing it from {} may break on update",
+                    self.current_module
+                ));
             }
             if !self.namespace_is_known(&full_ns) {
                 if full_ns.contains('.') {
@@ -2056,20 +2068,16 @@ impl Compiler {
                     .cloned()
                     .unwrap_or_else(|| namespace.to_string());
                 let target = super::modules::qualify(&namespace, base);
-                if let Some(exports) = self.module_exports.get(&namespace)
-                    && !exports.exports(base)
-                {
-                    if exports.explicit {
-                        self.warn_once(format!(
-                            "warning: overriding {target}, which is not exported by {namespace}; \
-                             this override may break on update"
-                        ));
+                if let Some(explicit) = self.hidden_by(&namespace, base) {
+                    let detail = if explicit {
+                        format!("not exported by {namespace}")
                     } else {
-                        self.warn_once(format!(
-                            "warning: overriding {target}, which is %-private to {namespace}; \
-                             this override may break on update"
-                        ));
-                    }
+                        format!("%-private to {namespace}")
+                    };
+                    self.warn_once(format!(
+                        "warning: overriding {target}, which is {detail}; \
+                         this override may break on update"
+                    ));
                 }
 
                 let (kind, callback) = match list.get(2) {

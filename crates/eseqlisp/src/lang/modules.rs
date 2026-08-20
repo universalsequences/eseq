@@ -59,11 +59,7 @@ pub type ModuleExportRegistry = HashMap<String, ModuleExports>;
 
 /// Return a visibility decision when `module` is loaded. Implicit/core
 /// namespaces are always public; an absent named module has no checkable set.
-pub fn exported_from(
-    registry: &ModuleExportRegistry,
-    module: &str,
-    name: &str,
-) -> Option<bool> {
+pub fn exported_from(registry: &ModuleExportRegistry, module: &str, name: &str) -> Option<bool> {
     if module == IMPLICIT_MODULE || CORE_NAMESPACES.contains(&module) {
         return Some(true);
     }
@@ -102,8 +98,7 @@ pub fn inspect_exports(
                     module = Some(name.clone());
                 }
             }
-            [head, names @ ..]
-                if matches!(&head.kind, ExprKind::Symbol(form) if form == "export") =>
+            [head, names @ ..] if matches!(&head.kind, ExprKind::Symbol(form) if form == "export") =>
             {
                 has_export_form = true;
                 let (line, column) = line_column(source, expression.origin.primary_span.start_byte);
@@ -128,7 +123,10 @@ pub fn inspect_exports(
 fn line_column(source: &str, byte: usize) -> (usize, usize) {
     let prefix = &source[..byte.min(source.len())];
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = prefix.rsplit_once('\n').map_or(prefix.len(), |(_, tail)| tail.len()) + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map_or(prefix.len(), |(_, tail)| tail.len())
+        + 1;
     (line, column)
 }
 
@@ -281,7 +279,10 @@ mod tests {
         assert_eq!(module.as_deref(), Some("test.exports"));
         assert!(explicit);
         assert_eq!(
-            exports.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            exports
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
         assert_eq!((exports[1].line, exports[1].column), (4, 1));
