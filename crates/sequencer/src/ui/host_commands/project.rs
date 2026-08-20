@@ -288,7 +288,6 @@ pub(super) fn handle(
             ctx.frame.prev_track_peak_levels.clear();
             ctx.frame.prev_modulator_phases = ctx.meters.cached_modulator_phases.clone();
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
-            ctx.frame.prev_bus_playheads = bus_playhead_snapshot(&app);
             ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, &app);
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
             ctx.frame.prev_ui_epoch = ui_epoch.fetch_add(1, Ordering::Relaxed) + 1;

@@ -386,7 +386,7 @@ impl GraphController<'_> {
             self.apply_free_patch_idle_voice(track)
                 .expect("free-patch engine runtime was validated before graph mutation");
         }
-        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
     }
@@ -571,7 +571,7 @@ impl GraphController<'_> {
             self.apply_free_patch_idle_voice(track)
                 .expect("free-patch engine runtime was validated before graph mutation");
         }
-        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.app.publish_sampler_analysis_runtime(track);
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
@@ -701,7 +701,7 @@ impl GraphController<'_> {
                 lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
             }
         }
-        self.app.tracks[track] = instrument_display_name(instrument_name);
+        self.app.set_automatic_track_name(track, instrument_display_name(instrument_name));
         self.app.device_registry.clear_rack_track(track_id);
         self.finish_track_instrument_source_change(track);
         Ok(reset_summary)
@@ -827,7 +827,7 @@ impl GraphController<'_> {
                 (buffer_id, sample_name.to_string(), sample_rate),
             )
             .expect("sampler reset target was validated before graph mutation");
-        self.app.tracks[track] = sample_name.to_string();
+        self.app.set_automatic_track_name(track, sample_name.to_string());
         self.app.reset_sampler_bpm_for_analysis(track);
         self.app.publish_sampler_analysis_runtime(track);
         self.finish_track_instrument_source_change(track);
@@ -877,7 +877,6 @@ impl GraphController<'_> {
     pub fn add_rack_track(
         &mut self,
         name: &str,
-        routing: RackRouting,
         slots: Vec<RackSlotBuildSpec<'_>>,
     ) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();
@@ -889,7 +888,6 @@ impl GraphController<'_> {
                 "Rack tracks support at most {MAX_RACK_SLOTS} slots"
             ));
         }
-        validate_rack_build_slot_pad_map(routing, &slots)?;
         self.force_reap_all_rack_teardowns();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
@@ -956,7 +954,6 @@ impl GraphController<'_> {
                         instrument_type: InstrumentType::Sampler,
                         instrument_run_mode: CustomInstrumentRunMode::Instrument,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
-                        pad_note: slot.pad_note,
                         choke_group: slot.choke_group,
                         gain: slot.gain,
                         pan: slot.pan.clamp(-1.0, 1.0),
@@ -1041,7 +1038,6 @@ impl GraphController<'_> {
                         instrument_type: InstrumentType::Custom,
                         instrument_run_mode: custom.run_mode,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
-                        pad_note: slot.pad_note,
                         choke_group: slot.choke_group,
                         gain: slot.gain,
                         pan: slot.pan.clamp(-1.0, 1.0),
@@ -1078,7 +1074,6 @@ impl GraphController<'_> {
         }
 
         let rack_track = RackTrackSnapshot {
-            routing,
             slots: rack_slot_snapshots,
             macros: crate::sequencer::default_rack_macros(),
             runtime_macro_values: None,
@@ -1090,20 +1085,8 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
-    pub fn add_empty_rack_track(&mut self) -> Result<usize, String> {
-        self.add_rack_track(
-            "Drum Rack",
-            RackRouting::ByPitch,
-            Vec::<RackSlotBuildSpec<'_>>::new(),
-        )
-    }
-
     pub fn add_empty_layer_rack_track(&mut self) -> Result<usize, String> {
-        self.add_rack_track(
-            "Layer Rack",
-            RackRouting::Broadcast,
-            Vec::<RackSlotBuildSpec<'_>>::new(),
-        )
+        self.add_rack_track("Layer Rack", Vec::<RackSlotBuildSpec<'_>>::new())
     }
 
     pub fn group_track_to_instrument_rack(&mut self, track: usize) -> Result<(), String> {
@@ -1142,7 +1125,11 @@ impl GraphController<'_> {
                     .load(Ordering::Relaxed)
                     != 0;
                 active.then(|| {
-                    EffectDescriptor::builtin_insert_project_name(&descriptor.name)
+                    // Every built-in — native insert or DGenLisp-hosted, e.g.
+                    // Filter Table — has to carry the `builtin:` prefix into
+                    // rack-slot state; the bare name reloads as a missing
+                    // custom effect (eseq-zck).
+                    crate::effects::builtin_effect_project_name(&descriptor.name)
                         .unwrap_or_else(|| descriptor.name.clone())
                 })
             })
@@ -1290,13 +1277,15 @@ impl GraphController<'_> {
             .editor
             .effect_chain_leases
             .move_host(FxChainLocator::Track(track), rack_locator)?;
-        self.app.tracks[track] = format!("Rack {track_name}");
+        self.app.set_automatic_track_name(track, format!("Rack {track_name}"));
         self.app.set_rack_selected_slot(track, 0);
         self.publish_rack_slot_panner_runtime(track);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        self.app.state.publish_scheduler_snapshot();
-        self.app.push_all_restored_defaults();
+        // Both epochs advance before the publish: the scheduler stamps queued
+        // events with snapshot.pattern_epoch while the audio callback rejects
+        // events against the live atomic epoch, so a snapshot carrying the
+        // pre-bump epoch silences *every* track until something republishes.
         self.app
             .state
             .transport
@@ -1307,6 +1296,8 @@ impl GraphController<'_> {
             .transport
             .pattern_epoch
             .fetch_add(1, Ordering::Relaxed);
+        self.app.state.publish_scheduler_snapshot();
+        self.app.push_all_restored_defaults();
         Ok(())
     }
 
@@ -1386,11 +1377,14 @@ impl GraphController<'_> {
                 self.delete_engine_runtime(engine_id);
             }
         }
-        self.app.tracks[track] = display_name.to_string();
+        self.app.set_automatic_track_name(track, display_name.to_string());
         self.app.set_rack_selected_slot(track, 0);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        self.app.state.publish_scheduler_snapshot();
+        // Both epochs advance before the publish: the scheduler stamps queued
+        // events with snapshot.pattern_epoch while the audio callback rejects
+        // events against the live atomic epoch, so a snapshot carrying the
+        // pre-bump epoch silences *every* track until something republishes.
         self.app
             .state
             .transport
@@ -1401,6 +1395,7 @@ impl GraphController<'_> {
             .transport
             .pattern_epoch
             .fetch_add(1, Ordering::Relaxed);
+        self.app.state.publish_scheduler_snapshot();
         Ok(())
     }
 
@@ -1487,7 +1482,7 @@ impl GraphController<'_> {
                 lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
             }
         }
-        self.app.tracks[track] = sample_name.to_string();
+        self.app.set_automatic_track_name(track, sample_name.to_string());
         self.app.reset_sampler_bpm_for_analysis(track);
         self.app.publish_sampler_analysis_runtime(track);
         self.app.device_registry.clear_rack_track(track_id);
@@ -1537,7 +1532,6 @@ impl GraphController<'_> {
                         sample_name: sample_name.clone(),
                     }),
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -1554,53 +1548,11 @@ impl GraphController<'_> {
             )
             .collect();
 
-        let idx = self.add_rack_track(&track_name, RackRouting::Broadcast, specs)?;
+        let idx = self.add_rack_track(&track_name, specs)?;
         for (path, buffer_id, _, sample_name) in loaded_slots {
             self.app
                 .register_loaded_sample_path(&sample_name, buffer_id, path);
         }
-        Ok(idx)
-    }
-
-    pub fn add_sampler_drum_rack_track(
-        &mut self,
-        wav_path: &Path,
-        pad_note: i32,
-    ) -> Result<usize, String> {
-        if !validate_drum_rack_pad_note(pad_note) {
-            return Err(format!("Unsupported drum rack pad note {pad_note}"));
-        }
-        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
-        self.app.submit_sample_analysis(&loaded);
-        let sample_name =
-            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
-        let specs = vec![RackSlotBuildSpec {
-            instrument: RackSlotInstrumentBuildSpec::Sampler(RackSamplerBuildSpec {
-                buffer_id: loaded.buffer_id,
-                sample_rate: loaded.sample_rate,
-                sample_name: sample_name.clone(),
-            }),
-            instrument_base_note_offset: 0.0,
-            pad_note: Some(pad_note),
-            choke_group: None,
-            gain: 1.0,
-            pan: 0.0,
-            mute: false,
-            solo: false,
-            max_polyphony: DEFAULT_DRUM_SLOT_MAX_POLYPHONY,
-            param_plocks: None,
-            instrument_slot: None,
-            effect_slots: None,
-            effect_descriptors: None,
-            custom_effect_names: None,
-            track_sound_state: None,
-        }];
-        let idx = self.add_rack_track("Drum Rack", RackRouting::ByPitch, specs)?;
-        self.app.register_loaded_sample_path(
-            &sample_name,
-            loaded.buffer_id,
-            wav_path.to_path_buf(),
-        );
         Ok(idx)
     }
 

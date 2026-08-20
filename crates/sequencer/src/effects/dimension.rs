@@ -145,7 +145,8 @@ fn biquad_sample(input: f32, coeffs: BiquadCoeffs, z1: &mut f32, z2: &mut f32) -
 }
 
 fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
-    let omega = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.49) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 20.0, 0.49) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin * std::f32::consts::FRAC_1_SQRT_2;
@@ -160,7 +161,8 @@ fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
 }
 
 fn highpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
-    let omega = std::f32::consts::TAU * freq.clamp(10.0, sr * 0.49) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 10.0, 0.49) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin * std::f32::consts::FRAC_1_SQRT_2;
@@ -279,7 +281,7 @@ unsafe extern "C" fn dimension_process(
         return;
     }
 
-    let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
 
     // Mode buttons combine by averaging their rate/depth pairs (the hardware
     // parallels timing resistors when several are latched).

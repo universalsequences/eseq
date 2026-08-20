@@ -806,10 +806,8 @@ pub(in crate::lisp_host) fn effect_param_ids(
         return Err("effect param index out of range".to_string());
     }
     let idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32) as u64;
+        .node_param_idx(param_idx)
+        .ok_or_else(|| "effect param index unresolved".to_string())? as u64;
     if idx == u32::MAX as u64 {
         return Err("effect param index unresolved".to_string());
     }
@@ -838,12 +836,7 @@ pub(in crate::lisp_host) fn current_effect_param_raw(
         .iter()
         .find(|param| {
             param.logical_id == slot.node_id as u64
-                && param.idx
-                    == slot
-                        .param_node_indices
-                        .get(param_idx)
-                        .copied()
-                        .unwrap_or(param_idx as u32) as u64
+                && Some(param.idx) == slot.node_param_idx(param_idx).map(u64::from)
         })
         .map(|param| param.value)
         .unwrap_or(desc.default))
@@ -922,10 +915,8 @@ pub(in crate::lisp_host) fn instrument_param_target_and_idx(
         return Err("instrument param index out of range".to_string());
     }
     let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
+        .node_param_idx(param_idx)
+        .ok_or_else(|| "instrument param index unresolved".to_string())?;
     let span = slot
         .param_node_spans
         .get(param_idx)

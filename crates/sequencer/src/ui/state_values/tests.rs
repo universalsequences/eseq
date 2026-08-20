@@ -864,7 +864,6 @@
             "ui/seq-macro-mapping-hooks.lisp",
             "ui/seqv-track-params.lisp",
             "ui/step-grid-interactions.lisp",
-            "ui/bus-grid.lisp",
             "ui/macros.lisp",
             "ui/macro-state.lisp",
             "ui/track-collapse.lisp",
@@ -1046,8 +1045,8 @@
         let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
             .expect("read ui/step-grid-interactions.lisp");
         // The anchor is pinned into `eseq.vanilla` (module spec §10 hazard m):
-        // ui/bus-grid.lisp (eseq.bus-grid) shares this gesture slot and
-        // `set!`s it through the same `eseq.vanilla/` spelling.
+        // vanilla callers share this gesture slot and `set!` it through the
+        // same `eseq.vanilla/` spelling.
         let start = src
             .find("(def eseq.vanilla/step-key-select-anchor")
             .expect("keyboard step selection source should define anchor");
@@ -2181,6 +2180,15 @@
                     ])]),
                 ),
                 (
+                    "kit-presets",
+                    test_list(vec![map_value([
+                        ("kind", Value::String("kit".to_string())),
+                        ("label", Value::String("House Kit".to_string())),
+                        ("name", Value::String("House Kit".to_string())),
+                        ("path", Value::String("kits/House-Kit.kit".to_string())),
+                    ])]),
+                ),
+                (
                     "sidebar-instrument-display-name",
                     Value::String(String::new()),
                 ),
@@ -2323,6 +2331,170 @@
             rendered.contains("Wide Plate"),
             "saved Sound label should be visible; rendered:\n{rendered}"
         );
+    }
+
+    /// Drum rack v2 slice 6: kits are browser objects, listed in their own tab
+    /// and loaded by activating one (docs/drum-rack-v2-spec.md, "Polish").
+    #[test]
+    fn metal_seq_browser_kits_tab_loads_a_kit_as_a_new_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"kits\")")
+            .expect("select Kits tab");
+        editor.refresh_runtime_side_effects();
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 24);
+        let layout = editor.widget_layout().expect("Kits browser layout");
+        assert_finite_layout_tree(&layout);
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/kits-tab-tree")
+            .expect("Kits tree should render");
+        assert!(tree.rect.width > 0.0 && tree.rect.height > 0.0);
+        let rendered = render_layout_cells(&layout, 72, 24);
+        assert!(
+            rendered.contains("House Kit"),
+            "saved kit label should be visible; rendered:\n{rendered}"
+        );
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/%load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
+            )
+            .expect("activate the kit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "load-kit");
+                let Value::Map(payload) = payload else {
+                    panic!("load-kit payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("kits/House-Kit.kit".to_string()))
+                );
+            }
+            other => panic!("expected load-kit host command, got {other:?}"),
+        }
+    }
+
+    /// eseq-4b5.19, eseq-4b5.23: the browser addresses kit and Sound
+    /// auditions to the selected drum rack, refuses saved instruments, and
+    /// adds rather than converts for the builtin sampler, so no audition
+    /// targets the stale current track hidden behind the rack.
+    #[test]
+    fn metal_seq_browser_selected_rack_addresses_auditions_without_using_stale_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        apply_rack_group_bindings(&mut editor, false);
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(3.0));
+        rt.set_reactive("SEQ", "current-track", Value::Number(1.0));
+        rt.set_reactive("SEQ", "track-instrument-types", test_string_list(&[
+            "sampler", "custom", "sampler",
+        ]));
+        rt.eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("select rack backing bus");
+        editor.runtime_mut().run_reactive_cycle();
+        let _ = editor.drain_host_commands();
+
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
+        ).expect("audition selected rack kit");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%load-sound (dict :label "Bass" :path "sounds/Bass.sound"))"#,
+        ).expect("audition selected rack Sound");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%activate-instrument "emulations/minimoog")"#,
+        ).expect("refuse saved instrument audition on selected rack");
+        editor.runtime_mut().eval_str(
+            r#"(eseq.browser/%activate-builtin-instrument "sampler")"#,
+        ).expect("activate builtin sampler on selected rack");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 3,
+            "saved instrument activation must not target the stale current track");
+        assert!(
+            matches!(&commands[2],
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "add-track-sampler"),
+            "builtin sampler must add a track, not convert the stale current track: {:?}",
+            commands[2],
+        );
+        for (command, expected_name, expected_path) in [
+            (&commands[0], "load-kit", "kits/House-Kit.kit"),
+            (&commands[1], "audition-sound-on-rack", "sounds/Bass.sound"),
+        ] {
+            let eseqlisp::host::HostCommand::Custom { name, payload } = command else {
+                panic!("expected custom host command, got {command:?}");
+            };
+            assert_eq!(name, expected_name);
+            let Value::Map(payload) = payload else { panic!("expected command map") };
+            assert_eq!(payload.get("path").map(|value| value.borrow().clone()),
+                Some(Value::String(expected_path.to_string())));
+            assert_eq!(payload.get("group-id").map(|value| value.borrow().clone()),
+                Some(Value::Number(7.0)));
+        }
+    }
+
+    /// eseq-4b5.17: the rack header's save icon enters a Kits-tab naming flow;
+    /// confirming there emits the addressed save command instead of writing
+    /// immediately from the FX panel.
+    #[test]
+    fn metal_seq_browser_kits_tab_saves_a_named_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.browser/enter-kit-save 7 "Kit")"#)
+            .expect("enter kit save mode");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-tab")
+                .expect("read selected browser tab"),
+            Some(Value::String("kits".to_string())),
+        );
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 24);
+        let layout = editor.widget_layout().expect("kit save browser layout");
+        for key in ["/kit-save-name", "/kit-save-confirm"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("kit save flow should render {key}"));
+            assert_finite_nonzero_rect(node, key);
+        }
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(do (set! eseq.browser/%kit-save-name "Breakbeat") (eseq.browser/%save-kit))"#,
+            )
+            .expect("confirm kit save");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "save-rack-as-kit");
+                let Value::Map(payload) = payload else {
+                    panic!("save-rack-as-kit payload should be a dict: {payload:?}");
+                };
+                for (key, expected) in [
+                    ("group-id", Value::Number(7.0)),
+                    ("name", Value::String("Breakbeat".to_string())),
+                    ("overwrite", Value::Bool(false)),
+                ] {
+                    assert_eq!(
+                        payload.get(key).map(|value| value.borrow().clone()),
+                        Some(expected),
+                        "save payload field {key}",
+                    );
+                }
+            }
+            other => panic!("expected save-rack-as-kit host command, got {other:?}"),
+        }
     }
 
     /// Module spec §10 hazard (l): `sbrowser-active-tree-key` hands a widget key
@@ -2654,6 +2826,25 @@
             .collect()
     }
 
+    fn top_level_tree_field_keywords(value: &Value, field: &str) -> Vec<Option<String>> {
+        let Value::List(items) = value else {
+            panic!("tree should be a list: {value:?}");
+        };
+        items
+            .iter()
+            .map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get(field).and_then(|value| match &*value.borrow() {
+                    Value::Keyword(value) => Some(value.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
     fn top_level_tree_field_bools(value: &Value, field: &str) -> Vec<Option<bool>> {
         let Value::List(items) = value else {
             panic!("tree should be a list: {value:?}");
@@ -2754,6 +2945,7 @@
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
         let names = top_level_tree_field_strings(&tree, "name");
+        let icons = top_level_tree_field_keywords(&tree, "icon");
         let draggable = top_level_tree_field_bools(&tree, "draggable");
 
         assert_eq!(
@@ -2773,16 +2965,20 @@
         assert_eq!(kinds[4].as_deref(), Some("builtin-instrument"));
         assert_eq!(names[3].as_deref(), Some("rack"));
         assert_eq!(names[4].as_deref(), Some("layer-rack"));
+        assert_eq!(icons[1].as_deref(), Some("sampler"));
+        assert_eq!(icons[2].as_deref(), Some("sine"));
+        assert_eq!(icons[3].as_deref(), Some("sampler"));
+        assert_eq!(icons[4].as_deref(), Some("sampler"));
         assert_eq!(
             &draggable[..5],
             &[
                 Some(false),
                 Some(true),
-                Some(false),
-                Some(false),
-                Some(false)
+                Some(true),
+                Some(true),
+                Some(true)
             ],
-            "sampler should be the only draggable builtin instrument"
+            "every builtin instrument row drags; only the header does not (eseq-mj8)"
         );
     }
 
@@ -2833,6 +3029,23 @@
             !tree_contains_kind(&tree, "section"),
             "audio effect tree should not contain collapsible section nodes: {tree:?}"
         );
+    }
+
+    #[test]
+    fn metal_seq_audio_effect_tree_omits_retired_builtins() {
+        let tree = build_audio_effect_tree("");
+        let labels = top_level_tree_field_strings(&tree, "label");
+        let label = |name: &str| labels.iter().any(|l| l.as_deref() == Some(name));
+
+        for retired in sequencer::effects::EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES {
+            assert!(
+                !label(retired),
+                "retired built-in {retired} should not be pickable: {tree:?}"
+            );
+        }
+        for kept in ["Str8 Delay", "Space Echo", "Compressor", "Glue Compressor"] {
+            assert!(label(kept), "{kept} should still be pickable: {tree:?}");
+        }
     }
 
     #[test]
@@ -4698,13 +4911,153 @@
         }
     }
 
+    /// eseq-mj8: every builtin instrument row drags, so the shared new-track
+    /// drop must dispatch on `:kind` — `add-track-instrument` resolves SAVED
+    /// instruments by name and would hunt for a file called "modulator".
     #[test]
-    fn metal_seq_browser_layer_button_appends_sample_to_current_broadcast_rack() {
+    fn metal_seq_browser_builtin_drop_on_new_track_zone_uses_builtin_add_commands() {
+        for (builtin, expected) in [
+            ("sampler", "add-track-sampler"),
+            ("modulator", "add-track-modulator"),
+            ("rack", "add-track-rack"),
+            ("layer-rack", "add-track-layer-rack"),
+        ] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    r#"(eseq.browser/drop-instrument-new-track
+                        (dict :kind "builtin-instrument" :name "{builtin}" :label "x"))"#
+                ))
+                .expect("drop builtin on the new-track zone");
+
+            let commands = editor.drain_host_commands();
+            assert_eq!(commands.len(), 1, "{builtin} should queue one command");
+            match &commands[0] {
+                eseqlisp::host::HostCommand::Custom { name, .. } => {
+                    assert_eq!(name, expected, "routing for builtin {builtin}");
+                }
+                other => panic!("expected {expected} host command, got {other:?}"),
+            }
+            // The spinner is keyed to saved-instrument loads; builtins land
+            // synchronously and would leave it stuck.
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str("sbrowser-loading-instrument-name")
+                    .expect("read loading name"),
+                Some(Value::String(String::new()))
+            );
+        }
+    }
+
+    /// The saved-instrument half of the same drop is unchanged.
+    #[test]
+    fn metal_seq_browser_saved_instrument_drop_on_new_track_zone_loads_by_name() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-instrument-new-track
+                    (dict :kind "instrument" :name "emulations/digitone"))"#,
+            )
+            .expect("drop saved instrument on the new-track zone");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("instrument add payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+            }
+            other => panic!("expected add-track-instrument host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-loading-instrument-name")
+                .expect("read loading name"),
+            Some(Value::String("emulations/digitone".to_string()))
+        );
+    }
+
+    /// A builtin dropped on an existing track that cannot host it adds a track
+    /// instead of dead-ending on "Only sampler conversion is supported".
+    #[test]
+    fn metal_seq_browser_builtin_drop_on_track_falls_back_to_adding_a_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "builtin-instrument" :name "rack")
+                          :target (dict :track 0)))"#,
+            )
+            .expect("drop drum rack on an existing track");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            matches!(&commands[0],
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "add-track-rack"),
+            "expected add-track-rack, got {:?}",
+            commands[0]
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Add drum rack")
+        );
+    }
+
+    /// Builtins are not files on disk, so a folder drop must not emit
+    /// move-saved-instrument.
+    #[test]
+    fn metal_seq_browser_builtin_drop_on_folder_is_rejected() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-instrument-on-folder
+                    (dict :payload (dict :kind "builtin-instrument" :name "modulator")
+                          :target (dict :folder "emulations" :label "emulations")))"#,
+            )
+            .expect("drop builtin on a folder");
+
+        assert!(editor.drain_host_commands().is_empty());
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Builtin instruments cannot be moved into a folder")
+        );
+    }
+
+    /// The mixer and sequencer new-track zones must keep delegating to the
+    /// shared router; open-coding add-track-instrument there is the exact
+    /// regression eseq-mj8 fixed.
+    #[test]
+    fn metal_seq_new_track_drop_zones_delegate_builtin_routing_to_the_browser() {
+        for path in ["ui/mixer.lisp", "ui/sequencer.lisp"] {
+            let src = std::fs::read_to_string(path).expect("read drop-zone lisp");
+            assert!(
+                src.contains("(eseq.browser/drop-instrument-new-track payload)"),
+                "{path} should route instrument drops through the shared router"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_layer_button_appends_sample_to_the_open_rack_panel() {
         let mut editor = browser_editor_on_instrument_tab();
         let mut rack = HashMap::new();
         rack.insert(
-            "routing".to_string(),
-            Rc::new(RefCell::new(Value::String("broadcast".to_string()))),
+            "is-rack".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
         );
         editor
             .runtime_mut()
@@ -5390,6 +5743,57 @@
     }
 
     #[test]
+    fn metal_seq_track_group_dispatcher_groups_only_multi_selection() {
+        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let start = src
+            .find("(def %group-selected ()")
+            .expect("mixer should define the group action");
+        let end = src
+            .find("(define-mode \"seq-mixer-mode\"")
+            .expect("group dispatcher should precede mixer mode setup");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![(
+                "selected-tracks",
+                test_list(vec![Value::Number(0.0), Value::Number(1.0)]),
+            )],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&format!("(module eseq.mixer)\n{}", &src[start..end]))
+            .expect("load track group dispatcher");
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/seq-ctrl-g)")
+            .expect("dispatch group for multi-selection");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }]
+                if name == "group-selected-tracks"
+        ));
+        assert_eq!(editor.runtime_mut().take_status_message(), None);
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-tracks",
+            test_list(vec![Value::Number(0.0)]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/seq-ctrl-g)")
+            .expect("reject group for single selection");
+        assert!(editor.drain_host_commands().is_empty());
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Select 2+ tracks to group")
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_parses() {
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
         let tokens = Parser::new(src).parse().expect("tokenize ui/effects.lisp");
@@ -5595,6 +5999,28 @@
                 "mixer-track:{}",
                 test_delete_target_number(payload, "track")?
             )),
+            "mixer-tracks" => {
+                let Value::Map(map) = payload else {
+                    return None;
+                };
+                let tracks = map.get("tracks")?;
+                let tracks = tracks.borrow();
+                let Value::List(tracks) = &*tracks else {
+                    return None;
+                };
+                let tracks = tracks
+                    .iter()
+                    .map(|track| match &*track.borrow() {
+                        Value::Number(track) if *track >= 0.0 => Some(*track as usize),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(format!("mixer-tracks:{tracks:?}"))
+            }
+            "mixer-group" => Some(format!(
+                "mixer-group:{}",
+                test_delete_target_number(payload, "group-id")?
+            )),
             "track-pattern" => Some(format!(
                 "track-pattern:{}:{}",
                 test_delete_target_number(payload, "track")?,
@@ -5636,7 +6062,10 @@
         }
     }
 
-    fn register_test_delete_target_natives(editor: &mut eseqlisp::Editor, track_count: usize) {
+    fn register_test_delete_target_natives(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+    ) -> Arc<Mutex<Option<(String, Value)>>> {
         let active = Arc::new(Mutex::new(None::<(String, Value)>));
         let version = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -5731,6 +6160,8 @@
                     };
                     let kind = key.split(':').next().unwrap_or_default();
                     let name = match (ctx.current_buffer_name().as_str(), kind) {
+                        ("*mixer*", "mixer-group") => "delete-track-group",
+                        ("*mixer*", "mixer-tracks") => "delete-tracks",
                         ("*mixer*", "mixer-track") => {
                             let Value::Map(map) = &payload else {
                                 return Ok(Value::Bool(false));
@@ -5775,11 +6206,11 @@
                 });
         }
 
-        let active = Arc::clone(&active);
+        let clone_target = Arc::clone(&active);
         editor.runtime_mut().register_native(
             "seq-clone-active-track-pattern",
             move |_args, ctx| {
-                let Some((key, payload)) = active.lock().unwrap().clone() else {
+                let Some((key, payload)) = clone_target.lock().unwrap().clone() else {
                     return Ok(Value::Bool(false));
                 };
                 if ctx.current_buffer_name() != "*mixer*" || !key.starts_with("track-pattern:") {
@@ -5792,6 +6223,7 @@
                 Ok(Value::Bool(true))
             },
         );
+        active
     }
 
     fn value_contains_string(value: &Value, needle: &str) -> bool {
@@ -8105,8 +8537,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -8220,8 +8651,6 @@
             vec![
                 ("track-ids", Value::List(vec![])),
                 ("track-instrument-types", Value::List(vec![])),
-                ("track-drum-racks", Value::List(vec![])),
-                ("track-drum-sounds", Value::List(vec![])),
                 ("track-mod-output-available", Value::List(vec![])),
                 ("track-instrument-run-modes", Value::List(vec![])),
                 ("num-tracks", Value::Number(1.0)),
@@ -9411,8 +9840,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -10633,12 +11061,10 @@
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             sequencer::sequencer::RackTrackSnapshot::new(
-                sequencer::sequencer::RackRouting::Broadcast,
                 vec![sequencer::sequencer::RackSlotSnapshot {
                     instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                     instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 12.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 0.75,
                     pan: -0.2,
@@ -10671,8 +11097,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -10703,77 +11128,14 @@
         app
     }
 
-    fn test_app_with_drum_rack_panel(selected_pad_note: i32) -> app::App {
-        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
-        let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-        state.set_rack_track_for_all_pattern_snapshots(
-            0,
-            sequencer::sequencer::RackTrackSnapshot::new(
-                sequencer::sequencer::RackRouting::ByPitch,
-                vec![sequencer::sequencer::RackSlotSnapshot {
-                    instrument_type: sequencer::sequencer::InstrumentType::Sampler,
-                    instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
-                    instrument_base_note_offset: 0.0,
-                    pad_note: Some(sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE),
-                    choke_group: None,
-                    gain: 1.0,
-                    pan: 0.0,
-                    mute: false,
-                    solo: false,
-                    max_polyphony: 1,
-                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
-                    instrument_slot:
-                        sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
-                            &sampler_desc,
-                            0,
-                            0,
-                        ),
-                    effect_slots: sequencer::sequencer::RackSlotSnapshot::empty_effect_slots(),
-                    effect_descriptors: sequencer::effects::EffectDescriptor::default_full_chain(),
-                    custom_effect_names: sequencer::sequencer::RackSlotSnapshot::empty_effect_names(
-                    ),
-                    track_sound_state: sequencer::sequencer::TrackSoundState::default(),
-                    sample_id: Some((42, "DS FM".to_string(), 48_000)),
-                }],
-                sequencer::sequencer::default_rack_macros(),
-            ),
-        );
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = app::App::new(
-            state,
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        app.tracks = vec!["Drum Rack".to_string()];
-        app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
-        app.graph.instrument_descriptors =
-            vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];
-        app.set_rack_selected_pad_note(0, selected_pad_note);
-        app
-    }
-
     #[test]
-    fn rack_instrument_panel_value_lists_broadcast_slots() {
+    fn rack_instrument_panel_value_lists_layer_slots() {
         let app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));
 
         let panel = build_instrument_panel_value(&app, 0, &selected);
 
         assert!(value_contains_string(&panel, "rack"));
-        assert!(value_contains_string(&panel, "broadcast"));
         assert!(value_contains_string(&panel, "Layer Alpha"));
 
         let Value::List(items) = &panel else {
@@ -10782,6 +11144,11 @@
         let Value::Map(rack) = &*items[0].borrow() else {
             panic!("rack panel item should be a map");
         };
+        assert_eq!(
+            rack.get("is-rack").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true)),
+            "the browser reads this flag to tell an open rack panel from none"
+        );
         assert_eq!(
             rack.get("selected-slot")
                 .map(|value| value.borrow().clone()),
@@ -13020,424 +13387,6 @@
         assert_eq!(drum_rack_pad_label(0), "C4");
         assert_eq!(drum_rack_pad_label(12), "C5");
         assert_eq!(drum_rack_pad_label(36), "C7");
-        assert_eq!(drum_rack_pad_bank_label(0), "C4 - D#5");
-    }
-
-    #[test]
-    fn drum_rack_slot_selection_uses_pad_note_identity() {
-        let mut app = test_app_with_drum_rack_panel(0);
-        let mut rack = app
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(0)
-            .cloned()
-            .flatten()
-            .expect("drum rack fixture");
-        let mut second_slot = rack.slots[0].clone();
-        second_slot.pad_note = Some(12);
-        rack.slots.push(second_slot);
-        app.state
-            .set_rack_track_for_all_pattern_snapshots(0, rack.clone());
-
-        assert!(app.select_rack_slot(0, &rack, 1));
-        assert_eq!(app.rack_selected_pad_note(0), 12);
-        assert_eq!(
-            app.selected_rack_slot_index_for_rack(0, &rack),
-            Some(1),
-            "selecting slot 1 must resolve the C5 pad, not slot index 1 as a pad note"
-        );
-    }
-
-    #[test]
-    fn drum_rack_sound_values_project_hits_into_slot_lanes() {
-        let mut app = test_app_with_drum_rack_panel(0);
-        app.set_rack_selected_pad_note(0, 0);
-        app.state.pattern.chord_data[0].add_note_with_duration(3, 0.0, 1.0);
-        app.state.pattern.patterns[0].set_step_active(3, true);
-        assert_eq!(
-            app.state.set_drum_lane_step_duration(0, 3, 0, 4.0),
-            Some(4.0)
-        );
-
-        assert!(matches!(
-            build_track_drum_racks_value(&app),
-            Value::List(ref tracks) if matches!(*tracks[0].borrow(), Value::Bool(true))
-        ));
-        assert!(matches!(
-            build_track_drum_racks_value(&test_app_with_rack_panel()),
-            Value::List(ref tracks) if matches!(*tracks[0].borrow(), Value::Bool(false))
-        ));
-
-        let sounds = build_all_track_drum_sounds_value(&app);
-        let Value::List(tracks) = sounds else {
-            panic!("drum sound options should be grouped by track");
-        };
-        let Value::List(options) = &*tracks[0].borrow() else {
-            panic!("drum sound options should be a list");
-        };
-        let Value::Map(sound) = &*options[0].borrow() else {
-            panic!("drum sound option should be a map");
-        };
-        assert_eq!(value_map_number(sound, "transpose"), Some(0.0));
-        assert_eq!(value_map_string(sound, "name").as_deref(), Some("DS FM"));
-        assert_eq!(value_map_string(sound, "pad-label").as_deref(), Some("C4"));
-        assert_eq!(
-            value_map_string(sound, "selected-field").as_deref(),
-            Some("track-0-rack-slot-0-selected")
-        );
-        assert_eq!(
-            value_map_string(sound, "label").as_deref(),
-            Some("C4 · DS FM"),
-            "sound names must use the same pad-note and slot display name as the drum-pad UI"
-        );
-        assert_eq!(
-            value_map_string(sound, "short-label").as_deref(),
-            Some("DSF"),
-            "vertical labels should use only the first three letters of the sound name"
-        );
-
-        assert!(drum_lane_step_active(&app.state, 0, 0, 3));
-        assert!(!drum_lane_step_active(&app.state, 0, 1, 3));
-        assert!(!drum_lane_step_active(&app.state, 0, 0, 2));
-        assert!(drum_lane_step_duration_covered(&app.state, 0, 0, 3));
-        assert!(drum_lane_step_duration_covered(&app.state, 0, 0, 6));
-        assert!(!drum_lane_step_duration_covered(&app.state, 0, 0, 7));
-
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], false);
-        sync_drum_lane_step_binding_fields(&mut runtime, &app.state, &app, 0, None);
-        sync_all_rack_slot_selection_binding_fields(&mut runtime, &app);
-        let Some(Value::Map(fields)) = runtime.global_value("SEQ") else {
-            panic!("SEQ should remain a reactive map");
-        };
-        assert!(matches!(
-            fields
-                .get(&drum_lane_step_selected_field(0, 0, 3))
-                .map(|value| value.borrow().clone()),
-            Some(Value::Bool(false))
-        ));
-        assert!(matches!(
-            fields
-                .get(&drum_lane_step_duration_field(0, 0, 3))
-                .map(|value| value.borrow().clone()),
-            Some(Value::Bool(true))
-        ));
-        assert!(matches!(
-            fields
-                .get(&rack_slot_selected_field(0, 0))
-                .map(|value| value.borrow().clone()),
-            Some(Value::Bool(true))
-        ));
-    }
-
-    #[test]
-    fn metal_seq_fx_lisp_lays_out_drum_rack_pad_grid() {
-        fn drop_meta_number(node: &eseqlisp::layout::LayoutNode, key: &str) -> Option<f64> {
-            let Value::Map(map) = node.props.get("drop-meta")? else {
-                return None;
-            };
-            map.get(key).and_then(|value| match *value.borrow() {
-                Value::Number(number) => Some(number),
-                _ => None,
-            })
-        }
-
-        let app = test_app_with_drum_rack_panel(0);
-        let selected = Arc::new(Mutex::new(HashSet::new()));
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
-        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(160, 20);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(1.0)),
-                ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![])),
-                ("available-builtin-effects", test_list(vec![])),
-                ("available-midi-effects", test_list(vec![])),
-                ("bus-names", test_list(vec![])),
-                ("effects", test_list(vec![])),
-                ("midi-effects", test_list(vec![])),
-                ("instrument-panel", rack_panel),
-                ("bus-effects", test_list(vec![])),
-                ("delete-target-version", Value::Number(0.0)),
-            ],
-            true,
-        );
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
-                (def eseq.browser/sample-selected-path () "")
-                (def eseq.browser/add-selected-rack-layer () false)
-                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
-                (def custom-midi-fx-ui (fx) false)
-                (def custom-audio-fx-ui (fx) false)
-                (defstate eseq.seq-core-state/selected-bus -1)
-                "#,
-            )
-            .expect("install drum rack fx test helpers");
-        register_test_delete_target_natives(&mut editor, 1);
-        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
-        editor.refresh_runtime_side_effects();
-        if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("drum rack fx lisp status after refresh: {status}");
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx lisp should create the *fx* buffer")
-            .id;
-        editor.set_active_buffer(fx_id);
-        let layout = editor.widget_layout().expect("drum rack fx layout");
-        assert_finite_layout_tree(&layout);
-        let mut layout_summaries = Vec::new();
-        collect_layout_node_summaries(&layout, &mut layout_summaries);
-        let grid = find_layout_node_by_debug_name(&layout, "drum-rack-pad-grid")
-            .unwrap_or_else(|| panic!("drum rack pad grid; layout={layout_summaries:#?}"));
-        assert_finite_nonzero_rect(grid, "drum rack pad grid");
-        let grid_cells = find_layout_node_by_debug_name(&layout, "drum-rack-pad-grid-cells")
-            .unwrap_or_else(|| panic!("drum rack pad grid cells; layout={layout_summaries:#?}"));
-        assert_finite_nonzero_rect(grid_cells, "drum rack pad grid cells");
-        let bank_selector = find_layout_node_by_debug_name(&layout, "drum-rack-pad-bank-selector")
-            .unwrap_or_else(|| panic!("drum rack pad bank selector; layout={layout_summaries:#?}"));
-        assert_finite_nonzero_rect(bank_selector, "drum rack pad bank selector");
-        assert!(
-            find_layout_node_by_text(&layout, "C4 - D#5").is_some(),
-            "first drum rack pad bank label should render; layout={layout_summaries:#?}"
-        );
-        assert_eq!(
-            count_stable_key_prefix(&layout, "eseq.effects.instrument-panel/drum-rack-pad-"),
-            16,
-            "drum rack should render exactly 16 pads"
-        );
-        assert!(
-            count_stable_key_prefix(&layout, "eseq.effects.instrument-panel/drum-rack-bank-") >= 2,
-            "drum rack should render octave pad bank selector cells"
-        );
-        let c4 = find_layout_node_by_text(&layout, "C4")
-            .unwrap_or_else(|| panic!("C4 pad label; layout={layout_summaries:#?}"));
-        let d_sharp_5 = find_layout_node_by_text(&layout, "D#5")
-            .unwrap_or_else(|| panic!("D#5 pad label; layout={layout_summaries:#?}"));
-        assert_finite_nonzero_rect(c4, "C4 pad label");
-        assert_finite_nonzero_rect(d_sharp_5, "D#5 pad label");
-        let selected_sampler_panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
-            .unwrap_or_else(|| {
-                panic!("selected drum pad sampler panel; layout={layout_summaries:#?}")
-            });
-        assert_finite_nonzero_rect(selected_sampler_panel, "selected drum pad sampler panel");
-        let pad_0 = find_layout_node_by_stable_key_suffix(&layout, "/drum-rack-pad-0")
-            .expect("C4 drum rack pad");
-        let pad_15 = find_layout_node_by_stable_key_suffix(&layout, "/drum-rack-pad-15")
-            .expect("D#5 drum rack pad");
-        assert_finite_nonzero_rect(pad_0, "C4 drum rack pad");
-        assert_finite_nonzero_rect(pad_15, "D#5 drum rack pad");
-        for pad_note in 0..16 {
-            let pad =
-                find_layout_node_by_stable_key_suffix(&layout, &format!("/drum-rack-pad-{pad_note}"))
-                .unwrap_or_else(|| panic!("missing visible drum rack pad {pad_note}"));
-            assert_finite_nonzero_rect(pad, &format!("drum rack pad {pad_note}"));
-            assert!(
-                pad.rect.row >= grid_cells.rect.row - 0.5
-                    && pad.rect.row + pad.rect.height
-                        <= grid_cells.rect.row + grid_cells.rect.height + 0.5,
-                "drum rack pad {pad_note} should fit inside the visible grid cells; pad={:?} grid={:?}",
-                pad.rect,
-                grid_cells.rect
-            );
-            assert!(
-                pad.rect.height <= 3.0,
-                "drum rack pad {pad_note} should be compact enough for four visible rows; got {:?}",
-                pad.rect
-            );
-        }
-        assert_eq!(drop_meta_number(pad_0, "track"), Some(0.0));
-        assert_eq!(drop_meta_number(pad_0, "pad-note"), Some(0.0));
-        assert_eq!(drop_meta_number(pad_15, "pad-note"), Some(15.0));
-
-        let _ = editor.drain_host_commands();
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(eseq.effects.instrument-panel/rack-pad-select
-                    (dict :track 0 :pad-note 15))"#,
-            )
-            .expect("select drum rack pad");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "select-rack-pad");
-                let Value::Map(payload) = payload else {
-                    panic!("select-rack-pad payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload.get("pad-note").map(|value| value.borrow().clone()),
-                    Some(Value::Number(15.0))
-                );
-            }
-            other => panic!("expected select-rack-pad host command, got {other:?}"),
-        }
-
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(eseq.effects.instrument-panel/rack-pad-bank-select
-                    (dict :track 0)
-                    (dict :bank-start 12))"#,
-            )
-            .expect("select drum rack pad bank");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "select-rack-pad-bank");
-                let Value::Map(payload) = payload else {
-                    panic!("select-rack-pad-bank payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload
-                        .get("bank-start")
-                        .map(|value| value.borrow().clone()),
-                    Some(Value::Number(12.0))
-                );
-            }
-            other => panic!("expected select-rack-pad-bank host command, got {other:?}"),
-        }
-
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(eseq.effects.instrument-panel/rack-slot-set-choke-group-label
-                    (dict :track 0 :idx 0)
-                    "2")"#,
-            )
-            .expect("set drum rack pad choke group");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "set-rack-slot-choke-group");
-                let Value::Map(payload) = payload else {
-                    panic!("set-rack-slot-choke-group payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload.get("slot").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload.get("value").map(|value| value.borrow().clone()),
-                    Some(Value::Number(2.0))
-                );
-            }
-            other => panic!("expected set-rack-slot-choke-group host command, got {other:?}"),
-        }
-
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(eseq.effects.instrument-panel/rack-panel-drop-on-drum-pad
-                    (dict :drag-type "sample"
-                          :payload (dict :path "samples/snare.wav")
-                          :target (dict :track 0 :pad-note 3)))"#,
-            )
-            .expect("drop sample on drum pad");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "add-rack-sample-pad");
-                let Value::Map(payload) = payload else {
-                    panic!("add-rack-sample-pad payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload.get("pad-note").map(|value| value.borrow().clone()),
-                    Some(Value::Number(3.0))
-                );
-                assert_eq!(
-                    payload.get("path").map(|value| value.borrow().clone()),
-                    Some(Value::String("samples/snare.wav".to_string()))
-                );
-                assert_eq!(
-                    payload
-                        .get("preserve-browser-context")
-                        .map(|value| value.borrow().clone()),
-                    Some(Value::Bool(true))
-                );
-            }
-            other => panic!("expected add-rack-sample-pad host command, got {other:?}"),
-        }
-
-        let mut banked_app = test_app_with_drum_rack_panel(0);
-        banked_app.set_rack_pad_bank_start(0, 12);
-        let banked_panel = build_instrument_panel_value(&banked_app, 0, &selected);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "instrument-panel", banked_panel);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor.refresh_visible_layouts_for_buffer_named("*fx*");
-        let banked_layout = editor.widget_layout().expect("banked drum pad fx layout");
-        assert_finite_layout_tree(&banked_layout);
-        let mut banked_summaries = Vec::new();
-        collect_layout_node_summaries(&banked_layout, &mut banked_summaries);
-        assert!(
-            find_layout_node_by_text(&banked_layout, "C5").is_some(),
-            "banked drum rack should render C5 pad label; layout={banked_summaries:#?}"
-        );
-        assert!(
-            find_layout_node_by_text(&banked_layout, "D#6").is_some(),
-            "banked drum rack should render D#6 pad label; layout={banked_summaries:#?}"
-        );
-        let c2_pad = find_layout_node_by_stable_key_suffix(&banked_layout, "/drum-rack-pad-12")
-            .expect("C5 drum rack pad in second bank");
-        let d_sharp_3_pad = find_layout_node_by_stable_key_suffix(&banked_layout, "/drum-rack-pad-27")
-            .expect("D#6 drum rack pad in second bank");
-        assert_finite_nonzero_rect(c2_pad, "C5 drum rack pad");
-        assert_finite_nonzero_rect(d_sharp_3_pad, "D#6 drum rack pad");
-        assert_eq!(drop_meta_number(c2_pad, "pad-note"), Some(12.0));
-        assert_eq!(drop_meta_number(d_sharp_3_pad, "pad-note"), Some(27.0));
-
-        let empty_app = test_app_with_drum_rack_panel(3);
-        let empty_panel = build_instrument_panel_value(&empty_app, 0, &selected);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "instrument-panel", empty_panel);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor.refresh_visible_layouts_for_buffer_named("*fx*");
-        let empty_layout = editor.widget_layout().expect("empty drum pad fx layout");
-        assert_finite_layout_tree(&empty_layout);
-        let empty_drop = find_layout_node_by_debug_name(&empty_layout, "rack-empty-selected-panel")
-            .expect("empty selected drum pad panel");
-        assert_finite_nonzero_rect(empty_drop, "empty selected drum pad panel");
-        assert_eq!(drop_meta_number(empty_drop, "track"), Some(0.0));
-        assert_eq!(drop_meta_number(empty_drop, "pad-note"), Some(3.0));
     }
 
     fn reactive_number(runtime: &Runtime, namespace: &str, field: &str) -> Option<f64> {
@@ -13615,67 +13564,6 @@
 
     fn test_owned_string_list(values: &[String]) -> Value {
         test_list(values.iter().cloned().map(Value::String).collect())
-    }
-
-    fn test_drum_sound(
-        slot_idx: usize,
-        transpose: f64,
-        name: &str,
-        label: &str,
-        short_label: &str,
-    ) -> Value {
-        let mut sound = HashMap::new();
-        sound.insert(
-            "transpose".to_string(),
-            Rc::new(RefCell::new(Value::Number(transpose))),
-        );
-        sound.insert(
-            "slot-idx".to_string(),
-            Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
-        );
-        for (key, param) in [
-            ("gain-field", sequencer::sequencer::RackSlotParam::Gain),
-            ("mute-field", sequencer::sequencer::RackSlotParam::Mute),
-            ("solo-field", sequencer::sequencer::RackSlotParam::Solo),
-        ] {
-            sound.insert(
-                key.to_string(),
-                Rc::new(RefCell::new(Value::String(rack_slot_value_field(
-                    0, slot_idx, param,
-                )))),
-            );
-        }
-        sound.insert(
-            "peak-field".to_string(),
-            Rc::new(RefCell::new(Value::String(rack_slot_peak_field(
-                0, slot_idx,
-            )))),
-        );
-        sound.insert(
-            "selected-field".to_string(),
-            Rc::new(RefCell::new(Value::String(rack_slot_selected_field(
-                0, slot_idx,
-            )))),
-        );
-        sound.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(name.to_string()))),
-        );
-        sound.insert(
-            "pad-label".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                label.split(" · ").next().unwrap_or(label).to_string(),
-            ))),
-        );
-        sound.insert(
-            "label".to_string(),
-            Rc::new(RefCell::new(Value::String(label.to_string()))),
-        );
-        sound.insert(
-            "short-label".to_string(),
-            Rc::new(RefCell::new(Value::String(short_label.to_string()))),
-        );
-        Value::Map(sound)
     }
 
     fn test_repeated_number_list(value: f64, len: usize) -> Value {
@@ -13980,24 +13868,6 @@
         }
     }
 
-    fn register_standalone_sequencer_helpers(runtime: &mut Runtime) {
-        runtime
-            .eval_str(
-                r#"
-                (def eseq.seqv-track-params/seqv-track-drum-rack? (track)
-                  (if (< track (len SEQ.track-drum-racks))
-                    (nth SEQ.track-drum-racks track)
-                    false))
-
-                (def eseq.seqv-track-params/seqv-track-drum-sounds (track)
-                  (if (< track (len SEQ.track-drum-sounds))
-                    (nth SEQ.track-drum-sounds track)
-                    '()))
-                "#,
-            )
-            .expect("install helpers normally supplied by the full authoring lisp");
-    }
-
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
         let src = std::fs::read_to_string("ui/main.lisp").expect("read grid lisp");
         full_grid_editor_with_main_source(&src)
@@ -14126,8 +13996,6 @@
                     "track-transposes",
                     test_list(vec![test_number_list(&[0.0; 16])]),
                 ),
-                ("track-drum-racks", test_bool_list(&[false])),
-                ("track-drum-sounds", test_list(vec![test_list(vec![])])),
                 ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
@@ -14182,47 +14050,6 @@
                 ("bus-mutes", test_bool_list(&[false, false, false])),
                 ("bus-solos", test_bool_list(&[false, false, false])),
                 ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                (
-                    "bus-steps",
-                    test_list(vec![steps.clone(), steps.clone(), steps.clone()]),
-                ),
-                (
-                    "bus-velocities",
-                    test_list(vec![
-                        step_numbers.clone(),
-                        step_numbers.clone(),
-                        step_numbers.clone(),
-                    ]),
-                ),
-                (
-                    "bus-durations",
-                    test_list(vec![
-                        test_number_list(&[1.0; 16]),
-                        test_number_list(&[1.0; 16]),
-                        test_number_list(&[1.0; 16]),
-                    ]),
-                ),
-                (
-                    "bus-syncs",
-                    test_list(vec![
-                        test_number_list(&[0.0; 16]),
-                        test_number_list(&[0.0; 16]),
-                        test_number_list(&[0.0; 16]),
-                    ]),
-                ),
-                (
-                    "bus-step-has-plocks",
-                    test_list(vec![
-                        empty_plocks.clone(),
-                        empty_plocks.clone(),
-                        empty_plocks.clone(),
-                    ]),
-                ),
-                ("bus-playheads", test_number_list(&[0.0, 0.0, 0.0])),
-                ("bus-num-steps", test_number_list(&[16.0, 16.0, 16.0])),
-                ("bus-timebases", test_number_list(&[0.0, 0.0, 0.0])),
-                ("bus-swings", test_number_list(&[0.0, 0.0, 0.0])),
-                ("bus-swing-resolutions", test_number_list(&[0.0, 0.0, 0.0])),
                 ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
                 ("available-builtin-effects", test_list(vec![])),
@@ -14438,17 +14265,17 @@
             Some("eseq.seq-grid-mode/sequence-roll-hold"),
             "the production *sequencer* keymap must remain available after transport focus",
         );
-        let comma = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(','),
+        let semicolon = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(';'),
             crossterm::event::KeyModifiers::NONE,
         );
-        editor.handle_key(comma);
+        editor.handle_key(semicolon);
         assert!(editor.drain_host_commands().iter().any(|command| {
             matches!(
                 command,
                 eseqlisp::HostCommand::Custom { name, .. } if name == "toggle-roll-mode"
             )
-        }), "comma must dispatch the global roll toggle while transport owns focus");
+        }), "semicolon must dispatch the global roll toggle while transport owns focus");
 
         editor
             .runtime_mut()
@@ -14461,8 +14288,15 @@
             .expect("roll resolution control");
         assert!(roll.rect.width.is_finite() && roll.rect.width > 0.0);
         assert!(roll.rect.height.is_finite() && roll.rect.height > 0.0);
-        let Value::List(rgba) = roll.props.get("background").expect("roll background") else {
-            panic!("rolling background must be an rgba color: {:?}", roll.props.get("background"));
+        let Value::List(rgba) = roll
+            .props
+            .get("background-color")
+            .expect("roll background color")
+        else {
+            panic!(
+                "rolling background must be an rgba color: {:?}",
+                roll.props.get("background-color")
+            );
         };
         let red = rgba[1].borrow();
         assert!(matches!(&*red, Value::Number(value) if *value > 0.7));
@@ -14789,16 +14623,6 @@
             "SEQ",
             "track-transposes",
             test_list(repeated_param_lists(0.0)),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-drum-sounds",
-            test_list((0..track_count).map(|_| test_list(vec![])).collect()),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-drum-racks",
-            test_repeated_bool_list(false, track_count),
         );
         rt.set_reactive("SEQ", "track-pans", test_list(repeated_param_lists(0.0)));
         rt.set_reactive("SEQ", "track-syncs", test_list(repeated_param_lists(0.0)));
@@ -15213,16 +15037,6 @@
         rt.set_reactive("SEQ", "track-durations", test_list(track_durations));
         rt.set_reactive("SEQ", "track-auxas", test_list(track_auxas));
         rt.set_reactive("SEQ", "track-transposes", test_list(track_transposes));
-        rt.set_reactive(
-            "SEQ",
-            "track-drum-sounds",
-            test_list((0..track_count).map(|_| test_list(vec![])).collect()),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-drum-racks",
-            test_repeated_bool_list(false, track_count),
-        );
         rt.set_reactive("SEQ", "track-pans", test_list(track_pans));
         rt.set_reactive("SEQ", "track-syncs", test_list(track_syncs));
         rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
@@ -15362,7 +15176,6 @@
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
-        register_standalone_sequencer_helpers(editor.runtime_mut());
         editor
             .runtime_mut()
             .eval_str("(do (defstate eseq.seq-core-state/selected-bus -1) (defstate cursor-step 0) (def eseq.seq-core-state/page-size 16))")
@@ -17870,8 +17683,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -17930,8 +17742,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -18946,596 +18757,6 @@
     }
 
     #[test]
-    fn metal_seq_drum_rack_sound_controls_use_named_pads_and_only_write_pad_notes() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["rack"]),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-drum-sounds",
-            test_list(vec![test_list(vec![
-                test_drum_sound(0, 0.0, "Kick", "C4 · Kick", "Kic"),
-                test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
-            ])]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &rack_slot_selected_field(0, 0),
-            Value::Bool(true),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &rack_slot_selected_field(0, 1),
-            Value::Bool(false),
-        );
-        for pad_note in [0, 12] {
-            for step in 0..16 {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    &drum_lane_step_active_field(0, pad_note, step),
-                    Value::Bool((pad_note == 0 && step == 0) || (pad_note == 12 && step == 4)),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    &drum_lane_step_selected_field(0, pad_note, step),
-                    Value::Bool(false),
-                );
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    &drum_lane_step_duration_field(0, pad_note, step),
-                    Value::Bool((pad_note == 0 && step == 0) || (pad_note == 12 && step == 4)),
-                );
-            }
-        }
-
-        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
-        {
-            let calls = Arc::clone(&calls);
-            editor
-                .runtime_mut()
-                .register_native("seq-set-step-param", move |args, _ctx| {
-                    let step = match args.first() {
-                        Some(Value::Number(value)) => *value as usize,
-                        other => panic!("expected step number, got {other:?}"),
-                    };
-                    let param = match args.get(1) {
-                        Some(Value::Keyword(value)) => value,
-                        other => panic!("expected step parameter, got {other:?}"),
-                    };
-                    let value = match args.get(2) {
-                        Some(Value::Number(value)) => *value,
-                        other => panic!("expected numeric step parameter value, got {other:?}"),
-                    };
-                    calls
-                        .lock()
-                        .unwrap()
-                        .push(format!("{step}:{param}:{value}"));
-                    Ok(Value::Bool(true))
-                });
-        }
-
-        let sequencer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*sequencer*")
-            .expect("sequencer buffer should exist")
-            .id;
-        editor.set_active_buffer(sequencer_id);
-        editor.set_layout_viewport(220, 80);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let compact_layout = editor.widget_layout().expect("compact drum-rack layout");
-        let mut lanes = Vec::new();
-        collect_layout_nodes_by_debug_name(&compact_layout, "seqv-drum-slot-lane", &mut lanes);
-        assert_eq!(lanes.len(), 2, "each occupied pad should render one lane");
-        for (index, lane) in lanes.iter().enumerate() {
-            assert_finite_nonzero_rect(lane, &format!("drum lane {index}"));
-        }
-        assert!(
-            matches!(
-                lanes[0].props.get("selected"),
-                Some(Value::ReactiveRef { field, .. }) if field == &rack_slot_selected_field(0, 0)
-            ),
-            "the selected rack slot should light its sequencer lane through a reactive binding"
-        );
-        editor.drain_host_commands();
-        editor
-            .runtime_mut()
-            .invoke(
-                lanes[0]
-                    .props
-                    .get("on-click")
-                    .cloned()
-                    .expect("drum lane slot-selection click"),
-                vec![Value::Nil],
-            )
-            .expect("select drum lane slot");
-        assert!(matches!(
-            editor.drain_host_commands().as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload }]
-                if name == "select-rack-slot"
-                    && matches!(payload, Value::Map(values)
-                        if matches!(values.get("track").map(|value| value.borrow().clone()), Some(Value::Number(track)) if track == 0.0)
-                        && matches!(values.get("slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0))
-        ));
-        assert!(
-            lanes[1].rect.row > lanes[0].rect.row + lanes[0].rect.height,
-            "drum lanes should be separated by a visible vertical gap: {:?}",
-            lanes.iter().map(|lane| lane.rect).collect::<Vec<_>>()
-        );
-        let kick_step =
-            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-lane-step-0-0-0")
-                .expect("the Kick lane should expose its own first step");
-        assert_finite_nonzero_rect(kick_step, "Kick lane first step");
-        for handler in ["on-mouse-down", "on-drag", "on-mouse-up", "on-double-click"] {
-            assert!(
-                kick_step.props.contains_key(handler),
-                "drum lane steps should expose the normal step {handler} interaction"
-            );
-        }
-        let kick_shell = kick_step
-            .children
-            .first()
-            .expect("Kick lane first step shell");
-        assert!(
-            matches!(
-                kick_shell.props.get("selected"),
-                Some(Value::ReactiveRef { .. })
-            ),
-            "lane selection must be a reactive per-pad binding"
-        );
-        assert!(
-            matches!(
-                kick_shell.props.get("duration"),
-                Some(Value::ReactiveRef { .. })
-            ),
-            "lane duration visualization must use a reactive per-pad binding"
-        );
-        let snare_step =
-            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-lane-step-0-12-4")
-                .expect("the Snare lane should expose its own fifth step");
-        assert_finite_nonzero_rect(snare_step, "Snare lane fifth step");
-        let kick_label =
-            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-lane-label-0-0")
-                .expect("the Kick lane should have a slot label on its right");
-        assert_finite_nonzero_rect(kick_label, "Kick lane label");
-        assert_eq!(
-            kick_label.props.get("text"),
-            Some(&Value::String("Kick".to_string()))
-        );
-        assert!(
-            kick_label.rect.col + kick_label.rect.width <= kick_step.rect.col,
-            "the slot label should be placed to the left of the steps"
-        );
-        let kick_mute = find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-slot-mute-0-0")
-            .expect("the Kick lane should expose a per-slot mute toggle");
-        assert_finite_nonzero_rect(kick_mute, "Kick lane mute toggle");
-        assert_eq!(
-            kick_mute.props.get("text"),
-            Some(&Value::String("C4".to_string())),
-            "the drum-lane mute control should identify its pad by note"
-        );
-        assert!(
-            matches!(
-                kick_mute.props.get("background-color"),
-                Some(Value::List(items))
-                    if items.len() == 5
-                        && matches!(&*items[0].borrow(), Value::Symbol(name) if name == "rgba")
-                        && matches!(&*items[1].borrow(), Value::Number(value) if (*value - 0.95).abs() < 0.001)
-                        && matches!(&*items[2].borrow(), Value::Number(value) if (*value - 0.48).abs() < 0.001)
-                        && matches!(&*items[3].borrow(), Value::Number(value) if (*value - 0.18).abs() < 0.001)
-                        && matches!(&*items[4].borrow(), Value::Number(value) if (*value - 1.0).abs() < 0.001)
-            ),
-            "an unmuted drum pad should use the enabled mute-control treatment; got {:?}",
-            kick_mute.props.get("background-color")
-        );
-        assert!(
-            kick_mute.rect.col < kick_label.rect.col,
-            "the per-slot mute toggle should sit before the slot name"
-        );
-        let kick_volume =
-            find_layout_node_by_stable_key_suffix(&compact_layout, "/drum-slot-volume-0-0")
-                .expect("the Kick lane should expose a per-slot volume control");
-        assert_finite_nonzero_rect(kick_volume, "Kick lane volume control");
-        assert!(
-            kick_volume.rect.col + kick_volume.rect.width <= kick_step.rect.col,
-            "the per-slot volume control should sit before the steps"
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.sequencer/set-track-param-mode 0 3) (eseq.sequencer/track-menu-click 0)")
-            .expect("select Sound and expand the drum-rack row");
-        editor.refresh_runtime_side_effects();
-
-        let layout = editor.widget_layout().expect("expanded drum-rack layout");
-        assert!(
-            find_layout_node_by_text(&layout, "sound").is_some(),
-            "the expanded rack tab should replace tpose with sound"
-        );
-        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-sound-slider-0-0")
-            .expect("drum-rack Sound mode should render a discrete sound slider");
-        assert_finite_nonzero_rect(slider, "drum-rack sound slider");
-        assert_eq!(layout_prop_number(slider, "min"), Some(0.0));
-        assert_eq!(layout_prop_number(slider, "max"), Some(1.0));
-        assert_eq!(
-            slider.props.get("items"),
-            Some(&test_string_list(&["Kic", "Sna"])),
-            "the vertical slider should show only three-letter sound abbreviations"
-        );
-        assert!(
-            find_layout_node_by_debug_name(&layout, "seqv-expanded-step-sound-label").is_none(),
-            "Sound mode should not render a redundant horizontal full-name label"
-        );
-        assert!(
-            find_layout_node_by_text(&layout, "C4 · Kick").is_none(),
-            "expanded Sound mode should not render the full note-and-name label"
-        );
-
-        editor
-            .runtime_mut()
-            .invoke(
-                slider
-                    .props
-                    .get("on-change")
-                    .cloned()
-                    .expect("sound slider on-change"),
-                vec![Value::Number(1.0)],
-            )
-            .expect("select Snare through the sound slider");
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            ["0:transpose:12"],
-            "the sound slider must translate its discrete index to the selected pad note"
-        );
-
-        let step_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*step*")
-            .expect("step buffer should exist")
-            .id;
-        editor.set_active_buffer(step_id);
-        editor.set_layout_viewport(80, 16);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_visible_layouts_for_buffer_named("*step*");
-        let layout = editor.widget_layout().expect("drum-rack step panel layout");
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.seqv-track-params/seqv-track-drum-rack? SEQ.current-track)")
-                .expect("evaluate drum-rack step inspector mode"),
-            Some(Value::Bool(true)),
-            "the test fixture should remain a drum rack when the step panel renders"
-        );
-        let sound_picker = find_layout_node_by_stable_key_suffix(&layout, "/step-param-sound")
-            .expect("step inspector should expose a named drum sound picker");
-        assert_finite_nonzero_rect(sound_picker, "step inspector drum sound picker");
-        editor
-            .runtime_mut()
-            .invoke(
-                sound_picker
-                    .props
-                    .get("on-change")
-                    .cloned()
-                    .expect("step inspector sound picker on-change"),
-                vec![Value::String("C5 · Snare".to_string())],
-            )
-            .expect("select Snare through the step inspector");
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            ["0:transpose:12", "0:transpose:12"],
-            "the step inspector must write the selected pad note, never a label index"
-        );
-    }
-
-    #[test]
-    fn metal_seq_drum_rack_cmd_a_targets_the_globally_selected_slot() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-drum-sounds",
-            test_list(vec![test_list(vec![
-                test_drum_sound(0, 0.0, "Kick", "C4 · Kick", "Kic"),
-                test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
-            ])]),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &rack_slot_selected_field(0, 0),
-            Value::Bool(false),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &rack_slot_selected_field(0, 1),
-            Value::Bool(true),
-        );
-        let selected_pad_notes = Arc::new(Mutex::new(Vec::new()));
-        {
-            let selected_pad_notes = Arc::clone(&selected_pad_notes);
-            editor.runtime_mut().register_native(
-                "seq-select-all-drum-rack-steps",
-                move |args, _ctx| {
-                    let Some(Value::Number(pad_note)) = args.first() else {
-                        panic!("expected selected pad note, got {args:?}");
-                    };
-                    selected_pad_notes.lock().unwrap().push(*pad_note as i32);
-                    Ok(Value::Number(16.0))
-                },
-            );
-        }
-
-        editor
-            .runtime_mut()
-            .eval_str("(eseq.sequencer/select-all-current-track-steps)")
-            .expect("Cmd+A drum-rack selection route");
-        assert_eq!(
-            selected_pad_notes.lock().unwrap().as_slice(),
-            [12],
-            "Cmd+A should begin with the globally selected C5 drum slot"
-        );
-    }
-
-    #[test]
-    fn metal_seq_drum_lane_click_and_drag_match_normal_track_gestures() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["rack"]),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-drum-sounds",
-            test_list(vec![test_list(vec![test_drum_sound(
-                0,
-                12.0,
-                "Snare",
-                "C5 · Snare",
-                "Sna",
-            )])]),
-        );
-        for step in 0..16 {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &drum_lane_step_active_field(0, 12, step),
-                Value::Bool(step == 0),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &drum_lane_step_selected_field(0, 12, step),
-                Value::Bool(false),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &drum_lane_step_duration_field(0, 12, step),
-                Value::Bool(step == 0),
-            );
-        }
-
-        let active = Arc::new(Mutex::new(HashSet::from([0usize])));
-        let selected = Arc::new(Mutex::new(HashSet::<usize>::new()));
-        let toggles = Arc::new(Mutex::new(Vec::<usize>::new()));
-        let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
-        let moves = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
-        let durations = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
-        editor
-            .runtime_mut()
-            .register_native("now-ms", |_args, _ctx| Ok(Value::Number(1_000.0)));
-        {
-            let active = Arc::clone(&active);
-            editor.runtime_mut().register_native(
-                "seq-drum-lane-step-active?",
-                move |args, _ctx| {
-                    let step = match args.get(2) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected drum step, got {other:?}"),
-                    };
-                    Ok(Value::Bool(active.lock().unwrap().contains(&step)))
-                },
-            );
-        }
-        {
-            let selected = Arc::clone(&selected);
-            editor.runtime_mut().register_native(
-                "seq-drum-lane-step-selected?",
-                move |args, _ctx| {
-                    let step = match args.get(2) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected drum step, got {other:?}"),
-                    };
-                    Ok(Value::Bool(selected.lock().unwrap().contains(&step)))
-                },
-            );
-        }
-        {
-            let selected = Arc::clone(&selected);
-            editor
-                .runtime_mut()
-                .register_native("seq-drum-lane-has-selection?", move |_args, _ctx| {
-                    Ok(Value::Bool(!selected.lock().unwrap().is_empty()))
-                });
-        }
-        {
-            let active = Arc::clone(&active);
-            let toggles = Arc::clone(&toggles);
-            editor
-                .runtime_mut()
-                .register_native("seq-toggle-drum-lane-step", move |args, _ctx| {
-                    let step = match args.get(2) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected drum step, got {other:?}"),
-                    };
-                    toggles.lock().unwrap().push(step);
-                    let mut active = active.lock().unwrap();
-                    let enabled = if active.insert(step) {
-                        true
-                    } else {
-                        active.remove(&step);
-                        false
-                    };
-                    Ok(Value::Bool(enabled))
-                });
-        }
-        {
-            let selected = Arc::clone(&selected);
-            let ranges = Arc::clone(&ranges);
-            editor.runtime_mut().register_native(
-                "seq-select-drum-lane-step-range",
-                move |args, _ctx| {
-                    let start = match args.get(2) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected range start, got {other:?}"),
-                    };
-                    let end = match args.get(3) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected range end, got {other:?}"),
-                    };
-                    ranges.lock().unwrap().push((start, end));
-                    let mut selected = selected.lock().unwrap();
-                    selected.clear();
-                    selected.extend(start.min(end)..=start.max(end));
-                    Ok(Value::Nil)
-                },
-            );
-        }
-        editor
-            .runtime_mut()
-            .register_native("seq-select-drum-lane-step", |_args, _ctx| Ok(Value::Nil));
-        {
-            let moves = Arc::clone(&moves);
-            editor.runtime_mut().register_native(
-                "seq-move-drum-lane-step-drag",
-                move |args, _ctx| {
-                    let start = match args.get(2) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected move start, got {other:?}"),
-                    };
-                    let target = match args.get(3) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected move target, got {other:?}"),
-                    };
-                    moves.lock().unwrap().push((start, target));
-                    Ok(Value::Bool(true))
-                },
-            );
-        }
-        {
-            let durations = Arc::clone(&durations);
-            editor.runtime_mut().register_native(
-                "seq-set-drum-lane-step-duration",
-                move |args, _ctx| {
-                    let step = match args.get(2) {
-                        Some(Value::Number(step)) => *step as usize,
-                        other => panic!("expected duration source, got {other:?}"),
-                    };
-                    let duration = match args.get(3) {
-                        Some(Value::Number(duration)) => *duration as usize,
-                        other => panic!("expected duration, got {other:?}"),
-                    };
-                    durations.lock().unwrap().push((step, duration));
-                    Ok(Value::Number(duration as f64))
-                },
-            );
-        }
-
-        let sequencer_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*sequencer*")
-            .expect("sequencer buffer should exist")
-            .id;
-        editor.set_active_buffer(sequencer_id);
-        editor.set_layout_viewport(220, 80);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("drum lane gesture layout");
-        let callback = |step: usize, name: &str| {
-            find_layout_node_by_stable_key_suffix(&layout, &format!("/drum-lane-step-0-12-{step}"))
-                .unwrap_or_else(|| panic!("drum lane step {step}"))
-                .props
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| panic!("drum lane step {step} {name}"))
-        };
-        let plain_event = map_value([]);
-        let duration_edge_event = map_value([("sx", Value::Number(0.75))]);
-
-        editor
-            .runtime_mut()
-            .invoke(
-                callback(0, "on-mouse-down"),
-                vec![duration_edge_event.clone()],
-            )
-            .expect("press active drum hit duration edge");
-        editor
-            .runtime_mut()
-            .invoke(callback(3, "on-drag"), vec![duration_edge_event.clone()])
-            .expect("drag drum hit duration edge");
-        editor
-            .runtime_mut()
-            .invoke(callback(3, "on-mouse-up"), vec![duration_edge_event])
-            .expect("release drum hit duration edge");
-        assert_eq!(durations.lock().unwrap().as_slice(), [(0, 1), (0, 4)]);
-        assert!(moves.lock().unwrap().is_empty());
-
-        editor
-            .runtime_mut()
-            .invoke(callback(0, "on-mouse-down"), vec![plain_event.clone()])
-            .expect("press active drum hit");
-        editor
-            .runtime_mut()
-            .invoke(callback(0, "on-mouse-up"), vec![plain_event.clone()])
-            .expect("release active drum hit");
-        assert_eq!(ranges.lock().unwrap().as_slice(), [(0, 0)]);
-        assert!(
-            toggles.lock().unwrap().is_empty(),
-            "clicking an active hit should select it, not toggle it"
-        );
-
-        editor
-            .runtime_mut()
-            .invoke(callback(0, "on-mouse-down"), vec![plain_event.clone()])
-            .expect("press active drum hit for move");
-        editor
-            .runtime_mut()
-            .invoke(callback(3, "on-drag"), vec![plain_event.clone()])
-            .expect("drag active drum hit");
-        editor
-            .runtime_mut()
-            .invoke(callback(3, "on-mouse-up"), vec![plain_event.clone()])
-            .expect("release moved drum hit");
-        assert_eq!(moves.lock().unwrap().as_slice(), [(0, 3)]);
-
-        active.lock().unwrap().clear();
-        selected.lock().unwrap().clear();
-        editor
-            .runtime_mut()
-            .invoke(callback(1, "on-mouse-down"), vec![plain_event.clone()])
-            .expect("paint first empty drum hit");
-        editor
-            .runtime_mut()
-            .invoke(callback(2, "on-drag"), vec![plain_event.clone()])
-            .expect("paint second empty drum hit");
-        editor
-            .runtime_mut()
-            .invoke(callback(2, "on-mouse-up"), vec![plain_event])
-            .expect("release painted drum hits");
-        assert_eq!(toggles.lock().unwrap().as_slice(), [1, 2]);
-    }
-
-    #[test]
     fn metal_seq_step_panel_selected_edits_use_plock_path() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -20021,6 +19242,26 @@
             }
             other => panic!("expected add-track-instrument host command, got {other:?}"),
         }
+
+        // eseq-mj8: a builtin row carries the same "instrument" drag type, so
+        // the zone must dispatch on :kind instead of asking for a saved
+        // instrument named "modulator".
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/drop-new-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "builtin-instrument" :name "modulator")))"#,
+            )
+            .expect("drop builtin modulator on sequencer empty space");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            matches!(&commands[0],
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "add-track-modulator"),
+            "expected add-track-modulator host command, got {:?}",
+            commands[0]
+        );
 
         editor
             .runtime_mut()
@@ -22912,8 +22153,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -23084,8 +22324,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -23229,8 +22468,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -23576,8 +22814,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -23703,8 +22940,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -24519,8 +23755,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -27774,6 +27009,256 @@
     }
 
     #[test]
+    fn metal_seq_mixer_track_strip_context_menu_starts_inline_rename() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer should exist")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(140, 20);
+
+        let layout = editor.widget_layout().expect("mixer layout should build");
+        let track_strip = find_layout_node_by_stable_key(&layout, "mixer-v2-track-0")
+            .expect("expanded mixer track strip should render");
+        let open_menu = track_strip
+            .props
+            .get("on-right-click")
+            .cloned()
+            .expect("the full track strip should expose the context-menu gesture");
+        let track_label = find_layout_node_by_stable_key(&layout, "mixer-v2-strip-label-0")
+            .expect("expanded mixer track label should render");
+        assert!(
+            !track_label.props.contains_key("on-right-click"),
+            "the nested label must defer to the strip handler instead of opening the menu twice",
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                open_menu,
+                vec![map_value([
+                    ("col", Value::Number(83.25)),
+                    ("row", Value::Number(7.5)),
+                ])],
+            )
+            .expect("right-click mixer track strip");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-track").unwrap(),
+            Some(Value::Number(0.0)),
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-col").unwrap(),
+            Some(Value::Number(83.25)),
+            "the context menu should retain the pointer column",
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-row").unwrap(),
+            Some(Value::Number(7.5)),
+            "the context menu should retain the pointer row",
+        );
+
+        let menu_layout = editor.widget_layout().expect("track context menu layout should build");
+        let rename_item = find_layout_node_by_text(&menu_layout, "Rename")
+            .expect("track context menu should offer rename");
+        let rename = rename_item
+            .props
+            .get("on-select")
+            .cloned()
+            .expect("rename item should expose a select callback");
+        editor.runtime_mut().invoke(rename, vec![Value::Nil])
+            .expect("select track rename action");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            Some(Value::Bool(false)),
+            "selecting rename should close the context menu",
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-renaming").unwrap(),
+            Some(Value::Number(0.0)),
+        );
+        let rename_layout = editor.widget_layout().expect("inline rename layout should build");
+        let rename_input = find_layout_node_by_stable_key_suffix(
+            &rename_layout,
+            "/track-rename-input-0",
+        ).expect("row-level context menu rename should replace the track label with an input");
+        assert_finite_nonzero_rect(rename_input, "mixer inline track rename input");
+        assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
+        assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
+
+        editor.runtime_mut()
+            .eval_str("(eseq.mixer/%finish-track-rename 0 false)")
+            .expect("finish expanded inline rename");
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[true]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let collapsed_layout = editor.widget_layout().expect("collapsed mixer layout should build");
+        let collapsed_strip = find_layout_node_by_stable_key(&collapsed_layout, "mixer-v2-track-0")
+            .expect("collapsed mixer track strip should render");
+        assert!(
+            collapsed_strip.props.contains_key("on-right-click"),
+            "the full collapsed track strip should expose the context-menu gesture",
+        );
+        let collapsed_label = find_layout_node_by_stable_key_suffix(
+            &collapsed_layout,
+            "/track-collapsed-label-0",
+        ).expect("collapsed mixer track label should render");
+        assert!(
+            !collapsed_label.props.contains_key("on-right-click"),
+            "the nested collapsed label must defer to the strip context-menu handler",
+        );
+    }
+
+    #[test]
+    fn metal_seq_mixer_track_context_menu_only_groups_the_clicked_multi_selection() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        fn track_menu_action_ids(editor: &mut Editor, target: usize, selected: &[f64]) -> Vec<String> {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "selected-tracks",
+                test_number_list(selected),
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.runtime_mut().eval_str(&format!(
+                "(do (set! eseq.mixer/%track-menu-group-id -1) (set! eseq.mixer/%track-menu-track {target}))",
+            )).expect("select track context-menu target");
+            let Some(Value::List(actions)) = editor.runtime_mut()
+                .eval_str("(eseq.mixer/%track-context-menu-actions)")
+                .expect("evaluate track context-menu actions")
+            else {
+                panic!("track context-menu actions should be a list");
+            };
+            actions.into_iter().map(|action| {
+                let Value::Map(action) = action.borrow().clone() else {
+                    panic!("track context-menu action should be a map");
+                };
+                let Value::Keyword(id) = action.get("id")
+                    .expect("menu action id").borrow().clone()
+                else {
+                    panic!("track context-menu action id should be a keyword");
+                };
+                id
+            }).collect()
+        }
+
+        assert_eq!(
+            track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]),
+            vec!["rename", "group"],
+        );
+        assert_eq!(
+            track_menu_action_ids(&mut editor, 2, &[0.0, 1.0]),
+            vec!["rename"],
+            "right-clicking outside the multi-selection keeps the single-track menu",
+        );
+        assert_eq!(
+            track_menu_action_ids(&mut editor, 0, &[0.0]),
+            vec!["rename"],
+        );
+
+        track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]);
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(do (set! eseq.mixer/%track-menu-open true) (eseq.mixer/%select-track-menu-action (dict :id :group)))",
+        ).expect("select Group Tracks");
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            Some(Value::Bool(false)),
+        );
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            eseqlisp::host::HostCommand::Custom { name, .. }
+                if name == "group-selected-tracks"
+        ));
+    }
+
+    #[test]
+    fn metal_seq_mixer_group_context_menu_actions_distinguish_plain_groups_and_racks() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let group = |id: f64, rack: bool| {
+            map_value([("id", Value::Number(id)), ("rack", Value::Bool(rack))])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "groups",
+            test_list(vec![group(7.0, false), group(8.0, true)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        fn menu_action_ids(editor: &mut Editor, group_id: f64) -> Vec<String> {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(set! eseq.mixer/%track-menu-group-id {group_id})",
+                ))
+                .expect("select group context-menu target");
+            let Some(Value::List(actions)) = editor.runtime_mut()
+                .eval_str("(eseq.mixer/%track-context-menu-actions)")
+                .expect("evaluate group context-menu actions")
+            else {
+                panic!("group context-menu actions should be a list");
+            };
+            actions
+                .into_iter()
+                .map(|action| {
+                    let Value::Map(action) = action.borrow().clone() else {
+                        panic!("group context-menu action should be a map");
+                    };
+                    let id = action.get("id").expect("menu action id").borrow().clone();
+                    let Value::Keyword(id) = id else {
+                        panic!("group context-menu action id should be a keyword");
+                    };
+                    id
+                })
+                .collect()
+        }
+
+        assert_eq!(
+            menu_action_ids(&mut editor, 7.0),
+            vec!["rename", "convert-drum-rack", "ungroup"],
+        );
+        assert_eq!(
+            menu_action_ids(&mut editor, 8.0),
+            vec!["rename", "ungroup"],
+        );
+
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(do (set! eseq.mixer/%track-menu-open true) (eseq.mixer/%select-track-menu-action (dict :id :ungroup)))",
+        ).expect("select Ungroup");
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            Some(Value::Bool(false)),
+        );
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "ungroup-tracks");
+                let Value::Map(payload) = payload else {
+                    panic!("ungroup payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(8.0)),
+                );
+            }
+            command => panic!("expected custom ungroup command, got {command:?}"),
+        }
+    }
+
+    #[test]
     fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
         struct TestTextMeasurer;
         impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
@@ -27796,45 +27281,60 @@
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
-                ("num-tracks", Value::Number(3.0)),
-                ("track-ids", test_number_list(&[0.0, 1.0, 2.0])),
-                ("track-names", test_string_list(&["kick", "snare", "hat"])),
-                ("track-colors", test_multi_track_colors(3)),
-                ("track-collapsed", test_bool_list(&[false, true, false])),
+                ("num-tracks", Value::Number(4.0)),
+                ("track-ids", test_number_list(&[0.0, 1.0, 2.0, 3.0])),
+                (
+                    "track-names",
+                    test_string_list(&["kick", "snare", "hat", "modulator"]),
+                ),
+                ("track-colors", test_multi_track_colors(4)),
+                (
+                    "track-collapsed",
+                    test_bool_list(&[false, false, false, true]),
+                ),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
                 ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
-                ("record-armed", test_repeated_bool_list(false, 3)),
-                ("track-mutes", test_repeated_bool_list(false, 3)),
-                ("track-solos", test_repeated_bool_list(false, 3)),
-                ("track-muted-by-solo", test_repeated_bool_list(false, 3)),
-                ("track-muted-effective", test_repeated_bool_list(false, 3)),
+                ("record-armed", test_repeated_bool_list(false, 4)),
+                ("track-mutes", test_repeated_bool_list(false, 4)),
+                ("track-solos", test_repeated_bool_list(false, 4)),
+                ("track-muted-by-solo", test_repeated_bool_list(false, 4)),
+                ("track-muted-effective", test_repeated_bool_list(false, 4)),
                 (
                     "track-color-r-effective",
-                    test_multi_track_color_channel(3, 0),
+                    test_multi_track_color_channel(4, 0),
                 ),
                 (
                     "track-color-g-effective",
-                    test_multi_track_color_channel(3, 1),
+                    test_multi_track_color_channel(4, 1),
                 ),
                 (
                     "track-color-b-effective",
-                    test_multi_track_color_channel(3, 2),
+                    test_multi_track_color_channel(4, 2),
                 ),
                 (
                     "track-instrument-types",
-                    test_string_list(&["sampler", "custom", "sampler"]),
+                    test_string_list(&["sampler", "custom", "rack", "modulator"]),
                 ),
                 (
                     "track-mod-output-available",
-                    test_repeated_bool_list(false, 3),
+                    test_repeated_bool_list(false, 4),
                 ),
                 ("mod-routes", test_list(vec![])),
                 ("selected-mod-routes", test_list(vec![])),
-                ("track-volumes", test_number_list(&[1.0, 1.0, 1.0])),
-                ("track-mixer-pans", test_number_list(&[0.0, 0.0, 0.0])),
-                ("track-outputs", test_string_list(&["main", "main", "main"])),
+                (
+                    "track-volumes",
+                    test_number_list(&[1.0, 1.0, 1.0, 1.0]),
+                ),
+                (
+                    "track-mixer-pans",
+                    test_number_list(&[0.0, 0.0, 0.0, 0.0]),
+                ),
+                (
+                    "track-outputs",
+                    test_string_list(&["main", "main", "main", "main"]),
+                ),
                 (
                     "track-output-options",
                     test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
@@ -27842,7 +27342,7 @@
                 (
                     "track-bus-sends",
                     test_list(
-                        (0..3)
+                        (0..4)
                             .map(|_| {
                                 test_list(vec![
                                     test_track_bus_send(1, "Bus A", 0.0),
@@ -27852,8 +27352,14 @@
                             .collect(),
                     ),
                 ),
-                ("track-num-steps", test_number_list(&[16.0, 16.0, 16.0])),
-                ("track-timebases", test_string_list(&["16", "16", "16"])),
+                (
+                    "track-num-steps",
+                    test_number_list(&[16.0, 16.0, 16.0, 16.0]),
+                ),
+                (
+                    "track-timebases",
+                    test_string_list(&["16", "16", "16", "16"]),
+                ),
                 ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
                 ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
                 ("bus-mutes", test_repeated_bool_list(false, 3)),
@@ -27867,10 +27373,9 @@
             true,
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
-        register_standalone_sequencer_helpers(editor.runtime_mut());
         {
             let rt = editor.runtime_mut();
-            for track in 0..3 {
+            for track in 0..4 {
                 rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
                 rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
                 rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
@@ -27963,14 +27468,14 @@
             .expect("mixer buffer should exist")
             .id;
         editor.set_active_buffer(mixer_id);
-        editor.set_layout_viewport(120, 16);
+        editor.set_layout_viewport(180, 16);
         let mixer_layout = editor
             .widget_layout()
             .expect("collapsed mixer layout should build");
 
         let compact_badge =
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-label-1")
-                .expect("collapsed track badge should render");
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-label-3")
+                .expect("collapsed modulator badge should render");
         assert_finite_nonzero_rect(compact_badge, "collapsed mixer track badge");
         assert!(
             compact_badge.props.contains_key("on-double-click"),
@@ -27978,15 +27483,21 @@
         );
         let compact_badge_content = find_layout_node_by_stable_key_suffix(
             &mixer_layout,
-            "/track-collapsed-label-content-1",
+            "/track-collapsed-label-content-3",
         )
-        .expect("collapsed track badge content should render");
-        assert_finite_nonzero_rect(compact_badge_content, "collapsed mixer badge content");
+        .expect("collapsed modulator badge content should render");
+        assert_finite_nonzero_rect(compact_badge_content, "collapsed modulator badge content");
         assert_eq!(compact_badge_content.widget_type, "badge");
         assert_eq!(
             compact_badge_content.props.get("icon"),
-            Some(&Value::Keyword("piano".to_string())),
-            "collapsed instrument badges should reuse the sidebar piano icon"
+            Some(&Value::Keyword("sine".to_string())),
+            "collapsed modulator badges should reuse the sidebar sine icon"
+        );
+        let sampler_strip = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-0")
+            .expect("expanded sampler strip should render");
+        assert!(
+            sampler_strip.props.contains_key("on-right-click"),
+            "the full mixer strip must expose the track context-menu gesture",
         );
         let sampler_badge_content =
             find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-0")
@@ -27997,16 +27508,75 @@
             Some(&Value::Keyword("waveform".to_string())),
             "sampler mixer badges should reuse the sidebar waveform icon"
         );
+        let custom_badge_content =
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-1")
+                .expect("expanded custom instrument badge content should render");
+        assert_finite_nonzero_rect(custom_badge_content, "custom instrument mixer badge content");
+        assert_eq!(
+            custom_badge_content.props.get("icon"),
+            Some(&Value::Keyword("piano".to_string())),
+            "custom instrument mixer badges should reuse the sidebar piano icon"
+        );
+        let rack_badge_content =
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-content-2")
+                .expect("expanded instrument rack badge content should render");
+        assert_finite_nonzero_rect(rack_badge_content, "instrument rack mixer badge content");
+        assert_eq!(
+            rack_badge_content.props.get("icon"),
+            Some(&Value::Keyword("sliders".to_string())),
+            "instrument rack mixer badges should use the device-rack icon"
+        );
         let compact_mute =
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-mute-1")
-                .expect("collapsed track mute should render");
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-collapsed-mute-3")
+                .expect("collapsed modulator mute should render");
         assert_finite_nonzero_rect(compact_mute, "collapsed mixer mute");
-        let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-1")
-            .expect("collapsed track meter should render");
+        let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-3")
+            .expect("collapsed modulator meter should render");
         assert_finite_nonzero_rect(compact_meter, "collapsed mixer meter");
         assert!(
-            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-1").is_none(),
-            "collapsed mixer track should not render the full-width label"
+            find_layout_node_by_stable_key_suffix(&mixer_layout, "/track-label-3").is_none(),
+            "collapsed modulator track should not render the full-width label"
+        );
+
+        editor.runtime_mut()
+            .eval_str("(eseq.mixer/%begin-track-rename 0)")
+            .expect("begin inline track rename");
+        editor.refresh_runtime_side_effects();
+        let rename_layout = editor.widget_layout()
+            .expect("inline track rename layout should build");
+        let rename_input = find_layout_node_by_stable_key_suffix(
+            &rename_layout,
+            "/track-rename-input-0",
+        ).expect("expanded mixer badge should become a text input");
+        assert_eq!(rename_input.widget_type, "text-input");
+        assert_finite_nonzero_rect(rename_input, "mixer inline track rename input");
+        assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
+        assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
+        editor.runtime_mut()
+            .eval_str("(eseq.mixer/%finish-track-rename 0 false)")
+            .expect("cancel inline track rename");
+        editor.refresh_runtime_side_effects();
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[false, false, false, false]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let expanded_mixer_layout = editor
+            .widget_layout()
+            .expect("expanded modulator mixer layout should build");
+        let modulator_badge_content = find_layout_node_by_stable_key_suffix(
+            &expanded_mixer_layout,
+            "/track-label-content-3",
+        )
+        .expect("expanded modulator badge content should render");
+        assert_finite_nonzero_rect(modulator_badge_content, "expanded modulator mixer badge");
+        assert_eq!(
+            modulator_badge_content.props.get("icon"),
+            Some(&Value::Keyword("sine".to_string())),
+            "expanded modulator badges should reuse the sidebar sine icon"
         );
 
         let sequencer_id = editor
@@ -28027,16 +27597,38 @@
             }
         }
 
-        assert!(
-            find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-1").is_none(),
-            "collapsed track should be omitted from the sequencer row list"
+        for track in 0..4 {
+            assert!(
+                find_layout_node_by_stable_key(
+                    &sequencer_layout,
+                    &format!("sequencer-track-{track}"),
+                )
+                .is_some(),
+                "expanded track {track} should render in the sequencer"
+            );
+        }
+        let rack_track_name =
+            find_layout_node_by_stable_key_suffix(&sequencer_layout, "/track-name-label-2")
+                .expect("instrument rack sequencer badge should render");
+        assert_finite_nonzero_rect(rack_track_name, "instrument rack sequencer badge");
+        assert_eq!(
+            rack_track_name.props.get("icon"),
+            Some(&Value::Keyword("sliders".to_string())),
+            "instrument rack sequencer badges should use the device-rack icon"
         );
-        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-0").is_some());
-        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-2").is_some());
+        let modulator_track_name =
+            find_layout_node_by_stable_key_suffix(&sequencer_layout, "/track-name-label-3")
+                .expect("modulator sequencer badge should render");
+        assert_finite_nonzero_rect(modulator_track_name, "modulator sequencer badge");
+        assert_eq!(
+            modulator_track_name.props.get("icon"),
+            Some(&Value::Keyword("sine".to_string())),
+            "modulator sequencer badges should reuse the sidebar sine icon"
+        );
         assert_eq!(
             count_stable_key_prefix(&sequencer_layout, "eseq.sequencer/step-cell-"),
-            32,
-            "sequencer should render step cells only for visible tracks"
+            64,
+            "sequencer should render step cells for all four expanded tracks"
         );
     }
 
@@ -46101,6 +45693,7 @@
                 ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
+                ("armed-rack-id", Value::Number(-1.0)),
                 ("song-bound-clip", Value::Nil),
                 ("track-selected-0", Value::Bool(true)),
                 ("track-selected-1", Value::Bool(false)),
@@ -46333,7 +45926,7 @@
             .runtime_mut()
             .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
             .expect("install browser-owned loading-instrument state");
-        register_test_delete_target_natives(&mut editor, 2);
+        let active_delete_target = register_test_delete_target_natives(&mut editor, 2);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 1, true, true, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 2, false, false, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 1, 3, true, false, true, false);
@@ -46343,6 +45936,7 @@
             "seq-toggle-record-arm",
             "seq-toggle-track-mute",
             "seq-toggle-track-solo",
+            "seq-toggle-rack-arm",
             "seq-set-track",
             "seq-set-track-volume",
             "seq-set-track-pan",
@@ -46351,6 +45945,7 @@
             "seq-set-bus-volume",
             "seq-clear-selection",
             "eseq.browser/drop-sample-on-track",
+            "eseq.browser/drop-instrument-new-track",
         ] {
             let calls = Arc::clone(&calls);
             editor
@@ -46359,6 +45954,79 @@
                     calls.lock().unwrap().push(format!("{name}:{args:?}"));
                     Ok(Value::Bool(true))
                 });
+        }
+
+        let selected_tracks = Arc::new(Mutex::new(std::collections::HashSet::from([0usize])));
+        for name in [
+            "seq-select-track-range",
+            "seq-select-tracks",
+            "seq-toggle-track-selected",
+        ] {
+            let calls = Arc::clone(&calls);
+            let selected_tracks = Arc::clone(&selected_tracks);
+            let active_delete_target = Arc::clone(&active_delete_target);
+            editor.runtime_mut().register_native(name, move |args, _ctx| {
+                let mut selected = selected_tracks.lock().unwrap();
+                if name == "seq-select-track-range" {
+                    calls.lock().unwrap().push(format!("{name}:{args:?}"));
+                    let (Some(Value::Number(anchor)), Some(Value::Number(target))) =
+                        (args.first(), args.get(1))
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    selected.clear();
+                    selected.extend(
+                        (*anchor as usize).min(*target as usize)
+                            ..=(*anchor as usize).max(*target as usize),
+                    );
+                } else if name == "seq-select-tracks" {
+                    let (Some(Value::List(values)), Some(Value::Number(target))) =
+                        (args.first(), args.get(1))
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let tracks: Vec<usize> = values
+                        .iter()
+                        .filter_map(|value| match &*value.borrow() {
+                            Value::Number(track) => Some(*track as usize),
+                            _ => None,
+                        })
+                        .collect();
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("{name}:{tracks:?}:{}", *target as usize));
+                    selected.clear();
+                    selected.extend(tracks);
+                } else if let Some(Value::Number(track)) = args.first() {
+                    calls.lock().unwrap().push(format!("{name}:{args:?}"));
+                    let track = *track as usize;
+                    if !selected.remove(&track) {
+                        selected.insert(track);
+                    }
+                    if selected.is_empty() {
+                        selected.insert(track);
+                    }
+                }
+                let mut tracks: Vec<usize> = selected.iter().copied().collect();
+                tracks.sort_unstable();
+                *active_delete_target.lock().unwrap() = if tracks.len() >= 2 {
+                    let values = tracks
+                        .iter()
+                        .map(|track| Rc::new(RefCell::new(Value::Number(*track as f64))))
+                        .collect();
+                    Some((
+                        format!("mixer-tracks:{tracks:?}"),
+                        Value::Map(std::collections::HashMap::from([(
+                            "tracks".to_string(),
+                            Rc::new(RefCell::new(Value::List(values))),
+                        )])),
+                    ))
+                } else {
+                    None
+                };
+                Ok(Value::Bool(true))
+            });
         }
 
         // ui/track-collapse.lisp is a module now, and its compat aliases only
@@ -46384,6 +46052,86 @@
         editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
         editor.set_layout_viewport(120, 30);
         editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(def eseq.drum-rack-v2/mixer-visible-track-order () (list 1 7 10 11 2))",
+            )
+            .expect("install non-contiguous mixer order fixture");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.mixer/%visual-track-range 7 11)")
+                .expect("build visual mixer range"),
+            Some(test_number_list(&[7.0, 10.0, 11.0])),
+            "shift ranges must contain the badges between their visual endpoints",
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(def eseq.drum-rack-v2/mixer-visible-track-order () (list 0 1))")
+            .expect("restore the two-track mixer fixture order");
+
+        calls.lock().unwrap().clear();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict) 0)")
+            .expect("plain body click establishes range anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict :shift true) 1)")
+            .expect("shift body click extends from anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict :shift true) 0)")
+            .expect("second shift body click re-extends from the same anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-body-click (dict :cmd true) 1)")
+            .expect("cmd body click toggles without moving anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-label-click (dict :shift true) 1)")
+            .expect("shift label click extends from the unchanged anchor");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-label-click (dict) 1)")
+            .expect("plain label click resets range anchor and preserves delete gesture");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/%track-label-click (dict :shift true) 0)")
+            .expect("shift label click supports a reverse range");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "seq-set-track:[0]",
+                "seq-select-tracks:[0, 1]:1",
+                "seq-select-tracks:[0]:0",
+                "seq-toggle-track-selected:[1]",
+                "seq-select-tracks:[0, 1]:1",
+                "seq-set-track:[1]",
+                "seq-select-tracks:[0, 1]:0",
+            ],
+            "mixer body and label clicks should preserve the range anchor semantics"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target after range click"),
+            Some(Value::String("mixer-tracks".to_string())),
+            "shift-clicking a label must arm the selected track range"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/delete-selected-track)")
+            .expect("delete the armed track range");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 8, "selection reveals plus one mass delete");
+        assert!(matches!(
+            commands.last(),
+            Some(eseqlisp::host::HostCommand::Custom { name, .. }) if name == "delete-tracks"
+        ));
 
         editor
             .runtime_mut()
@@ -46775,6 +46523,11 @@
             other => panic!("expected add-track-sample host command, got {other:?}"),
         }
 
+        // Instrument drops (saved AND builtin) delegate to the shared browser
+        // router, which is what keeps builtin rows off the saved-instrument
+        // lookup (eseq-mj8). The routing itself is covered by the browser
+        // tests; here we prove the mixer hands the whole payload over.
+        calls.lock().unwrap().clear();
         editor
             .runtime_mut()
             .eval_str(
@@ -46785,28 +46538,17 @@
                                          :label "digitone")))"#,
             )
             .expect("drop instrument on new-track zone");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "add-track-instrument");
-                let Value::Map(payload) = payload else {
-                    panic!("add-track-instrument payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("name").map(|value| value.borrow().clone()),
-                    Some(Value::String("emulations/digitone".to_string()))
-                );
-            }
-            other => panic!("expected add-track-instrument host command, got {other:?}"),
-        }
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-loading-instrument-name")
-                .expect("read loading instrument"),
-            Some(Value::String("emulations/digitone".to_string()))
+        assert!(editor.drain_host_commands().is_empty());
+        let instrument_drop_calls = calls.lock().unwrap();
+        assert_eq!(instrument_drop_calls.len(), 1);
+        assert!(
+            instrument_drop_calls[0]
+                .starts_with("eseq.browser/drop-instrument-new-track:")
+                && instrument_drop_calls[0].contains("emulations/digitone"),
+            "mixer instrument drops should delegate the payload to the browser router: \
+             {instrument_drop_calls:?}"
         );
+        drop(instrument_drop_calls);
 
         editor
             .runtime_mut()
@@ -46900,12 +46642,225 @@
             "group bus strips should expose an effect drop callback"
         );
         assert!(
-            group_bus_strip.rect.width > 0.0 && group_bus_strip.rect.height > 0.0,
-            "group bus drop zone should have a finite visible rect: {:?}",
+            group_bus_strip.rect.width >= 10.0 && group_bus_strip.rect.height > 0.0,
+            "group strip should be wide enough for channel controls: {:?}",
             group_bus_strip.rect
         );
+        let group_mute = find_node_by_stable_key_suffix(&layout, "/group-mute-7")
+            .expect("plain group mute control");
+        let group_solo = find_node_by_stable_key_suffix(&layout, "/group-solo-7")
+            .expect("plain group solo control");
+        assert_finite_nonzero_rect(group_mute, "plain group mute control");
+        assert_finite_nonzero_rect(group_solo, "plain group solo control");
+        assert!(
+            find_node_by_stable_key_suffix(&layout, "/group-arm-7").is_none(),
+            "plain groups should not expose a record-arm control"
+        );
+        // Mute polarity: a strip that is passing audio is lit and a muted one
+        // goes dark, the same way track and bus strips paint their own mute
+        // buttons. This group's bus is unmuted, so its "M" must be lit —
+        // inverted, an unmuted group reads as muted next to its neighbours.
+        assert_eq!(
+            format!("{:?}", group_mute.props.get("background-color")),
+            "Some(('rgba 0.95 0.48 0.18 1))",
+            "an unmuted group's mute button should be lit like a track/bus strip's"
+        );
+        assert_eq!(
+            format!("{:?}", group_mute.props.get("color")),
+            "Some(:black)",
+            "an unmuted group's mute label should be the lit-state color"
+        );
+        for (control, expected) in [
+            (group_mute, "seq-toggle-bus-mute:[2]"),
+            (group_solo, "seq-toggle-bus-solo:[2]"),
+        ] {
+            let on_click = control
+                .props
+                .get("on-click")
+                .cloned()
+                .expect("group bus control should expose a click callback");
+            editor
+                .runtime_mut()
+                .invoke(on_click, vec![Value::Map(Default::default())])
+                .expect("click group bus control");
+            assert_eq!(
+                calls.lock().unwrap().last().map(String::as_str),
+                Some(expected),
+                "group mute/solo should control the backing bus"
+            );
+        }
+        calls.lock().unwrap().clear();
+
+        let group_badge = find_node_by_stable_key_suffix(&layout, "/group-badge-7")
+            .expect("plain group badge");
+        let open_group_menu = group_badge
+            .props
+            .get("on-right-click")
+            .cloned()
+            .expect("plain group badge should expose a context menu");
+        editor
+            .runtime_mut()
+            .invoke(
+                open_group_menu.clone(),
+                vec![map_value([
+                    ("col", Value::Number(20.0)),
+                    ("row", Value::Number(8.0)),
+                ])],
+            )
+            .expect("open plain group context menu");
+        editor.refresh_runtime_side_effects();
+        let menu_layout = editor.widget_layout().expect("plain group context menu layout");
+        let rename_item = find_layout_node_by_text(&menu_layout, "Rename")
+            .expect("plain group should offer rename");
+        assert_finite_nonzero_rect(rename_item, "rename group menu item");
+        let convert_item = find_layout_node_by_text(
+            &menu_layout,
+            "Convert to Drum Rack",
+        )
+        .expect("plain group should offer drum-rack conversion");
+        assert_finite_nonzero_rect(convert_item, "convert group to drum rack menu item");
+        let convert = convert_item.props.get("on-select").cloned()
+            .expect("conversion item should expose a select callback");
+        editor.runtime_mut().invoke(convert, vec![Value::Nil])
+            .expect("select drum-rack conversion");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "convert-group-to-drum-rack");
+                let Value::Map(payload) = payload else {
+                    panic!("conversion payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0)),
+                );
+            }
+            other => panic!("expected group conversion host command, got {other:?}"),
+        }
+
+        // A drum rack uses the same group bus controls and adds pad-play arm.
+        // Mutating the fixture from a plain group proves the two strip kinds
+        // intentionally diverge rather than all groups receiving an R button.
+        let Some(Value::List(groups)) = editor.runtime_mut().eval_str("SEQ.groups").unwrap() else {
+            panic!("mixer groups should be a list");
+        };
+        let Some(group_cell) = groups.first() else {
+            panic!("mixer fixture should contain a group");
+        };
+        let Value::Map(mut rack_group) = group_cell.borrow().clone() else {
+            panic!("mixer group should be a map");
+        };
+        rack_group.insert("rack".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "groups",
+            Value::List(vec![Rc::new(RefCell::new(Value::Map(rack_group)))]),
+        );
+        editor.runtime_mut().set_reactive("SEQ", "armed-rack-id", Value::Number(7.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let rack_layout = editor.widget_layout().expect("rack mixer layout");
+        let rack_arm = find_node_by_stable_key_suffix(&rack_layout, "/group-arm-7")
+            .expect("drum rack arm control");
+        assert_finite_nonzero_rect(rack_arm, "drum rack arm control");
+        let rack_name = find_node_by_stable_key_suffix(&rack_layout, "/group-name-label-7")
+            .expect("drum rack mixer badge");
+        assert_finite_nonzero_rect(rack_name, "drum rack mixer badge");
+        assert!(
+            !rack_name.props.contains_key("icon"),
+            "drum rack mixer badges should render without an icon"
+        );
+        assert_eq!(
+            node_text(rack_arm).as_deref(),
+            Some("R"),
+            "the rack-only control should be record arm"
+        );
+        editor
+            .runtime_mut()
+            .invoke(
+                open_group_menu,
+                vec![map_value([
+                    ("col", Value::Number(20.0)),
+                    ("row", Value::Number(8.0)),
+                ])],
+            )
+            .expect("open rack context menu");
+        editor.refresh_runtime_side_effects();
+        let rack_menu_layout = editor.widget_layout().expect("rack context menu layout");
+        assert!(
+            find_layout_node_by_text(&rack_menu_layout, "Convert to Drum Rack").is_none(),
+            "an existing drum rack must not offer conversion",
+        );
+        let rack_rename = find_layout_node_by_text(&rack_menu_layout, "Rename")
+            .expect("drum rack should offer rename");
+        assert_finite_nonzero_rect(rack_rename, "drum rack rename menu item");
+        let select_rename = rack_rename.props.get("on-select").cloned()
+            .expect("rack rename item should expose a select callback");
+        editor.runtime_mut().invoke(select_rename, vec![Value::Nil])
+            .expect("select drum rack rename");
+        editor.refresh_runtime_side_effects();
+        let rename_layout = editor.widget_layout().expect("rack rename layout");
+        let rename_input = find_layout_node_by_stable_key_suffix(
+            &rename_layout,
+            "/group-rename-input-7",
+        ).expect("rack group name should become an inline input");
+        assert_eq!(rename_input.widget_type, "text-input");
+        assert_finite_nonzero_rect(rename_input, "drum rack rename input");
+        assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
+        assert_eq!(
+            rename_input.props.get("select-all-on-focus"),
+            Some(&Value::Bool(true)),
+        );
+        let on_change = rename_input.props.get("on-change").cloned()
+            .expect("rack rename input should expose a change callback");
+        editor.runtime_mut().invoke(
+            on_change,
+            vec![Value::String("Night Kit".to_string())],
+        ).expect("edit rack name");
+        let on_submit = rename_input.props.get("on-submit").cloned()
+            .expect("rack rename input should expose a submit callback");
+        editor.runtime_mut().invoke(on_submit, Vec::new())
+            .expect("submit rack rename");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "rename-group");
+                let Value::Map(payload) = payload else {
+                    panic!("rename payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0)),
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Night Kit".to_string())),
+                );
+            }
+            other => panic!("expected group rename host command, got {other:?}"),
+        }
+        editor.refresh_runtime_side_effects();
+        let rack_arm_click = rack_arm
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("rack arm should expose a click callback");
+        editor
+            .runtime_mut()
+            .invoke(rack_arm_click, vec![Value::Map(Default::default())])
+            .expect("click rack arm");
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-rack-arm:[7]"),
+            "rack arm should toggle the rack's stable group id"
+        );
+        calls.lock().unwrap().clear();
+
         let group_badge = find_node_by_stable_key_suffix(&layout, "/group-badge-7")
             .expect("group badge click target");
+        assert_finite_nonzero_rect(group_badge, "mixer group badge");
         let group_badge_click = group_badge
             .props
             .get("on-click")
@@ -46924,6 +46879,45 @@
             Some(Value::Number(2.0)),
             "clicking the group badge should select its backing bus"
         );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target after group badge click"),
+            Some(Value::String("mixer-group".to_string())),
+            "clicking the group badge should arm the whole group for deletion"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
+        editor.refresh_runtime_side_effects();
+        let armed_layout = editor.widget_layout().expect("armed group mixer layout");
+        let armed_group_badge = find_node_by_stable_key_suffix(&armed_layout, "/group-badge-7")
+            .expect("armed group badge");
+        assert_eq!(
+            layout_prop_bool(armed_group_badge, "selected"),
+            Some(true),
+            "the armed group badge should render its delete-target selection"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/handle-key \"BS\" nil)")
+            .expect("delete selected group from mixer");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "delete-track-group");
+                let Value::Map(payload) = payload else {
+                    panic!("delete-track-group payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(7.0))
+                );
+            }
+            other => panic!("expected delete-track-group host command, got {other:?}"),
+        }
         let mod_out =
             find_node_by_stable_key_suffix(&layout, "/mod-out-0").expect("track mod out port");
         let custom_mod_out = find_node_by_stable_key_suffix(&layout, "/mod-out-1")
@@ -49217,4 +49211,1689 @@
                 "mac-osx-dark is the boot theme and must set `:{key}`"
             );
         }
+    }
+
+    /// Drum rack v2 slice 2 (`docs/drum-rack-v2-spec.md` "UI"): the grid draws
+    /// a rack as a header row over its member tracks, and the header owns the
+    /// backing bus's mute/solo/volume.
+    fn rack_group_fixture(collapsed: bool) -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.9, 0.45, 0.15],
+            collapsed,
+            members: vec![1, 2],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig {
+                pads: vec![
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 36,
+                        member: 0,
+                    },
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 38,
+                        member: 1,
+                    },
+                ],
+                choke_groups: vec![None, Some(1)],
+            }),
+            rack_members: Vec::new(),
+        }
+    }
+
+    fn regular_group_fixture(collapsed: bool) -> sequencer::project::ProjectTrackGroup {
+        let mut group = rack_group_fixture(collapsed);
+        group.id = 8;
+        group.name = "Band".to_string();
+        group.rack = None;
+        group
+    }
+
+    fn apply_groups_bindings(
+        editor: &mut eseqlisp::Editor,
+        groups: &[sequencer::project::ProjectTrackGroup],
+    ) {
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "groups", build_groups_value(groups));
+        rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(groups));
+        // Pad-arm state is read only by a drum-rack header; -1 = no rack armed.
+        rt.set_reactive("SEQ", "armed-rack-id", Value::Number(-1.0));
+        rt.set_reactive("SEQ", "bus-ids", test_number_list(&[0.0, 1.0, 2.0]));
+        rt.set_reactive("SEQ", "bus-names", test_string_list(&["Mix", "Bus A", "Group"]));
+        rt.set_reactive("SEQ", "bus-volumes", test_number_list(&[1.0, 1.0, 0.8]));
+        rt.set_reactive("SEQ", "bus-mutes", test_bool_list(&[false, false, false]));
+        rt.set_reactive("SEQ", "bus-solos", test_bool_list(&[false, false, false]));
+        for bus in 0..3 {
+            rt.set_reactive("SEQ", &format!("bus-peak-{bus}"), Value::Number(0.0));
+        }
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+    }
+
+    fn apply_group_bindings(
+        editor: &mut eseqlisp::Editor,
+        group: sequencer::project::ProjectTrackGroup,
+    ) {
+        apply_groups_bindings(editor, &[group]);
+    }
+
+    fn apply_rack_group_bindings(editor: &mut eseqlisp::Editor, collapsed: bool) {
+        apply_group_bindings(editor, rack_group_fixture(collapsed));
+    }
+
+    #[test]
+    fn metal_seq_visible_track_order_matches_nested_group_rendering_and_collapse() {
+        let mut parent = regular_group_fixture(false);
+        parent.id = 3;
+        parent.members = vec![1, 7];
+        parent.rack_members = vec![7];
+
+        let mut child = rack_group_fixture(false);
+        child.members = vec![10, 11];
+
+        let mut collapsed_group = regular_group_fixture(true);
+        collapsed_group.id = 9;
+        collapsed_group.members = vec![5, 6];
+        collapsed_group.rack_members.clear();
+
+        let mut editor = sequencer_perf_editor(14, 16);
+        apply_groups_bindings(&mut editor, &[parent, child, collapsed_group]);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[
+                false, false, false, false, false, false, false, false, true, false, false,
+                false, false, false,
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/visible-track-order)")
+                .expect("visible track order should evaluate"),
+            Some(test_number_list(&[
+                0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 9.0, 12.0, 13.0,
+            ])),
+            "navigation must flatten the exact order drawn by the group blocks",
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/mixer-visible-track-order)")
+                .expect("mixer track order should evaluate"),
+            Some(test_number_list(&[
+                0.0, 1.0, 7.0, 10.0, 11.0, 2.0, 3.0, 4.0, 8.0, 9.0, 12.0, 13.0,
+            ])),
+            "mixer order keeps collapsed track badges but skips collapsed groups",
+        );
+
+        for (track, delta, expected) in [
+            (7, 1, 10),
+            (10, -1, 7),
+            (13, 1, 0),
+            (0, -1, 13),
+            (5, 1, 9),
+            (5, -1, 4),
+            (8, 1, 9),
+            (8, -1, 4),
+        ] {
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str(&format!(
+                        "(eseq.drum-rack-v2/track-relative {track} {delta})"
+                    ))
+                    .expect("relative navigation should evaluate"),
+                Some(Value::Number(expected as f64)),
+                "track {track} should move by {delta} to the nearest visible row",
+            );
+        }
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(&[true; 14]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/track-relative 7 1)")
+                .expect("empty visual order should be safe"),
+            Some(Value::Nil),
+        );
+    }
+
+    #[test]
+    fn metal_seq_groups_value_carries_rack_pad_map() {
+        let groups = [rack_group_fixture(false)];
+        let Value::List(items) = build_groups_value(&groups) else {
+            panic!("groups value should be a list");
+        };
+        let Some(Value::Map(group)) = items.first().map(|cell| cell.borrow().clone()) else {
+            panic!("groups value should hold one group map");
+        };
+        assert_eq!(
+            group.get("rack").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true)),
+            "a group carrying a pad map is a rack"
+        );
+        let Some(Value::List(pads)) = group.get("pads").map(|cell| cell.borrow().clone()) else {
+            panic!("rack group should expose its pads");
+        };
+        assert_eq!(pads.len(), 2, "both pads should be exposed");
+        let Value::Map(second) = pads[1].borrow().clone() else {
+            panic!("pad should be a map");
+        };
+        for (field, expected) in [
+            ("pad-note", 38.0),
+            // member position 1 resolves to member track 2 …
+            ("member", 1.0),
+            ("track", 2.0),
+            ("choke", 1.0),
+        ] {
+            assert_eq!(
+                second.get(field).map(|cell| cell.borrow().clone()),
+                Some(Value::Number(expected)),
+                "pad field {field} should resolve"
+            );
+        }
+    }
+
+    /// Slice 5 of docs/drum-rack-v2-spec.md: the mixer draws a nested rack
+    /// inside its parent's block, which it can only do if the bindings carry
+    /// the nesting in both directions.
+    #[test]
+    fn metal_seq_groups_value_carries_rack_nesting_in_both_directions() {
+        let mut parent = rack_group_fixture(false);
+        parent.id = 3;
+        parent.rack = None;
+        parent.members = vec![0, 3];
+        parent.rack_members = vec![7];
+        let groups = [parent, rack_group_fixture(false)];
+        let Value::List(items) = build_groups_value(&groups) else {
+            panic!("groups value should be a list");
+        };
+        let field = |index: usize, key: &str| {
+            let Some(Value::Map(group)) = items.get(index).map(|cell| cell.borrow().clone()) else {
+                panic!("group {index} should be a map");
+            };
+            group.get(key).map(|cell| cell.borrow().clone())
+        };
+        assert_eq!(
+            field(0, "rack-members"),
+            Some(test_list(vec![Value::Number(7.0)])),
+            "the parent lists the rack it contains",
+        );
+        assert_eq!(
+            field(0, "parent"),
+            Some(Value::Number(-1.0)),
+            "a top-level group has no parent",
+        );
+        assert_eq!(
+            field(1, "parent"),
+            Some(Value::Number(3.0)),
+            "the nested rack points back at the group drawing it",
+        );
+        assert_eq!(
+            field(1, "rack-members"),
+            Some(test_list(vec![])),
+            "racks contain only member tracks",
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_renders_drum_rack_header_over_member_track_rows() {
+        let track_count = 4;
+        let step_count = 16;
+        let mut editor = sequencer_perf_editor(track_count, step_count);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let layout = editor
+            .widget_layout()
+            .expect("rack sequencer layout should build");
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            let normalized = status.to_ascii_lowercase();
+            if normalized.contains("error") || normalized.contains("unknown") {
+                panic!("rack sequencer layout status: {status}");
+            }
+        }
+
+        for key in [
+            "/rack-arm-7",
+            "/rack-mute-7",
+            "/rack-solo-7",
+            "/rack-collapse-7",
+            "/rack-name-label-7",
+            "/rack-volume-control-7",
+        ] {
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
+                "rack header should render {key}"
+            );
+        }
+        let rack_name = find_layout_node_by_stable_key_suffix(&layout, "/rack-name-label-7")
+            .expect("drum rack sequencer badge");
+        assert_finite_nonzero_rect(rack_name, "drum rack sequencer badge");
+        assert_eq!(
+            rack_name.props.get("icon"),
+            Some(&Value::Keyword("sampler".to_string())),
+            "drum rack sequencer badges should reuse the Kits tab icon"
+        );
+
+        // The rack subtree is the whole block: header row plus member rows.
+        // Track ids are 1000 + index in this fixture.
+        let block = find_layout_node_by_stable_key_suffix(&layout, "sequencer-rack-7")
+            .expect("rack block should render");
+        assert!(
+            block.props.contains_key("on-click"),
+            "rack container chrome should select its backing bus"
+        );
+        assert_eq!(
+            block.props.get("selected-border-color"),
+            Some(&Value::Keyword("mixer-strip-selected-border".to_string())),
+            "selected rack containers should use the track selection border"
+        );
+        assert_eq!(
+            block.props.get("selected-background-color"),
+            block.props.get("background-color"),
+            "rack selection must retain the normal container background"
+        );
+        assert!(
+            find_layout_node_by_stable_key_suffix(block, "/rack-arm-7").is_some(),
+            "the rack header belongs to the rack block"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + member)),
+                1,
+                "member track {member} should render its standard row nested in the rack"
+            );
+        }
+        for loose in [0usize, 3] {
+            assert_eq!(
+                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + loose)),
+                0,
+                "non-member track {loose} should stay outside the rack block"
+            );
+            assert_eq!(
+                count_stable_key_prefix(&layout, &format!("sequencer-track-{}", 1000 + loose)),
+                1,
+                "non-member track {loose} should still render as a loose row"
+            );
+        }
+        assert_eq!(
+            count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
+            track_count * step_count,
+            "member rows are ordinary track rows, so every track keeps its step grid"
+        );
+
+        // eseq-4b5.22: the rack header's meter reads the rack's BACKING BUS
+        // peak, not a track peak, so `bus-peak-*` has a live consumer in
+        // *sequencer* even when the mixer is hidden. This pins the binding
+        // that `track_and_bus_meter_bindings_visible` exists to keep synced —
+        // re-gating bus peaks on mixer visibility alone freezes this meter.
+        let rack_meter = find_layout_node_by_stable_key_suffix(&layout, "/rack-volume-control-7")
+            .expect("rack header should render its volume/meter control");
+        assert_eq!(
+            rack_meter.props.get("background"),
+            Some(&Value::String("seqv-track-volume-meter".to_string())),
+            "the rack fader is the same meter/fader widget the track rows use"
+        );
+        assert!(
+            matches!(
+                rack_meter.props.get("level"),
+                Some(Value::ReactiveRef {
+                    namespace,
+                    field,
+                    ..
+                }) if namespace == "SEQ" && field == "bus-peak-2"
+            ),
+            "the rack meter level must bind the backing bus peak (bus 2), got {:?}",
+            rack_meter.props.get("level")
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_renders_regular_group_as_collapsible_member_container_without_arm() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_group_bindings(&mut editor, regular_group_fixture(false));
+
+        let expanded = editor
+            .widget_layout()
+            .expect("regular group sequencer layout should build");
+        let block = find_layout_node_by_stable_key_suffix(&expanded, "sequencer-group-8")
+            .expect("regular group block should render");
+        assert!(
+            block.props.contains_key("on-click"),
+            "regular group container chrome should select its backing bus"
+        );
+        assert_eq!(
+            block.props.get("selected-border-color"),
+            Some(&Value::Keyword("mixer-strip-selected-border".to_string())),
+            "selected regular groups should use the track selection border"
+        );
+        assert_eq!(
+            block.props.get("selected-background-color"),
+            block.props.get("background-color"),
+            "regular group selection must retain the normal container background"
+        );
+        let Some(Value::List(group_bg)) = block.props.get("background-color") else {
+            panic!("regular group background should be an RGBA color");
+        };
+        assert_eq!(
+            group_bg.last().map(|channel| channel.borrow().clone()),
+            Some(Value::Number(1.0)),
+            "group background must be opaque so the selected border cannot show through it"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%select-group 0)")
+            .expect("select regular group container");
+        let selected = editor
+            .widget_layout()
+            .expect("selected regular group sequencer layout should build");
+        let selected_block = find_layout_node_by_stable_key_suffix(&selected, "sequencer-group-8")
+            .expect("selected regular group block should render");
+        assert_eq!(
+            selected_block.props.get("selected"),
+            Some(&Value::Bool(true)),
+            "selecting group chrome should select its backing bus and activate the border"
+        );
+        assert_eq!(
+            selected_block.props.get("selected-background-color"),
+            selected_block.props.get("background-color"),
+            "selected group layout should retain the normal background"
+        );
+        for key in [
+            "/group-collapse-8",
+            "/group-mute-8",
+            "/group-solo-8",
+            "/group-name-label-8",
+            "/group-volume-control-8",
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(block, key)
+                .unwrap_or_else(|| panic!("regular group header should render {key}"));
+            assert_finite_nonzero_rect(node, "regular group header control");
+            if key == "/group-collapse-8" {
+                assert!(
+                    node.props.contains_key("on-click"),
+                    "regular group collapse control should use the drum-rack interaction model"
+                );
+            }
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(block, "/group-arm-8").is_none(),
+            "regular groups cannot be armed and must not render an Arm control"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(block, &format!("sequencer-track-{}", 1000 + member)),
+                1,
+                "regular group member track {member} should be nested in its block"
+            );
+            let indicator = find_layout_node_by_stable_key_suffix(
+                block,
+                &format!("/group-track-indicator-8-{member}"),
+            )
+            .unwrap_or_else(|| {
+                panic!("regular group member {member} should have a group prefix")
+            });
+            assert_finite_nonzero_rect(indicator, "regular group member prefix");
+        }
+
+        apply_group_bindings(&mut editor, regular_group_fixture(true));
+        let collapsed = editor
+            .widget_layout()
+            .expect("collapsed regular group sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&collapsed, "/group-collapse-8").is_some(),
+            "collapsing a regular group keeps the control that expands it"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(&collapsed, &format!("sequencer-track-{}", 1000 + member)),
+                0,
+                "collapsed regular group should hide member track {member}"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_sequencer_nests_drum_rack_inside_regular_group() {
+        let mut parent = regular_group_fixture(false);
+        parent.members = vec![0, 3];
+        parent.rack_members = vec![7];
+        let rack = rack_group_fixture(false);
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_groups_bindings(&mut editor, &[parent, rack]);
+
+        let layout = editor
+            .widget_layout()
+            .expect("nested group sequencer layout should build");
+        let parent_block = find_layout_node_by_stable_key_suffix(&layout, "sequencer-group-8")
+            .expect("regular parent group should render");
+        let rack_block = find_layout_node_by_stable_key_suffix(parent_block, "sequencer-rack-7")
+            .expect("child drum rack should render inside its regular parent");
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(rack_block, &format!("sequencer-track-{}", 1000 + member)),
+                1,
+                "rack member track {member} should remain nested in the child rack"
+            );
+        }
+        assert_eq!(
+            count_stable_key_prefix(&layout, "sequencer-rack-7"),
+            1,
+            "a nested drum rack must not also render as a top-level block"
+        );
+    }
+
+    /// Drum rack v2 slice 3: the header's arm dot is a read of the host's
+    /// pad-arm state, not UI-local state, so the grid and the live keyboard
+    /// can never disagree about which kit answers the keys.
+    #[test]
+    fn metal_seq_rack_header_arm_follows_host_armed_rack_id() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/armed? 0)")
+                .expect("armed? should evaluate"),
+            Some(Value::Bool(false)),
+            "no rack is armed while SEQ.armed-rack-id is -1"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "armed-rack-id", Value::Number(7.0));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/armed? 0)")
+                .expect("armed? should evaluate"),
+            Some(Value::Bool(true)),
+            "the header reads the armed rack by group id"
+        );
+    }
+
+    /// track only when a sound is dropped on it. An EMPTY cell creates a member
+    /// mapped to that cell's own pad note; an OCCUPIED cell replaces the sound
+    /// on the member the pad already has, so no second member appears and the
+    /// pad keeps its pattern, mixer and choke state.
+    #[test]
+    fn metal_seq_rack_pad_cells_are_lazy_pad_drop_targets() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+        // The drop affordance lives on the cell itself — occupied AND empty —
+        // so it travels with the pad interface wherever it renders; the grid's
+        // own surface, the *fx* rack panel, asserts that in
+        // `metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer`. What
+        // this test pins is where each cell's drop is addressed.
+
+        // An empty cell addresses the rack by (group id, pad note) — the note
+        // is the CELL's own (eseq-4b5.14), never a next-free fallback. The
+        // rack's pads sit at 36/38 so the grid opens on page 3 (base note 36),
+        // where cell 5 (row 1, col 1) is note 45 and cell 6 is note 46.
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/%drop-on-pad-cell
+                    (dict
+                      :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "rack-pad" :group-id 7 :cell 5))
+                    0 5)"#,
+            )
+            .expect("sample drop on an empty pad should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "add-track-sample"),
+            vec![("group-id", 7.0), ("pad-note", 45.0)],
+            "an empty cell creates a member mapped to exactly that cell's note"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/%drop-on-pad-cell
+                    (dict
+                      :drag-type "instrument"
+                      :payload (dict :kind "instrument" :name "core/drift")
+                      :target (dict :kind "rack-pad" :group-id 7 :cell 6))
+                    0 6)"#,
+            )
+            .expect("instrument drop on an empty pad should evaluate");
+        assert_eq!(
+            rack_host_command_payload(&mut editor, "add-track-instrument"),
+            vec![("group-id", 7.0), ("pad-note", 46.0)],
+            "instrument drops behave like sample drops"
+        );
+
+        // Paging moves the cell's note by an octave, not by sixteen pads.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 2)")
+            .expect("paging should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/%pad-cell-note 0 5)")
+                .expect("paged cell note should evaluate"),
+            Some(Value::Number(33.0)),
+            "the page below starts an octave down, so the same cell is note-12"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 3)")
+            .expect("paging back should evaluate");
+
+        // An occupied cell is the member track's own drop target. It also marks
+        // that this track-shaped target came from a pad so the shared browser
+        // replacement commands preserve the selected track.
+        // Pad 36 is the page's lowest note, so it renders bottom-left: cell 12.
+        let occupied_meta =
+            "(eseq.sequencer/%pad-cell-drop-meta 0 12 (eseq.sequencer/%pad-at 0 12))";
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(&format!("(get {occupied_meta} :track)"))
+                .expect("occupied pad track metadata should evaluate"),
+            Some(Value::Number(1.0)),
+            "the bottom-left cell addresses the member track behind pad 36"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(&format!("(get {occupied_meta} :from-pad)"))
+                .expect("occupied pad origin metadata should evaluate"),
+            Some(Value::Bool(true)),
+            "occupied-pad metadata must preserve the user's selected track"
+        );
+        // The occupied path hands the event to the browser's single-track
+        // replacement without creating a member. The perf editor loads no
+        // samples, so stub the browser call and record the target.
+        let replaced = Arc::new(Mutex::new(Vec::<(f64, bool)>::new()));
+        {
+            let replaced = Arc::clone(&replaced);
+            editor.runtime_mut().register_native(
+                "eseq.browser/drop-sample-on-track",
+                move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Map(event)) => event
+                            .get("target")
+                            .map(|cell| cell.borrow().clone())
+                            .and_then(|target| match target {
+                                Value::Map(target) => target
+                                    .get("track")
+                                    .map(|cell| cell.borrow().clone())
+                                    .and_then(|track| match track {
+                                        Value::Number(track) => Some(track),
+                                        _ => None,
+                                    }),
+                                _ => None,
+                            }),
+                        _ => None,
+                    };
+                    let from_pad = match args.first() {
+                        Some(Value::Map(event)) => event
+                            .get("target")
+                            .map(|cell| cell.borrow().clone())
+                            .and_then(|target| match target {
+                                Value::Map(target) => target
+                                    .get("from-pad")
+                                    .map(|cell| cell.borrow().clone()),
+                                _ => None,
+                            })
+                            .is_some_and(|value| value == Value::Bool(true)),
+                        _ => false,
+                    };
+                    replaced.lock().unwrap().push((track.unwrap_or(-1.0), from_pad));
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/%drop-on-pad-cell
+                    (dict
+                      :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "track" :track 1 :from-pad true))
+                    0 12)"#,
+            )
+            .expect("sample drop on an occupied pad should evaluate");
+        assert_eq!(
+            *replaced.lock().unwrap(),
+            vec![(1.0, true)],
+            "an occupied pad replaces its member and carries the selection-preserving discriminant"
+        );
+        assert!(
+            !editor.drain_host_commands().iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. }
+                    if name == "add-track-sample" || name == "add-track-instrument"
+            )),
+            "replacing a pad's sound must not create a second member"
+        );
+    }
+
+    #[test]
+    fn metal_seq_occupied_pad_replacements_preserve_track_selection_in_host_payloads() {
+        fn assert_preserves_selection(editor: &mut eseqlisp::Editor, command_name: &str) {
+            let commands = editor.drain_host_commands();
+            assert!(matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == command_name
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(1.0))
+                        && map.get("preserve-track-selection").is_some_and(|value| *value.borrow() == Value::Bool(true)))
+            ), "{command_name} should preserve selection for an occupied-pad target, got {commands:?}");
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 3, 16);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["custom", "sampler", "rack"]),
+        );
+        let cases = [
+            (
+                "sample",
+                r#"(eseq.browser/drop-sample-on-track
+                    (dict :drag-type "sample"
+                      :payload (dict :path "samples/hat.wav")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "load-sample-into-track",
+            ),
+            (
+                "Sound",
+                r#"(eseq.browser/drop-sound-on-track
+                    (dict :drag-type "sound"
+                      :payload (dict :path "sounds/kick.sound")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "load-sound-onto-track",
+            ),
+            (
+                "saved instrument",
+                r#"(eseq.browser/drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                      :payload (dict :kind "instrument" :name "core/drift")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "swap-track-instrument",
+            ),
+            (
+                "builtin instrument",
+                r#"(eseq.browser/drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                      :payload (dict :kind "builtin-instrument" :name "sampler")
+                      :target (dict :kind "track" :track 1 :from-pad true)))"#,
+                "swap-track-builtin-instrument",
+            ),
+        ];
+        for (kind, expression, command_name) in cases {
+            let _ = editor.drain_host_commands();
+            editor
+                .runtime_mut()
+                .eval_str(expression)
+                .unwrap_or_else(|error| panic!("{kind} occupied-pad drop should evaluate: {error:?}"));
+            assert_preserves_selection(&mut editor, command_name);
+        }
+    }
+
+    /// A nudge clamps to the note-positional grid's range, not to raw MIDI 0.
+    /// `pad_note` is a transpose where 0 = C4, so the domain runs negative and
+    /// a `(max 0 ...)` lower bound would teleport every pad in the bottom three
+    /// octaves up to C4 instead of holding it still.
+    #[test]
+    fn metal_seq_rack_pad_note_nudge_clamps_to_the_grid_floor() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let eval = |editor: &mut eseqlisp::Editor, expr: &str| -> Option<Value> {
+            editor.runtime_mut().eval_str(expr).expect("expr evaluates")
+        };
+
+        // The floor is the grid's lowest note (C1 = -36), never 0.
+        let floor = match eval(&mut editor, "(eseq.drum-rack-v2/min-grid-pad-note)") {
+            Some(Value::Number(n)) => n,
+            other => panic!("min-grid-pad-note should be a number, got {other:?}"),
+        };
+        assert_eq!(floor, -36.0);
+        assert_eq!(
+            eval(&mut editor, "(eseq.drum-rack-v2/%clamp-pad-note -37)"),
+            Some(Value::Number(-36.0)),
+            "below the floor clamps to the floor, not to 0"
+        );
+
+        // Nudging a pad that already sits on the floor is a no-op: the clamped
+        // note equals the current one, so no host command is issued.
+        assert_eq!(
+            eval(
+                &mut editor,
+                "(eseq.drum-rack-v2/nudge-pad-note 0 (dict :pad-note -36) -1)"
+            ),
+            Some(Value::Nil),
+            "a pad on the grid floor must not move when nudged down"
+        );
+    }
+
+    /// eseq-4b5.14: the pad grid is note-positional. A cell IS a MIDI note —
+    /// derived from (page, row, col) alone — and it draws whichever pad answers
+    /// to that note, so a pad's label and its position can never disagree. Pads
+    /// on other notes leave their cells empty; nothing compacts.
+    #[test]
+    fn metal_seq_rack_pad_grid_cells_are_midi_note_positions() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let number = |editor: &mut eseqlisp::Editor, expr: &str| -> f64 {
+            match editor.runtime_mut().eval_str(expr).expect("expr evaluates") {
+                Some(Value::Number(n)) => n,
+                other => panic!("{expr} should be a number, got {other:?}"),
+            }
+        };
+
+        // The grid opens on the page holding the rack's lowest pad (36), not on
+        // page 0 — a kit that lives high up must not open onto empty octaves.
+        assert_eq!(number(&mut editor, "(eseq.sequencer/%pad-page 0)"), 3.0);
+
+        // Within a page: bottom-left is the lowest note, ascending left to
+        // right then bottom to top. Cell 12 is the bottom-left cell.
+        for (cell, note) in [(12, 36.0), (13, 37.0), (15, 39.0), (8, 40.0), (0, 48.0), (3, 51.0)] {
+            assert_eq!(
+                number(&mut editor, &format!("(eseq.sequencer/%pad-cell-note 0 {cell})")),
+                note,
+                "cell {cell} should name note {note}"
+            );
+        }
+
+        // Pages are octave-aligned, so the bottom-left cell of EVERY page is a
+        // C (they overlap by four notes, which is what buys that), and every
+        // page stays inside the host's pad-note domain. Pad notes are
+        // TRANSPOSES around C4, so the range runs negative: page -3 is C1.
+        let min_page = number(&mut editor, "(eseq.drum-rack-v2/min-pad-page)") as i32;
+        let max_page = number(&mut editor, "(eseq.drum-rack-v2/max-pad-page)") as i32;
+        assert_eq!(min_page, -3, "the bottom page is C1, a drum rack's home");
+        for page in min_page..=max_page {
+            let base = number(
+                &mut editor,
+                &format!("(eseq.drum-rack-v2/cell-note {page} 12)"),
+            );
+            assert_eq!(base.rem_euclid(12.0), 0.0, "page {page} should start on a C");
+            let top = number(
+                &mut editor,
+                &format!("(eseq.drum-rack-v2/cell-note {page} 3)"),
+            );
+            assert_eq!(top, base + 15.0, "a page spans sixteen notes");
+            assert!(
+                base >= number(&mut editor, "(eseq.drum-rack-v2/min-grid-pad-note)")
+                    && top <= number(&mut editor, "(eseq.drum-rack-v2/max-grid-pad-note)"),
+                "page {page} must stay inside the pad-note domain"
+            );
+        }
+        // A transpose of 0 is C4 — the same zero the step sequencer and piano
+        // roll speak — so the pad space straddles middle C rather than
+        // starting there.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.drum-rack-v2/min-grid-pad-note))")
+                .expect("lowest pad note label should evaluate"),
+            Some(Value::String("C1".to_string())),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label 0)")
+                .expect("middle C label should evaluate"),
+            Some(Value::String("C4".to_string())),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label -1)")
+                .expect("negative note label should evaluate"),
+            Some(Value::String("B3".to_string())),
+            "a negative transpose names the note below middle C, not a wrapped one"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label -12)")
+                .expect("octave-down label should evaluate"),
+            Some(Value::String("C3".to_string())),
+        );
+
+        // Pads render sparsely AT their notes: 36 bottom-left, 38 two cells
+        // along, and the cell between them empty.
+        assert_eq!(
+            number(&mut editor, "(get (eseq.sequencer/%pad-at 0 12) :track)"),
+            1.0
+        );
+        assert_eq!(
+            number(&mut editor, "(get (eseq.sequencer/%pad-at 0 14) :track)"),
+            2.0
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(= (eseq.sequencer/%pad-at 0 13) nil)")
+                .expect("empty cell should evaluate"),
+            Some(Value::Bool(true)),
+            "the note between the two pads is an empty cell, not the next pad"
+        );
+
+        // Every occupied cell's label is its own note's name.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/%pad-cell-note 0 12))")
+                .expect("cell note label should evaluate"),
+            Some(Value::String("C7".to_string())),
+            "the bottom-left cell is the page's C, and pad 36 labels itself C7"
+        );
+
+        // Paging is over the note range, not the pad list, so it reaches any
+        // octave a pad could be placed on.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 99)")
+            .expect("paging past the top should evaluate");
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            max_page as f64,
+            "the page clamps at the top rather than addressing notes off the pad map"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 -99)")
+            .expect("paging past the bottom should evaluate");
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            min_page as f64,
+            "and clamps at C1 on the way down"
+        );
+    }
+
+    /// eseq-4b5.14: the default page follows the kit. A rack whose pads live in
+    /// another octave opens there without manual paging, and page state is
+    /// scoped to the rack so another rack's page never leaks in.
+    #[test]
+    fn metal_seq_rack_pad_grid_opens_on_the_page_holding_the_kit() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        let mut group = rack_group_fixture(false);
+        let Some(rack) = group.rack.as_mut() else {
+            panic!("fixture should be a rack");
+        };
+        // Both pads four octaves down, BELOW middle C: -12/-10 instead of
+        // 36/38. Pad notes are transposes around C4, so the pad map runs
+        // negative and the default page has to follow a kit down there.
+        for pad in rack.pads.iter_mut() {
+            pad.pad_note -= 48;
+        }
+        let groups = [group];
+        {
+            let rt = editor.runtime_mut();
+            rt.set_reactive("SEQ", "groups", build_groups_value(&groups));
+            rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(&groups));
+            rt.set_reactive("SEQ", "armed-rack-id", Value::Number(-1.0));
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/%pad-page 0)")
+                .expect("default page should evaluate"),
+            Some(Value::Number(-1.0)),
+            "the grid opens on the page holding the kit's lowest pad"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (eseq.sequencer/%pad-at 0 12) :track)")
+                .expect("bottom-left pad should evaluate"),
+            Some(Value::Number(1.0)),
+            "the kit's lowest pad still renders bottom-left, an octave away"
+        );
+        // Page state names the rack it belongs to: a page set for some other
+        // rack leaves this one on its own derived default.
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! eseq.sequencer/%pad-grid-page-group 999) (set! eseq.sequencer/%pad-grid-page 0))")
+            .expect("foreign page state should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/%pad-page 0)")
+                .expect("default page should evaluate"),
+            Some(Value::Number(-1.0)),
+            "another rack's page must not leak into this rack's grid"
+        );
+    }
+
+
+    /// eseq-4b5.15: the octave-overview mini-map is a second VIEW of the grid's
+    /// page, never a second page state. It lays the whole grid-addressable note
+    /// range out four to a row with the lowest notes at the bottom, lights the
+    /// rows the enlarged grid is showing, and pages the grid on click.
+    #[test]
+    fn metal_seq_rack_pad_map_mirrors_the_grid_page() {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+
+        let number = |editor: &mut eseqlisp::Editor, expr: &str| -> f64 {
+            match editor.runtime_mut().eval_str(expr).expect("expr evaluates") {
+                Some(Value::Number(n)) => n,
+                other => panic!("{expr} should be a number, got {other:?}"),
+            }
+        };
+        let flag = |editor: &mut eseqlisp::Editor, expr: &str| -> bool {
+            match editor.runtime_mut().eval_str(expr).expect("expr evaluates") {
+                Some(Value::Bool(b)) => b,
+                other => panic!("{expr} should be a bool, got {other:?}"),
+            }
+        };
+
+        // The map covers exactly what the grid can address — C1..D#8, four notes
+        // to a row — so no map cell names a note no page could ever show.
+        let rows = number(&mut editor, "(eseq.drum-rack-v2/pad-map-row-count)");
+        assert_eq!(rows, 22.0);
+        let bottom = number(&mut editor, "(eseq.drum-rack-v2/min-grid-pad-note)");
+        assert_eq!(
+            number(&mut editor, "(eseq.drum-rack-v2/pad-map-row-base 21)"),
+            bottom,
+            "the bottom row is C1, the same ascending order the grid reads"
+        );
+        assert_eq!(
+            number(&mut editor, "(eseq.drum-rack-v2/pad-map-row-base 0)"),
+            number(&mut editor, "(eseq.drum-rack-v2/max-grid-pad-note)") - 3.0,
+            "row 0 renders at the top and ends on the highest addressable note"
+        );
+        // What the mini-map is FOR: middle C sits in the middle of the map, not
+        // on its floor, because a pad note is a transpose around C4.
+        let middle_c_row = (0..22)
+            .find(|row| {
+                number(
+                    &mut editor,
+                    &format!("(eseq.drum-rack-v2/pad-map-row-base {row})"),
+                ) == 0.0
+            })
+            .expect("some row should carry middle C");
+        assert!(
+            (7..=14).contains(&middle_c_row),
+            "C4 should land near the middle of the 22 map rows, got row {middle_c_row}"
+        );
+
+        // The highlight is exactly the sixteen notes on screen: the rack's pads
+        // sit at 36/38, so the grid opens on page 3 (36..51) and the four rows
+        // based at 36/40/44/48 light up — the ones either side do not.
+        assert_eq!(number(&mut editor, "(eseq.sequencer/%pad-page 0)"), 3.0);
+        for (row, on_page) in [(4, false), (3, true), (2, true), (1, true), (0, true)] {
+            assert_eq!(
+                flag(
+                    &mut editor,
+                    &format!("(eseq.drum-rack-v2/pad-map-row-on-page? {row} 3)")
+                ),
+                on_page,
+                "row {row} should {} be inside page 3's window",
+                if on_page { "" } else { "not" }
+            );
+        }
+
+        // The pad list is flattened ONCE into a note-indexed track list, so a
+        // cell answers with a lookup rather than another scan of the pads —
+        // and it answers with the member track, which is both "occupied?" and
+        // the cell's trigger-light binding (eseq-4b5.16).
+        const MAP_PADS: &str =
+            "(list (dict :pad-note 36 :track 4) (dict :pad-note 38 :track 7))";
+        assert!(flag(
+            &mut editor,
+            &format!("(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 36)")
+        ));
+        assert!(!flag(
+            &mut editor,
+            &format!("(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 37)")
+        ));
+        assert_eq!(
+            number(
+                &mut editor,
+                &format!("(eseq.sequencer/%note-track (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 38)")
+            ),
+            7.0,
+            "a map cell resolves to the member track behind its note"
+        );
+        assert_eq!(
+            number(
+                &mut editor,
+                &format!("(eseq.sequencer/%note-track (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 37)")
+            ),
+            -1.0,
+            "a note no pad answers to has no track"
+        );
+        assert_eq!(
+            number(
+                &mut editor,
+                &format!("(len (eseq.sequencer/%pad-note-tracks {MAP_PADS}))")
+            ),
+            number(
+                &mut editor,
+                "(+ (- (eseq.drum-rack-v2/max-grid-pad-note) (eseq.drum-rack-v2/min-grid-pad-note)) 1)"
+            ),
+            "the track list covers every note the map draws"
+        );
+
+        // Clicking a row pages the grid to the page holding those notes, and
+        // the highlight follows — one shared page, two views of it. Row 21 is
+        // the bottom row, C1, three octaves BELOW middle C.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 (eseq.drum-rack-v2/page-of-note (eseq.drum-rack-v2/pad-map-row-base 21)))")
+            .expect("map click should evaluate");
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            -3.0,
+            "a click on the bottom row pages to the page holding C1"
+        );
+        assert!(flag(
+            &mut editor,
+            "(eseq.drum-rack-v2/pad-map-row-on-page? 21 (eseq.sequencer/%pad-page 0))"
+        ));
+        assert!(
+            !flag(
+                &mut editor,
+                "(eseq.drum-rack-v2/pad-map-row-on-page? 3 (eseq.sequencer/%pad-page 0))"
+            ),
+            "the rows the grid left behind stop being highlighted"
+        );
+        // The clicked note is now on the enlarged grid, which is the point of
+        // the jump.
+        assert_eq!(
+            number(&mut editor, "(eseq.sequencer/%pad-cell-note 0 12)"),
+            bottom
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/%pad-cell-note 0 12))")
+                .expect("bottom-left label should evaluate"),
+            Some(Value::String("C1".to_string())),
+        );
+    }
+
+    /// A sequencer harness that also loads the effect buffers, so the *fx*
+    /// buffer's rack branch can be rendered against a real rack.
+    fn rack_fx_panel_editor() -> eseqlisp::Editor {
+        let mut editor = sequencer_perf_editor(4, 16);
+        apply_rack_group_bindings(&mut editor, false);
+        let rt = editor.runtime_mut();
+        for (key, value) in [
+            ("compiling", Value::Bool(false)),
+            ("available-effects", test_list(vec![])),
+            ("available-builtin-effects", test_list(vec![])),
+            ("available-midi-effects", test_list(vec![])),
+            ("effects", test_list(vec![])),
+            ("midi-effects", test_list(vec![])),
+            ("instrument-panel", test_list(vec![])),
+            ("process-slots", test_list(vec![])),
+            ("bus-effects", test_list(vec![test_list(vec![]); 3])),
+            ("delete-target-version", Value::Number(0.0)),
+        ] {
+            rt.set_reactive("SEQ", key, value);
+        }
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Kit")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/sample-selected-path () "")
+                (def eseq.browser/add-selected-rack-layer () false)
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                "#,
+            )
+            .expect("install rack fx panel test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        editor
+    }
+
+    /// eseq-4b5.10: selecting a drum rack selects its backing bus, so without a
+    /// rack branch the *fx* buffer answers a kit with the bus's (usually empty)
+    /// effect chain. A rack has to feel like a track here: the pad interface —
+    /// same cells, same drops, same audition — plus the rack bus chain, while
+    /// an ordinary bus still gets the generic panel.
+    #[test]
+    fn metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer() {
+        // The *fx* rack panel grew the 22-row octave mini-map (eseq-4b5.15),
+        // and laying the whole panel out overflows the default test-thread
+        // stack.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer_impl)
+            .expect("spawn rack fx panel layout test")
+            .join()
+            .expect("rack fx panel layout test thread");
+    }
+
+    fn metal_seq_rack_selection_shows_the_pad_panel_in_the_fx_buffer_impl() {
+        let mut editor = rack_fx_panel_editor();
+        // The rack's backing bus is bus 2 (`rack_group_fixture`'s bus id).
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+
+        let pads = find_layout_node_by_debug_name(&layout, "rack-fx-pads-panel")
+            .unwrap_or_else(|| panic!("rack pad panel; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(pads, "rack pad panel");
+        let grid = find_layout_node_by_stable_key_suffix(pads, "/rack-pad-grid-7")
+            .unwrap_or_else(|| panic!("rack pad grid; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(grid, "rack pad grid");
+        // Sixteen cells — one per note of the visible page, two of which this
+        // rack's pads answer to; the rest are empty notes, not lanes. This panel
+        // is the pad interface's only surface (eseq-4b5.11), so every cell —
+        // occupied and empty alike — has to stay a drop target here.
+        for cell in 0..16 {
+            let node =
+                find_layout_node_by_stable_key_suffix(grid, &format!("/rack-pad-cell-7-{cell}"))
+                    .unwrap_or_else(|| panic!("pad cell {cell}; layout={layout_summaries:#?}"));
+            assert_finite_nonzero_rect(node, "rack pad cell");
+            assert!(
+                node.props.contains_key("on-drop") && node.props.contains_key("drop-types"),
+                "pad cell {cell} should stay a drop target in the fx panel"
+            );
+            assert!(
+                node.props.contains_key("drop-hover-border-color"),
+                "pad cell {cell} should highlight while hovered"
+            );
+            assert!(
+                node.props.contains_key("on-click"),
+                "pad cell {cell} should still audition"
+            );
+        }
+        // The rack bus's own chain stays reachable from the same panel.
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-drop-placeholder-panel").is_some(),
+            "the rack bus effect chain should remain editable; layout={layout_summaries:#?}"
+        );
+
+        // Rack identity and saving use the same header structure and save icon
+        // contract as regular instrument panels; pad-only controls stay below.
+        let header = find_layout_node_by_debug_name(&layout, "rack-fx-header-row")
+            .expect("the rack panel should have an instrument-style header");
+        assert_finite_nonzero_rect(header, "rack fx header");
+        let save = find_layout_node_by_stable_key_suffix(header, "/rack-fx-save-kit-7")
+            .expect("the rack header should expose the kit save icon");
+        assert_finite_nonzero_rect(save, "rack kit save icon");
+        assert!(
+            save.props.contains_key("on-click"),
+            "the kit save icon should enter the browser naming flow"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%select-pad 0 (nth (eseq.drum-rack-v2/pads 0) 1))")
+            .expect("selecting a pad should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (eseq.sequencer/selected-pad 0) :track)")
+                .expect("focused pad should resolve"),
+            Some(Value::Number(2.0)),
+            "the focused pad names its member track"
+        );
+        // Opening a pad runs the ordinary "edit this track" path, which the
+        // perf editor does not carry natives for.
+        for native in ["seq-clear-selection", "seq-set-track", "set-track-cursor"] {
+            editor
+                .runtime_mut()
+                .register_native(native, |_args, _ctx| Ok(Value::Bool(true)));
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(eseq.sequencer/open-pad-member-fx 0 (nth (eseq.drum-rack-v2/pads 0) 1))",
+            )
+            .expect("opening a pad's member should evaluate");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.seq-core-state/selected-bus")
+                .expect("bus selection should resolve"),
+            Some(Value::Number(-1.0)),
+            "opening a pad hands the fx buffer that member track's own panel"
+        );
+
+        // An ordinary bus is untouched by the rack branch.
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 1)")
+            .expect("select a plain bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let bus_layout = editor.widget_layout().expect("plain bus fx layout");
+        assert!(
+            find_layout_node_by_debug_name(&bus_layout, "rack-fx-pads-panel").is_none(),
+            "a plain bus should still show the generic bus panel"
+        );
+    }
+
+
+    /// eseq-4b5.15: the rack panel draws the mini-map as a slim column LEFT of
+    /// the enlarged grid, inside the same fixed-height panel — occupied notes
+    /// filled, the enlarged window highlighted, every row a page jump.
+    #[test]
+    fn metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel() {
+        // Laying out the full *fx* panel plus the 22-row map overflows the
+        // default test-thread stack.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel_impl)
+            .expect("spawn rack pad map layout test")
+            .join()
+            .expect("rack pad map layout test thread");
+    }
+
+    fn metal_seq_rack_pad_map_renders_left_of_the_grid_in_the_fx_panel_impl() {
+        let mut editor = rack_fx_panel_editor();
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+
+        let pads = find_layout_node_by_debug_name(&layout, "rack-fx-pads-panel")
+            .unwrap_or_else(|| panic!("rack pad panel; layout={layout_summaries:#?}"));
+        let map = find_layout_node_by_stable_key_suffix(pads, "/rack-pad-map-7")
+            .unwrap_or_else(|| panic!("rack pad mini-map; layout={layout_summaries:#?}"));
+        let grid = find_layout_node_by_stable_key_suffix(pads, "/rack-pad-grid-7")
+            .unwrap_or_else(|| panic!("rack pad grid; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(map, "rack pad mini-map");
+        // Preserve Ableton's placement without constraining the rack's chosen
+        // content height to the surrounding panel background.
+        assert!(
+            map.rect.col + map.rect.width <= grid.rect.col + 0.01,
+            "the mini-map should sit left of the enlarged grid: map={:?}, grid={:?}",
+            map.rect,
+            grid.rect
+        );
+        // Every row of four notes is drawn, and each is a page jump.
+        for base in [-36, -12, 0, 36, 48] {
+            let row =
+                find_layout_node_by_stable_key_suffix(map, &format!("/rack-pad-map-row-7-{base}"))
+                    .unwrap_or_else(|| panic!("map row {base}; layout={layout_summaries:#?}"));
+            assert_finite_nonzero_rect(row, "map row");
+            assert!(
+                row.props.contains_key("on-click"),
+                "map row {base} should page the grid on click"
+            );
+        }
+        // Lowest notes at the bottom, like the grid: C1 under middle C under
+        // the top octave.
+        let low = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7--36")
+            .expect("bottom map row");
+        let high = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-48")
+            .expect("top map row");
+        let middle_c = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-0")
+            .expect("middle C map row");
+        assert!(
+            high.rect.row < middle_c.rect.row && middle_c.rect.row < low.rect.row,
+            "middle C should sit between the top and bottom of the map"
+        );
+        assert!(
+            high.rect.row < low.rect.row,
+            "the map should read bottom-up: high={:?}, low={:?}",
+            high.rect,
+            low.rect
+        );
+
+        // Occupied notes are distinguishable from empty ones at a glance.
+        let filled = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-36")
+            .expect("occupied map cell");
+        let empty = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-37")
+            .expect("empty map cell");
+        assert_finite_nonzero_rect(filled, "occupied map cell");
+        assert_ne!(
+            filled.props.get("background-color"),
+            empty.props.get("background-color"),
+            "an occupied note should not look like an empty one"
+        );
+        // The highlighted block is the page the grid is showing (36..51), and
+        // it moves when the grid pages.
+        let on_page = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-36")
+            .expect("highlighted map row");
+        let off_page = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-0")
+            .expect("unhighlighted map row");
+        assert_ne!(
+            on_page.props.get("background-color"),
+            off_page.props.get("background-color"),
+            "the enlarged window should be a distinct block in the map"
+        );
+        let highlight = on_page.props.get("background-color").cloned();
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 0)")
+            .expect("paging should evaluate");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let paged = editor.widget_layout().expect("paged rack fx panel layout");
+        let map = find_layout_node_by_stable_key_suffix(&paged, "/rack-pad-map-7")
+            .expect("mini-map after paging");
+        assert_eq!(
+            find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-0")
+                .expect("row 0 after paging")
+                .props
+                .get("background-color")
+                .cloned(),
+            highlight,
+            "paging the grid moves the mini-map's highlight to the new window"
+        );
+        assert_ne!(
+            find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-row-7-36")
+                .expect("row 36 after paging")
+                .props
+                .get("background-color")
+                .cloned(),
+            highlight,
+            "the page the grid left is no longer highlighted"
+        );
+    }
+
+    /// eseq-4b5.16: a pad lights while it sounds, in the enlarged grid AND in
+    /// the mini-map — including on a page the grid is not showing. The light
+    /// is one bound field per member track, so a hit repaints the cell without
+    /// re-rendering the panel: the assertions below read the SAME layout nodes
+    /// before and after the flag flips, with no relayout in between.
+    #[test]
+    fn metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding_impl)
+            .expect("spawn rack pad trigger light test")
+            .join()
+            .expect("rack pad trigger light test thread");
+    }
+
+    fn metal_seq_rack_pad_cells_light_on_the_member_track_trigger_binding_impl() {
+        let mut editor = rack_fx_panel_editor();
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("selecting the rack selects its bus");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+
+        // The fixture's pads are note 36 on member track 1 and note 38 on
+        // member track 2; the grid opens on page 3 (36..51), where note 36 is
+        // the bottom-left cell (12) and note 38 is cell 14.
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
+            .expect("rack pad grid");
+        let map = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-map-7")
+            .expect("rack pad mini-map");
+        let lit_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-12")
+            .expect("grid cell for note 36");
+        let other_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-14")
+            .expect("grid cell for note 38");
+        let empty_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-13")
+            .expect("grid cell for note 37");
+        let lit_map_cell = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-36")
+            .expect("map cell for note 36");
+        let other_map_cell = find_layout_node_by_stable_key_suffix(map, "/rack-pad-map-cell-7-38")
+            .expect("map cell for note 38");
+
+        // Nothing is playing: every pad is dark, and an empty cell has no
+        // light to give — there is no member track behind it.
+        for (label, cell) in [
+            ("grid cell 36", lit_cell),
+            ("grid cell 38", other_cell),
+            ("map cell 36", lit_map_cell),
+        ] {
+            assert_eq!(
+                layout_prop_bool(cell, "selected"),
+                Some(false),
+                "{label} should start dark"
+            );
+            assert!(
+                cell.props.contains_key("selected-background-color"),
+                "{label} should carry a lit colour"
+            );
+        }
+        assert_eq!(
+            layout_prop_bool(empty_cell, "selected"),
+            None,
+            "an empty cell has no member track and so no light"
+        );
+
+        // Firing the pad's member track lights exactly that pad, in both views,
+        // with no re-render: the same nodes now read lit.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &rack_pad_trigger_field(1), Value::Number(1.0));
+        assert_eq!(
+            layout_prop_bool(lit_cell, "selected"),
+            Some(true),
+            "the triggered pad's grid cell should light"
+        );
+        assert_eq!(
+            layout_prop_bool(lit_map_cell, "selected"),
+            Some(true),
+            "the triggered pad's mini-map cell should light too"
+        );
+        assert_eq!(
+            layout_prop_bool(other_cell, "selected"),
+            Some(false),
+            "an untriggered pad stays dark"
+        );
+        assert_eq!(
+            layout_prop_bool(other_map_cell, "selected"),
+            Some(false),
+            "an untriggered pad stays dark in the map as well"
+        );
+
+        // A pad on a page the grid is NOT showing still flashes in the map:
+        // page away from 36..51 and the map cell keeps its own light.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%set-pad-page 0 0)")
+            .expect("paging should evaluate");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let paged = editor.widget_layout().expect("paged rack fx panel layout");
+        let paged_map = find_layout_node_by_stable_key_suffix(&paged, "/rack-pad-map-7")
+            .expect("mini-map after paging");
+        assert_eq!(
+            layout_prop_bool(
+                find_layout_node_by_stable_key_suffix(paged_map, "/rack-pad-map-cell-7-36")
+                    .expect("offscreen map cell"),
+                "selected"
+            ),
+            Some(true),
+            "a pad off the enlarged page still shows its trigger in the map"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &rack_pad_trigger_field(1), Value::Number(0.0));
+    }
+
+    /// The pad light's host half: the audio thread's per-track trigger latch is
+    /// what makes it miss-free, active notes hold it up while the note sounds,
+    /// and an idle rack publishes nothing at all.
+    #[test]
+    fn rack_pad_trigger_flags_consume_the_latch_hold_notes_and_idle_silently() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = test_app_for_track_visual_state(state.clone());
+        app.groups = vec![rack_group_fixture(false)];
+        let mut triggered_at: Vec<Option<Instant>> = Vec::new();
+        let idle: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>> = vec![Vec::new(); 3];
+        let now = Instant::now();
+
+        // Idle: nothing lit, nothing to publish.
+        let dark = read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now);
+        assert_eq!(dark, vec![false, false, false]);
+
+        // A hit that came and went entirely between two UI frames leaves no
+        // active note behind — only the latch — and must still light the pad.
+        state.transport.trigger_flash[1].store(255, Ordering::Relaxed);
+        let lit = read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now);
+        assert_eq!(
+            lit,
+            vec![false, true, false],
+            "the latched trigger lights its member track"
+        );
+        assert_eq!(
+            state.transport.trigger_flash[1].load(Ordering::Relaxed),
+            0,
+            "reading the latch consumes it, so one hit is one light"
+        );
+
+        // The light decays on its own once the hold elapses …
+        assert_eq!(
+            read_rack_pad_trigger_flags(
+                &app,
+                &state,
+                &idle,
+                &mut triggered_at,
+                now + RACK_PAD_TRIGGER_HOLD
+            ),
+            vec![false, false, false],
+            "the light decays without another trigger"
+        );
+        // … but a note that is still sounding keeps refreshing it, so a held
+        // pad key stays lit rather than blinking once.
+        let mut held = idle.clone();
+        held[1] = vec![sequencer::sequencer::ActiveNoteActivity {
+            note: 60,
+            velocity: 1.0,
+            trigger_id: 1,
+        }];
+        assert_eq!(
+            read_rack_pad_trigger_flags(
+                &app,
+                &state,
+                &held,
+                &mut triggered_at,
+                now + RACK_PAD_TRIGGER_HOLD * 10
+            ),
+            vec![false, true, false],
+            "an active note holds the light up"
+        );
+
+        // Track 0 is not a rack member, so its triggers never light anything —
+        // and its latch is left alone for whoever else may want it.
+        state.transport.trigger_flash[0].store(255, Ordering::Relaxed);
+        assert!(
+            !read_rack_pad_trigger_flags(&app, &state, &idle, &mut triggered_at, now)[0],
+            "a loose track has no pad to light"
+        );
+        assert_eq!(
+            state.transport.trigger_flash[0].load(Ordering::Relaxed),
+            255,
+            "a loose track's latch is not consumed"
+        );
+    }
+
+    /// Drains one host command and returns its numeric payload fields in the
+    /// order the command declares them.
+    fn rack_host_command_payload(
+        editor: &mut eseqlisp::Editor,
+        expected: &str,
+    ) -> Vec<(&'static str, f64)> {
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "{expected} should be the only command");
+        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0] else {
+            panic!("expected a custom host command, got {:?}", commands[0]);
+        };
+        assert_eq!(name, expected);
+        let Value::Map(payload) = payload else {
+            panic!("{expected} payload should be a dict: {payload:?}");
+        };
+        ["group-id", "pad-note", "note", "value"]
+            .into_iter()
+            .filter_map(|field| match payload.get(field).map(|cell| cell.borrow().clone()) {
+                Some(Value::Number(value)) => Some((field, value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn metal_seq_sequencer_collapsed_drum_rack_hides_member_rows() {
+        let track_count = 4;
+        let step_count = 16;
+        let mut editor = sequencer_perf_editor(track_count, step_count);
+        apply_rack_group_bindings(&mut editor, true);
+
+        let layout = editor
+            .widget_layout()
+            .expect("collapsed rack sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-arm-7").is_some(),
+            "collapsing a rack keeps its header row"
+        );
+        for member in [1usize, 2] {
+            assert_eq!(
+                count_stable_key_prefix(&layout, &format!("sequencer-track-{}", 1000 + member)),
+                0,
+                "collapsing a rack folds member track {member} away"
+            );
+        }
+        assert_eq!(
+            count_stable_key_prefix(&layout, "eseq.sequencer/step-cell-"),
+            (track_count - 2) * step_count,
+            "only the loose tracks keep their step grids while the rack is collapsed"
+        );
     }

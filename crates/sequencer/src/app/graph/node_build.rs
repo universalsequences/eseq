@@ -296,10 +296,10 @@ impl GraphController<'_> {
         }
 
         self.app.tracks.push(track_name.clone());
+        self.app.track_name_user_authored.push(false);
         self.app.push_next_track_color();
         self.app.push_default_track_collapsed();
         self.app.rack_selected_slots.push(0);
-        self.app.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
         self.app
             .graph
             .effect_descriptors

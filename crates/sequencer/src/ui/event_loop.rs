@@ -89,12 +89,14 @@ pub(crate) fn run_event_loop(
         prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
         prev_groups: Vec::new(),
+        prev_armed_rack: None,
         prev_track_peak_levels: Vec::new(),
         prev_rack_slot_peak_levels: Vec::new(),
         prev_bus_peak_levels: Vec::new(),
         prev_modulator_phases: Vec::new(),
         prev_modulator_levels: Vec::new(),
-        prev_bus_playheads: Vec::new(),
+        prev_rack_pad_triggers: Vec::new(),
+        rack_pad_triggered_at: Vec::new(),
         prev_track_playheads: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
@@ -819,10 +821,14 @@ pub(crate) fn run_event_loop(
                     let sequence_roll_binding = editor.buffer_mode_keybinding("*sequencer*", key)
                         == Some("eseq.seq-grid-mode/sequence-roll-hold");
                     // Sequence roll and its rate keys are transport-wide:
-                    // neither requires an armed track. Text/value widget focus
-                    // still wins in `should_route_to_live_keyboard` below.
+                    // neither requires an armed track. The active mode must opt
+                    // in, and editor focus still wins, through the gate below.
                     let roll_rate_key = is_active_roll_rate_key(&shared.state, &key);
-                    let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a);
+                    // An armed drum rack is an arm target too: with only the
+                    // rack armed the keys must still reach the live keyboard,
+                    // where they resolve to pads.
+                    let any_armed = shared.record_armed.lock().unwrap().iter().any(|a| *a)
+                        || shared.armed_rack.lock().unwrap().is_some();
                     let recording_key_outcome = if (sequence_roll_binding
                         || roll_rate_key
                         || any_armed
@@ -839,6 +845,7 @@ pub(crate) fn run_event_loop(
                             &mut app,
                             &shared.state,
                             &shared.record_armed,
+                            &shared.armed_rack,
                             &shared.recording,
                             &shared.keyboard_tx,
                             &shared.keyboard_octave,
@@ -1136,6 +1143,7 @@ pub(crate) fn run_event_loop(
                         }
                         *shared.bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *shared.record_armed.lock().unwrap() = vec![false; track_names.len()];
+                        *shared.armed_rack.lock().unwrap() = None;
                         shared.recording.store(false, Ordering::Relaxed);
                         frame.recording_history_open = false;
                         // Keep the shared bus mirror in sync with the loaded buses,
@@ -1363,7 +1371,6 @@ pub(crate) fn run_event_loop(
                         frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
                         frame.prev_modulator_phases = meters.cached_modulator_phases.clone();
                         frame.prev_modulator_levels = meters.cached_modulator_levels.clone();
-                        frame.prev_bus_playheads = bus_playhead_snapshot(&app);
                         frame.prev_track_playheads = track_playheads_snapshot(&shared.state, &app);
                         frame.prev_track_button_states = track_button_state_snapshot(&shared.state);
                         frame.prev_ui_epoch = shared.ui_epoch.load(Ordering::Relaxed);
@@ -1421,7 +1428,7 @@ pub(crate) fn run_event_loop(
                     pending.run_mode,
                     result,
                 ) {
-                    Ok(SavedInstrumentLoadApply::Added { track, group_id }) => {
+                    Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
                         finish_added_instrument_track(
                             track,
                             AddTrackInstrumentCtx {
@@ -1436,6 +1443,7 @@ pub(crate) fn run_event_loop(
                                 accumulator_names: &shared.accumulator_names,
                                 cached_track_peak_levels: &meters.cached_track_peak_levels,
                                 group_id,
+                                pad_note,
                                 track_groups: &shared.track_groups,
                                 ui_epoch: &shared.ui_epoch,
                                 lg_raw: shared.lg_raw,
@@ -1443,10 +1451,16 @@ pub(crate) fn run_event_loop(
                         );
                         editor.mark_needs_redraw();
                     }
-                    Ok(SavedInstrumentLoadApply::Swapped { summary }) => {
+                    Ok(SavedInstrumentLoadApply::Swapped {
+                        track,
+                        summary,
+                        preserve_track_selection,
+                    }) => {
                         finish_swapped_instrument_track(
                             &pending.name,
+                            track,
                             summary,
+                            preserve_track_selection,
                             SwapTrackInstrumentCtx {
                                 app: &mut app,
                                 editor: &mut editor,

@@ -8,9 +8,8 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
     rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentSlotResetSummary,
-    InstrumentType, ModDestination, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
-    RackTrackSnapshot, TrackOutput, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
-    DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
+    InstrumentType, ModDestination, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, TrackOutput, TrackSoundState, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
     MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::audio::MAX_VOICES;
@@ -106,79 +105,10 @@ fn appended_rack_slot_max_polyphony(_existing_slots: &[RackSlotSnapshot]) -> usi
     DEFAULT_LAYER_SLOT_MAX_POLYPHONY.min(MAX_VOICES).max(1)
 }
 
-fn validate_drum_rack_pad_note(pad_note: i32) -> bool {
-    (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad_note)
-}
-
-fn validate_rack_slot_pad_map(
-    routing: RackRouting,
-    slots: &[RackSlotSnapshot],
-) -> Result<(), String> {
-    if routing != RackRouting::ByPitch {
-        return Ok(());
-    }
-
-    let mut occupied = [false; DRUM_RACK_TOTAL_PAD_NOTES];
-    for (slot_idx, slot) in slots.iter().enumerate() {
-        let Some(pad_note) = slot.pad_note else {
-            return Err(format!(
-                "Drum rack slot {} is missing a pad note",
-                slot_idx + 1
-            ));
-        };
-        if !validate_drum_rack_pad_note(pad_note) {
-            return Err(format!(
-                "Drum rack slot {} has unsupported pad note {}",
-                slot_idx + 1,
-                pad_note
-            ));
-        }
-        let pad_idx = (pad_note - DRUM_RACK_FIRST_PAD_NOTE) as usize;
-        if occupied[pad_idx] {
-            return Err(format!("Drum rack pad {pad_note} is already occupied"));
-        }
-        occupied[pad_idx] = true;
-    }
-    Ok(())
-}
-
-fn validate_rack_build_slot_pad_map(
-    routing: RackRouting,
-    slots: &[RackSlotBuildSpec<'_>],
-) -> Result<(), String> {
-    if routing != RackRouting::ByPitch {
-        return Ok(());
-    }
-
-    let mut occupied = [false; DRUM_RACK_TOTAL_PAD_NOTES];
-    for (slot_idx, slot) in slots.iter().enumerate() {
-        let Some(pad_note) = slot.pad_note else {
-            return Err(format!(
-                "Drum rack slot {} is missing a pad note",
-                slot_idx + 1
-            ));
-        };
-        if !validate_drum_rack_pad_note(pad_note) {
-            return Err(format!(
-                "Drum rack slot {} has unsupported pad note {}",
-                slot_idx + 1,
-                pad_note
-            ));
-        }
-        let pad_idx = (pad_note - DRUM_RACK_FIRST_PAD_NOTE) as usize;
-        if occupied[pad_idx] {
-            return Err(format!("Drum rack pad {pad_note} is already occupied"));
-        }
-        occupied[pad_idx] = true;
-    }
-    Ok(())
-}
-
 fn preserve_rack_slot_configuration(
     mut replacement: RackSlotSnapshot,
     existing: &RackSlotSnapshot,
 ) -> RackSlotSnapshot {
-    replacement.pad_note = existing.pad_note;
     replacement.choke_group = existing.choke_group;
     replacement.instrument_base_note_offset = existing.instrument_base_note_offset;
     replacement.gain = existing.gain;

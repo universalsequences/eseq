@@ -5,15 +5,16 @@ use crate::audio::MAX_VOICES;
 
 pub const MAX_TRACKS: usize = 64;
 pub const MAX_RACK_SLOTS: usize = 16;
-pub const DRUM_RACK_PAD_COUNT: usize = 16;
-// Banks move by octave while the visible 4x4 grid spans sixteen chromatic pads.
-pub const DRUM_RACK_PAD_BANK_STRIDE: i32 = 12;
-pub const DRUM_RACK_TOTAL_PAD_NOTES: usize = 128;
-pub const DRUM_RACK_FIRST_PAD_NOTE: i32 = 0;
+/// A drum rack pad answers to one keyboard note, and a pad note is the same
+/// TRANSPOSE the step sequencer and piano roll speak: 0 is C4, so notes below
+/// middle C are negative (docs/drum-rack-v2-spec.md, "Core model"). The pad
+/// map therefore runs from C1 — a drum rack's home octave — up to D#8, which
+/// puts C4 in the middle of the pad space instead of at its floor and keeps
+/// every pad inside real MIDI once the transpose is applied.
+pub const DRUM_RACK_TOTAL_PAD_NOTES: usize = 88;
+pub const DRUM_RACK_FIRST_PAD_NOTE: i32 = -36;
 pub const DRUM_RACK_LAST_PAD_NOTE: i32 =
     DRUM_RACK_FIRST_PAD_NOTE + DRUM_RACK_TOTAL_PAD_NOTES as i32 - 1;
-pub const DRUM_RACK_LAST_PAD_BANK_START: i32 =
-    DRUM_RACK_LAST_PAD_NOTE - DRUM_RACK_PAD_COUNT as i32 + 1;
 pub const MAX_INSTRUMENT_ENGINES: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_SAMPLER_POOLS: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_STEPS: usize = 256;
@@ -171,13 +172,6 @@ impl InstrumentType {
             _ => InstrumentType::Sampler,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RackRouting {
-    #[default]
-    Broadcast,
-    ByPitch,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

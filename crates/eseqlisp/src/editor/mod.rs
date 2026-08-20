@@ -1,7 +1,7 @@
 mod commands;
 mod minibuffer;
 mod natives;
-mod widget_focus;
+pub(crate) mod widget_focus;
 mod widget_interaction;
 
 use std::collections::{HashMap, HashSet};
@@ -505,6 +505,9 @@ struct TextUndoSnapshot {
 pub struct MajorMode {
     pub name: String,
     pub read_only: bool,
+    /// Whether a host may interpret otherwise-unhandled bare keys as live
+    /// performance input while this mode owns the active buffer.
+    pub live_keys: bool,
     pub keybindings: HashMap<String, String>,
     pub on_enter: Option<String>,
     pub on_key: Option<String>,
@@ -2002,6 +2005,8 @@ impl Editor {
                     | MouseEventKind::Down(MouseButton::Left)
                     | MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::Up(MouseButton::Left)
+                    | MouseEventKind::Down(MouseButton::Right)
+                    | MouseEventKind::Up(MouseButton::Right)
             )
         {
             let tile_id = self.overlay_owner_tile(entry).unwrap_or(self.active_tile);
@@ -2516,14 +2521,18 @@ impl Editor {
                     return;
                 }
 
-                let modal_id = editor
+                // Same rule one level down the modal family: a context menu
+                // opened inside a modal is the topmost panel and closes
+                // first, so resolve the innermost open panel rather than the
+                // first one in tree order (which is the outer modal).
+                let panel_id = editor
                     .runtime
                     .current_layout
                     .as_deref()
-                    .and_then(widget_focus::find_open_modal_node)
-                    .map(|modal| modal.widget_id);
-                if let Some(modal_id) = modal_id {
-                    editor.fire_modal_on_close(modal_id);
+                    .and_then(topmost_open_overlay_panel)
+                    .map(|panel| panel.widget_id);
+                if let Some(panel_id) = panel_id {
+                    editor.fire_modal_on_close(panel_id);
                 }
                 return;
             }
@@ -2608,9 +2617,10 @@ impl Editor {
             crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)
                 .map(|node| node.widget_id)
         });
-        crate::widget_render::set_pointer_hover_widget(hovered);
+        if crate::widget_render::set_pointer_hover_widget(hovered) {
+            self.mark_needs_redraw();
+        }
         self.widget_cursor = WidgetCursor::Default;
-        self.mark_needs_redraw();
     }
 
     pub fn handle_tiled_touchpad_magnify(
@@ -4219,6 +4229,14 @@ impl Editor {
         self.runtime.set_layout_frame_viewport(frame_viewport);
     }
 
+    /// Publish the active tile's content-scroll offsets to the layout engine
+    /// so frame-anchored widgets can express the frame viewport in the same
+    /// content space their own rects (and pointer anchors) live in.
+    pub fn sync_layout_content_scroll(&mut self) {
+        let content_scroll = (self.widget_layout_scroll_left(), self.total_scroll_top());
+        self.runtime.set_layout_content_scroll(content_scroll);
+    }
+
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);
@@ -5479,6 +5497,18 @@ impl Editor {
         self.mode_keybinding(&buffer.mode, key)
     }
 
+    /// Whether the active major mode explicitly permits host live-keyboard
+    /// shortcuts. Modes opt in so ordinary source and special text modes keep
+    /// ownership of their bare keys by default.
+    pub fn active_mode_accepts_live_keys(&self) -> bool {
+        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
+            return false;
+        };
+        self.mode_registry
+            .get(mode_name)
+            .is_some_and(|mode| mode.live_keys)
+    }
+
     fn mode_keybinding(&self, mode: &BufferMode, key: KeyEvent) -> Option<&str> {
         let BufferMode::Named(mode_name) = mode else {
             return None;
@@ -6327,6 +6357,39 @@ impl Editor {
         }
 
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Right) => {
+                if !widgets_visible {
+                    return;
+                }
+                // While an overlay is up, a right-click inside the topmost
+                // modal-family panel routes to its subtree (the intercept in
+                // try_handle_widget_mouse_precise); outside, it dismisses the
+                // topmost entry and is consumed, exactly like a left-click.
+                if let Some(entry) = crate::widget_render::topmost_overlay() {
+                    let local_col = precise_col - content_col as f32;
+                    let local_row = precise_row - content_row as f32;
+                    if !crate::widget_render::overlay_contains(local_col, local_row) {
+                        self.dismiss_overlay_entry(entry);
+                        self.mark_needs_redraw();
+                    } else if entry.kind == crate::widget_render::OverlayKind::Modal {
+                        let _ = self.try_handle_widget_mouse_precise(
+                            mouse,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
+                    }
+                    return;
+                }
+                let _ = self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                );
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
                 self.active_leaf_mut().active_widget_gesture = None;
@@ -6595,7 +6658,9 @@ impl Editor {
                     );
                 } else {
                     self.widget_cursor = WidgetCursor::Default;
-                    crate::widget_render::set_pointer_hover_widget(None);
+                    if crate::widget_render::set_pointer_hover_widget(None) {
+                        self.mark_needs_redraw();
+                    }
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -7964,15 +8029,16 @@ impl Editor {
         }
 
         // Process mode definitions
-        for (name, read_only, on_enter, on_key) in self.runtime.take_pending_mode_defs() {
+        for definition in self.runtime.take_pending_mode_defs() {
             self.mode_registry.insert(
-                name.clone(),
+                definition.name.clone(),
                 MajorMode {
-                    name,
-                    read_only,
+                    name: definition.name,
+                    read_only: definition.read_only,
+                    live_keys: definition.live_keys,
                     keybindings: HashMap::new(),
-                    on_enter,
-                    on_key,
+                    on_enter: definition.on_enter,
+                    on_key: definition.on_key,
                 },
             );
         }
@@ -9448,6 +9514,33 @@ fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The topmost open modal-family overlay panel (modal or context menu) in a
+/// layout — the one a dismissal gesture reaches first.
+///
+/// Stacking order follows nesting: a context menu opened inside a modal is
+/// laid out as its descendant and draws above it, so the innermost open panel
+/// is on top. Among siblings the later one wins, matching draw order.
+/// `widget_focus::find_open_modal_node` answers in tree order instead, which
+/// returns the outer modal and would close the whole modal while its context
+/// menu is still up.
+fn topmost_open_overlay_panel(
+    node: &crate::layout::LayoutNode,
+) -> Option<&crate::layout::LayoutNode> {
+    if let Some(found) = node
+        .children
+        .iter()
+        .rev()
+        .find_map(topmost_open_overlay_panel)
+    {
+        return Some(found);
+    }
+    if crate::widget_render::is_overlay_panel_widget(&node.widget_type) && !node.children.is_empty()
+    {
+        return Some(node);
+    }
+    None
+}
+
 /// Inspect hit test. Returns the hit node plus the accumulated scroll
 /// offset between layout coordinates and rendered position, so callers can
 /// place the hover highlight where the widget is actually drawn.
@@ -9465,10 +9558,10 @@ fn inspect_hit_test_layout_impl(
     col: f32,
     scroll_dy: f32,
 ) -> Option<(&crate::layout::LayoutNode, f32)> {
-    // An open modal has a zero-size layout node (zero parent footprint);
-    // its children are anchored to the frame viewport with real rects, so
-    // descend without the containment gate.
-    if node.widget_type == "modal" {
+    // An open modal-family overlay has a zero-size layout node (zero parent
+    // footprint); its children are anchored to the frame viewport with real
+    // rects, so descend without the containment gate.
+    if crate::widget_render::is_overlay_panel_widget(&node.widget_type) {
         return node
             .children
             .iter()

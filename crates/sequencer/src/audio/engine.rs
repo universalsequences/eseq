@@ -18,7 +18,7 @@ use crate::audiograph::{self, LiveGraphPtr};
 use crate::effects::reverb;
 use crate::recorder::MasterRecorder;
 use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
-use crate::app::{AudioBuses, BusGateRuntimeState, BusNodeIds};
+use crate::app::{AudioBuses, BusEffectRuntimeState, BusNodeIds};
 
 const INITIAL_GRAPH_CAPACITY: i32 = 256;
 
@@ -104,8 +104,7 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
         parts.block_size,
         Arc::clone(&parts.master_recorder),
         parts.keyboard_rx,
-        Arc::clone(&parts.buses.bus_gate_runtime),
-        Arc::clone(&parts.buses.bus_gate_playheads),
+        Arc::clone(&parts.buses.bus_effect_runtime),
     )?;
 
     Ok(Engine {
@@ -350,23 +349,15 @@ fn init_engine_parts(
             }),
         });
     }
-    let bus_gate_runtime = Arc::new(Mutex::new(Arc::new(
+    let bus_effect_runtime = Arc::new(Mutex::new(Arc::new(
         default_bus_nodes
             .iter()
-            .map(|nodes| BusGateRuntimeState {
+            .map(|nodes| BusEffectRuntimeState {
                 id: nodes.id,
-                gate_id: nodes.gate_id,
-                sequence: crate::sequencer::BusGateSequence::default(),
                 effect_slots: crate::app::BusChannelState::default_effect_slots(),
             })
             .collect(),
     )));
-    let bus_gate_playheads = Arc::new(Mutex::new(
-        default_bus_nodes
-            .iter()
-            .map(|nodes| (nodes.id, 0usize))
-            .collect(),
-    ));
 
     // Create global reverb bus and reverb node
     let reverb_bus_name = CString::new("reverb_bus").unwrap();
@@ -427,8 +418,7 @@ fn init_engine_parts(
         bus_l_id,
         bus_r_id,
         default_bus_nodes,
-        bus_gate_runtime,
-        bus_gate_playheads,
+        bus_effect_runtime,
         reverb_bus_id,
         reverb_node_id,
     };

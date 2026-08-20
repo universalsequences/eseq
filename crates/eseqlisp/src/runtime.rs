@@ -749,6 +749,15 @@ where
         .collect()
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingModeDefinition {
+    pub name: String,
+    pub read_only: bool,
+    pub live_keys: bool,
+    pub on_enter: Option<String>,
+    pub on_key: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeBridgeState {
     /// The module of the chunk executing the current native call (None =
@@ -771,7 +780,7 @@ pub(crate) struct RuntimeBridgeState {
     pub current_buffer_read_only: bool,
     pub pending_set_read_only: Option<bool>,
     pub current_buffer_mode: String,
-    pub pending_mode_defs: Vec<(String, bool, Option<String>, Option<String>)>, // (name, read_only, on_enter, on_key)
+    pub pending_mode_defs: Vec<PendingModeDefinition>,
     pub pending_mode_bindings: Vec<(String, String, String)>, // (mode, key, handler)
     pub pending_set_mode: Option<String>,
     pub pending_set_mode_for: Vec<(String, String)>, // (buffer_name, mode_name)
@@ -905,6 +914,7 @@ impl NativeContext {
         &mut self,
         name: String,
         read_only: bool,
+        live_keys: bool,
         on_enter: Option<String>,
         on_key: Option<String>,
     ) {
@@ -917,7 +927,13 @@ impl NativeContext {
         self.shared
             .borrow_mut()
             .pending_mode_defs
-            .push((name, read_only, on_enter, on_key));
+            .push(PendingModeDefinition {
+                name,
+                read_only,
+                live_keys,
+                on_enter,
+                on_key,
+            });
     }
 
     pub fn mode_bind_key(&mut self, mode: String, key: String, handler: String) {
@@ -1182,8 +1198,9 @@ pub struct Runtime {
     /// builder; `None` means frame-anchored widgets fall back to the tile's
     /// own root area.
     layout_frame_viewport: Option<crate::layout::Rect>,
+    layout_content_scroll: (f32, f32),
     widget_id_offset: u64,
-    text_measurer: Option<Box<dyn TextMeasurer>>,
+    text_measurer: Option<Rc<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
     last_ui_invalidation_trace: Option<UiInvalidationTrace>,
 }
@@ -1246,6 +1263,7 @@ impl Runtime {
             layout_cell_w: 1.0,
             layout_cell_h: 1.0,
             layout_frame_viewport: None,
+            layout_content_scroll: (0.0, 0.0),
             widget_id_offset: 0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
@@ -1703,8 +1721,23 @@ impl Runtime {
             ),
             (
                 "box",
-                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :focusable bool :key value :on-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
+                "(box :background value :background-color color :border-color color :border-width px :corner-radius px :padding cells :width cells :height cells :aspect ratio :align mode :h-align mode :v-align mode :flex weight :selected bool :selected-background-color color :selected-border-color color :muted bool :muted-background-color color :muted-border-color color :drop-hover-background-color color :drop-hover-border-color color :drag-type type :drag-payload value :drag-modifier modifier :capture-pointer bool :focusable bool :key value :on-click callback :on-right-click callback :on-double-click callback :on-drag callback :on-drop callback :on-mouse-down callback :on-mouse-up callback child ...)",
                 "Create a layout container with optional background, border, interaction, drag/drop, and selection styling.",
+            ),
+            (
+                "context-menu",
+                "(context-menu :is-open bool :anchor-col cells :anchor-row cells :on-close callback child ...)",
+                "Pointer-anchored action-menu overlay: opens at the anchor, flips/clamps to stay on screen, closes on Escape, outside click, or item selection.",
+            ),
+            (
+                "menu-item",
+                "(menu-item \"label\" :shortcut text :disabled bool :on-select callback)",
+                "One row of a context-menu: label, optional right-aligned shortcut hint, optional disabled state.",
+            ),
+            (
+                "menu-separator",
+                "(menu-separator)",
+                "A horizontal divider row inside a context-menu.",
             ),
             (
                 "get",
@@ -2575,6 +2608,17 @@ impl Runtime {
         self.layout_frame_viewport
     }
 
+    /// Set the tile's content-scroll offsets `(cols, rows)` for subsequent
+    /// layout passes (see `LayoutEngine::content_scroll`).
+    ///
+    /// Deliberately does NOT invalidate the layout: panning a tile would then
+    /// rebuild the whole widget layout every frame. Only frame-anchored
+    /// widgets read it, and scroll is trapped while one of those is open, so
+    /// the next relayout picks up the current value.
+    pub fn set_layout_content_scroll(&mut self, content_scroll: (f32, f32)) {
+        self.layout_content_scroll = content_scroll;
+    }
+
     /// Force a full relayout on the next render pass.
     /// Used when internal widget state (e.g. tree expand/collapse) changes
     /// the widget's size without changing the widget tree data.
@@ -2622,6 +2666,10 @@ impl Runtime {
     /// Set the text measurer for proportional font layout (Metal backend).
     /// Also stores cell dimensions for pixel↔cell conversion.
     pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasurer>, cell_w: f32, cell_h: f32) {
+        let measurer: Rc<dyn TextMeasurer> = Rc::from(measurer);
+        // Render-pass code (e.g. text-input caret metrics) needs a measurer to
+        // recover from measure-pass cache misses under subtree layout reuse.
+        crate::widget_render::set_render_text_measurer(Rc::clone(&measurer));
         self.text_measurer = Some(measurer);
         self.layout_cell_w = cell_w;
         self.layout_cell_h = cell_h;
@@ -2974,9 +3022,7 @@ impl Runtime {
         self.shared.borrow_mut().pending_set_buffer_styles.take()
     }
 
-    pub(crate) fn take_pending_mode_defs(
-        &mut self,
-    ) -> Vec<(String, bool, Option<String>, Option<String>)> {
+    pub(crate) fn take_pending_mode_defs(&mut self) -> Vec<PendingModeDefinition> {
         std::mem::take(&mut self.shared.borrow_mut().pending_mode_defs)
     }
 
@@ -3264,6 +3310,7 @@ impl Runtime {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
         engine.frame_viewport = frame_viewport;
+        engine.content_scroll = self.layout_content_scroll;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
@@ -3912,6 +3959,7 @@ impl Runtime {
             LayoutEngine::new_exact(self.layout_cols, self.layout_rows, self.layout_aspect)
         };
         engine.frame_viewport = self.layout_frame_viewport;
+        engine.content_scroll = self.layout_content_scroll;
         if let Some(layout) = engine.layout_with_id_offset(tree, self.widget_id_offset) {
             let geometry_changed = previous_layout
                 .as_ref()

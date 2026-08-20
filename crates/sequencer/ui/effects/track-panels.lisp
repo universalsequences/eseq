@@ -340,11 +340,6 @@
   (seq-print-step-param-release
     (eseq.seqv-track-params/seqv-param-keyword mode)))
 
-(def %step-set-sound (label)
-  ;; The drum-sound dropdown is a discrete pick, not a hold gesture — it
-  ;; never routes through print mode (a latch with no release would stick).
-  (%step-set-param-direct 3 (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label SEQ.current-track label)))
-
 (def %step-duration-print-context? (mode)
   (and (= mode 1) SEQ.playing SEQ.recording))
 
@@ -376,19 +371,6 @@
       :on-release (lambda () (%step-param-release mode))
       :width width
       :height 1.15)))
-
-(def %step-sound-picker ()
-  (v-stack :align :center :gap 0.24
-    (label "Sound" :font-size 8 :color :dim :bg :transparent)
-    (if (> (eseq.seqv-track-params/seqv-drum-sound-count SEQ.current-track) 0)
-      (dropdown
-        :key "step-param-sound"
-        :value (eseq.seqv-track-params/seqv-drum-sound-label-for-transpose SEQ.current-track (%step-param-value 3))
-        :options (eseq.seqv-track-params/seqv-drum-sound-labels SEQ.current-track)
-        :on-change (lambda (label) (%step-set-sound label))
-        :width 8.8 :height 1.15 :font-size 8.2)
-      (box :key "step-param-sound-empty" :width 8.8 :height 1.15
-        (label "No drum pads" :font-size 8 :color :dim :bg :transparent)))))
 
 ;; The mixer-v2-* names below resolve through eseq.mixer's compat aliases,
 ;; NOT an import: importing eseq.mixer would evaluate mixer.lisp, whose
@@ -432,9 +414,7 @@
               :suffix " selected" :decimals 0 :width 5.0
               :font-size 8 :color :dim :bg :transparent)))
         (h-stack :gap 0.55 :align :center
-          (if (eseq.seqv-track-params/seqv-track-drum-rack? SEQ.current-track)
-            (%step-sound-picker)
-            (%step-param-picker 3 "transpose" 4.2))
+          (%step-param-picker 3 "transpose" 4.2)
           (%step-param-picker 0 "velocity" 4.2)
           (%step-param-picker 1 "duration" 4.2))))))
 

@@ -271,13 +271,14 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "define-mode",
-        "(define-mode name :read-only bool :on-enter fn-name :on-key fn-name)",
-        "Register a named major mode.",
+        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name)",
+        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts.",
         |args, ctx| {
             let Some(Value::String(name)) = args.first() else {
                 return Err("define-mode expects a name string".to_string());
             };
             let mut read_only = false;
+            let mut live_keys = false;
             let mut on_enter: Option<String> = None;
             let mut on_key: Option<String> = None;
             let mut i = 1;
@@ -285,6 +286,10 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 match args.get(i) {
                     Some(Value::Keyword(k)) if k == "read-only" => {
                         read_only = matches!(args.get(i + 1), Some(Value::Bool(true)));
+                        i += 2;
+                    }
+                    Some(Value::Keyword(k)) if k == "live-keys" => {
+                        live_keys = matches!(args.get(i + 1), Some(Value::Bool(true)));
                         i += 2;
                     }
                     Some(Value::Keyword(k)) if k == "on-enter" => {
@@ -302,7 +307,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                     _ => i += 1,
                 }
             }
-            ctx.define_mode(name.clone(), read_only, on_enter, on_key);
+            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key);
             Ok(Value::Bool(true))
         },
     );

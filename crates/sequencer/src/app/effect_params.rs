@@ -216,11 +216,9 @@ fn append_scene_bus_effect_mappings(
             if !scene_values_differ(param, base, target_value) {
                 continue;
             }
-            let raw_idx = live_slot
-                .param_node_indices
-                .get(param_idx)
-                .copied()
-                .unwrap_or(param_idx as u32);
+            let Some(raw_idx) = live_slot.node_param_idx(param_idx) else {
+                continue;
+            };
             let target = crate::process::ParamTarget::EffectParam {
                 slot: slot_idx,
                 effect: descriptor.name.clone(),
@@ -612,11 +610,7 @@ impl App {
         let bus = self.buses.get(bus_idx)?;
         let slot = bus.effect_slots.get(slot_idx)?;
         let base = *slot.defaults.get(param_idx)?;
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let raw_idx = slot.node_param_idx(param_idx)?;
         let param_id = crate::neural::ParamNodeId::from_slot_param(
             slot.node_id,
             slot.modulator_node_id,
@@ -1089,7 +1083,7 @@ impl App {
             }
         }
         if bus_touched {
-            self.publish_bus_gate_runtime();
+            self.publish_bus_effect_runtime();
         }
     }
 

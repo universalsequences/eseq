@@ -65,13 +65,13 @@ pub struct ProjectTrackGroup {
 }
 
 pub struct ProjectRackConfig {
-    pub pads: Vec<ProjectRackPad>,         // ordered; pad grid position = index
+    pub pads: Vec<ProjectRackPad>,         // ordered; grid position is by pad_note, not index
     #[serde(default)]
     pub choke_groups: Vec<Option<u8>>,     // parallel to pads
 }
 
 pub struct ProjectRackPad {
-    pub pad_note: i32,                     // MIDI note this pad answers to
+    pub pad_note: i32,                     // keyboard TRANSPOSE this pad answers to; 0 = C4
     pub member: usize,                     // index into group.members
 }
 ```
@@ -79,10 +79,25 @@ pub struct ProjectRackPad {
 Invariants (inherit all track-group invariants, plus):
 
 - Every pad's `member` points at a live member of the same group.
-- A member track may back at most one pad. Members without a pad are legal
-  (an fx-return-ish track inside the kit) but not reachable from the pad
-  keyboard.
+- A member track may back at most one pad, and **every member has one**. A
+  padless member is not reachable from the pad keyboard, does not appear in the
+  pad grid, and has no choke selector — it is invisible, unplayable dead
+  weight — so joining a rack always maps a pad: callers that name a `pad_note`
+  get that pad, callers that don't (the mixer group-header drop, the track-badge
+  drag, move-track-to-group) get the lowest free note. A rack with every note in
+  the pad-note domain mapped is full and refuses the join. Projects saved before this rule are
+  repaired on load: unmapped members claim free notes in member order.
 - `pad_note` values are unique within a rack.
+- A pad note is a **transpose, not a raw MIDI number**: 0 is C4, the same zero a
+  step's transpose and the piano roll speak (`rack_slot_matches_routing` compares
+  `pad_note` against `transpose`), so notes below middle C are negative. The
+  domain is `DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE` = **-36..51**,
+  C1 (a drum rack's home octave, where a rack's first pad lands) up to D#8 —
+  which puts C4 in the *middle* of the pad space rather than at its floor, and
+  keeps every pad inside real MIDI once the transpose is applied. Projects
+  saved when the domain was 0..127 may hold pads above D#8; load sanitizes
+  them away and re-lands their members on free in-domain notes, since a pad
+  outside the domain would be invisible to every grid page and un-nudgeable.
 - Deleting a member track removes its pad; deleting the group deletes the rack
   config with it. Track reindex-on-delete updates `members` exactly as the
   track-groups spec requires — pads reference members by position in
@@ -109,7 +124,10 @@ Two independent arm targets, exactly as requested:
 
 Arm exclusivity follows whatever the existing single-armed-track rule is; the
 rack header is one more armable target. Arming the rack does not arm members
-(and vice versa).
+(and vice versa). As shipped: one rack is armed at a time, arming a rack
+disarms *its own* member tracks, and arming a member track disarms the rack it
+belongs to. Tracks outside the rack keep the existing multi-arm behavior and
+play chromatically alongside the pads.
 
 ## Trigger routing
 
@@ -173,6 +191,15 @@ pub enum GroupMember {
 }
 ```
 
+As built, the two kinds are stored in two fields rather than one heterogeneous
+`Vec` — `members: Vec<usize>` (unchanged, and still what rack pads index into)
+plus `rack_members: Vec<u64>` — and `group_members_ordered(group, groups)`
+interleaves them into `Vec<GroupMember>` for render order. A rack sits at its
+own lowest member track, so it occupies exactly one slot in the parent's block;
+racks that have claimed no track yet sort last. Keeping `members` a plain track
+list is what lets `ProjectRackPad::member` stay a position in it, and keeps old
+files parsing with no custom deserializer.
+
 Nesting rule (keeps the track-groups "one level deep" spirit): plain groups
 may contain tracks and racks; racks contain only member tracks; plain groups
 never contain plain groups. A rack belongs to at most one parent group.
@@ -215,8 +242,65 @@ The grid view renders the rack as a header row plus full member rows:
   `DrumLaneHistoryAction`) is deleted once v2 lands.
 - Mixer: reuse the track-groups render-order layer; a rack renders as its
   group (header strip + members, collapsible).
-- Pad grid (4×4 performance view) can stay as a *view* over the pad map for
-  finger drumming / slot browsing; it no longer owns any sequencing.
+- Pad grid (4×4 performance view) stays a *view* over the pad map for finger
+  drumming / slot browsing; it owns no sequencing. It renders in the **`*fx*`
+  rack panel** — selecting a rack selects its bus, and that panel answers with
+  the kit rather than a bare bus chain. The grid is **note-positional**: a cell
+  IS a fixed pad note, and it draws whichever pad answers to that note — grid
+  position derives from `pad_note`, *never* from the pad's index in the vec, so
+  a pad's label and its position can never contradict each other. Cells with no
+  pad are empty; the grid is sparse and never compacts.
+  - A page shows sixteen consecutive notes with the **lowest bottom-left**,
+    ascending left→right then bottom→top. Pages are **octave-aligned** (page
+    *k* starts at note `12k`), so the bottom-left cell of every page is a C;
+    the price is a four-note overlap between adjacent pages, which is exactly
+    what a plain 16-note stride cannot buy. Pages run *k* = -3 (C1, notes
+    -36..-21) to *k* = 3 (notes 36..51), the host's pad-note domain, so no cell
+    ever names a note a pad could not be placed on.
+  - Paging walks the note range, not the pad list, and its readout names the
+    notes on screen. A rack's grid opens on the page holding its lowest pad —
+    a kit that lives at C7 must not open onto empty octaves — and an empty rack
+    opens at the drum home, C1 (`DRUM_RACK_FIRST_PAD_NOTE`), where its first
+    pad will land. Page state is scoped to the rack, so one rack's page never
+    leaks into another's grid.
+  - Dropping on an **empty** cell maps the new pad to *exactly* that cell's
+    note (lazy pads, "Track budget"); there is no next-free fallback, because
+    an occupied cell is never routed down the empty-drop path. Drops that name
+    no cell — mixer group header, track badge, move-track-to-group — keep the
+    lowest-free-note behavior.
+  - An **octave-overview mini-map** sits as a slim column to the *left* of the
+    grid: the whole grid-addressable range (C1–D#8) as tiny cells, four to a
+    row, lowest at the bottom — so C1 is the bottom row and C4 lands near the
+    middle — with occupied notes filled and the sixteen notes currently
+    enlarged drawn as a highlighted block. It is a second
+    *view* of the same page state — never a second state — and clicking a row
+    pages the grid to the page holding those notes, so a kit three octaves up
+    is one gesture away. The map derives occupancy from the pad list read once
+    at its root; the arrow pager stays for single-octave steps.
+  - A pad **lights while it sounds**, in the grid and in the mini-map alike —
+    including a pad on a page the grid is not currently showing, which is what
+    makes the map a play indicator and not just a navigator. All three trigger
+    sources light it, because all three land on the pad's member track: a cell
+    click, an armed rack's live keys, and the member's own sequenced steps.
+    The light is therefore one bound field per member track
+    (`rack-pad-trigger-<track>`), fed by the audio thread's per-track trigger
+    latch — so a hit shorter than a UI frame is never missed — and held up for
+    as long as the note is actually sounding, decaying shortly after. Being a
+    *bound* field, a hit repaints the cell without re-rendering the panel, and
+    a rack with nothing playing publishes nothing at all.
+
+  A cell click hits the pad down the live path (member track at base pitch), so
+  choke groups and the member's own fx chain apply exactly as from the
+  keyboard, and it also focuses the pad so the panel can open that member's own
+  track.
+- The pad-note badge is a note name with −/+ nudges, and the choke selector is
+  an Off/1..16 dropdown; both address the pad by *(rack group id, pad note)*,
+  never by track index, and both are ordinary recorded edits.
+- `SAVE KIT` in the `*fx*` rack panel saves the rack as a kit; the browser's
+  **Kits** tab lists saved kits and loading one builds a new rack beside the
+  existing tracks. The sequencer header carries neither this nor a pad toggle:
+  it stays the track-shaped strip described above (collapse, arm, mute/solo,
+  name, meter).
 
 Follow the `each`-based widget generation convention (never `map`).
 
@@ -238,10 +322,19 @@ Follow the `each`-based widget generation convention (never `map`).
   retarget to "create member track + assign pad").
 - Choke-group semantics (re-keyed to member tracks).
 
-Deleted: `ByPitch` slot matching in dispatch, transpose-as-pad-selector, the
-drum-lane projection helpers and their history actions, per-slot mix fields
-(subsumed by member track channels), `RackSlotParamPlocks` (subsumed by real
-per-track p-locks).
+Deleted (as shipped): the `RackRouting::ByPitch` variant and its slot matching
+in dispatch, transpose-as-pad-selector, the v1 drum-rack track and pad-fill
+constructors, the sidebar 4x4 pad grid and its pad-bank state, the drum-lane
+projection helpers and their history actions, and the `Sound` param mode that
+projected transpose as a pad name. The browser's "Add drum rack" now creates a
+rack group; a legacy `by_pitch` project still deserializes and loads as a plain
+layering rack.
+
+Per-slot mix fields (`gain`/`pan`/`mute`/`solo`) and `RackSlotParamPlocks` were
+**kept**: they are also the Instrument Rack's per-layer mixer and per-layer
+p-locks, and "Instrument Rack changes" is a non-goal above. Only the drum-lane
+UI that surfaced them for drum racks is gone. They can be revisited if and when
+the Instrument Rack itself is redesigned.
 
 ## Phasing
 
@@ -257,12 +350,34 @@ per-track p-locks).
    save/load as a browser object (a kit = group config + member instrument
    presets).
 
+## Kits
+
+A **kit** is a drum rack saved as a browser object (`kits/<name>.kit`). It
+carries:
+
+- kit identity — name, color, and the pad map (each pad's note, its choke
+  group, and the member track's name);
+- one **Sound** per pad, captured exactly as the Sounds browser captures a
+  track: the member's instrument (sampler buffer or custom engine), its
+  instrument params, and its insert fx chain.
+
+It deliberately does **not** carry patterns, and it does not carry the rack
+bus's own fx chain or fader. Loading a kit therefore never overwrites anything
+that is already sequenced: it creates a *new* rack group beside the existing
+tracks, one empty member track per pad, and re-applies the pad map and choke
+groups. Pads whose Sound fails to load (a missing sample, a missing instrument)
+are reported by name; the rest of the kit still lands. Every step a load takes
+is an ordinary recorded edit, so a kit load undoes like any other.
+
 ## Open questions
 
-- Should the rack header's arm and a member arm be mutually exclusive, or can
-  the rack stay armed while one member is "focus-armed" for chromatic play?
-  (Default: exclusive, same as any two tracks.)
-- Kit-as-preset: what exactly serializes when saving a drum rack to the
-  browser (member instruments + fx + pad map, but presumably not patterns?).
+- ~~Should the rack header's arm and a member arm be mutually exclusive, or
+  can the rack stay armed while one member is "focus-armed" for chromatic
+  play?~~ Resolved: exclusive, scoped to the rack's own members (see "Arming &
+  live play").
+- ~~Kit-as-preset: what exactly serializes when saving a drum rack to the
+  browser (member instruments + fx + pad map, but presumably not patterns?).~~
+  Resolved: pad map + choke groups + kit identity + one Sound per pad; no
+  patterns, no rack bus chain. See "Kits".
 - Does the Instrument Rack eventually migrate onto this model (a group with
   `Broadcast` routing), or stay a slot container? Not needed for v1.

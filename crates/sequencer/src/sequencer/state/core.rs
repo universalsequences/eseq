@@ -247,6 +247,24 @@ pub struct RuntimeBindingState {
     pub sampler_onset_ptr_lo: Vec<AtomicU32>,
     pub sampler_onset_ptr_hi: Vec<AtomicU32>,
     pub sampler_analysis_status: Vec<AtomicU32>,
+    /// Drum rack v2 choke assignments, one entry per track, published by the
+    /// control thread whenever rack membership or a pad's choke group changes
+    /// (`App::publish_rack_choke_runtime`) and read lock-free on the audio
+    /// thread. `0` means the track is not a rack pad with a choke group;
+    /// otherwise see [`rack_choke_key`].
+    pub rack_choke_keys: Vec<AtomicU64>,
+}
+
+/// Packs a drum rack v2 choke assignment into the value stored in
+/// [`RuntimeBindingState::rack_choke_keys`]: the owning rack's group id in the
+/// high bits, the choke group in the low 8. Two tracks choke each other iff
+/// their keys are equal and non-zero, so the audio thread never has to walk
+/// group membership. Choke group `0` means "unassigned" and packs to `0`.
+pub fn rack_choke_key(group_id: u64, choke_group: u8) -> u64 {
+    if choke_group == 0 {
+        return 0;
+    }
+    (group_id << 8) | choke_group as u64
 }
 
 /// A sequencer definition published from the UI/editor runtime to the scheduler VM.

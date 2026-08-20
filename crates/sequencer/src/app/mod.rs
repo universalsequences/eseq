@@ -24,10 +24,9 @@ use crate::lisp_host::{
 use crate::quantized_launch::{DuePatternLaunch, PatternLaunchTarget};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackRouting, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot,
-    DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START, DRUM_RACK_LAST_PAD_NOTE,
-    DRUM_RACK_PAD_BANK_STRIDE, DRUM_RACK_PAD_COUNT, MAX_STEPS, STEPS_PER_PAGE,
+    BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, RackTrackSnapshot, SequencerState, StepParam, StepSnapshot, MAX_STEPS,
+    STEPS_PER_PAGE,
 };
 use crate::track_color::TrackColor;
 
@@ -548,8 +547,7 @@ pub struct GraphState {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub bus_node_ids: Vec<BusNodeIds>,
-    pub bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    pub bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
     pub track_buffer_ids: Vec<i32>,
@@ -704,8 +702,7 @@ pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub default_bus_nodes: Vec<BusNodeIds>,
-    pub bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    pub bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
 }
@@ -727,10 +724,8 @@ pub struct BusNodeIds {
 }
 
 #[derive(Clone)]
-pub struct BusGateRuntimeState {
+pub struct BusEffectRuntimeState {
     pub id: BusId,
-    pub gate_id: i32,
-    pub sequence: BusGateSequence,
     pub effect_slots: Vec<EffectSlotSnapshot>,
 }
 
@@ -741,10 +736,13 @@ pub struct BusChannelState {
     pub volume: f32,
     pub mute: bool,
     pub solo: bool,
-    pub gate_sequence: BusGateSequence,
     pub effect_descriptors: Vec<EffectDescriptor>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub custom_effect_names: Vec<Option<String>>,
+    /// Where this bus's post-fader signal goes: the master mix, or another bus
+    /// (a rack bus chained into its parent group's bus). See
+    /// `docs/drum-rack-v2-spec.md`, "Racks inside track groups".
+    pub output: crate::project::BusOutput,
 }
 
 impl BusChannelState {
@@ -755,10 +753,10 @@ impl BusChannelState {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: BusGateSequence::default(),
             effect_descriptors: Self::default_effect_descriptors(),
             effect_slots: Self::default_effect_slots(),
             custom_effect_names: vec![None; crate::lisp_host::MAX_CUSTOM_FX],
+            output: crate::project::BusOutput::Mix,
         }
     }
 
@@ -902,13 +900,15 @@ pub struct App {
     pub(crate) macro_base_shadow:
         std::sync::Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
     pub tracks: Vec<String>,
+    /// True after an explicit user rename. Automatic instrument/sample names
+    /// may update only unpinned tracks.
+    pub track_name_user_authored: Vec<bool>,
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub rack_selected_slots: Vec<usize>,
-    pub rack_pad_bank_starts: Vec<i32>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     pub current_project_name: Option<String>,
@@ -1911,6 +1911,20 @@ impl App {
         }
     }
 
+    pub fn normalize_track_name_authorship(&mut self) {
+        self.track_name_user_authored.truncate(self.tracks.len());
+        self.track_name_user_authored.resize(self.tracks.len(), false);
+    }
+
+    pub fn set_automatic_track_name(&mut self, track: usize, name: String) {
+        self.normalize_track_name_authorship();
+        if !self.track_name_user_authored.get(track).copied().unwrap_or(false) {
+            if let Some(current) = self.tracks.get_mut(track) {
+                *current = name;
+            }
+        }
+    }
+
     pub fn normalize_track_colors(&mut self) {
         self.track_colors.truncate(self.tracks.len());
         while self.track_colors.len() < self.tracks.len() {
@@ -1942,10 +1956,6 @@ impl App {
         while self.rack_selected_slots.len() < self.tracks.len() {
             self.rack_selected_slots.push(0);
         }
-        self.rack_pad_bank_starts.truncate(self.tracks.len());
-        while self.rack_pad_bank_starts.len() < self.tracks.len() {
-            self.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
-        }
     }
 
     pub fn rack_selected_slot(&self, track: usize, slot_count: usize) -> usize {
@@ -1967,77 +1977,18 @@ impl App {
     }
 
     /// Select a physical rack slot while preserving each rack routing mode's
-    /// selection identity. Broadcast racks select by slot index; drum racks
-    /// select by the slot's pad note so sparse pad assignments stay correct.
+    /// selection identity: a rack selects by slot index.
     pub fn select_rack_slot(
         &mut self,
         track: usize,
         rack: &RackTrackSnapshot,
         slot_idx: usize,
     ) -> bool {
-        let Some(slot) = rack.slots.get(slot_idx) else {
+        if rack.slots.get(slot_idx).is_none() {
             return false;
-        };
-        match rack.routing {
-            RackRouting::Broadcast => self.set_rack_selected_slot(track, slot_idx),
-            RackRouting::ByPitch => {
-                let Some(pad_note) = slot.pad_note else {
-                    return false;
-                };
-                self.set_rack_selected_pad_note(track, pad_note);
-            }
         }
+        self.set_rack_selected_slot(track, slot_idx);
         true
-    }
-
-    pub fn rack_selected_pad_note(&self, track: usize) -> i32 {
-        let raw = self.rack_selected_slots.get(track).copied().unwrap_or(0) as i32;
-        raw.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE)
-    }
-
-    fn drum_rack_bank_start_for_pad_note(pad_note: i32) -> i32 {
-        let clamped = pad_note.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE);
-        let relative = clamped - DRUM_RACK_FIRST_PAD_NOTE;
-        let start = DRUM_RACK_FIRST_PAD_NOTE
-            + (relative / DRUM_RACK_PAD_BANK_STRIDE) * DRUM_RACK_PAD_BANK_STRIDE;
-        start.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START)
-    }
-
-    pub fn rack_pad_bank_start(&self, track: usize) -> i32 {
-        self.rack_pad_bank_starts
-            .get(track)
-            .copied()
-            .unwrap_or(DRUM_RACK_FIRST_PAD_NOTE)
-            .clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START)
-    }
-
-    pub fn set_rack_pad_bank_start(&mut self, track: usize, bank_start: i32) {
-        self.normalize_rack_selected_slots();
-        let bank_start = bank_start.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_BANK_START);
-        if let Some(selected_bank) = self.rack_pad_bank_starts.get_mut(track) {
-            *selected_bank = bank_start;
-        }
-        let selected_pad = self.rack_selected_pad_note(track);
-        let bank_end = bank_start + DRUM_RACK_PAD_COUNT as i32 - 1;
-        if selected_pad < bank_start || selected_pad > bank_end {
-            self.set_rack_selected_pad_note(track, bank_start);
-        }
-    }
-
-    pub fn set_rack_selected_pad_note(&mut self, track: usize, pad_note: i32) {
-        self.normalize_rack_selected_slots();
-        let pad_note = pad_note.clamp(DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE);
-        if let Some(selected) = self.rack_selected_slots.get_mut(track) {
-            *selected = pad_note as usize;
-        }
-        let bank_start = self.rack_pad_bank_start(track);
-        let bank_end = bank_start + DRUM_RACK_PAD_COUNT as i32 - 1;
-        if pad_note < bank_start || pad_note > bank_end {
-            let new_bank_start = Self::drum_rack_bank_start_for_pad_note(pad_note);
-            if let Some(selected_bank) = self.rack_pad_bank_starts.get_mut(track) {
-                *selected_bank = new_bank_start;
-            }
-        }
     }
 
     pub fn selected_rack_slot_index_for_rack(
@@ -2045,17 +1996,7 @@ impl App {
         track: usize,
         rack: &RackTrackSnapshot,
     ) -> Option<usize> {
-        match rack.routing {
-            RackRouting::Broadcast => {
-                (!rack.slots.is_empty()).then(|| self.rack_selected_slot(track, rack.slots.len()))
-            }
-            RackRouting::ByPitch => {
-                let selected_pad = self.rack_selected_pad_note(track);
-                rack.slots
-                    .iter()
-                    .position(|slot| slot.pad_note == Some(selected_pad))
-            }
-        }
+        (!rack.slots.is_empty()).then(|| self.rack_selected_slot(track, rack.slots.len()))
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::instruments::sampler::LoadedSample) {
@@ -2121,7 +2062,6 @@ impl App {
             .iter()
             .map(|bus| BusPatternSnapshot {
                 id: bus.id,
-                gate_sequence: bus.gate_sequence.clone(),
                 effect_plocks: bus
                     .effect_slots
                     .iter()
@@ -2139,7 +2079,6 @@ impl App {
     pub fn restore_bus_pattern_snapshot(&mut self, snapshot: &[BusPatternSnapshot]) {
         for bus in &mut self.buses {
             let Some(saved) = snapshot.iter().find(|saved| saved.id == bus.id) else {
-                bus.gate_sequence = BusGateSequence::default();
                 for slot in &mut bus.effect_slots {
                     slot.plocks = (0..MAX_STEPS)
                         .map(|_| vec![None; slot.num_params as usize])
@@ -2147,7 +2086,6 @@ impl App {
                 }
                 continue;
             };
-            bus.gate_sequence = saved.gate_sequence.clone();
             let descriptors = &bus.effect_descriptors;
             for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
                 // Recall per-scene base parameter values. Legacy snapshots (and
@@ -2193,9 +2131,9 @@ impl App {
                     .collect();
             }
         }
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         // Push the recalled base values to the live audio nodes so the scene's
-        // effect settings take immediately (not just on the next gate step).
+        // effect settings take immediately.
         for bus_idx in 0..self.buses.len() {
             let slot_count = self.buses[bus_idx].effect_slots.len();
             for slot_idx in 0..slot_count {
@@ -2241,13 +2179,50 @@ impl App {
         self.restore_bus_pattern_snapshot(&snapshot);
     }
 
-    pub fn publish_bus_gate_runtime(&self) {
+    /// Publishes drum rack v2 choke assignments into the lock-free per-track
+    /// runtime table the audio thread reads when a pad triggers
+    /// (docs/drum-rack-v2-spec.md, "Trigger routing"). Choke lives on the pad
+    /// list, but the audio thread only ever knows track indices, so the pad
+    /// map is flattened here: every member track backing a pad with a choke
+    /// group gets the packed (group id, choke group) key, everything else
+    /// gets 0. Call after any change to group membership or a pad's choke.
+    /// Republishing is a clear-then-write over the whole table: a hit landing
+    /// inside that window simply doesn't choke, which is inaudible next to the
+    /// edit that caused it.
+    pub fn publish_rack_choke_runtime(&self) {
+        use std::sync::atomic::Ordering;
+        let keys = &self.state.runtime.rack_choke_keys;
+        for key in keys.iter() {
+            key.store(0, Ordering::Release);
+        }
+        for group in &self.groups {
+            let Some(rack) = group.rack.as_ref() else {
+                continue;
+            };
+            for (pad_idx, pad) in rack.pads.iter().enumerate() {
+                let Some(choke) = rack.choke_group(pad_idx) else {
+                    continue;
+                };
+                let Some(track) = group.members.get(pad.member).copied() else {
+                    continue;
+                };
+                let Some(slot) = keys.get(track) else {
+                    continue;
+                };
+                slot.store(
+                    crate::sequencer::rack_choke_key(group.id, choke),
+                    Ordering::Release,
+                );
+            }
+        }
+    }
+
+    pub fn publish_bus_effect_runtime(&self) {
         let runtime = self
             .buses
             .iter()
             .filter_map(|bus| {
-                let nodes = self
-                    .graph
+                self.graph
                     .bus_node_ids
                     .iter()
                     .find(|nodes| nodes.id == bus.id)?;
@@ -2255,11 +2230,9 @@ impl App {
                 for (slot_idx, slot) in effect_slots.iter_mut().enumerate() {
                     let count = (slot.num_params as usize).min(slot.defaults.len());
                     for param_idx in 0..count {
-                        let raw_idx = slot
-                            .param_node_indices
-                            .get(param_idx)
-                            .copied()
-                            .unwrap_or(param_idx as u32);
+                        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                            continue;
+                        };
                         let param_id = crate::neural::ParamNodeId::from_slot_param(
                             slot.node_id,
                             slot.modulator_node_id,
@@ -2273,30 +2246,13 @@ impl App {
                             .effective_value(&key, slot.defaults[param_idx]);
                     }
                 }
-                Some(BusGateRuntimeState {
+                Some(BusEffectRuntimeState {
                     id: bus.id,
-                    gate_id: nodes.gate_id,
-                    sequence: bus.gate_sequence.clone(),
                     effect_slots,
                 })
             })
             .collect();
-        *self.graph.bus_gate_runtime.lock().unwrap() = Arc::new(runtime);
-
-        let mut playheads = self.graph.bus_gate_playheads.lock().unwrap();
-        let next_playheads = self
-            .buses
-            .iter()
-            .map(|bus| {
-                let step = playheads
-                    .iter()
-                    .find(|(id, _)| *id == bus.id)
-                    .map(|(_, step)| *step)
-                    .unwrap_or(0);
-                (bus.id, step)
-            })
-            .collect();
-        *playheads = next_playheads;
+        *self.graph.bus_effect_runtime.lock().unwrap() = Arc::new(runtime);
     }
 
     pub fn new(
@@ -2340,13 +2296,13 @@ impl App {
             macro_base_shadow: std::sync::Mutex::new(HashMap::new()),
             scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),
+            track_name_user_authored: Vec::new(),
             track_colors: Vec::new(),
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
             sampler_paths: Vec::new(),
             rack_selected_slots: Vec::new(),
-            rack_pad_bank_starts: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
             current_project_name: None,
@@ -2493,8 +2449,7 @@ impl App {
                 bus_l_id: buses.bus_l_id,
                 bus_r_id: buses.bus_r_id,
                 bus_node_ids: buses.default_bus_nodes,
-                bus_gate_runtime: buses.bus_gate_runtime,
-                bus_gate_playheads: buses.bus_gate_playheads,
+                bus_effect_runtime: buses.bus_effect_runtime,
                 reverb_bus_id: buses.reverb_bus_id,
                 reverb_node_id: buses.reverb_node_id,
                 track_buffer_ids: Vec::new(),
@@ -2516,7 +2471,7 @@ impl App {
             },
         };
         app.ensure_bus_pattern_bank_len(1);
-        app.publish_bus_gate_runtime();
+        app.publish_bus_effect_runtime();
         app
     }
 

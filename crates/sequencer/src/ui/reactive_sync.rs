@@ -16,8 +16,38 @@ pub(super) fn sync_after_instrument_track_apply(
     ui_epoch: &Arc<AtomicUsize>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) {
-    current_track.store(track_index, Ordering::Relaxed);
-    app.ui.cursor_track = track_index;
+    sync_after_instrument_track_apply_with_selection(
+        app, editor, state, track_index, current_track, track_names, track_pan_ids,
+        record_armed, selected_steps, accumulator_names, cached_track_peak_levels,
+        cached_bus_peak_levels, ui_epoch, lg_raw, false,
+    );
+}
+
+pub(super) fn sync_after_instrument_track_apply_with_selection(
+    app: &mut app::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    track_index: usize,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    preserve_track_selection: bool,
+) {
+    let selected_track = host_commands::selection_after_track_apply(
+        track_index,
+        preserve_track_selection,
+        current_track,
+        app.tracks.len(),
+    );
+    current_track.store(selected_track, Ordering::Relaxed);
+    app.ui.cursor_track = selected_track;
     let track_name = app.tracks[track_index].clone();
     if track_names.len() < app.tracks.len() {
         track_names.push(track_name);
@@ -38,11 +68,11 @@ pub(super) fn sync_after_instrument_track_apply(
     let rt = editor.runtime_mut();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
-    set_current_track_reactive(rt, app.tracks.len(), track_index);
+    set_current_track_reactive(rt, app.tracks.len(), selected_track);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-    sync_all_track_sequencer_state(rt, state, app, track_index, selected_steps);
-    rt.set_reactive("SEQ", "steps", build_steps_value(state, track_index));
-    sync_step_param_lists(rt, state, track_index);
+    sync_all_track_sequencer_state(rt, state, app, selected_track, selected_steps);
+    rt.set_reactive("SEQ", "steps", build_steps_value(state, selected_track));
+    sync_step_param_lists(rt, state, selected_track);
     sync_track_mixer_state(rt, app, state);
     sync_bus_mixer_state(rt, app);
     sync_track_peak_fields(rt, cached_track_peak_levels);
@@ -52,7 +82,7 @@ pub(super) fn sync_after_instrument_track_apply(
         "effects",
         build_effects_value(
             state,
-            track_index,
+            selected_track,
             &app.graph.effect_descriptors,
             selected_steps,
         ),
@@ -60,29 +90,29 @@ pub(super) fn sync_after_instrument_track_apply(
     rt.set_reactive(
         "SEQ",
         "midi-effects",
-        build_midi_effects_value(state, track_index, selected_steps),
+        build_midi_effects_value(state, selected_track, selected_steps),
     );
     rt.set_reactive(
         "SEQ",
         "instrument-panel",
-        build_instrument_panel_value(app, track_index, selected_steps),
+        build_instrument_panel_value(app, selected_track, selected_steps),
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-    sync_track_params(rt, app, state, track_index, selected_steps);
+    sync_track_params(rt, app, state, selected_track, selected_steps);
     sync_selected_track_bus_send_binding_fields(
         rt,
         app,
         state,
-        track_index,
+        selected_track,
         selected_steps,
     );
-    sync_fx_param_binding_fields(rt, app, state, track_index, selected_steps);
+    sync_fx_param_binding_fields(rt, app, state, selected_track, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
-        build_step_has_plocks(state, track_index, &app.graph.effect_descriptors),
+        build_step_has_plocks(state, selected_track, &app.graph.effect_descriptors),
     );
-    sync_sidebar_browser(rt, app, track_index);
+    sync_sidebar_browser(rt, app, selected_track);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     refresh_visible_track_topology_layouts(editor);
@@ -797,7 +827,6 @@ pub(super) fn sync_step_batch_structural_bindings(
             }
         }
     }
-    dirty |= sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, steps);
     if track == current_track_idx {
         let cursor_step = fx_step_cursor_from_runtime(rt);
         dirty |= sync_fx_step_cursor_binding_fields(
@@ -880,33 +909,6 @@ pub(super) fn sync_track_duration_span_binding_fields(
                 Value::Bool(step < num_steps && track_step_duration_covered(state, track, step)),
             )
             .effects_dirty;
-    }
-    dirty
-}
-
-pub(super) fn sync_drum_lane_duration_span_binding_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    app: &app::App,
-    track: usize,
-    start_step: usize,
-) -> bool {
-    let mut dirty = false;
-    for sound in drum_rack_sound_options(app, track) {
-        for step in start_step.min(MAX_STEPS)..MAX_STEPS {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &drum_lane_step_duration_field(track, sound.pad_note, step),
-                    Value::Bool(drum_lane_step_duration_covered(
-                        state,
-                        track,
-                        sound.pad_note,
-                        step,
-                    )),
-                )
-                .effects_dirty;
-        }
     }
     dirty
 }
@@ -1675,11 +1677,6 @@ pub(super) fn apply_ui_invalidations(
     // reconcile over all MAX_STEPS, so collect the touched steps here and do
     // one reconcile per track after the loop.
     let mut plock_render_steps: Vec<(usize, Vec<usize>)> = Vec::new();
-    // Drum-rack lanes place a hit on the pad row named by the step's Transpose,
-    // so a transpose edit moves the hit between rows. `drum_rack_sound_options`
-    // needs a rack-track lock plus a SEQ namespace read, so this is likewise
-    // batched to one call per track.
-    let mut drum_lane_transpose_steps: Vec<(usize, Vec<usize>)> = Vec::new();
     // The piano roll renders notes from transpose/velocity/duration, so a
     // step-param edit on the current track moves them. One sync per apply,
     // never one per step.
@@ -1831,9 +1828,6 @@ pub(super) fn apply_ui_invalidations(
                         step_param_track_lists.push((track, param));
                     }
                     push_deferred_track_step(&mut plock_render_steps, track, step);
-                    if param == StepParam::Transpose {
-                        push_deferred_track_step(&mut drum_lane_transpose_steps, track, step);
-                    }
                     if track == current_track_idx {
                         piano_roll_step_params_dirty = true;
                     }
@@ -1841,8 +1835,6 @@ pub(super) fn apply_ui_invalidations(
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
-                    needs_reactive_cycle |=
-                        sync_drum_lane_duration_span_binding_fields(rt, state, app, track, step);
                     if !duration_span_tracks.contains(&track) {
                         duration_span_tracks.push(track);
                     }
@@ -2377,12 +2369,6 @@ pub(super) fn apply_ui_invalidations(
             }
         }
     }
-    // Cheap no-op on non-drum tracks (`drum_rack_sound_options` returns empty
-    // before any namespace read).
-    for (track, steps) in drum_lane_transpose_steps {
-        needs_reactive_cycle |=
-            sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, &steps);
-    }
     if piano_roll_step_params_dirty {
         sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
         needs_reactive_cycle = true;
@@ -2417,6 +2403,7 @@ pub(super) fn load_or_convert_sampler_track(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
     track: usize,
     path: Option<&Path>,
+    preserve_track_selection: bool,
 ) -> Result<SamplerTrackLoadResult, String> {
     if track >= app.tracks.len() {
         return Err(format!("Track {} does not exist", track + 1));
@@ -2512,25 +2499,33 @@ pub(super) fn load_or_convert_sampler_track(
     if let Some(track_name) = track_names.get_mut(track) {
         *track_name = new_name.clone();
     }
-    current_track.store(track, Ordering::Relaxed);
-    app.ui.cursor_track = track;
+    let selected_track = host_commands::selection_after_track_apply(
+        track,
+        preserve_track_selection,
+        current_track,
+        app.tracks.len(),
+    );
+    current_track.store(selected_track, Ordering::Relaxed);
+    app.ui.cursor_track = selected_track;
 
     let rt = editor.runtime_mut();
-    set_current_track_reactive(rt, app.tracks.len(), track);
+    set_current_track_reactive(rt, app.tracks.len(), selected_track);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive(
         "SEQ",
         "instrument-panel",
-        build_instrument_panel_value(app, track, selected_steps),
+        build_instrument_panel_value(app, selected_track, selected_steps),
     );
-    sync_sampler_selection_time_fields(
-        rt,
-        app,
-        track,
-        selected_steps.lock().unwrap().iter().copied().min(),
-    );
+    if selected_track == track {
+        sync_sampler_selection_time_fields(
+            rt,
+            app,
+            selected_track,
+            selected_steps.lock().unwrap().iter().copied().min(),
+        );
+    }
     sync_track_mixer_state(rt, app, state);
-    sync_sidebar_browser(rt, app, track);
+    sync_sidebar_browser(rt, app, selected_track);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     Ok(SamplerTrackLoadResult {

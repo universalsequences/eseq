@@ -6,69 +6,6 @@ pub(crate) struct RuntimeInit {
     pub(crate) midi_fx_names: Arc<Mutex<Vec<String>>>,
     pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
     pub(crate) piano_roll_clipboard: PianoRollClipboard,
-    pub(crate) selected_drum_lane_steps: Arc<Mutex<HashSet<DrumLaneStepSelection>>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct DrumLaneStepSelection {
-    pub(crate) track: usize,
-    pub(crate) pad_note: i32,
-    pub(crate) step: usize,
-}
-
-pub(crate) fn write_drum_lane_selection(
-    bindings: &eseqlisp::reactive::ReactiveBindingStore,
-    selection: DrumLaneStepSelection,
-    selected: bool,
-) {
-    bindings.write_float(
-        "SEQ",
-        &drum_lane_step_selected_field(selection.track, selection.pad_note, selection.step),
-        if selected { 1.0 } else { 0.0 },
-    );
-}
-
-pub(crate) fn clear_drum_lane_selection(
-    bindings: &eseqlisp::reactive::ReactiveBindingStore,
-    selected: &mut HashSet<DrumLaneStepSelection>,
-) {
-    for selection in selected.drain() {
-        write_drum_lane_selection(bindings, selection, false);
-    }
-}
-
-fn full_drum_lane_selection(
-    track: usize,
-    pad_notes: impl IntoIterator<Item = i32>,
-    num_steps: usize,
-) -> HashSet<DrumLaneStepSelection> {
-    pad_notes
-        .into_iter()
-        .flat_map(|pad_note| {
-            (0..num_steps).map(move |step| DrumLaneStepSelection {
-                track,
-                pad_note,
-                step,
-            })
-        })
-        .collect()
-}
-
-/// Cmd+A in a drum rack progresses from its selected pad to every occupied
-/// pad. Any partial or unrelated selection starts over at the selected pad.
-fn drum_rack_select_all_target(
-    selected: &HashSet<DrumLaneStepSelection>,
-    track: usize,
-    selected_pad_note: i32,
-    pad_notes: &[i32],
-    num_steps: usize,
-) -> HashSet<DrumLaneStepSelection> {
-    let selected_lane = full_drum_lane_selection(track, [selected_pad_note], num_steps);
-    if selected == &selected_lane {
-        full_drum_lane_selection(track, pad_notes.iter().copied(), num_steps)
-    } else {
-        selected_lane
-    }
 }
 
 fn value_number_field(value: &Value, field: &str) -> Option<usize> {
@@ -1831,6 +1768,43 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
                 .ok_or_else(|| "mixer-track delete target expects :track".to_string())?;
             Ok(ActiveDeleteTarget::MixerTrack { track })
         }
+        Some("mixer-tracks") | Some("tracks") => {
+            let Value::Map(fields) = payload else {
+                return Err("mixer-tracks delete target expects a :tracks list".to_string());
+            };
+            let tracks = fields
+                .get("tracks")
+                .ok_or_else(|| "mixer-tracks delete target expects :tracks".to_string())?;
+            let tracks = tracks.borrow();
+            let Value::List(tracks) = &*tracks else {
+                return Err("mixer-tracks delete target expects :tracks to be a list".to_string());
+            };
+            let mut parsed = Vec::with_capacity(tracks.len());
+            for track in tracks {
+                let track = track.borrow();
+                let Value::Number(track) = &*track else {
+                    return Err("mixer-tracks delete target indices must be numbers".to_string());
+                };
+                if !track.is_finite() || *track < 0.0 || track.fract() != 0.0 {
+                    return Err(
+                        "mixer-tracks delete target indices must be non-negative integers"
+                            .to_string(),
+                    );
+                }
+                parsed.push(*track as usize);
+            }
+            parsed.sort_unstable();
+            parsed.dedup();
+            if parsed.len() < 2 {
+                return Err("mixer-tracks delete target expects at least two tracks".to_string());
+            }
+            Ok(ActiveDeleteTarget::MixerTracks { tracks: parsed })
+        }
+        Some("mixer-group") | Some("group") => {
+            let group_id = value_number_field(payload, "group-id")
+                .ok_or_else(|| "mixer-group delete target expects :group-id".to_string())?;
+            Ok(ActiveDeleteTarget::MixerGroup { group_id: group_id as u64 })
+        }
         Some("track-pattern") | Some("pattern") => {
             let track = value_number_field(payload, "track")
                 .ok_or_else(|| "track-pattern delete target expects :track".to_string())?;
@@ -1924,6 +1898,8 @@ fn effect_param_target(
 fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
     match target {
         Some(ActiveDeleteTarget::MixerTrack { .. }) => Value::String("mixer-track".to_string()),
+        Some(ActiveDeleteTarget::MixerTracks { .. }) => Value::String("mixer-tracks".to_string()),
+        Some(ActiveDeleteTarget::MixerGroup { .. }) => Value::String("mixer-group".to_string()),
         Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
         Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
@@ -1964,6 +1940,37 @@ mod delete_target_tests {
             )
             .expect("mixer target"),
             ActiveDeleteTarget::MixerTrack { track: 2 }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("mixer-tracks".to_string()),
+                &map_value([(
+                    "tracks",
+                    Value::List(vec![
+                        Rc::new(RefCell::new(Value::Number(4.0))),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                        Rc::new(RefCell::new(Value::Number(4.0))),
+                    ]),
+                )]),
+            )
+            .expect("multiple mixer target"),
+            ActiveDeleteTarget::MixerTracks { tracks: vec![2, 4] }
+        );
+        assert_eq!(
+            active_delete_target_kind(Some(&ActiveDeleteTarget::MixerTracks {
+                tracks: vec![2, 4],
+            })),
+            Value::String("mixer-tracks".to_string())
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("mixer-group".to_string()),
+                &map_value([("group-id", Value::Number(17.0))]),
+            )
+            .expect("mixer group target"),
+            ActiveDeleteTarget::MixerGroup { group_id: 17 }
         );
 
         assert_eq!(
@@ -2044,6 +2051,24 @@ mod delete_target_tests {
     }
 
     #[test]
+    fn selected_tracks_arm_and_clear_multiple_track_delete_target() {
+        let target = Arc::new(Mutex::new(Some(ActiveDeleteTarget::MixerTrack { track: 0 })));
+        let version = Arc::new(AtomicUsize::new(0));
+        let selected = HashSet::from([3, 1]);
+
+        arm_selected_tracks_delete_target(&selected, &target, &version);
+        assert_eq!(
+            *target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks { tracks: vec![1, 3] })
+        );
+        assert_eq!(version.load(Ordering::Relaxed), 1);
+
+        arm_selected_tracks_delete_target(&HashSet::from([3]), &target, &version);
+        assert_eq!(*target.lock().unwrap(), None);
+        assert_eq!(version.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn delete_target_parser_rejects_incomplete_bus_fx_target() {
         let err = parse_delete_target(
             &Value::Keyword("fx-effect".to_string()),
@@ -2110,6 +2135,217 @@ mod process_binding_target_tests {
     }
 }
 
+/// Toggles a track's record arm, keeping the drum-rack arm exclusive with it:
+/// arming a member track hands the live keyboard back to chromatic play, so
+/// the rack it belongs to disarms (docs/drum-rack-v2-spec.md, "Arming & live
+/// play"). Tracks outside the armed rack leave pad play alone. Returns the new
+/// arm state, or `None` when the track index is out of range.
+pub(crate) fn toggle_track_record_arm(
+    record_armed: &mut [bool],
+    armed_rack: &mut Option<u64>,
+    groups: &[sequencer::project::ProjectTrackGroup],
+    track: usize,
+) -> Option<bool> {
+    let flag = record_armed.get_mut(track)?;
+    *flag = !*flag;
+    let armed = *flag;
+    if armed {
+        if let Some(rack_id) = *armed_rack {
+            let is_member = groups
+                .iter()
+                .any(|group| group.id == rack_id && group.members.contains(&track));
+            if is_member {
+                *armed_rack = None;
+            }
+        }
+    }
+    Some(armed)
+}
+
+/// Toggles a drum rack's pad arm. Only one rack answers the keyboard at a
+/// time, and arming one disarms its own member tracks so a member never
+/// responds to a key both as a pad and chromatically. Returns the new state.
+pub(crate) fn toggle_rack_pad_arm(
+    armed_rack: &mut Option<u64>,
+    record_armed: &mut [bool],
+    members: &[usize],
+    group_id: u64,
+) -> bool {
+    let armed = *armed_rack != Some(group_id);
+    *armed_rack = armed.then_some(group_id);
+    if armed {
+        for member in members {
+            if let Some(flag) = record_armed.get_mut(*member) {
+                *flag = false;
+            }
+        }
+    }
+    armed
+}
+
+/// Whether `armed_rack` still names a live drum rack. Group ids are recycled
+/// (`max(id) + 1` in `app::edit`), so a stale arm is worse than a dangling
+/// reference: the next group created inherits the dead id and comes up
+/// pad-armed, stealing the keyboard from the sequencer's bare-key shortcuts.
+/// Ungrouping or converting a rack away is the same staleness — the id lives
+/// on, but no longer as a rack.
+pub(crate) fn armed_rack_still_live(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    armed_rack: Option<u64>,
+) -> bool {
+    let Some(rack_id) = armed_rack else {
+        return true;
+    };
+    groups
+        .iter()
+        .any(|group| group.id == rack_id && group.is_rack())
+}
+
+/// Whether the armed delete target still names something that exists. Only
+/// the group-addressed variant can be invalidated by a group edit; the
+/// track-addressed ones are reindexed (and cleared) on their own paths.
+pub(crate) fn delete_target_still_live(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    target: Option<&ActiveDeleteTarget>,
+) -> bool {
+    match target {
+        Some(ActiveDeleteTarget::MixerGroup { group_id }) => {
+            groups.iter().any(|group| group.id == *group_id)
+        }
+        _ => true,
+    }
+}
+
+/// Drops shared group references that the just-applied topology edit killed.
+/// Called from the two group-topology sync choke points
+/// (`sync_after_track_topology_delete`, `sync_after_rack_structure_change`),
+/// so delete/ungroup/convert/audition all get the same invalidation without
+/// each handler remembering to clear.
+pub(crate) fn prune_stale_group_references(
+    armed_rack: &Arc<Mutex<Option<u64>>>,
+    active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: &Arc<AtomicUsize>,
+    groups: &[sequencer::project::ProjectTrackGroup],
+) {
+    {
+        let mut guard = armed_rack.lock().unwrap();
+        if !armed_rack_still_live(groups, *guard) {
+            *guard = None;
+        }
+    }
+    let mut guard = active_delete_target.lock().unwrap();
+    if !delete_target_still_live(groups, guard.as_ref()) {
+        *guard = None;
+        bump_delete_target_version(active_delete_target_version);
+    }
+}
+
+fn arm_selected_tracks_delete_target(
+    selected: &HashSet<usize>,
+    active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: &Arc<AtomicUsize>,
+) {
+    let mut tracks: Vec<usize> = selected.iter().copied().collect();
+    tracks.sort_unstable();
+    let target = (tracks.len() >= 2).then_some(ActiveDeleteTarget::MixerTracks { tracks });
+    let mut guard = active_delete_target.lock().unwrap();
+    if *guard != target {
+        *guard = target;
+        bump_delete_target_version(active_delete_target_version);
+    }
+}
+
+fn register_track_selection_natives(
+    runtime: &mut Runtime,
+    state: Arc<SequencerState>,
+    current_track: Arc<AtomicUsize>,
+    selected_tracks: Arc<Mutex<HashSet<usize>>>,
+    active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: Arc<AtomicUsize>,
+) {
+    fn track_arg(value: Option<&Value>, name: &str, native: &str) -> Result<usize, String> {
+        let Some(Value::Number(value)) = value else {
+            return Err(format!("{native}: expected {name} track number"));
+        };
+        if !value.is_finite() || *value < 0.0 || value.fract() != 0.0 {
+            return Err(format!("{native}: invalid {name} track {value}"));
+        }
+        Ok(*value as usize)
+    }
+
+    let range_state = Arc::clone(&state);
+    let range_current_track = Arc::clone(&current_track);
+    let range_selected_tracks = Arc::clone(&selected_tracks);
+    let range_delete_target = Arc::clone(&active_delete_target);
+    let range_delete_target_version = Arc::clone(&active_delete_target_version);
+    runtime.register_native("seq-select-track-range", move |args, _ctx| {
+        let anchor = track_arg(args.first(), "anchor", "seq-select-track-range")?;
+        let target = track_arg(args.get(1), "target", "seq-select-track-range")?;
+        let track_count = range_state.active_track_count();
+        if anchor >= track_count {
+            return Err(format!("seq-select-track-range: anchor track {anchor} out of range").into());
+        }
+        if target >= track_count {
+            return Err(format!("seq-select-track-range: target track {target} out of range").into());
+        }
+
+        let (start, end) = if anchor <= target {
+            (anchor, target)
+        } else {
+            (target, anchor)
+        };
+        {
+            let mut selected = range_selected_tracks.lock().unwrap();
+            selected.clear();
+            selected.extend(start..=end);
+            arm_selected_tracks_delete_target(
+                &selected,
+                &range_delete_target,
+                &range_delete_target_version,
+            );
+        }
+        range_current_track.store(target, Ordering::Relaxed);
+        Ok(Value::Number(target as f64))
+    });
+
+    runtime.register_native("seq-select-tracks", move |args, _ctx| {
+        let Some(Value::List(values)) = args.first() else {
+            return Err("seq-select-tracks: expected a track list".to_string());
+        };
+        if values.is_empty() {
+            return Err("seq-select-tracks: track list cannot be empty".to_string());
+        }
+        let track_count = state.active_track_count();
+        let mut replacement = HashSet::with_capacity(values.len());
+        for value in values {
+            let value = value.borrow();
+            let track = track_arg(Some(&value), "selected", "seq-select-tracks")?;
+            if track >= track_count {
+                return Err(format!("seq-select-tracks: track {track} out of range"));
+            }
+            if !replacement.insert(track) {
+                return Err(format!("seq-select-tracks: duplicate track {track}"));
+            }
+        }
+        let target = track_arg(args.get(1), "target", "seq-select-tracks")?;
+        if !replacement.contains(&target) {
+            return Err(format!("seq-select-tracks: target track {target} is not selected"));
+        }
+
+        {
+            let mut selected = selected_tracks.lock().unwrap();
+            *selected = replacement;
+            arm_selected_tracks_delete_target(
+                &selected,
+                &active_delete_target,
+                &active_delete_target_version,
+            );
+        }
+        current_track.store(target, Ordering::Relaxed);
+        Ok(Value::Number(target as f64))
+    });
+}
+
 pub(crate) fn init_runtime(
     app: &app::App,
     state: Arc<SequencerState>,
@@ -2129,6 +2365,7 @@ pub(crate) fn init_runtime(
     master_recording: Arc<AtomicBool>,
     master_recorder: Arc<sequencer::recorder::MasterRecorder>,
     record_armed: Arc<Mutex<Vec<bool>>>,
+    armed_rack: Arc<Mutex<Option<u64>>>,
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
@@ -2160,7 +2397,6 @@ pub(crate) fn init_runtime(
 
     let track_count = track_names.len();
     let effect_descriptors = app.graph.effect_descriptors.clone();
-    let selected_drum_lane_steps = Arc::new(Mutex::new(HashSet::<DrumLaneStepSelection>::new()));
     state.set_scratch_runtime_descriptors(
         app.graph.effect_descriptors.clone(),
         app.graph.instrument_descriptors.clone(),
@@ -2235,6 +2471,8 @@ pub(crate) fn init_runtime(
                 ("selected-tracks", Value::List(vec![])),
                 ("groups", Value::List(vec![])),
                 ("group-collapsed", Value::List(vec![])),
+                // Group id of the pad-armed drum rack; -1 = none.
+                ("armed-rack-id", Value::Number(-1.0)),
                 ("delete-target-version", Value::Number(0.0)),
                 ("selected-mod-routes", Value::List(vec![])),
                 (
@@ -2278,8 +2516,6 @@ pub(crate) fn init_runtime(
                 ("browser-preview-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
-                ("track-drum-racks", build_track_drum_racks_value(&app)),
-                ("track-drum-sounds", build_all_track_drum_sounds_value(&app)),
                 (
                     "track-mod-output-available",
                     build_track_mod_output_available(&app),
@@ -2498,19 +2734,6 @@ pub(crate) fn init_runtime(
                     ),
                 ),
                 ("bus-effects", build_bus_effects_value(&app)),
-                ("bus-steps", build_bus_steps_value(&app)),
-                ("bus-velocities", build_bus_param_lists(&app, "velocity")),
-                ("bus-durations", build_bus_param_lists(&app, "duration")),
-                ("bus-syncs", build_bus_param_lists(&app, "sync")),
-                ("bus-num-steps", build_bus_num_steps_value(&app)),
-                ("bus-timebases", build_bus_timebase_value(&app)),
-                ("bus-swings", build_bus_swing_value(&app)),
-                (
-                    "bus-swing-resolutions",
-                    build_bus_swing_resolution_value(&app),
-                ),
-                ("bus-step-has-plocks", build_bus_step_has_plocks(&app)),
-                ("bus-playheads", build_bus_playheads_value(&app)),
                 (
                     "effects",
                     if track_count == 0 {
@@ -2778,6 +3001,7 @@ pub(crate) fn init_runtime(
                     build_string_list(&project_instrument_engine_names(app)),
                 ),
                 ("sound-presets", build_sound_presets_value()),
+                ("kit-presets", build_kit_presets_value()),
                 ("current-project-name", Value::String(String::new())),
                 // Editor mode state (for inline instrument/effect creation/editing)
                 ("editor-active", Value::Bool(false)),
@@ -2942,36 +3166,6 @@ pub(crate) fn init_runtime(
                         Value::Bool(step == track_active_playhead_step(&state, track)),
                     ));
                 }
-                for sound in drum_rack_sound_options(&app, track) {
-                    for step in 0..MAX_STEPS {
-                        fields.push((
-                            Box::leak(
-                                drum_lane_step_active_field(track, sound.pad_note, step)
-                                    .into_boxed_str(),
-                            ),
-                            Value::Bool(drum_lane_step_active(&state, track, sound.pad_note, step)),
-                        ));
-                        fields.push((
-                            Box::leak(
-                                drum_lane_step_selected_field(track, sound.pad_note, step)
-                                    .into_boxed_str(),
-                            ),
-                            Value::Bool(false),
-                        ));
-                        fields.push((
-                            Box::leak(
-                                drum_lane_step_duration_field(track, sound.pad_note, step)
-                                    .into_boxed_str(),
-                            ),
-                            Value::Bool(drum_lane_step_duration_covered(
-                                &state,
-                                track,
-                                sound.pad_note,
-                                step,
-                            )),
-                        ));
-                    }
-                }
             }
             fields
         },
@@ -3085,6 +3279,7 @@ pub(crate) fn init_runtime(
 
     let st = state.clone();
     let ct = current_track.clone();
+    let groups = track_groups.clone();
     let delete_target = active_delete_target.clone();
     let delete_target_version = active_delete_target_version.clone();
     
@@ -3120,6 +3315,69 @@ pub(crate) fn init_runtime(
                 );
                 ctx.enqueue_command(HostCommand::Custom {
                     name: "delete-track".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
+            ActiveDeleteTarget::MixerTracks { tracks } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                let track_count = st.active_track_count();
+                let armed_track_count = tracks.len();
+                let valid_tracks: Vec<usize> = tracks
+                    .into_iter()
+                    .filter(|track| *track < track_count)
+                    .collect();
+                if valid_tracks.len() < 2 {
+                    ctx.set_status("Cannot delete tracks because the selection is stale");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                if valid_tracks.len() == track_count {
+                    ctx.set_status("Cannot delete all remaining tracks");
+                    return Ok(Value::Bool(false));
+                }
+                if valid_tracks.len() != armed_track_count {
+                    *delete_target.lock().unwrap() = Some(ActiveDeleteTarget::MixerTracks {
+                        tracks: valid_tracks.clone(),
+                    });
+                    bump_delete_target_version(&delete_target_version);
+                }
+                let tracks = Value::List(
+                    valid_tracks
+                        .into_iter()
+                        .map(|track| Rc::new(RefCell::new(Value::Number(track as f64))))
+                        .collect(),
+                );
+                let mut map = std::collections::HashMap::new();
+                map.insert("tracks".to_string(), Rc::new(RefCell::new(tracks)));
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-tracks".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
+            ActiveDeleteTarget::MixerGroup { group_id } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                if !groups.lock().unwrap().iter().any(|group| group.id == group_id) {
+                    ctx.set_status("Cannot delete missing track group");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "group-id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(group_id as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-track-group".to_string(),
                     payload: Value::Map(map),
                 });
             }
@@ -3472,59 +3730,6 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(next_active))
     });
 
-    // seq-toggle-drum-lane-step — toggle one occupied pad lane at a track step
-    let st = state.clone();
-    runtime.register_native("seq-toggle-drum-lane-step", move |args, ctx| {
-        let (Some(Value::Number(track)), Some(Value::Number(pad_note)), Some(Value::Number(step))) =
-            (args.first(), args.get(1), args.get(2))
-        else {
-            return Err("seq-toggle-drum-lane-step: expected (track pad-note step)".into());
-        };
-        let track = *track as usize;
-        let pad_note = pad_note.round() as i32;
-        let step = *step as usize;
-        if track >= st.active_track_count() {
-            return Err(format!(
-                "seq-toggle-drum-lane-step: track {track} out of range"
-            ));
-        }
-        if step >= MAX_STEPS {
-            return Err(format!(
-                "seq-toggle-drum-lane-step: step {step} out of range"
-            ));
-        }
-        let occupied = st
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .is_some_and(|rack| {
-                rack.routing == sequencer::sequencer::RackRouting::ByPitch
-                    && rack
-                        .slots
-                        .iter()
-                        .any(|slot| slot.pad_note == Some(pad_note))
-            });
-        if !occupied {
-            return Err(format!(
-                "seq-toggle-drum-lane-step: pad note {pad_note} is not occupied on track {track}"
-            ));
-        }
-
-        let active = !drum_lane_step_active(&st, track, pad_note, step);
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("toggle".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
-        payload.insert("step".to_string(), Rc::new(RefCell::new(Value::Number(step as f64))));
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "drum-lane-history-action".to_string(),
-            payload: Value::Map(payload),
-        });
-        Ok(Value::Bool(active))
-    });
 
     let st = state.clone();
     runtime.register_native("seq-track-step-active?", move |args, _ctx| {
@@ -3540,42 +3745,6 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 
-    let st = state.clone();
-    runtime.register_native("seq-set-drum-lane-step-duration", move |args, ctx| {
-        let (
-            Some(Value::Number(track)),
-            Some(Value::Number(pad_note)),
-            Some(Value::Number(step)),
-            Some(Value::Number(duration)),
-        ) = (args.first(), args.get(1), args.get(2), args.get(3))
-        else {
-            return Err(
-                "seq-set-drum-lane-step-duration: expected (track pad-note step duration)".into(),
-            );
-        };
-        let track = *track as usize;
-        let pad_note = pad_note.round() as i32;
-        let step = *step as usize;
-        if track >= st.active_track_count() || step >= MAX_STEPS {
-            return Ok(Value::Bool(false));
-        }
-        if st.drum_lane_step_duration(track, step, pad_note).is_none() {
-            return Ok(Value::Bool(false));
-        }
-        let duration = (*duration as f32)
-            .clamp(StepParam::Duration.min(), StepParam::Duration.max());
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("duration".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
-        payload.insert("step".to_string(), Rc::new(RefCell::new(Value::Number(step as f64))));
-        payload.insert("duration".to_string(), Rc::new(RefCell::new(Value::Number(duration as f64))));
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "drum-lane-history-action".to_string(),
-            payload: Value::Map(payload),
-        });
-        Ok(Value::Number(duration as f64))
-    });
 
     // seq-set-step-param — set param on current track
     let ct = current_track.clone();
@@ -4132,6 +4301,18 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(track as f64))
     });
 
+    // Atomic replacement primitives for contiguous model-index ranges and for
+    // an explicit ordered UI range. The latter lets grouped surfaces select the
+    // tracks they actually draw without teaching Rust their visual topology.
+    register_track_selection_natives(
+        &mut runtime,
+        state.clone(),
+        current_track.clone(),
+        selected_tracks.clone(),
+        active_delete_target.clone(),
+        active_delete_target_version.clone(),
+    );
+
     // seq-toggle-track-selected — (seq-toggle-track-selected track-idx)
     // cmd-click multi-select: toggle this track's membership in the selection set.
     // The last-clicked track becomes the focused current track. The set never
@@ -4139,6 +4320,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel_tracks = selected_tracks.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
     runtime.register_native("seq-toggle-track-selected", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-toggle-track-selected: expected track number".into());
@@ -4149,7 +4332,7 @@ pub(crate) fn init_runtime(
         }
         let selected = {
             let mut set = sel_tracks.lock().unwrap();
-            if set.contains(&track) {
+            let selected = if set.contains(&track) {
                 set.remove(&track);
                 if set.is_empty() {
                     set.insert(track);
@@ -4160,7 +4343,9 @@ pub(crate) fn init_runtime(
             } else {
                 set.insert(track);
                 true
-            }
+            };
+            arm_selected_tracks_delete_target(&set, &delete_target, &delete_target_version);
+            selected
         };
         ct.store(track, Ordering::Relaxed);
         Ok(Value::Bool(selected))
@@ -4705,314 +4890,13 @@ pub(crate) fn init_runtime(
         ))
     });
 
-    let st = state.clone();
-    runtime.register_native("seq-drum-lane-step-active?", move |args, _ctx| {
-        let (Some(Value::Number(track)), Some(Value::Number(pad_note)), Some(Value::Number(step))) =
-            (args.first(), args.get(1), args.get(2))
-        else {
-            return Err("seq-drum-lane-step-active?: expected (track pad-note step)".into());
-        };
-        Ok(Value::Bool(drum_lane_step_active(
-            &st,
-            *track as usize,
-            pad_note.round() as i32,
-            *step as usize,
-        )))
-    });
 
-    let drum_sel = selected_drum_lane_steps.clone();
-    runtime.register_native("seq-drum-lane-step-selected?", move |args, _ctx| {
-        let (Some(Value::Number(track)), Some(Value::Number(pad_note)), Some(Value::Number(step))) =
-            (args.first(), args.get(1), args.get(2))
-        else {
-            return Err("seq-drum-lane-step-selected?: expected (track pad-note step)".into());
-        };
-        Ok(Value::Bool(drum_sel.lock().unwrap().contains(
-            &DrumLaneStepSelection {
-                track: *track as usize,
-                pad_note: pad_note.round() as i32,
-                step: *step as usize,
-            },
-        )))
-    });
 
-    let drum_sel = selected_drum_lane_steps.clone();
-    runtime.register_native("seq-drum-lane-has-selection?", move |args, _ctx| {
-        let (Some(Value::Number(track)), Some(Value::Number(pad_note))) =
-            (args.first(), args.get(1))
-        else {
-            return Err("seq-drum-lane-has-selection?: expected (track pad-note)".into());
-        };
-        let track = *track as usize;
-        let pad_note = pad_note.round() as i32;
-        Ok(Value::Bool(drum_sel.lock().unwrap().iter().any(
-            |selection| selection.track == track && selection.pad_note == pad_note,
-        )))
-    });
 
-    let drum_sel = selected_drum_lane_steps.clone();
-    let normal_sel = selected_steps.clone();
-    let ct = current_track.clone();
-    let ui_inv = ui_invalidations.clone();
-    let bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-select-drum-lane-step", move |args, _ctx| {
-        let (Some(Value::Number(track)), Some(Value::Number(pad_note)), Some(Value::Number(step))) =
-            (args.first(), args.get(1), args.get(2))
-        else {
-            return Err("seq-select-drum-lane-step: expected (track pad-note step)".into());
-        };
-        let selection = DrumLaneStepSelection {
-            track: *track as usize,
-            pad_note: pad_note.round() as i32,
-            step: *step as usize,
-        };
-        if selection.step >= MAX_STEPS {
-            return Ok(Value::Bool(false));
-        }
-        let mut set = drum_sel.lock().unwrap();
-        let different_lane = set.iter().any(|selected| {
-            selected.track != selection.track || selected.pad_note != selection.pad_note
-        });
-        if different_lane {
-            clear_drum_lane_selection(&bindings, &mut set);
-        }
-        let selected = if set.insert(selection) {
-            true
-        } else {
-            set.remove(&selection);
-            false
-        };
-        write_drum_lane_selection(&bindings, selection, selected);
-        drop(set);
 
-        let mut normal = normal_sel.lock().unwrap();
-        if !normal.is_empty() {
-            let mut changed_steps = normal.drain().collect::<Vec<_>>();
-            changed_steps.sort_unstable();
-            drop(normal);
-            ui_inv.push(UiInvalidation::StepSelection {
-                track: ct.load(Ordering::Relaxed),
-                changed_steps,
-            });
-        }
-        Ok(Value::Bool(selected))
-    });
 
-    let st = state.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    let normal_sel = selected_steps.clone();
-    let ct = current_track.clone();
-    let ui_inv = ui_invalidations.clone();
-    let bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-select-drum-lane-step-range", move |args, _ctx| {
-        let (
-            Some(Value::Number(track)),
-            Some(Value::Number(pad_note)),
-            Some(Value::Number(a)),
-            Some(Value::Number(b)),
-        ) = (args.first(), args.get(1), args.get(2), args.get(3))
-        else {
-            return Err(
-                "seq-select-drum-lane-step-range: expected (track pad-note start end)".into(),
-            );
-        };
-        let track = *track as usize;
-        if track >= st.active_track_count() {
-            return Ok(Value::Number(0.0));
-        }
-        let pad_note = pad_note.round() as i32;
-        let num_steps = st.pattern.track_params[track]
-            .get_num_steps()
-            .min(MAX_STEPS);
-        if num_steps == 0 {
-            return Ok(Value::Number(0.0));
-        }
-        let a = (*a as usize).min(num_steps - 1);
-        let b = (*b as usize).min(num_steps - 1);
-        let lo = a.min(b);
-        let hi = a.max(b);
-        let next = (lo..=hi)
-            .map(|step| DrumLaneStepSelection {
-                track,
-                pad_note,
-                step,
-            })
-            .collect::<HashSet<_>>();
-        let mut set = drum_sel.lock().unwrap();
-        for selection in set.difference(&next) {
-            write_drum_lane_selection(&bindings, *selection, false);
-        }
-        for selection in next.difference(&set) {
-            write_drum_lane_selection(&bindings, *selection, true);
-        }
-        *set = next;
-        drop(set);
 
-        let mut normal = normal_sel.lock().unwrap();
-        if !normal.is_empty() {
-            let mut changed_steps = normal.drain().collect::<Vec<_>>();
-            changed_steps.sort_unstable();
-            drop(normal);
-            ui_inv.push(UiInvalidation::StepSelection {
-                track: ct.load(Ordering::Relaxed),
-                changed_steps,
-            });
-        }
-        Ok(Value::Number((hi - lo + 1) as f64))
-    });
 
-    // seq-select-all-drum-rack-steps — Cmd+A selects the globally selected
-    // drum pad first, then expands to every occupied pad on the next press.
-    let st = state.clone();
-    let ct = current_track.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    let normal_sel = selected_steps.clone();
-    let ui_inv = ui_invalidations.clone();
-    let bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-select-all-drum-rack-steps", move |args, _ctx| {
-        let Some(Value::Number(selected_pad_note)) = args.first() else {
-            return Err("seq-select-all-drum-rack-steps: expected pad note".into());
-        };
-        let track = ct.load(Ordering::Relaxed);
-        let selected_pad_note = selected_pad_note.round() as i32;
-        let num_steps = st.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
-        let pad_notes = st
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(Option::as_ref)
-            .filter(|rack| rack.routing == sequencer::sequencer::RackRouting::ByPitch)
-            .map(|rack| {
-                let mut pad_notes = rack
-                    .slots
-                    .iter()
-                    .filter_map(|slot| slot.pad_note)
-                    .collect::<Vec<_>>();
-                pad_notes.sort_unstable();
-                pad_notes.dedup();
-                pad_notes
-            })
-            .unwrap_or_default();
-        if num_steps == 0 || !pad_notes.contains(&selected_pad_note) {
-            return Ok(Value::Number(0.0));
-        }
-
-        let mut selected = drum_sel.lock().unwrap();
-        let next = drum_rack_select_all_target(
-            &selected,
-            track,
-            selected_pad_note,
-            &pad_notes,
-            num_steps,
-        );
-        for selection in selected.difference(&next) {
-            write_drum_lane_selection(&bindings, *selection, false);
-        }
-        for selection in next.difference(&selected) {
-            write_drum_lane_selection(&bindings, *selection, true);
-        }
-        *selected = next;
-        let count = selected.len();
-        drop(selected);
-
-        // The selected-cell values are binding-backed, but still notify the
-        // normal selection invalidation path so retained sequencer layouts
-        // redraw immediately just as they do after a drag selection.
-        ui_inv.push(UiInvalidation::StepSelection {
-            track,
-            changed_steps: (0..num_steps).collect(),
-        });
-
-        let mut normal = normal_sel.lock().unwrap();
-        if !normal.is_empty() {
-            normal.clear();
-        }
-        Ok(Value::Number(count as f64))
-    });
-
-    let drum_sel = selected_drum_lane_steps.clone();
-    let bindings = runtime.reactive_binding_store();
-    runtime.register_native("seq-clear-drum-lane-selection", move |_args, _ctx| {
-        clear_drum_lane_selection(&bindings, &mut drum_sel.lock().unwrap());
-        Ok(Value::Nil)
-    });
-
-    let st = state.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    runtime.register_native("seq-move-drum-lane-step-drag", move |args, ctx| {
-        let (
-            Some(Value::Number(track)),
-            Some(Value::Number(pad_note)),
-            Some(Value::Number(start)),
-            Some(Value::Number(target)),
-        ) = (args.first(), args.get(1), args.get(2), args.get(3))
-        else {
-            return Err(
-                "seq-move-drum-lane-step-drag: expected (track pad-note start target)".into(),
-            );
-        };
-        let track = *track as usize;
-        let pad_note = pad_note.round() as i32;
-        let start = *start as usize;
-        let target = *target as usize;
-        if track >= st.active_track_count() || start == target {
-            return Ok(Value::Bool(false));
-        }
-        let num_steps = st.pattern.track_params[track]
-            .get_num_steps()
-            .min(MAX_STEPS);
-        if start >= num_steps || target >= num_steps {
-            return Ok(Value::Bool(false));
-        }
-        let delta = target as isize - start as isize;
-        let clicked = DrumLaneStepSelection {
-            track,
-            pad_note,
-            step: start,
-        };
-        let (steps, move_selection) = {
-            let set = drum_sel.lock().unwrap();
-            if set.contains(&clicked) {
-                let mut steps = set
-                    .iter()
-                    .filter(|selection| selection.track == track && selection.pad_note == pad_note)
-                    .map(|selection| selection.step)
-                    .collect::<Vec<_>>();
-                steps.sort_unstable();
-                (steps, true)
-            } else {
-                (vec![start], false)
-            }
-        };
-        let new_steps = steps
-            .iter()
-            .map(|step| *step as isize + delta)
-            .collect::<Vec<_>>();
-        if new_steps
-            .iter()
-            .any(|step| *step < 0 || *step >= num_steps as isize)
-        {
-            return Ok(Value::Bool(false));
-        }
-        let step_values = steps
-            .iter()
-            .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
-            .collect();
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("move".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
-        payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
-        payload.insert("delta".to_string(), Rc::new(RefCell::new(Value::Number(delta as f64))));
-        payload.insert("move-selection".to_string(), Rc::new(RefCell::new(Value::Bool(move_selection))));
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "drum-lane-history-action".to_string(),
-            payload: Value::Map(payload),
-        });
-        Ok(Value::Bool(true))
-    });
 
     // ── Selection natives ──
 
@@ -5020,8 +4904,6 @@ pub(crate) fn init_runtime(
     let sel = selected_steps.clone();
     let ct = current_track.clone();
     let ui_inv = ui_invalidations.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-select-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-select-step: expected step number".into());
@@ -5032,7 +4914,6 @@ pub(crate) fn init_runtime(
         if was_selected {
             set.remove(&step);
         }
-        clear_drum_lane_selection(&drum_selection_bindings, &mut drum_sel.lock().unwrap());
         ui_inv.push(UiInvalidation::StepSelection {
             track: ct.load(Ordering::Relaxed),
             changed_steps: vec![step],
@@ -5045,8 +4926,6 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_inv = ui_invalidations.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-select-step-range", move |args, _ctx| {
         let (Some(Value::Number(a)), Some(Value::Number(b))) = (args.first(), args.get(1)) else {
             return Err("seq-select-step-range: expected start and end steps".into());
@@ -5060,7 +4939,6 @@ pub(crate) fn init_runtime(
         let b = (*b as usize).min(num_steps - 1);
         let lo = a.min(b);
         let hi = a.max(b);
-        clear_drum_lane_selection(&drum_selection_bindings, &mut drum_sel.lock().unwrap());
         let len = hi - lo + 1;
         let mut set = sel.lock().unwrap();
         if set.len() == len && (lo..=hi).all(|step| set.contains(&step)) {
@@ -5085,16 +4963,11 @@ pub(crate) fn init_runtime(
     let sel = selected_steps.clone();
     let ct = current_track.clone();
     let ui_inv = ui_invalidations.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
-    let drum_selection_bindings = runtime.reactive_binding_store();
     runtime.register_native("seq-clear-selection", move |_args, _ctx| {
         let mut selected = sel.lock().unwrap();
-        let mut drum_selected = drum_sel.lock().unwrap();
-        if selected.is_empty() && drum_selected.is_empty() {
+        if selected.is_empty() {
             return Ok(Value::Nil);
         }
-        clear_drum_lane_selection(&drum_selection_bindings, &mut drum_selected);
-        drop(drum_selected);
         let mut changed_steps = selected.drain().collect::<Vec<_>>();
         changed_steps.sort_unstable();
         drop(selected);
@@ -5107,11 +4980,8 @@ pub(crate) fn init_runtime(
 
     // seq-has-selection?
     let sel = selected_steps.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
     runtime.register_native("seq-has-selection?", move |_args, _ctx| {
-        Ok(Value::Bool(
-            !sel.lock().unwrap().is_empty() || !drum_sel.lock().unwrap().is_empty(),
-        ))
+        Ok(Value::Bool(!sel.lock().unwrap().is_empty()))
     });
 
     let sel = selected_steps.clone();
@@ -5161,41 +5031,7 @@ pub(crate) fn init_runtime(
     // seq-delete-selected-steps — clear all selected steps and clear selection
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
     runtime.register_native("seq-delete-selected-steps", move |_args, ctx| {
-        let drum_steps = {
-            let selected = drum_sel.lock().unwrap();
-            if selected.is_empty() {
-                None
-            } else {
-                let first = *selected.iter().next().unwrap();
-                let mut steps = selected
-                    .iter()
-                    .filter(|selection| {
-                        selection.track == first.track && selection.pad_note == first.pad_note
-                    })
-                    .map(|selection| selection.step)
-                    .collect::<Vec<_>>();
-                steps.sort_unstable();
-                Some((first.track, first.pad_note, steps))
-            }
-        };
-        if let Some((track, pad_note, steps)) = drum_steps {
-            let step_values = steps
-                .iter()
-                .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
-                .collect();
-            let mut payload = HashMap::new();
-            payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("clear".to_string()))));
-            payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-            payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
-            payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "drum-lane-history-action".to_string(),
-                payload: Value::Map(payload),
-            });
-            return Ok(Value::Number(steps.len() as f64));
-        }
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
             let set = sel.lock().unwrap();
@@ -5281,7 +5117,6 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let drum_sel = selected_drum_lane_steps.clone();
     runtime.register_native("seq-shift-selected-steps", move |args, ctx| {
         let Some(Value::Number(direction)) = args.first() else {
             return Err("seq-shift-selected-steps: expected direction".into());
@@ -5291,51 +5126,6 @@ pub(crate) fn init_runtime(
             return Ok(Value::Nil);
         }
         let delta = direction.signum();
-        let drum_selection = {
-            let set = drum_sel.lock().unwrap();
-            set.iter().next().copied().map(|first| {
-                let mut steps = set
-                    .iter()
-                    .filter(|selection| {
-                        selection.track == first.track && selection.pad_note == first.pad_note
-                    })
-                    .map(|selection| selection.step)
-                    .collect::<Vec<_>>();
-                steps.sort_unstable();
-                (first.track, first.pad_note, steps)
-            })
-        };
-        if let Some((track, pad_note, steps)) = drum_selection {
-            let num_steps = st.pattern.track_params[track]
-                .get_num_steps()
-                .min(MAX_STEPS);
-            let can_shift = if delta < 0 {
-                steps.first().is_some_and(|step| *step > 0)
-            } else {
-                steps
-                    .last()
-                    .is_some_and(|step| step.saturating_add(1) < num_steps)
-            };
-            if !can_shift {
-                return Ok(Value::Bool(false));
-            }
-            let step_values = steps
-                .iter()
-                .map(|step| Rc::new(RefCell::new(Value::Number(*step as f64))))
-                .collect();
-            let mut payload = HashMap::new();
-            payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("move".to_string()))));
-            payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-            payload.insert("pad-note".to_string(), Rc::new(RefCell::new(Value::Number(pad_note as f64))));
-            payload.insert("steps".to_string(), Rc::new(RefCell::new(Value::List(step_values))));
-            payload.insert("delta".to_string(), Rc::new(RefCell::new(Value::Number(delta as f64))));
-            payload.insert("move-selection".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "drum-lane-history-action".to_string(),
-                payload: Value::Map(payload),
-            });
-            return Ok(Value::Bool(true));
-        }
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
             let set = sel.lock().unwrap();
@@ -6058,6 +5848,44 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(new_len as f64))
     });
 
+    // Rack headers select their backing bus. The host resolves that stable bus
+    // to a rack group and applies the operation to all real member tracks.
+    runtime.register_native("seq-resize-drum-rack-patterns", move |args, ctx| {
+        let Some(Value::Number(bus)) = args.first() else {
+            return Err("seq-resize-drum-rack-patterns: expected bus index".into());
+        };
+        if *bus < 0.0 {
+            return Err(
+                "seq-resize-drum-rack-patterns: bus index must be non-negative".into(),
+            );
+        }
+        let operation = match args.get(1) {
+            Some(Value::Keyword(operation))
+            | Some(Value::String(operation))
+            | Some(Value::Symbol(operation))
+                if operation == "double" || operation == "halve" => operation.clone(),
+            _ => {
+                return Err(
+                    "seq-resize-drum-rack-patterns: expected :double or :halve".into(),
+                )
+            }
+        };
+        let mut payload = HashMap::new();
+        payload.insert(
+            "bus".to_string(),
+            Rc::new(RefCell::new(Value::Number(*bus))),
+        );
+        payload.insert(
+            "op".to_string(),
+            Rc::new(RefCell::new(Value::Keyword(operation))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "resize-drum-rack-patterns".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Bool(true))
+    });
+
     let ct = current_track.clone();
     runtime.register_native(
         "seq-propagate-current-track-to-all-patterns",
@@ -6244,23 +6072,65 @@ pub(crate) fn init_runtime(
 
     // seq-toggle-record-arm — toggle record arm for a given track index
     let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-record-arm", move |args, _ctx| {
         let Some(Value::Number(track_idx)) = args.first() else {
             return Err("seq-toggle-record-arm: expected track index".into());
         };
         let track = *track_idx as usize;
-        let mut armed = ra.lock().unwrap();
-        if track < armed.len() {
-            armed[track] = !armed[track];
+        let armed = toggle_track_record_arm(
+            &mut ra.lock().unwrap(),
+            &mut ar.lock().unwrap(),
+            &groups_state.lock().unwrap(),
+            track,
+        );
+        match armed {
             // Disarming the last track no longer stops recording: record
             // mode stands on its own now (arrangement capture needs no
             // armed track).
-            ui_ep.fetch_add(1, Ordering::Relaxed);
-            Ok(Value::Bool(armed[track]))
-        } else {
-            Ok(Value::Bool(false))
+            Some(armed) => {
+                ui_ep.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Bool(armed))
+            }
+            None => Ok(Value::Bool(false)),
         }
+    });
+
+    // seq-toggle-rack-arm — (seq-toggle-rack-arm group-id)
+    // Arms a drum rack for pad play: the live keyboard stops playing tracks
+    // chromatically and starts hitting this kit's pads. Only one rack is armed
+    // at a time, and arming it disarms its own member tracks so a member never
+    // answers a key both as a pad and chromatically.
+    let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-rack-arm", move |args, _ctx| {
+        let Some(Value::Number(group_id)) = args.first() else {
+            return Err("seq-toggle-rack-arm: expected group id".into());
+        };
+        let group_id = *group_id as u64;
+        let members = {
+            let groups = groups_state.lock().unwrap();
+            match groups
+                .iter()
+                .find(|group| group.id == group_id && group.is_rack())
+            {
+                Some(group) => group.members.clone(),
+                None => {
+                    return Err(format!("seq-toggle-rack-arm: rack {group_id} not found").into());
+                }
+            }
+        };
+        // Lock order matches `seq-toggle-record-arm`: record arms, then the
+        // rack arm.
+        let mut track_armed = ra.lock().unwrap();
+        let mut rack = ar.lock().unwrap();
+        let armed = toggle_rack_pad_arm(&mut rack, &mut track_armed, &members, group_id);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(armed))
     });
 
     let sample_db = Rc::new(
@@ -6423,7 +6293,6 @@ pub(crate) fn init_runtime(
         midi_fx_names,
         sample_browser,
         piano_roll_clipboard: piano_clipboard,
-        selected_drum_lane_steps,
     }
 }
 
@@ -7469,6 +7338,317 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn track_selection_natives_replace_selection_atomically() {
+        let state = Arc::new(SequencerState::new(7, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::from([0, 6])));
+        let delete_target = Arc::new(Mutex::new(None));
+        let delete_target_version = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::new();
+        register_track_selection_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::clone(&current_track),
+            Arc::clone(&selected_tracks),
+            Arc::clone(&delete_target),
+            Arc::clone(&delete_target_version),
+        );
+
+        runtime
+            .eval_str("(seq-select-track-range 2 6)")
+            .expect("select forward track range");
+        assert_eq!(
+            *selected_tracks.lock().unwrap(),
+            HashSet::from([2, 3, 4, 5, 6])
+        );
+        assert_eq!(current_track.load(Ordering::Relaxed), 6);
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks {
+                tracks: vec![2, 3, 4, 5, 6],
+            })
+        );
+
+        runtime
+            .eval_str("(seq-select-track-range 6 2)")
+            .expect("select reverse track range");
+        assert_eq!(
+            *selected_tracks.lock().unwrap(),
+            HashSet::from([2, 3, 4, 5, 6])
+        );
+        assert_eq!(current_track.load(Ordering::Relaxed), 2);
+
+        let _ = runtime.eval_str("(seq-select-track-range 2 7)");
+        assert_eq!(
+            *selected_tracks.lock().unwrap(),
+            HashSet::from([2, 3, 4, 5, 6]),
+            "an invalid range must not partially mutate selection"
+        );
+
+        runtime
+            .eval_str("(seq-select-tracks (list 1 6 3) 6)")
+            .expect("select explicit visual range");
+        assert_eq!(*selected_tracks.lock().unwrap(), HashSet::from([1, 3, 6]));
+        assert_eq!(current_track.load(Ordering::Relaxed), 6);
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks {
+                tracks: vec![1, 3, 6],
+            })
+        );
+
+        for invalid in [
+            "(seq-select-tracks (list 1 1 3) 1)",
+            "(seq-select-tracks (list 1 7 3) 1)",
+            "(seq-select-tracks (list 1 3) 6)",
+        ] {
+            let _ = runtime.eval_str(invalid);
+            assert_eq!(
+                *selected_tracks.lock().unwrap(),
+                HashSet::from([1, 3, 6]),
+                "an invalid explicit selection must not partially mutate selection"
+            );
+        }
+    }
+
+    /// Drum rack v2 slice 3 (`docs/drum-rack-v2-spec.md`, "Arming & live
+    /// play"): the rack header is one more armable target, exclusive with its
+    /// own members.
+    fn arm_test_rack() -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.5, 0.5, 0.5],
+            collapsed: false,
+            members: vec![1, 2],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn arming_a_rack_disarms_its_members_and_only_one_rack_at_a_time() {
+        let groups = [arm_test_rack()];
+        let mut record_armed = vec![true, true, false, true];
+        let mut armed_rack = None;
+
+        assert!(toggle_rack_pad_arm(
+            &mut armed_rack,
+            &mut record_armed,
+            &groups[0].members,
+            7
+        ));
+        assert_eq!(armed_rack, Some(7));
+        assert_eq!(
+            record_armed,
+            vec![true, false, false, true],
+            "arming the rack disarms its members, and only its members"
+        );
+
+        // A second rack takes the keyboard from the first.
+        assert!(toggle_rack_pad_arm(&mut armed_rack, &mut record_armed, &[3], 9));
+        assert_eq!(armed_rack, Some(9));
+        assert_eq!(record_armed, vec![true, false, false, false]);
+
+        // Toggling the armed rack again disarms it outright.
+        assert!(!toggle_rack_pad_arm(
+            &mut armed_rack,
+            &mut record_armed,
+            &[3],
+            9
+        ));
+        assert_eq!(armed_rack, None);
+    }
+
+    #[test]
+    fn arming_a_member_track_disarms_the_rack_but_a_loose_track_does_not() {
+        let groups = [arm_test_rack()];
+        let mut record_armed = vec![false; 4];
+        let mut armed_rack = Some(7);
+
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 3),
+            Some(true)
+        );
+        assert_eq!(
+            armed_rack,
+            Some(7),
+            "arming a track outside the rack leaves pad play alone"
+        );
+
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 2),
+            Some(true)
+        );
+        assert_eq!(
+            armed_rack, None,
+            "arming a member hands the keyboard back to chromatic play"
+        );
+
+        // Disarming never re-arms the rack.
+        armed_rack = Some(7);
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 2),
+            Some(false)
+        );
+        assert_eq!(armed_rack, Some(7));
+        assert_eq!(
+            toggle_track_record_arm(&mut record_armed, &mut armed_rack, &groups, 9),
+            None,
+            "an out-of-range track toggles nothing"
+        );
+    }
+
+    /// A plain (non-rack) group with the same id shape as `arm_test_rack`,
+    /// for the ungroup/convert-away cases and for id recycling.
+    fn plain_test_group(id: u64) -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            rack: None,
+            id,
+            ..arm_test_rack()
+        }
+    }
+
+    fn shared_group_state(
+        armed_rack: Option<u64>,
+        target: Option<ActiveDeleteTarget>,
+    ) -> (
+        Arc<Mutex<Option<u64>>>,
+        Arc<Mutex<Option<ActiveDeleteTarget>>>,
+        Arc<AtomicUsize>,
+    ) {
+        (
+            Arc::new(Mutex::new(armed_rack)),
+            Arc::new(Mutex::new(target)),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    /// Group ids are recycled (`max(id) + 1`), so an arm left behind by a
+    /// deleted rack does not merely dangle — the next group created inherits
+    /// the id and would come up pad-armed, swallowing the bare-key sequencer
+    /// shortcuts.
+    #[test]
+    fn deleting_an_armed_rack_clears_the_arm_so_a_recycled_id_is_not_armed() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(Some(7), None);
+
+        // The rack is deleted: no group carries id 7 any more.
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[],
+        );
+        assert_eq!(*armed_rack.lock().unwrap(), None);
+
+        // A brand-new group recycles id 7 and must not inherit the arm.
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[plain_test_group(7)],
+        );
+        assert_eq!(
+            *armed_rack.lock().unwrap(),
+            None,
+            "a recycled group id must not revive a dead rack's pad arm"
+        );
+    }
+
+    /// Ungroup and convert-to-plain leave the id alive but no longer a rack;
+    /// pad routing has nothing to answer with, so the arm must go too.
+    #[test]
+    fn an_armed_group_that_stops_being_a_rack_is_disarmed() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(Some(7), None);
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[arm_test_rack()],
+        );
+        assert_eq!(
+            *armed_rack.lock().unwrap(),
+            Some(7),
+            "a live rack keeps its arm across unrelated topology edits"
+        );
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[plain_test_group(7)],
+        );
+        assert_eq!(*armed_rack.lock().unwrap(), None);
+    }
+
+    /// Same recycling hazard on the delete target: a stale group id turns one
+    /// stray Delete into the destruction of a brand-new, unrelated group.
+    #[test]
+    fn deleting_the_targeted_group_clears_the_delete_target() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(None, Some(ActiveDeleteTarget::MixerGroup { group_id: 7 }));
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[arm_test_rack()],
+        );
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerGroup { group_id: 7 }),
+            "a live group keeps its delete target"
+        );
+        assert_eq!(delete_target_version.load(Ordering::Relaxed), 0);
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[],
+        );
+        assert_eq!(*delete_target.lock().unwrap(), None);
+        assert_eq!(
+            delete_target_version.load(Ordering::Relaxed),
+            1,
+            "clearing the target must republish the delete-target read surfaces"
+        );
+
+        // Recycling id 7 onto a new group must not re-aim Delete at it.
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[plain_test_group(7)],
+        );
+        assert_eq!(*delete_target.lock().unwrap(), None);
+    }
+
+    /// Track-addressed delete targets are reindexed on their own paths; a
+    /// group edit must not clear them out from under the mixer.
+    #[test]
+    fn group_pruning_leaves_track_addressed_delete_targets_alone() {
+        let (armed_rack, delete_target, delete_target_version) =
+            shared_group_state(None, Some(ActiveDeleteTarget::MixerTracks { tracks: vec![1, 2] }));
+
+        prune_stale_group_references(
+            &armed_rack,
+            &delete_target,
+            &delete_target_version,
+            &[],
+        );
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks { tracks: vec![1, 2] })
+        );
+        assert_eq!(delete_target_version.load(Ordering::Relaxed), 0);
+    }
+
     fn def_song_value_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> f64 {
         match &*map.get(key).expect(key).borrow() {
             Value::Number(value) => *value,
@@ -7628,41 +7808,6 @@ mod tests {
         assert!(matches!(steps, Value::List(values) if values.len() == 2));
         let updates = payload.get("updates").unwrap().borrow().clone();
         assert!(matches!(updates, Value::List(values) if values.len() == 2));
-    }
-
-    #[test]
-    fn drum_rack_select_all_progresses_from_selected_lane_to_all_lanes() {
-        let selected = HashSet::new();
-        let selected_pad = 12;
-        let pad_notes = [0, 12, 19];
-
-        let selected_lane =
-            drum_rack_select_all_target(&selected, 0, selected_pad, &pad_notes, 4);
-        assert_eq!(selected_lane.len(), 4);
-        assert!(selected_lane.iter().all(|selection| selection.pad_note == 12));
-
-        let all_lanes =
-            drum_rack_select_all_target(&selected_lane, 0, selected_pad, &pad_notes, 4);
-        assert_eq!(all_lanes.len(), 12);
-        for pad_note in pad_notes {
-            assert_eq!(
-                all_lanes
-                    .iter()
-                    .filter(|selection| selection.pad_note == pad_note)
-                    .count(),
-                4,
-                "second Cmd+A should select every step on pad {pad_note}"
-            );
-        }
-
-        let partial = HashSet::from([DrumLaneStepSelection {
-            track: 0,
-            pad_note: 19,
-            step: 0,
-        }]);
-        let reset_to_selected_lane =
-            drum_rack_select_all_target(&partial, 0, selected_pad, &pad_notes, 4);
-        assert_eq!(reset_to_selected_lane, selected_lane);
     }
 
     fn map_bool(value: &Value, key: &str) -> bool {

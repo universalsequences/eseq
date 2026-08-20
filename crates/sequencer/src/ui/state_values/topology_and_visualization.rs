@@ -70,9 +70,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-durations", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-auxas", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-transposes", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
+            rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-process-lanes", Value::List(vec![]));

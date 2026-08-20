@@ -621,7 +621,6 @@ mod tests {
     fn rack_macro_plock_defines_a_colored_variant_key() {
         let state = SequencerState::new(1, vec![]);
         let mut rack = crate::sequencer::RackTrackSnapshot::new(
-            crate::sequencer::RackRouting::Broadcast,
             Vec::new(),
             crate::sequencer::default_rack_macros(),
         );

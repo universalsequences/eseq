@@ -42,6 +42,9 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "virtual-v-stack",
     "box",
     "modal",
+    "context-menu",
+    "menu-item",
+    "menu-separator",
     "grid",
     "responsive-grid",
     "image",
@@ -327,7 +330,10 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     let mut children = Vec::new();
     let mut i = 0;
 
-    if (widget_type == "label" || widget_type == "button" || widget_type == "badge")
+    if (widget_type == "label"
+        || widget_type == "button"
+        || widget_type == "badge"
+        || widget_type == "menu-item")
         && let Some(value) = args.first()
     {
         let text = match value {

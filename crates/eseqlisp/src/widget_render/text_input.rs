@@ -95,6 +95,30 @@ fn set_state(widget_id: u64, state: TextInputState) {
     }
 }
 
+/// Move a text-input's cursor/selection state to a new widget id. Used when a
+/// relayout reassigns the focused input's widget_id: the remapped node is the
+/// same logical widget, so the user's caret must survive the id change.
+pub(crate) fn transfer_state(old_widget_id: u64, new_widget_id: u64) {
+    if old_widget_id == new_widget_id {
+        return;
+    }
+    STATES.with(|s| {
+        let mut states = s.borrow_mut();
+        if let Some(state) = states.remove(&old_widget_id) {
+            states.insert(new_widget_id, state);
+        }
+    });
+}
+
+pub(crate) fn select_all(widget_id: u64, text: &str) {
+    let char_count = text.chars().count();
+    set_state(widget_id, TextInputState {
+        cursor_pos: char_count,
+        selection_anchor: (char_count > 0).then_some(0),
+        selecting: false,
+    });
+}
+
 pub(crate) fn selection_range(state: &TextInputState) -> Option<(usize, usize)> {
     let anchor = state.selection_anchor?;
     if anchor == state.cursor_pos {
@@ -348,7 +372,7 @@ fn read_system_clipboard() -> Result<String, String> {
         .map_err(|error| format!("clipboard did not contain UTF-8 text: {error}"))
 }
 
-fn get_text(props: &HashMap<String, Value>) -> String {
+pub(crate) fn get_text(props: &HashMap<String, Value>) -> String {
     match props.get("value") {
         Some(Value::String(s)) => s.clone(),
         _ => String::new(),
@@ -542,6 +566,32 @@ fn move_cursor_vertically(text: &str, cursor_pos: usize, max_chars: usize, delta
     (target_start + col).min(next_start)
 }
 
+/// Populate CHAR_WIDTH_CACHE for `text` at render time if the measure pass
+/// skipped it. In-place subtree layout reuse can re-render a text-input with a
+/// new value without re-measuring it (its :width-driven size is unchanged), so
+/// the caret/selection metrics cannot rely on measure()-side caching alone.
+/// Only render paths call this — they pass the real viewport cell width, which
+/// keeps cached widths consistent with measure-pass entries.
+#[cfg(target_os = "macos")]
+fn ensure_char_widths_cached_at_render(text: &str, font_size: f32, cell_w: f32) {
+    if text.is_empty() || cell_w <= 0.0 {
+        return;
+    }
+    let key = (font_size.to_bits(), text.to_string());
+    if CHAR_WIDTH_CACHE.with(|c| c.borrow().contains_key(&key)) {
+        return;
+    }
+    super::with_render_text_measurer(|measurer| {
+        let widths: Vec<f32> = text
+            .chars()
+            .map(|ch| measurer.measure_text_px(&ch.to_string(), font_size) / cell_w)
+            .collect();
+        CHAR_WIDTH_CACHE.with(|c| {
+            c.borrow_mut().insert(key, widths);
+        });
+    });
+}
+
 /// Sum per-character widths up to cursor_pos from cache. Falls back to approximation.
 #[cfg(target_os = "macos")]
 pub(crate) fn cursor_x_from_char_cache(
@@ -550,6 +600,7 @@ pub(crate) fn cursor_x_from_char_cache(
     cursor_pos: usize,
     cell_w: f32,
 ) -> f32 {
+    ensure_char_widths_cached_at_render(text, font_size, cell_w);
     CHAR_WIDTH_CACHE.with(|c| {
         let key = (font_size.to_bits(), text.to_string());
         if let Some(widths) = c.borrow().get(&key) {
@@ -568,6 +619,7 @@ fn text_range_width_from_char_cache(
     end: usize,
     cell_w: f32,
 ) -> f32 {
+    ensure_char_widths_cached_at_render(text, font_size, cell_w);
     CHAR_WIDTH_CACHE.with(|c| {
         let key = (font_size.to_bits(), text.to_string());
         if let Some(widths) = c.borrow().get(&key) {
@@ -715,6 +767,7 @@ impl WidgetDefinition for TextInputWidget {
         &[
             "value", "placeholder", "width", "height", "font-size", "text-color",
             "placeholder-color", "bg", "bg-color", "cursor-color", "ring-color", "on-change",
+            "on-submit", "on-cancel", "on-blur", "auto-focus", "select-all-on-focus",
         ]
     }
 
@@ -831,7 +884,15 @@ impl WidgetDefinition for TextInputWidget {
     }
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
-        text_entry_key_event(node, key, false, None)
+        match key.code {
+            KeyCode::Enter if node.props.contains_key("on-submit") => {
+                Some(WidgetEvent::Custom(Value::Keyword("submit".to_string())))
+            }
+            KeyCode::Esc if node.props.contains_key("on-cancel") => {
+                Some(WidgetEvent::Custom(Value::Keyword("cancel".to_string())))
+            }
+            _ => text_entry_key_event(node, key, false, None),
+        }
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
@@ -841,18 +902,18 @@ impl WidgetDefinition for TextInputWidget {
         if matches!(value, Value::Nil) {
             return None;
         }
-        let Value::String(new_text) = value else {
-            return None;
+        let (prop, args) = match value {
+            Value::String(new_text) => ("on-change", vec![Value::String(new_text.clone())]),
+            Value::Keyword(action) if action == "submit" => ("on-submit", Vec::new()),
+            Value::Keyword(action) if action == "cancel" => ("on-cancel", Vec::new()),
+            _ => return None,
         };
         let callback = node
             .props
-            .get("on-change")
+            .get(prop)
             .filter(|v| !matches!(v, Value::Nil | Value::Bool(false)))
             .cloned()?;
-        Some(EventOutput {
-            callback,
-            args: vec![Value::String(new_text.clone())],
-        })
+        Some(EventOutput { callback, args })
     }
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -1500,6 +1561,52 @@ impl WidgetDefinition for TextboxWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_all_on_focus_selects_the_full_unicode_value() {
+        let widget_id = u64::MAX - 41;
+        select_all(widget_id, "Aurora ✨");
+        let state = get_state(widget_id);
+        assert_eq!(state.cursor_pos, 8);
+        assert_eq!(selection_range(&state), Some((0, 8)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn render_pass_populates_char_cache_on_measure_miss() {
+        struct FixedMeasurer;
+        impl crate::layout::TextMeasurer for FixedMeasurer {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                text.chars().count() as f32 * font_size
+            }
+            fn line_height_px(&self, font_size: f32) -> f32 {
+                font_size
+            }
+        }
+        crate::widget_render::set_render_text_measurer(std::rc::Rc::new(FixedMeasurer));
+
+        // No measure() ran for this value (subtree layout reuse skips measure
+        // when the size is unchanged), so the render path must populate the
+        // cache itself instead of using the narrow 0.55*font_size fallback.
+        let text = "lush sound";
+        let font_size = 17.5;
+        let cell_w = 2.0;
+        let char_count = text.chars().count();
+        let expected_end = char_count as f32 * font_size / cell_w;
+
+        let cursor_x = cursor_x_from_char_cache(text, font_size, char_count, cell_w);
+        assert!(
+            (cursor_x - expected_end).abs() < 1e-4,
+            "caret must sit at the true end of text, got {cursor_x} expected {expected_end}"
+        );
+
+        // The select-all-on-focus highlight uses the same metrics source.
+        let sel_width = text_range_width_from_char_cache(text, font_size, 0, char_count, cell_w);
+        assert!(
+            (sel_width - expected_end).abs() < 1e-4,
+            "selection highlight must cover the full rendered text width"
+        );
+    }
 
     #[test]
     fn textbox_wraps_long_words_and_keeps_explicit_breaks() {

@@ -20,7 +20,6 @@
             instrument_type,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,
-            pad_note: None,
             choke_group: None,
             gain: 1.0,
             pan: 0.0,
@@ -47,7 +46,6 @@
 
     fn topology_test_rack() -> RackTrackSnapshot {
         RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![
                 topology_test_slot(InstrumentType::Sampler, None),
                 topology_test_slot(InstrumentType::Sampler, None),
@@ -78,13 +76,11 @@
         slot.solo = true;
         slot.max_polyphony = 1;
         slot.sample_id = Some((99, "other-kick".to_string(), 48_000));
-        slot.pad_note = Some(36);
         slot.choke_group = Some(2);
         assert!(slot
             .param_plocks
             .set(0, crate::sequencer::RackSlotParam::Gain, 0.75));
         second.macros[0].value = 0.8;
-        second.routing = RackRouting::ByPitch;
 
         assert_eq!(
             rack_topology_signature(&first),
@@ -105,7 +101,6 @@
         assert_changed(&slot_count);
 
         let mut slot_order = RackTrackSnapshot::new(
-            RackRouting::Broadcast,
             vec![
                 topology_test_slot(InstrumentType::Sampler, None),
                 topology_test_slot(InstrumentType::Custom, Some(7)),
@@ -351,8 +346,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -377,8 +371,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -478,6 +471,7 @@
                     .expect("old engine route should connect");
             }
             app.tracks.push(format!("Track {}", track + 1));
+            app.track_name_user_authored.push(false);
             app.track_registry
                 .allocate()
                 .expect("allocate fixture track id");
@@ -933,6 +927,63 @@
     }
 
     #[test]
+    fn rack_track_custom_name_survives_project_save_and_load() {
+        let graph = TestLiveGraph::new("rack-track-name-project-roundtrip-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_empty_layer_rack_track()
+            .expect("add rack track");
+        app.apply_recorded_track_name(0, "Aurora Layers")
+            .expect("rack rename should be recorded");
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let project_name = format!(
+            "__test-rack-track-name-roundtrip-{}-{nonce}",
+            std::process::id()
+        );
+        let project = app
+            .capture_project(&project_name)
+            .expect("rack project should capture");
+        assert_eq!(project.tracks[0].name.as_deref(), Some("Aurora Layers"));
+        assert!(project.tracks[0].name_user_authored);
+        let project_path = crate::project::save_project(&project_name, &project)
+            .expect("rack project should save");
+        let _cleanup = TestProjectFile(project_path);
+
+        app.queue_project_load_named(&project_name)
+            .expect("rack project should queue");
+        app.advance_pending_project_load()
+            .expect("existing project should clear");
+        app.advance_pending_project_load()
+            .expect("rack project track should load");
+
+        assert_eq!(app.tracks, vec!["Aurora Layers"]);
+        assert_eq!(app.track_name_user_authored, vec![true]);
+        app.editor.pending_project_load = None;
+
+        let legacy_project_name = format!("{project_name}-without-name");
+        let mut legacy_project = project;
+        legacy_project.tracks[0].name = None;
+        let legacy_project_path =
+            crate::project::save_project(&legacy_project_name, &legacy_project)
+                .expect("legacy rack project should save");
+        let _legacy_cleanup = TestProjectFile(legacy_project_path);
+        app.queue_project_load_named(&legacy_project_name)
+            .expect("legacy rack project should queue");
+        app.advance_pending_project_load()
+            .expect("named rack project should clear");
+        app.advance_pending_project_load()
+            .expect("legacy rack project track should load");
+
+        assert_eq!(app.tracks, vec!["Layer Rack"]);
+        app.editor.pending_project_load = None;
+        graph.process_block();
+    }
+
+    #[test]
     fn loading_arranged_project_over_another_clears_old_arrangement_before_tracks() {
         let graph = TestLiveGraph::new("arranged-project-reload-test");
         let mut app = test_app_with_track_count(&graph, 0);
@@ -1280,6 +1331,8 @@
             collapsed: false,
             members: vec![0, 1, 2],
             bus_id: crate::sequencer::DEFAULT_BUS_A_ID,
+            rack: None,
+            rack_members: Vec::new(),
         });
         let ids = app.track_registry.ids().to_vec();
 
@@ -1320,6 +1373,70 @@
         assert_eq!(app.tracks, ["First", "Last"]);
         assert_eq!(app.track_registry.ids(), &[ids[0], ids[2]]);
         graph.process_block();
+    }
+
+    #[test]
+    fn recorded_multi_track_deletion_is_descending_atomic_and_restores_group() {
+        let graph = TestLiveGraph::new("multi-track-deletion-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for _ in 0..4 {
+            app.graph_controller().add_blank_sampler_track()
+                .expect("seed sampler track");
+        }
+        app.tracks = vec![
+            "First".to_string(),
+            "Second".to_string(),
+            "Third".to_string(),
+            "Fourth".to_string(),
+        ];
+        app.state.pattern.patterns[1].set_step_active(5, true);
+        app.state.pattern.patterns[3].set_step_active(11, true);
+        app.add_builtin_effect_sync(3, "OTT").expect("track effect");
+        let bus = app.group_tracks_recorded(vec![1, 2, 3]).expect("plain group");
+        let group_id = app.groups.iter().find(|group| group.bus_id == bus.0)
+            .expect("created group").id;
+        let ids = app.track_registry.ids().to_vec();
+        let history_before = app.history.undo_len();
+
+        app.delete_tracks_recorded(vec![3, 1]).expect("delete selected tracks");
+        assert_eq!(app.tracks, ["First", "Third"]);
+        assert_eq!(app.track_registry.ids(), &[ids[0], ids[2]]);
+        assert!(app.groups.iter().all(|group| group.id != group_id));
+        assert_eq!(app.history.undo_len(), history_before + 1);
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks, ["First", "Second", "Third", "Fourth"]);
+        assert_eq!(app.track_registry.ids(), ids.as_slice());
+        assert!(app.state.pattern.patterns[1].is_active(5));
+        assert!(app.state.pattern.patterns[3].is_active(11));
+        assert_eq!(app.graph.effect_descriptors[3][0].name, "OTT");
+        assert_eq!(
+            app.groups.iter().find(|group| group.id == group_id)
+                .expect("group restored").members,
+            [1, 2, 3]
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_multi_track_deletion_refuses_every_track() {
+        let graph = TestLiveGraph::new("multi-track-last-track-guard-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for _ in 0..3 {
+            app.graph_controller().add_blank_sampler_track()
+                .expect("seed sampler track");
+        }
+        let ids = app.track_registry.ids().to_vec();
+        let history_before = app.history.undo_len();
+
+        let error = app.delete_tracks_recorded(vec![0, 1, 2])
+            .expect_err("deleting every track must be refused");
+        assert!(error.contains("Cannot delete all remaining tracks"));
+        assert_eq!(app.track_registry.ids(), ids.as_slice());
+        assert_eq!(app.history.undo_len(), history_before);
     }
 
     #[test]
@@ -1653,6 +1770,8 @@
             0
         );
 
+        app.apply_recorded_track_name(1, "Pinned Lead")
+            .expect("rename should be recorded");
         app.graph_controller()
             .swap_custom_track_instrument(
                 1,
@@ -1664,6 +1783,7 @@
             )
             .expect("second track should swap to the already materialized engine");
         assert_eq!(app.graph.track_engine_ids, vec![Some(1), Some(1)]);
+        assert_eq!(app.tracks[1], "Pinned Lead");
         assert!(
             app.graph.engine_node_ids[0].is_none(),
             "unreferenced old graph runtime should be collected"
@@ -1946,6 +2066,55 @@
                 .len(),
             2
         );
+        graph.process_block();
+    }
+
+    fn assert_published_epochs_are_live(app: &App, context: &str) {
+        let snapshot = app.state.latest_scheduler_snapshot();
+        assert_eq!(
+            snapshot.transport.pattern_epoch,
+            app.state.transport.pattern_epoch.load(Ordering::Relaxed),
+            "{context} published a stale pattern epoch; the audio callback drops every event stamped with it, silencing all tracks"
+        );
+        assert_eq!(
+            snapshot.transport.topology_epoch,
+            app.state.transport.topology_epoch.load(Ordering::Relaxed),
+            "{context} published a stale topology epoch"
+        );
+    }
+
+    #[test]
+    fn rack_slot_edits_publish_the_bumped_transport_epochs() {
+        let graph = TestLiveGraph::new("rack-slot-epoch-publish-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("one-slot rack should load");
+        app.apply_recorded_rack_slot_add(0, "Add rack sample", |app| {
+            app.graph_controller().add_sampler_slot_to_rack(0, sample)
+        })
+        .expect("second sampler slot should append");
+        assert_published_epochs_are_live(&app, "rack slot append");
+
+        // The drag-drop audition path: dropping a sample onto an occupied
+        // rack slot replaces that layer's source.
+        app.apply_recorded_rack_slot_source_replacement(
+            0,
+            1,
+            "Replace rack sample",
+            |app| {
+                app.graph_controller()
+                    .replace_rack_slot_with_sampler(0, 1, sample)
+            },
+        )
+        .expect("rack slot should take the dropped sample");
+        assert_published_epochs_are_live(&app, "rack slot sample replacement");
+
+        app.graph_controller()
+            .delete_rack_slot(0, 1)
+            .expect("rack slot should delete cleanly");
+        assert_published_epochs_are_live(&app, "rack slot delete");
         graph.process_block();
     }
 
@@ -2511,6 +2680,98 @@
             sound.rack.slots[0].custom_effects[0].as_deref(),
             Some("builtin:OTT")
         );
+        graph.process_block();
+    }
+
+    /// eseq-zck: a DGenLisp-hosted builtin (Filter Table) in a rack-slot
+    /// chain used to be saved under its bare name, indistinguishable from a
+    /// saved custom effect, so the preset failed to reload. Both builtin
+    /// families must round-trip, and a pre-fix file with the bare name must
+    /// still load.
+    #[test]
+    fn rack_preset_round_trips_dgen_hosted_builtins() {
+        let graph = TestLiveGraph::new("rack-preset-dgen-builtin-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        app.graph_controller()
+            .add_sampler_rack_track(&[sample.to_path_buf()])
+            .expect("rack sample should load");
+        app.add_builtin_rack_slot_effect_sync(0, 0, crate::effects::filter_table::NAME)
+            .expect("rack slot should accept Filter Table");
+        app.add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("rack slot should accept OTT");
+
+        let live = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("live rack state");
+        assert_eq!(
+            live.slots[0].custom_effect_names[0].as_deref(),
+            Some("builtin:Filter Table"),
+            "a DGenLisp builtin must be qualified in live rack-slot state"
+        );
+
+        let preset_name = format!("rack-dgen-builtin-test-{}", std::process::id());
+        let preset_path = app
+            .save_rack_preset(0, &preset_name, true)
+            .expect("rack preset should save");
+        let _preset_guard = TestProjectFile(preset_path);
+        let sound_path = app
+            .promote_preset_to_sound(0, &preset_name)
+            .expect("rack preset should promote to Sound");
+        let _sound_guard = TestProjectFile(sound_path.clone());
+        let sound = crate::project::load_sound_preset(&sound_path)
+            .expect("promoted Sound should be readable");
+        assert_eq!(
+            sound.rack.slots[0].custom_effects[0].as_deref(),
+            Some("builtin:Filter Table")
+        );
+        assert_eq!(
+            sound.rack.slots[0].custom_effects[1].as_deref(),
+            Some("builtin:OTT")
+        );
+        let live_params = live.slots[0].effect_slots[0].num_params;
+        assert_eq!(
+            sound.rack.slots[0].effect_slots[0].num_params, live_params,
+            "the saved param table must match the live descriptor"
+        );
+
+        app.delete_rack_slot_effect_slot(0, 0, 1)
+            .expect("live rack effect should be removable");
+        app.delete_rack_slot_effect_slot(0, 0, 0)
+            .expect("live rack effect should be removable");
+        app.load_rack_preset_onto_track(0, &preset_name)
+            .expect("rack preset should restore");
+        let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("restored rack state");
+        assert_eq!(
+            restored.slots[0].effect_descriptors[0].name,
+            crate::effects::filter_table::NAME
+        );
+        assert_eq!(restored.slots[0].effect_descriptors[1].name, "OTT");
+        assert_ne!(restored.slots[0].effect_slots[0].node_id, 0);
+        assert_ne!(restored.slots[0].effect_slots[1].node_id, 0);
+
+        // A file written before the fix stores the bare name; it must still
+        // resolve to the builtin rather than a missing custom effect.
+        let mut legacy = crate::project::load_rack_preset(&preset_name)
+            .expect("rack preset should be readable");
+        legacy.rack.slots[0].custom_effects[0] =
+            Some(crate::effects::filter_table::NAME.to_string());
+        let legacy_name = format!("{preset_name}-legacy");
+        let legacy_path =
+            crate::project::save_rack_preset(&legacy_name, &legacy).expect("legacy preset write");
+        let _legacy_guard = TestProjectFile(legacy_path);
+        app.load_rack_preset_onto_track(0, &legacy_name)
+            .expect("a pre-fix rack preset must still load");
+        let repaired = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("repaired rack state");
+        assert_eq!(
+            repaired.slots[0].effect_descriptors[0].name,
+            crate::effects::filter_table::NAME
+        );
+        assert_ne!(repaired.slots[0].effect_slots[0].node_id, 0);
         graph.process_block();
     }
 
@@ -3114,6 +3375,8 @@
             },
             track: crate::project::ProjectTrack {
                 id: crate::sequencer::TrackId(1),
+                name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3133,7 +3396,6 @@
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -3165,6 +3427,15 @@
         app.load_sound_onto_track(0, &sound_path)
             .expect("Sound should load onto the target track");
 
+        assert_eq!(app.tracks[0], "Test Rack Sound");
+        assert_eq!(
+            app.capture_project("__sound-track-name-capture__")
+                .expect("loaded Sound should capture")
+                .tracks[0]
+                .name
+                .as_deref(),
+            Some("Test Rack Sound")
+        );
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
         assert_eq!(
             app.state.pattern.effect_chains[0][track_fx_slot]
@@ -3236,6 +3507,8 @@
             },
             track: crate::project::ProjectTrack {
                 id: crate::sequencer::TrackId(1),
+                name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3255,7 +3528,6 @@
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
                     instrument_run_mode: crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -3353,6 +3625,8 @@
             },
             track: crate::project::ProjectTrack {
                 id: track_id,
+                name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: crate::project::ProjectTrackKind::Rack {
@@ -3373,7 +3647,6 @@
                     instrument_run_mode:
                         crate::project::ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,

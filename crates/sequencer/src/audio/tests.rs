@@ -9,12 +9,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{
-    apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
-    collect_rack_choke_group_voice_releases, for_each_custom_voice_route_update,
+    apply_rack_macros_at_step, clear_active_keyboard_note_by_lid,
+    collect_rack_choke_group_track_releases, collect_rack_choke_group_voice_releases,
+    for_each_custom_voice_route_update,
     free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
     instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
-    mute_group_winner_for_block_events, rack_slot_matches_routing,
-    rack_slot_playback_transpose, resolve_live_instrument_defaults,
+    mute_group_winner_for_block_events, resolve_live_instrument_defaults,
     resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
     resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
     select_output_channels, select_output_config, store_active_keyboard_note,
@@ -26,6 +26,7 @@ use super::{
     FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
+use crate::sequencer::MAX_TRACKS;
 use crate::analysis::{pack_ptr, OnsetTableShared};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
@@ -37,7 +38,7 @@ use crate::scheduled_event::{
 };
 use crate::sequencer::{
     default_rack_macros, CustomInstrumentRunMode, InstrumentType, RackMacroCurve,
-    RackMacroMapping, RackMacroTarget, RackRouting, RackSlotParam, RackSlotParamPlocks,
+    RackMacroMapping, RackMacroTarget, RackSlotParam, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
 };
 use super::{preview, VoicePool};
@@ -90,12 +91,11 @@ fn rack_effect_plock_resolution_requires_matching_parameter_identity() {
     assert_eq!(resolved_slot_param_value(&slot, 3, 1, default), default);
 }
 
-fn rack_routing_test_slot(pad_note: Option<i32>) -> RackSlotSnapshot {
+fn rack_routing_test_slot() -> RackSlotSnapshot {
     RackSlotSnapshot {
         instrument_type: InstrumentType::Sampler,
         instrument_run_mode: CustomInstrumentRunMode::Instrument,
         instrument_base_note_offset: 0.0,
-        pad_note,
         choke_group: None,
         gain: 1.0,
         pan: 0.0,
@@ -115,8 +115,7 @@ fn rack_routing_test_slot(pad_note: Option<i32>) -> RackSlotSnapshot {
 #[test]
 fn rack_macro_is_effective_default_beneath_target_plock() {
     let mut rack = RackTrackSnapshot::new(
-        RackRouting::Broadcast,
-        vec![rack_routing_test_slot(None)],
+        vec![rack_routing_test_slot()],
         default_rack_macros(),
     );
     rack.macros[0].value = 0.75;
@@ -148,8 +147,7 @@ fn rack_macro_is_effective_default_beneath_target_plock() {
 fn published_rack_snapshot_observes_live_macro_defaults_and_plocks() {
     let state = SequencerState::new(1, vec![Vec::new()]);
     let mut rack = RackTrackSnapshot::new(
-        RackRouting::Broadcast,
-        vec![rack_routing_test_slot(None)],
+        vec![rack_routing_test_slot()],
         default_rack_macros(),
     );
     rack.macros[0].mappings.push(RackMacroMapping {
@@ -357,51 +355,12 @@ fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
 }
 
 #[test]
-fn rack_by_pitch_matches_only_the_selected_pad_and_plays_fixed_slot_pitch() {
-    let c1_slot = rack_routing_test_slot(Some(0));
-    let d1_slot = rack_routing_test_slot(Some(2));
-    let unmapped_slot = rack_routing_test_slot(None);
-
-    assert!(rack_slot_matches_routing(
-        &c1_slot,
-        RackRouting::Broadcast,
-        9.0
-    ));
-    assert!(rack_slot_matches_routing(
-        &c1_slot,
-        RackRouting::ByPitch,
-        0.0
-    ));
-    assert!(rack_slot_matches_routing(
-        &d1_slot,
-        RackRouting::ByPitch,
-        2.0
-    ));
-    assert!(!rack_slot_matches_routing(
-        &c1_slot,
-        RackRouting::ByPitch,
-        2.0
-    ));
-    assert!(!rack_slot_matches_routing(
-        &unmapped_slot,
-        RackRouting::ByPitch,
-        0.0
-    ));
-
-    assert_eq!(
-        rack_slot_playback_transpose(RackRouting::Broadcast, 7.0),
-        7.0
-    );
-    assert_eq!(rack_slot_playback_transpose(RackRouting::ByPitch, 7.0), 0.0);
-}
-
-#[test]
 fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
-    let mut released_sampler = rack_routing_test_slot(Some(0));
+    let mut released_sampler = rack_routing_test_slot();
     released_sampler.choke_group = Some(2);
-    let mut triggering_sampler = rack_routing_test_slot(Some(1));
+    let mut triggering_sampler = rack_routing_test_slot();
     triggering_sampler.choke_group = Some(2);
-    let mut unrelated_sampler = rack_routing_test_slot(Some(2));
+    let mut unrelated_sampler = rack_routing_test_slot();
     unrelated_sampler.choke_group = Some(3);
 
     let released_pool_id = crate::sequencer::rack_slot_pool_index(0, 0).unwrap();
@@ -437,7 +396,6 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     voice_pools[unrelated_pool_id].voices[0].active = true;
 
     let sampler_rack = RackTrackSnapshot::new(
-        RackRouting::ByPitch,
         vec![released_sampler, triggering_sampler, unrelated_sampler],
         crate::sequencer::default_rack_macros(),
     );
@@ -475,15 +433,15 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         "unrelated sampler gate-off block event should remain"
     );
 
-    let mut released_custom = rack_routing_test_slot(Some(3));
+    let mut released_custom = rack_routing_test_slot();
     released_custom.instrument_type = InstrumentType::Custom;
     released_custom.choke_group = Some(7);
     released_custom.track_sound_state.engine_id = Some(4);
-    let mut triggering_custom = rack_routing_test_slot(Some(4));
+    let mut triggering_custom = rack_routing_test_slot();
     triggering_custom.instrument_type = InstrumentType::Custom;
     triggering_custom.choke_group = Some(7);
     triggering_custom.track_sound_state.engine_id = Some(5);
-    let mut unrelated_custom = rack_routing_test_slot(Some(5));
+    let mut unrelated_custom = rack_routing_test_slot();
     unrelated_custom.instrument_type = InstrumentType::Custom;
     unrelated_custom.choke_group = Some(8);
     unrelated_custom.track_sound_state.engine_id = Some(6);
@@ -525,7 +483,6 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     });
 
     let custom_rack = RackTrackSnapshot::new(
-        RackRouting::ByPitch,
         vec![released_custom, triggering_custom, unrelated_custom],
         crate::sequencer::default_rack_macros(),
     );
@@ -566,6 +523,227 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         block_events.len(),
         2,
         "unrelated sampler and custom gate-off block events should remain"
+    );
+}
+
+/// Drum rack v2 choke: pads are member tracks, so a hit on one pad releases
+/// the sounding voices of the other member tracks in its choke group and
+/// nothing else (docs/drum-rack-v2-spec.md, "Trigger routing").
+#[test]
+fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
+    // Track 0 (sampler) and track 1 (custom) share rack 3's choke group 1;
+    // track 2 sits in the same rack with no choke; track 3 is another rack's
+    // choke group 1 — same group number, different rack.
+    let state = SequencerState::new(
+        4,
+        (0..4).map(|_| crate::sequencer::default_empty_effect_chain()).collect(),
+    );
+    let key = crate::sequencer::rack_choke_key(3, 1);
+    state.runtime.rack_choke_keys[0].store(key, Ordering::Release);
+    state.runtime.rack_choke_keys[1].store(key, Ordering::Release);
+    state.runtime.rack_choke_keys[2].store(0, Ordering::Release);
+    state.runtime.rack_choke_keys[3].store(
+        crate::sequencer::rack_choke_key(4, 1),
+        Ordering::Release,
+    );
+    for track in [0usize, 2, 3] {
+        state.runtime.instrument_type_flags[track]
+            .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+    }
+    state.runtime.instrument_type_flags[1]
+        .store(InstrumentType::Custom.runtime_flag(), Ordering::Relaxed);
+    state.runtime.track_engine_ids[1].store(2, Ordering::Relaxed);
+
+    let mut voice_pools: Vec<VoicePool> = (0..4).map(|_| VoicePool::new()).collect();
+    let mut custom_engine_pools: Vec<CustomEnginePool> =
+        (0..3).map(|_| CustomEnginePool::new()).collect();
+    for (track, lid) in [(0usize, 10u64), (2, 30), (3, 40)] {
+        voice_pools[track].add_voice(lid, 100 + track as i32);
+        voice_pools[track].voices[0].active = true;
+    }
+    custom_engine_pools[2].add_voice(20);
+    custom_engine_pools[2].voices[0].active = true;
+    custom_engine_pools[2].voices[0].assigned_track = Some(1);
+
+    let mut countdown_events = vec![CountdownEvent {
+        remaining_samples: 32.0,
+        period_samples: 0.0,
+        repeats: 0,
+        pattern_epoch: 0,
+        seq: 0,
+        kind: CountdownEventKind::GateOff(GateOffEvent {
+            track_idx: 0,
+            logical_id: 10,
+            target: GateOffTarget::Sampler { gatepitch_id: 0 },
+        }),
+    }];
+    let mut block_events = vec![BlockEvent {
+        frame_offset: 4,
+        seq: 1,
+        kind: BlockEventKind::GateOff(GateOffEvent {
+            track_idx: 3,
+            logical_id: 40,
+            target: GateOffTarget::Sampler { gatepitch_id: 0 },
+        }),
+    }];
+
+    // Track 1 triggers: it chokes track 0 and nothing else.
+    let mut active_keyboard_notes = active_keyboard_notes_fixture();
+    let mut note_offs = Vec::new();
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &mut active_keyboard_notes,
+        &[u64::MAX; MAX_TRACKS],
+        1,
+        1_000,
+        &mut note_offs,
+    );
+
+    assert!(
+        !voice_pools[0].voices[0].active,
+        "the other member track in the choke group should be released"
+    );
+    assert!(
+        custom_engine_pools[2].voices[0].active,
+        "the triggering track's own voice must survive its own choke"
+    );
+    assert!(
+        voice_pools[2].voices[0].active,
+        "a member track with no choke group is never choked"
+    );
+    assert!(
+        voice_pools[3].voices[0].active,
+        "choke group 1 of another rack is a different group"
+    );
+    assert_eq!(note_offs, vec![RackSlotNoteOff::Sampler { logical_id: 10 }]);
+    assert!(
+        countdown_events.is_empty(),
+        "the released voice's gate-off countdown should be cancelled"
+    );
+    assert_eq!(
+        block_events.len(),
+        1,
+        "an unchoked track's gate-off block event should remain"
+    );
+
+    // Track 0 triggers back at the sample track 1 fired at: simultaneous pads
+    // in one choke group keep each other's brand-new voice.
+    let mut last_trigger = [u64::MAX; MAX_TRACKS];
+    last_trigger[1] = 2_000;
+    note_offs.clear();
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &mut active_keyboard_notes,
+        &last_trigger,
+        0,
+        2_000,
+        &mut note_offs,
+    );
+    assert!(
+        custom_engine_pools[2].voices[0].active,
+        "a track that fired at this very sample is not choked"
+    );
+    assert!(note_offs.is_empty());
+
+    // One sample later the same hit does cut it.
+    note_offs.clear();
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &mut active_keyboard_notes,
+        &last_trigger,
+        0,
+        2_001,
+        &mut note_offs,
+    );
+    assert!(!custom_engine_pools[2].voices[0].active);
+    assert_eq!(
+        custom_engine_pools[2].voices[0].release_started_sample,
+        Some(2_001)
+    );
+    assert_eq!(note_offs, vec![RackSlotNoteOff::Custom { logical_id: 20 }]);
+}
+
+/// Drum rack v2 choke must forget the choked track's held-key entries: the
+/// pad's voice lids are recycled by the next trigger, so a stale
+/// `active_keyboard_notes` slot would make the eventual key release send a
+/// note-off on a lid the sequencer has already re-triggered, cutting a live
+/// hit mid-sample.
+#[test]
+fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
+    let state = SequencerState::new(
+        2,
+        (0..2).map(|_| crate::sequencer::default_empty_effect_chain()).collect(),
+    );
+    let key = crate::sequencer::rack_choke_key(3, 1);
+    state.runtime.rack_choke_keys[0].store(key, Ordering::Release);
+    state.runtime.rack_choke_keys[1].store(key, Ordering::Release);
+    state.runtime.instrument_type_flags[0]
+        .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+    state.runtime.instrument_type_flags[1]
+        .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+
+    let mut voice_pools: Vec<VoicePool> = (0..2).map(|_| VoicePool::new()).collect();
+    let mut custom_engine_pools: Vec<CustomEnginePool> = Vec::new();
+    voice_pools[0].add_voice(10, 100);
+    voice_pools[0].voices[0].active = true;
+
+    // The user is holding a key on pad 0, which sounds voice lid 10.
+    let mut active_keyboard_notes = active_keyboard_notes_fixture();
+    store_active_keyboard_note(
+        &mut active_keyboard_notes,
+        0,
+        3.0,
+        Some(63),
+        0.8,
+        &[ActiveKeyboardVoice {
+            logical_id: 10,
+            gatepitch_id: 0,
+            target: ActiveKeyboardVoiceTarget::Sampler { pool_id: 0 },
+        }],
+    );
+
+    let mut countdown_events = Vec::new();
+    let mut block_events = Vec::new();
+    let mut note_offs = Vec::new();
+
+    // Pad 1 hits and chokes pad 0.
+    collect_rack_choke_group_track_releases(
+        &state,
+        &mut voice_pools,
+        &mut custom_engine_pools,
+        &mut countdown_events,
+        &mut block_events,
+        &mut active_keyboard_notes,
+        &[u64::MAX; MAX_TRACKS],
+        1,
+        1_000,
+        &mut note_offs,
+    );
+
+    assert!(
+        !voice_pools[0].voices[0].active,
+        "the choked pad's voice should be released"
+    );
+    assert_eq!(note_offs, vec![RackSlotNoteOff::Sampler { logical_id: 10 }]);
+    assert!(
+        active_keyboard_notes[0].iter().all(|slot| slot.is_none()),
+        "the choked track's held-key entries must be cleared"
+    );
+    assert!(
+        take_active_keyboard_note(&mut active_keyboard_notes, 0, 3.0).is_none(),
+        "releasing the held key after a choke must not emit a note-off on a recycled lid"
     );
 }
 
@@ -1532,45 +1710,6 @@ fn swing_delay_uses_full_pair_offset() {
 
     let straight = swing_delay_samples(48_000.0, 120.0, 50.0, SwingResolution::Sixteenth);
     assert_eq!(straight, 0.0);
-}
-
-#[test]
-fn bus_gate_default_sequence_stays_open_across_steps() {
-    let sequence = crate::sequencer::BusGateSequence::default();
-    assert_eq!(bus_gate_target_at(&sequence, 0.0), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 0.24), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 0.25), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.99), 1.0);
-}
-
-#[test]
-fn bus_gate_sequence_follows_step_activity_and_duration() {
-    let mut sequence = crate::sequencer::BusGateSequence::default();
-    sequence.num_steps = 4;
-    sequence.timebase = crate::sequencer::Timebase::Quarter;
-    sequence.steps = [false; crate::sequencer::MAX_STEPS];
-    sequence.steps[1] = true;
-    sequence.velocities[1] = 0.5;
-    sequence.durations[1] = 0.5;
-
-    assert_eq!(bus_gate_target_at(&sequence, 0.25), 0.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.10), 0.5);
-    assert_eq!(bus_gate_target_at(&sequence, 1.60), 0.0);
-    assert_eq!(bus_gate_target_at(&sequence, 2.10), 0.0);
-}
-
-#[test]
-fn bus_gate_sync_steps_snap_boundaries_to_grid() {
-    let mut sequence = crate::sequencer::BusGateSequence::default();
-    sequence.num_steps = 4;
-    sequence.timebase = crate::sequencer::Timebase::Sixteenth;
-    sequence.steps = [false; crate::sequencer::MAX_STEPS];
-    sequence.steps[1] = true;
-    sequence.syncs[1] = 3.0; // 1/4
-
-    assert_eq!(bus_gate_target_at(&sequence, 0.50), 0.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.01), 1.0);
-    assert_eq!(bus_gate_target_at(&sequence, 1.30), 0.0);
 }
 
 #[test]

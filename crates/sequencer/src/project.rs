@@ -15,16 +15,18 @@ use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, ProjectArrangement, RackRouting, RackSlotParamPlocks,
+    ModDestination, PatternSnapshot, ProjectArrangement, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SerializedSongContext, SwingResolution, Timebase,
     TrackId, TrackOutput, TrackParamsSnapshot,
-    TrackRegistry, TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    TrackRegistry, TrackSendSnapshot, TrackSoundState, DRUM_RACK_FIRST_PAD_NOTE,
+    DRUM_RACK_LAST_PAD_NOTE, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
 const PROJECTS_DIR: &str = "projects";
 const SOUNDS_DIR: &str = "sounds";
 const RACK_PRESETS_DIR: &str = "presets/racks";
+const KITS_DIR: &str = "kits";
 // Version history:
 //   1 — original format; dgenlisp node-state header was 6 slots, so saved
 //       `param_node_indices` for dgen slots are `6 + cell_id`.
@@ -69,6 +71,37 @@ pub struct ProjectSoundPreset {
     pub metadata: ProjectSoundMetadata,
     pub track: ProjectTrack,
     pub rack: ProjectRackTrackPattern,
+}
+
+/// A drum-rack **kit** (`docs/drum-rack-v2-spec.md`, "Polish"): the rack's own
+/// identity plus one Sound per pad. A kit is deliberately *not* a project
+/// fragment — it carries the kit config (name, color, pad notes, choke groups)
+/// and each pad's instrument + fx chain, and no patterns: the member tracks a
+/// kit rebuilds are born empty, so dropping a kit into a session never
+/// overwrites what is already sequenced there.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectKitPreset {
+    pub version: u32,
+    pub metadata: ProjectSoundMetadata,
+    /// The rack group's color, so a loaded kit looks like the saved one.
+    #[serde(default)]
+    pub color: [f32; 3],
+    /// Ordered pads, in the rack's own pad order (the pad grid position).
+    pub pads: Vec<ProjectKitPad>,
+}
+
+/// One kit pad: where it sits on the pad keyboard, what it chokes, and the
+/// Sound that rebuilds its member track.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectKitPad {
+    pub pad_note: i32,
+    #[serde(default)]
+    pub choke_group: Option<u8>,
+    /// Member track name at save time; the rebuilt track is renamed to it.
+    #[serde(default)]
+    pub name: String,
+    /// The member track captured exactly as the Sounds browser captures one.
+    pub sound: ProjectSoundPreset,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -866,6 +899,335 @@ pub struct ProjectTrackGroup {
     pub members: Vec<usize>,
     /// Backing `ProjectBusChannel` this group routes to.
     pub bus_id: u64,
+    /// `Some(_)` turns this group into a drum rack: a pad-routing map over its
+    /// members. See `docs/drum-rack-v2-spec.md`.
+    #[serde(default)]
+    pub rack: Option<ProjectRackConfig>,
+    /// Child racks this (plain) group contains, by stable `GroupId` — the
+    /// `GroupMember::Rack` half of group membership
+    /// (docs/drum-rack-v2-spec.md, "Racks inside track groups"). Ids rather
+    /// than indices, so nesting survives track reindex-on-delete. The nesting
+    /// rule keeps this empty on racks: racks contain only member tracks, and
+    /// plain groups never contain plain groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_members: Vec<u64>,
+}
+
+/// One entry of a group's ordered membership. Track members live in
+/// `ProjectTrackGroup::members` and rack members in
+/// `ProjectTrackGroup::rack_members`; `group_members_ordered` interleaves them
+/// into the order the mixer draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupMember {
+    /// A member track, by index (as `members` stores it).
+    Track(usize),
+    /// A child rack, by stable `GroupId` (as `rack_members` stores it).
+    Rack(u64),
+}
+
+/// A group's membership in render order: track members sit at their track
+/// index and each child rack sits at its own lowest member track, so a rack
+/// occupies exactly one slot in the parent's block. Racks that have claimed no
+/// track yet (lazy pads) sort last, mirroring the grid's empty-rack handling.
+pub fn group_members_ordered(
+    group: &ProjectTrackGroup,
+    groups: &[ProjectTrackGroup],
+) -> Vec<GroupMember> {
+    let mut entries: Vec<(usize, GroupMember)> = group
+        .members
+        .iter()
+        .map(|&track| (track, GroupMember::Track(track)))
+        .collect();
+    for &rack_id in &group.rack_members {
+        let Some(rack) = groups.iter().find(|group| group.id == rack_id) else {
+            continue;
+        };
+        let anchor = rack.members.iter().copied().min().unwrap_or(usize::MAX);
+        entries.push((anchor, GroupMember::Rack(rack_id)));
+    }
+    entries.sort_by_key(|(anchor, _)| *anchor);
+    entries.into_iter().map(|(_, member)| member).collect()
+}
+
+/// Drops nesting that breaks the rule "plain groups may contain tracks and
+/// racks; racks contain only member tracks; plain groups never contain plain
+/// groups; a rack belongs to at most one parent group". Returns true when
+/// anything had to be repaired. Called on load, where a hand-edited or
+/// future-versioned file can carry anything.
+pub fn sanitize_group_nesting(groups: &mut [ProjectTrackGroup]) -> bool {
+    let rack_ids: Vec<u64> = groups
+        .iter()
+        .filter(|group| group.is_rack())
+        .map(|group| group.id)
+        .collect();
+    let mut claimed: Vec<u64> = Vec::new();
+    let mut repaired = false;
+    for index in 0..groups.len() {
+        if groups[index].rack_members.is_empty() {
+            continue;
+        }
+        // Racks hold only tracks, so any child on a rack is bogus.
+        if groups[index].is_rack() {
+            groups[index].rack_members.clear();
+            repaired = true;
+            continue;
+        }
+        let own_id = groups[index].id;
+        let before = groups[index].rack_members.len();
+        let mut kept = Vec::with_capacity(before);
+        for child in std::mem::take(&mut groups[index].rack_members) {
+            // A child must be a real rack, not this group, and unclaimed.
+            if child != own_id && rack_ids.contains(&child) && !claimed.contains(&child) {
+                claimed.push(child);
+                kept.push(child);
+            }
+        }
+        repaired |= kept.len() != before;
+        groups[index].rack_members = kept;
+    }
+    repaired
+}
+
+/// Resets any bus output that dangles, points at itself, or closes a cycle
+/// back to `Mix`. The nesting rule already bounds the chain at rack bus →
+/// group bus → mix, but a file is not a proof, so load validates anyway
+/// (docs/drum-rack-v2-spec.md, "Racks inside track groups"). Returns true when
+/// anything had to be repaired.
+pub fn sanitize_bus_outputs(buses: &mut [ProjectBusChannel]) -> bool {
+    let ids: Vec<u64> = buses.iter().map(|bus| bus.id).collect();
+    let mut repaired = false;
+    for index in 0..buses.len() {
+        let Some(destination) = buses[index].output.destination() else {
+            continue;
+        };
+        let dangling = !ids.contains(&destination);
+        if dangling || destination == buses[index].id {
+            buses[index].output = BusOutput::Mix;
+            repaired = true;
+            continue;
+        }
+        // Walk the chain from this bus; a revisit means the edge closes a loop.
+        let mut seen = vec![buses[index].id];
+        let mut cursor = destination;
+        let cyclic = loop {
+            if seen.contains(&cursor) {
+                break true;
+            }
+            seen.push(cursor);
+            let Some(next) = buses
+                .iter()
+                .find(|bus| bus.id == cursor)
+                .and_then(|bus| bus.output.destination())
+            else {
+                break false;
+            };
+            cursor = next;
+        };
+        if cyclic {
+            buses[index].output = BusOutput::Mix;
+            repaired = true;
+        }
+    }
+    repaired
+}
+
+impl ProjectTrackGroup {
+    /// A rack group is a drum rack; a plain group is an ordinary mixer group.
+    pub fn is_rack(&self) -> bool {
+        self.rack.is_some()
+    }
+
+    /// Track index the pad answering `pad_note` plays, when this group is a
+    /// rack with such a pad. This is the whole of live pad routing
+    /// (docs/drum-rack-v2-spec.md, "Trigger routing"): a note with no matching
+    /// pad — or on a plain group — resolves to nothing and is ignored.
+    pub fn rack_pad_track(&self, pad_note: i32) -> Option<usize> {
+        let rack = self.rack.as_ref()?;
+        let pad = rack.pads.get(rack.pad_index_for_note(pad_note)?)?;
+        self.members.get(pad.member).copied()
+    }
+}
+
+/// The drum-rack layer over a track group: an ordered pad map plus per-pad
+/// choke groups. Pads address members by *position in `group.members`*, which
+/// is why they survive track reindex-on-delete without carrying track ids.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectRackConfig {
+    /// Ordered pads; the pad grid position is the index.
+    pub pads: Vec<ProjectRackPad>,
+    /// Parallel to `pads`: the choke group each pad belongs to, if any.
+    #[serde(default)]
+    pub choke_groups: Vec<Option<u8>>,
+}
+
+/// One pad: the MIDI note it answers to and the member track backing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRackPad {
+    /// MIDI note this pad answers to. Unique within a rack.
+    pub pad_note: i32,
+    /// Index into `ProjectTrackGroup::members`. A member backs at most one pad.
+    pub member: usize,
+}
+
+impl ProjectRackConfig {
+    pub fn pad_index_for_note(&self, pad_note: i32) -> Option<usize> {
+        self.pads.iter().position(|pad| pad.pad_note == pad_note)
+    }
+
+    pub fn pad_index_for_member(&self, member: usize) -> Option<usize> {
+        self.pads.iter().position(|pad| pad.member == member)
+    }
+
+    /// Lowest pad note no pad answers to yet, or `None` once every note in the
+    /// pad domain is mapped. This is what a member joining the rack without an explicit note
+    /// claims, so members added by mixer drops stay reachable from the grid
+    /// (docs/drum-rack-v2-spec.md, "Core model": a member with no pad is
+    /// unplayable and invisible).
+    pub fn next_free_pad_note(&self) -> Option<i32> {
+        (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE)
+            .find(|note| self.pad_index_for_note(*note).is_none())
+    }
+
+    /// Repairs a rack whose members outnumber its pads — projects saved before
+    /// every attach path mapped a pad — by giving each unmapped member the next
+    /// free note, in member order. Returns how many pads it created.
+    pub fn map_unmapped_members(&mut self, member_count: usize) -> usize {
+        let mut created = 0;
+        for member in 0..member_count {
+            if self.pad_index_for_member(member).is_some() {
+                continue;
+            }
+            let Some(pad_note) = self.next_free_pad_note() else {
+                break;
+            };
+            self.push_pad(ProjectRackPad { pad_note, member });
+            created += 1;
+        }
+        created
+    }
+
+    /// Choke group of the pad at `pad_index`, if it has one.
+    pub fn choke_group(&self, pad_index: usize) -> Option<u8> {
+        self.choke_groups.get(pad_index).copied().flatten()
+    }
+
+    /// Sets (or clears) a pad's choke group, growing the parallel vec as needed.
+    pub fn set_choke_group(&mut self, pad_index: usize, choke: Option<u8>) {
+        if pad_index >= self.pads.len() {
+            return;
+        }
+        if self.choke_groups.len() < self.pads.len() {
+            self.choke_groups.resize(self.pads.len(), None);
+        }
+        self.choke_groups[pad_index] = choke;
+    }
+
+    /// Appends a pad. Callers must have checked the invariants first
+    /// (`sanitize` is the safety net, not the gate).
+    pub fn push_pad(&mut self, pad: ProjectRackPad) {
+        self.pads.push(pad);
+        self.choke_groups.resize(self.pads.len(), None);
+    }
+
+    /// Drops the pad at `pad_index` along with its choke entry.
+    pub fn remove_pad(&mut self, pad_index: usize) -> Option<ProjectRackPad> {
+        if pad_index >= self.pads.len() {
+            return None;
+        }
+        if pad_index < self.choke_groups.len() {
+            self.choke_groups.remove(pad_index);
+        }
+        Some(self.pads.remove(pad_index))
+    }
+
+    /// A member left `group.members` at `member_position`: drop its pad (if it
+    /// had one) and shift every later pad's member index down to match the
+    /// compacted `members` vec.
+    pub fn remap_after_member_removed(&mut self, member_position: usize) {
+        if let Some(pad_index) = self.pad_index_for_member(member_position) {
+            self.remove_pad(pad_index);
+        }
+        for pad in &mut self.pads {
+            if pad.member > member_position {
+                pad.member -= 1;
+            }
+        }
+    }
+
+    /// Enforces the rack invariants against a member count: pads point at live
+    /// members, `pad_note` is inside the pad domain and unique, and a member
+    /// backs at most one pad. Choke groups stay parallel to the surviving pads.
+    ///
+    /// The domain check migrates projects saved when pad notes spanned 0..127
+    /// (before eseq-4b5.15 shrank the domain to C1..D#8): a pad at a note no
+    /// page can render would be invisible and un-nudgeable forever, so it is
+    /// *moved* to the next free in-domain note rather than dropped. Moving it
+    /// in place is what keeps the parallel `choke_groups` entry attached to the
+    /// pad: dropping it and letting `map_unmapped_members` re-land the member
+    /// would silently reset the pad's choke group to `None`, so an open hat
+    /// would stop choking its closed hat after a load. A pad only disappears
+    /// when the rack has no free note left to move it to.
+    pub fn sanitize(&mut self, member_count: usize) {
+        self.choke_groups.resize(self.pads.len(), None);
+        let mut seen_notes: Vec<i32> = Vec::with_capacity(self.pads.len());
+        let mut seen_members: Vec<usize> = Vec::with_capacity(self.pads.len());
+        let mut keep: Vec<bool> = Vec::with_capacity(self.pads.len());
+        // Parallel to the surviving pads: the pad sat outside the current pad
+        // domain and needs a fresh in-domain note once the survivors are known.
+        let mut needs_note: Vec<bool> = Vec::with_capacity(self.pads.len());
+        for pad in &self.pads {
+            let in_domain =
+                (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad.pad_note);
+            // Out-of-domain notes are about to be replaced, so they cannot
+            // collide with anything; only in-domain notes must be unique.
+            let valid = pad.member < member_count
+                && !seen_members.contains(&pad.member)
+                && (!in_domain || !seen_notes.contains(&pad.pad_note));
+            if valid {
+                if in_domain {
+                    seen_notes.push(pad.pad_note);
+                }
+                seen_members.push(pad.member);
+            }
+            keep.push(valid);
+            needs_note.push(valid && !in_domain);
+        }
+        let mut index = 0;
+        self.pads.retain(|_| {
+            let keep_this = keep[index];
+            index += 1;
+            keep_this
+        });
+        let mut index = 0;
+        self.choke_groups.retain(|_| {
+            let keep_this = keep[index];
+            index += 1;
+            keep_this
+        });
+        let mut index = 0;
+        needs_note.retain(|_| {
+            let keep_this = keep[index];
+            index += 1;
+            keep_this
+        });
+
+        // Re-land the migrated pads, lowest free note first, carrying their
+        // choke groups with them. A pad that finds no free note is dropped —
+        // an unreachable note is worse than a missing pad.
+        let mut orphans: Vec<usize> = Vec::new();
+        for pad_index in 0..self.pads.len() {
+            if !needs_note[pad_index] {
+                continue;
+            }
+            match self.next_free_pad_note() {
+                Some(pad_note) => self.pads[pad_index].pad_note = pad_note,
+                None => orphans.push(pad_index),
+            }
+        }
+        for pad_index in orphans.into_iter().rev() {
+            self.remove_pad(pad_index);
+        }
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -885,6 +1247,28 @@ pub struct ProjectReverbState {
     pub replace: f32,
 }
 
+/// Where a bus's post-fader output lands. `Mix` is the historical (and only
+/// pre-rack-v2) behaviour: straight to the master mix. `Bus(id)` chains this
+/// bus into another one, which is how a drum rack joins a plain track group
+/// (docs/drum-rack-v2-spec.md, "Racks inside track groups"). The output graph
+/// must stay acyclic; `sanitize_bus_outputs` enforces that on load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BusOutput {
+    #[default]
+    Mix,
+    Bus(u64),
+}
+
+impl BusOutput {
+    /// The bus this one feeds, or `None` when it feeds the master mix.
+    pub fn destination(&self) -> Option<u64> {
+        match self {
+            BusOutput::Mix => None,
+            BusOutput::Bus(id) => Some(*id),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectBusChannel {
     pub id: u64,
@@ -895,68 +1279,14 @@ pub struct ProjectBusChannel {
     pub mute: bool,
     #[serde(default)]
     pub solo: bool,
-    #[serde(default)]
-    pub gate_sequence: ProjectBusGateSequence,
     #[serde(default, skip_serializing)]
     pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ProjectBusGateSequence {
-    #[serde(default = "default_bus_gate_steps")]
-    pub steps: Vec<bool>,
-    #[serde(default = "default_bus_gate_values")]
-    pub velocities: Vec<f32>,
-    #[serde(default = "default_bus_gate_values")]
-    pub durations: Vec<f32>,
-    #[serde(default = "default_bus_gate_syncs")]
-    pub syncs: Vec<f32>,
-    #[serde(default = "default_num_steps")]
-    pub num_steps: usize,
-    #[serde(default = "default_timebase")]
-    pub timebase: u8,
-    #[serde(default = "default_swing")]
-    pub swing: f32,
-    #[serde(default = "default_swing_resolution")]
-    pub swing_resolution: u8,
+    /// Output destination. Absent in pre-rack-v2 files, which load as `Mix`
+    /// and therefore route exactly as they did before.
     #[serde(default)]
-    pub timebase_plocks: Vec<Option<u32>>,
-    #[serde(default)]
-    pub swing_plocks: Vec<Option<f32>>,
-    #[serde(default)]
-    pub swing_resolution_plocks: Vec<Option<u32>>,
-}
-
-impl Default for ProjectBusGateSequence {
-    fn default() -> Self {
-        Self {
-            steps: default_bus_gate_steps(),
-            velocities: default_bus_gate_values(),
-            durations: default_bus_gate_values(),
-            syncs: default_bus_gate_syncs(),
-            num_steps: default_num_steps(),
-            timebase: default_timebase(),
-            swing: default_swing(),
-            swing_resolution: default_swing_resolution(),
-            timebase_plocks: vec![None; MAX_STEPS],
-            swing_plocks: vec![None; MAX_STEPS],
-            swing_resolution_plocks: vec![None; MAX_STEPS],
-        }
-    }
-}
-
-fn default_bus_gate_steps() -> Vec<bool> {
-    vec![true; MAX_STEPS]
-}
-
-fn default_bus_gate_values() -> Vec<f32> {
-    vec![1.0; MAX_STEPS]
-}
-
-fn default_bus_gate_syncs() -> Vec<f32> {
-    vec![0.0; MAX_STEPS]
+    pub output: BusOutput,
 }
 
 pub fn default_project_buses() -> Vec<ProjectBusChannel> {
@@ -967,9 +1297,9 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
+            output: BusOutput::Mix,
         },
         ProjectBusChannel {
             id: crate::sequencer::DEFAULT_BUS_A_ID,
@@ -977,9 +1307,9 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
+            output: BusOutput::Mix,
         },
         ProjectBusChannel {
             id: crate::sequencer::DEFAULT_BUS_B_ID,
@@ -987,9 +1317,9 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
-            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
+            output: BusOutput::Mix,
         },
     ]
 }
@@ -997,6 +1327,10 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
 #[derive(Clone, Serialize)]
 pub struct ProjectTrack {
     pub id: TrackId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name_user_authored: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<TrackColor>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1028,6 +1362,10 @@ struct ProjectTrackWire {
     #[serde(default)]
     id: Option<TrackId>,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    name_user_authored: bool,
+    #[serde(default)]
     color: Option<TrackColor>,
     #[serde(default)]
     collapsed: bool,
@@ -1047,6 +1385,8 @@ impl<'de> Deserialize<'de> for ProjectTrack {
         }
         Ok(Self {
             id,
+            name: wire.name,
+            name_user_authored: wire.name_user_authored,
             color: wire.color,
             collapsed: wire.collapsed,
             kind: wire.kind,
@@ -1066,6 +1406,8 @@ fn migrate_project_tracks(
             .zip(registry.ids().iter().copied())
             .map(|(track, id)| ProjectTrack {
                 id,
+                name: track.name,
+                name_user_authored: track.name_user_authored,
                 color: track.color,
                 collapsed: track.collapsed,
                 kind: track.kind,
@@ -1104,6 +1446,8 @@ fn migrate_project_tracks(
         };
         migrated.push(ProjectTrack {
             id,
+            name: track.name,
+            name_user_authored: track.name_user_authored,
             color: track.color,
             collapsed: track.collapsed,
             kind: track.kind,
@@ -1334,6 +1678,10 @@ pub enum ProjectInstrumentType {
     Rack,
 }
 
+/// Serialized rack routing. `ByPitch` was the v1 drum rack, which is now a
+/// track group (`docs/drum-rack-v2-spec.md`); the variant is kept only so
+/// projects written before the cleanup still deserialize, and it loads as a
+/// plain `Broadcast` rack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectRackRouting {
@@ -1422,8 +1770,6 @@ pub struct ProjectRackSlotPattern {
     #[serde(default)]
     pub instrument_base_note_offset: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pad_note: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choke_group: Option<u8>,
     #[serde(default = "default_rack_slot_gain")]
     pub gain: f32,
@@ -1477,8 +1823,6 @@ fn default_midi_fx_position() -> ProjectMidiFxPosition {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ProjectBusPatternSnapshot {
     pub id: u64,
-    #[serde(default)]
-    pub gate_sequence: ProjectBusGateSequence,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
 }
@@ -1830,28 +2174,10 @@ impl From<ProjectCustomInstrumentRunMode> for CustomInstrumentRunMode {
     }
 }
 
-impl From<RackRouting> for ProjectRackRouting {
-    fn from(value: RackRouting) -> Self {
-        match value {
-            RackRouting::Broadcast => Self::Broadcast,
-            RackRouting::ByPitch => Self::ByPitch,
-        }
-    }
-}
-
-impl From<ProjectRackRouting> for RackRouting {
-    fn from(value: ProjectRackRouting) -> Self {
-        match value {
-            ProjectRackRouting::Broadcast => RackRouting::Broadcast,
-            ProjectRackRouting::ByPitch => RackRouting::ByPitch,
-        }
-    }
-}
-
 impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
     fn from(value: RackTrackSnapshot) -> Self {
         Self {
-            routing: ProjectRackRouting::from(value.routing),
+            routing: ProjectRackRouting::Broadcast,
             slots: value
                 .slots
                 .into_iter()
@@ -1868,8 +2194,10 @@ impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
 
 impl From<ProjectRackTrackPattern> for RackTrackSnapshot {
     fn from(value: ProjectRackTrackPattern) -> Self {
+        // A legacy `by_pitch` rack loads as a plain layering rack: its slots
+        // stay audible instead of being silently dropped, and nothing routes
+        // by transpose any more.
         let mut rack = Self {
-            routing: RackRouting::from(value.routing),
             slots: value
                 .slots
                 .into_iter()
@@ -2013,7 +2341,6 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             instrument_type: ProjectInstrumentType::from(value.instrument_type),
             instrument_run_mode: ProjectCustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
-            pad_note: value.pad_note,
             choke_group: value.choke_group,
             gain: value.gain,
             pan: value.pan,
@@ -2027,7 +2354,20 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
                 .iter()
                 .map(ProjectEffectSlot::from)
                 .collect(),
-            custom_effects: value.custom_effect_names,
+            // Rack-slot chains are the one FX host whose live names reach the
+            // file verbatim (tracks and buses re-derive theirs at capture), and
+            // several live writers store a built-in under its bare descriptor
+            // name. Qualify them here so a saved slot is never mistaken for a
+            // custom effect on load — eseq-zck.
+            custom_effects: value
+                .custom_effect_names
+                .into_iter()
+                .map(|name| {
+                    name.map(|name| {
+                        crate::effects::builtin_effect_project_name(&name).unwrap_or(name)
+                    })
+                })
+                .collect(),
             track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
             sample_path,
             sample_name,
@@ -2045,7 +2385,6 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             instrument_type: InstrumentType::from(value.instrument_type),
             instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
-            pad_note: value.pad_note,
             choke_group: value.choke_group,
             gain: value.gain,
             pan: value.pan.clamp(-1.0, 1.0),
@@ -2252,6 +2591,44 @@ pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
         .collect::<Vec<_>>();
     names.sort();
     Ok(names)
+}
+
+pub fn kit_preset_path(name: &str) -> PathBuf {
+    Path::new(KITS_DIR).join(format!("{}.kit", sanitize_project_name(name)))
+}
+
+pub fn save_kit_preset(name: &str, kit: &ProjectKitPreset) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(KITS_DIR)?;
+    let path = kit_preset_path(name);
+    let json = serde_json::to_string(kit).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to serialize kit '{}': {error}", path.display()),
+        )
+    })?;
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
+    let src = std::fs::read_to_string(path)?;
+    serde_json::from_str(&src).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Failed to parse kit '{}': {error}", path.display()),
+        )
+    })
+}
+
+pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(KITS_DIR)?;
+    let mut paths = std::fs::read_dir(KITS_DIR)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("kit"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
 }
 
 pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
@@ -2891,6 +3268,132 @@ pub fn chord_snapshot_from_steps_and_durations(
 mod tests {
     use super::*;
 
+    fn test_bus(id: u64, output: BusOutput) -> ProjectBusChannel {
+        ProjectBusChannel {
+            id,
+            name: format!("Bus {id}"),
+            volume: crate::mixer_volume::default_fader(),
+            mute: false,
+            solo: false,
+            custom_effects: Vec::new(),
+            effect_slots: Vec::new(),
+            output,
+        }
+    }
+
+    fn test_group(id: u64, members: Vec<usize>, rack: bool, rack_members: Vec<u64>) -> ProjectTrackGroup {
+        ProjectTrackGroup {
+            id,
+            name: format!("Group {id}"),
+            color: [0.5, 0.5, 0.5],
+            collapsed: false,
+            members,
+            bus_id: 100 + id,
+            rack: rack.then(ProjectRackConfig::default),
+            rack_members,
+        }
+    }
+
+    #[test]
+    fn bus_output_defaults_to_mix_for_files_written_before_bus_chaining() {
+        let legacy = r#"{"id":7,"name":"Bus A","volume":0.8}"#;
+        let bus: ProjectBusChannel =
+            serde_json::from_str(legacy).expect("legacy bus channels still parse");
+        assert_eq!(bus.output, BusOutput::Mix);
+        assert_eq!(bus.output.destination(), None);
+
+        let chained = test_bus(7, BusOutput::Bus(9));
+        let round_trip: ProjectBusChannel =
+            serde_json::from_str(&serde_json::to_string(&chained).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(round_trip.output, BusOutput::Bus(9));
+    }
+
+    #[test]
+    fn bus_gate_sequence_from_older_files_is_dropped_without_failing_the_load() {
+        // The bus gate step sequencer is gone; files written while it existed
+        // still carry its `gate_sequence` blob on every bus and bus pattern.
+        // Both must deserialize as plain unknown fields.
+        let legacy = r#"{"id":7,"name":"Bus A","volume":0.8,
+            "gate_sequence":{"steps":[true,false],"velocities":[1.0,0.5],
+            "num_steps":2,"timebase":3,"swing":62.5}}"#;
+        let bus: ProjectBusChannel =
+            serde_json::from_str(legacy).expect("bus channels with gate data still parse");
+        assert_eq!(bus.id, 7);
+        assert_eq!(bus.output, BusOutput::Mix);
+
+        let legacy_pattern = r#"{"id":7,"gate_sequence":{"num_steps":4},"effect_slots":[]}"#;
+        let pattern: ProjectBusPatternSnapshot = serde_json::from_str(legacy_pattern)
+            .expect("bus pattern snapshots with gate data still parse");
+        assert_eq!(pattern.id, 7);
+        assert!(pattern.effect_slots.is_empty());
+    }
+
+    #[test]
+    fn sanitize_bus_outputs_resets_dangling_self_and_cyclic_chains() {
+        let mut buses = vec![
+            test_bus(1, BusOutput::Bus(404)),
+            test_bus(2, BusOutput::Bus(2)),
+            test_bus(3, BusOutput::Bus(4)),
+            test_bus(4, BusOutput::Bus(3)),
+            test_bus(5, BusOutput::Bus(6)),
+            test_bus(6, BusOutput::Mix),
+        ];
+        assert!(sanitize_bus_outputs(&mut buses));
+        assert_eq!(buses[0].output, BusOutput::Mix, "dangling destination");
+        assert_eq!(buses[1].output, BusOutput::Mix, "self reference");
+        // One of the two edges in the 3<->4 loop is enough to break it.
+        assert!(
+            buses[2].output == BusOutput::Mix || buses[3].output == BusOutput::Mix,
+            "a cycle must be broken",
+        );
+        assert_eq!(buses[4].output, BusOutput::Bus(6), "a legal chain survives");
+        assert!(!sanitize_bus_outputs(&mut buses), "sanitizing is idempotent");
+    }
+
+    #[test]
+    fn sanitize_group_nesting_enforces_the_rack_nesting_rule() {
+        let mut groups = vec![
+            // A plain group holding a real rack, a plain group, an unknown id,
+            // and itself.
+            test_group(1, vec![0], false, vec![2, 3, 404, 1]),
+            test_group(2, vec![1], true, Vec::new()),
+            test_group(3, vec![2], false, Vec::new()),
+            // A rack may not contain anything but tracks.
+            test_group(4, vec![3], true, vec![2]),
+            // A rack belongs to at most one parent.
+            test_group(5, vec![4], false, vec![2]),
+        ];
+        assert!(sanitize_group_nesting(&mut groups));
+        assert_eq!(groups[0].rack_members, vec![2], "only the real rack survives");
+        assert!(groups[3].rack_members.is_empty(), "racks contain no racks");
+        assert!(groups[4].rack_members.is_empty(), "a rack has one parent");
+        assert!(!sanitize_group_nesting(&mut groups), "sanitizing is idempotent");
+    }
+
+    #[test]
+    fn group_members_ordered_seats_a_rack_at_its_lowest_member_track() {
+        let groups = vec![
+            test_group(1, vec![0, 5], false, vec![2, 3]),
+            test_group(2, vec![2, 3], true, Vec::new()),
+            // An empty rack has claimed no track yet, so it sorts last.
+            test_group(3, Vec::new(), true, Vec::new()),
+        ];
+        assert_eq!(
+            group_members_ordered(&groups[0], &groups),
+            vec![
+                GroupMember::Track(0),
+                GroupMember::Rack(2),
+                GroupMember::Track(5),
+                GroupMember::Rack(3),
+            ],
+        );
+        assert_eq!(
+            group_members_ordered(&groups[1], &groups),
+            vec![GroupMember::Track(2), GroupMember::Track(3)],
+        );
+    }
+
     fn sample_project() -> ProjectFile {
         ProjectFile {
             version: project_file_version(),
@@ -2909,6 +3412,8 @@ mod tests {
             tracks: vec![
                 ProjectTrack {
                     id: TrackId(1),
+                    name: Some("Warm Prophet".to_string()),
+                    name_user_authored: false,
                     color: Some(TrackColor::new(0.96, 0.28, 0.52)),
                     collapsed: true,
                     kind: ProjectTrackKind::Custom {
@@ -2917,6 +3422,8 @@ mod tests {
                 },
                 ProjectTrack {
                     id: TrackId(2),
+                    name: Some("Studio Kick".to_string()),
+                    name_user_authored: false,
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
                     collapsed: false,
                     kind: ProjectTrackKind::Sampler {
@@ -3614,6 +4121,220 @@ mod tests {
     }
 
     #[test]
+    fn rack_config_round_trips_and_defaults_none() {
+        let mut project = sample_project();
+        project.groups = vec![ProjectTrackGroup {
+            id: 3,
+            name: "Kit".to_string(),
+            color: [0.4, 0.2, 0.6],
+            collapsed: false,
+            members: vec![0, 1],
+            bus_id: 7,
+            rack: Some(ProjectRackConfig {
+                pads: vec![
+                    ProjectRackPad { pad_note: 36, member: 0 },
+                    ProjectRackPad { pad_note: 38, member: 1 },
+                ],
+                choke_groups: vec![None, Some(1)],
+            }),
+            rack_members: Vec::new(),
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let rack = restored.groups[0].rack.as_ref().expect("rack survives the round trip");
+        assert_eq!(rack.pads[0], ProjectRackPad { pad_note: 36, member: 0 });
+        assert_eq!(rack.pads[1], ProjectRackPad { pad_note: 38, member: 1 });
+        assert_eq!(rack.choke_groups, vec![None, Some(1)]);
+
+        // A project written before drum rack v2 has no `rack` key at all.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value["groups"][0]
+            .as_object_mut()
+            .expect("group is a json object")
+            .remove("rack");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-rack project");
+        assert!(restored.groups[0].rack.is_none());
+        assert!(!restored.groups[0].is_rack());
+    }
+
+    #[test]
+    fn rack_sanitize_enforces_pad_invariants() {
+        let mut rack = ProjectRackConfig {
+            pads: vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                // Duplicate pad note.
+                ProjectRackPad { pad_note: 36, member: 1 },
+                // Member already backs pad 0.
+                ProjectRackPad { pad_note: 40, member: 0 },
+                // Member is out of range.
+                ProjectRackPad { pad_note: 42, member: 9 },
+                ProjectRackPad { pad_note: 44, member: 2 },
+            ],
+            choke_groups: vec![Some(1), Some(2), Some(3), Some(4), Some(5)],
+        };
+        rack.sanitize(3);
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad { pad_note: 44, member: 2 },
+            ],
+        );
+        assert_eq!(rack.choke_groups, vec![Some(1), Some(5)]);
+    }
+
+    /// eseq-4b5.15 shrank the pad-note domain from 0..127 to C1..D#8. A pad
+    /// saved outside it would be invisible to every grid page and un-nudgeable,
+    /// so sanitize moves it onto the next free in-domain note.
+    #[test]
+    fn rack_sanitize_migrates_out_of_domain_pad_notes() {
+        let mut rack = ProjectRackConfig {
+            pads: vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                // Legal before eseq-4b5.15, above D#8 now.
+                ProjectRackPad { pad_note: 96, member: 1 },
+            ],
+            choke_groups: vec![Some(1), Some(2)],
+        };
+        rack.sanitize(2);
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 1 },
+            ],
+            "the out-of-domain pad lands on the next free in-domain note"
+        );
+        assert_eq!(rack.choke_groups, vec![Some(1), Some(2)]);
+        assert_eq!(rack.map_unmapped_members(2), 0, "no member is left padless");
+    }
+
+    /// Regression: the migration used to drop the out-of-domain pad and let
+    /// `map_unmapped_members` re-land its member, which appended `None` to the
+    /// parallel `choke_groups` vec. A pre-eseq-4b5.15 kit with a closed hat at
+    /// 90 and an open hat at 91 in choke group 1 then loaded with both pads
+    /// remapped but no choke at all — the open hat silently stopped cutting the
+    /// closed one.
+    #[test]
+    fn rack_sanitize_preserves_choke_groups_across_the_pad_note_migration() {
+        let mut rack = ProjectRackConfig {
+            pads: vec![
+                ProjectRackPad { pad_note: 90, member: 0 },
+                ProjectRackPad { pad_note: 91, member: 1 },
+            ],
+            choke_groups: vec![Some(1), Some(1)],
+        };
+        rack.sanitize(2);
+        assert_eq!(rack.map_unmapped_members(2), 0);
+
+        for pad in &rack.pads {
+            assert!(
+                (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad.pad_note),
+                "pad {pad:?} should be migrated into the pad-note domain",
+            );
+        }
+        let closed = rack.pad_index_for_member(0).expect("closed hat keeps a pad");
+        let open = rack.pad_index_for_member(1).expect("open hat keeps a pad");
+        assert_eq!(rack.choke_group(closed), Some(1));
+        assert_eq!(
+            rack.choke_group(open),
+            rack.choke_group(closed),
+            "both hats stay in their original choke group",
+        );
+        assert_eq!(rack.choke_groups.len(), rack.pads.len(), "arrays stay parallel");
+    }
+
+    /// A rack with no free in-domain note left cannot re-land a migrated pad,
+    /// so that pad is dropped — with its choke entry, keeping the arrays
+    /// parallel.
+    #[test]
+    fn rack_sanitize_drops_a_migrated_pad_when_no_free_note_remains() {
+        let mut rack = ProjectRackConfig::default();
+        for (member, pad_note) in (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).enumerate() {
+            rack.push_pad(ProjectRackPad { pad_note, member });
+        }
+        let full = rack.pads.len();
+        rack.push_pad(ProjectRackPad { pad_note: 120, member: full });
+        rack.set_choke_group(full, Some(3));
+
+        rack.sanitize(full + 1);
+
+        assert_eq!(rack.pads.len(), full);
+        assert_eq!(rack.choke_groups.len(), full);
+        assert_eq!(rack.pad_index_for_member(full), None);
+    }
+
+    /// eseq-4b5.8: projects saved before every attach path mapped a pad hold
+    /// rack members with no pad — invisible in the grid and unplayable. Load
+    /// repairs them onto free notes in member order.
+    #[test]
+    fn rack_maps_unmapped_members_onto_free_pad_notes() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad { pad_note: 36, member: 1 });
+        rack.set_choke_group(0, Some(2));
+
+        // Members 0, 2 and 3 arrived through a mixer drop and got no pad.
+        assert_eq!(rack.map_unmapped_members(4), 3);
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 1 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 0 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE + 1, member: 2 },
+                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE + 2, member: 3 },
+            ],
+            "free notes are claimed lowest-first, skipping the taken one",
+        );
+        assert_eq!(
+            rack.choke_groups,
+            vec![Some(2), None, None, None],
+            "repair never disturbs an existing pad's choke group",
+        );
+
+        // A rack that already maps every member is left alone.
+        assert_eq!(rack.map_unmapped_members(4), 0);
+        assert_eq!(rack.pads.len(), 4);
+    }
+
+    /// The pad map is finite: a rack with every note taken cannot map more
+    /// members, and says so instead of looping or panicking.
+    #[test]
+    fn rack_with_every_pad_note_taken_has_no_free_note() {
+        let mut rack = ProjectRackConfig::default();
+        for (member, pad_note) in (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).enumerate() {
+            rack.push_pad(ProjectRackPad { pad_note, member });
+        }
+        assert_eq!(rack.next_free_pad_note(), None);
+        let members = rack.pads.len();
+        assert_eq!(rack.map_unmapped_members(members + 4), 0);
+        assert_eq!(rack.pads.len(), members);
+    }
+
+    #[test]
+    fn rack_remap_after_member_removed_drops_its_pad_and_shifts_the_rest() {
+        let mut rack = ProjectRackConfig::default();
+        rack.push_pad(ProjectRackPad { pad_note: 36, member: 0 });
+        rack.push_pad(ProjectRackPad { pad_note: 38, member: 1 });
+        rack.push_pad(ProjectRackPad { pad_note: 40, member: 2 });
+        rack.set_choke_group(2, Some(4));
+
+        rack.remap_after_member_removed(1);
+
+        assert_eq!(
+            rack.pads,
+            vec![
+                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad { pad_note: 40, member: 1 },
+            ],
+        );
+        assert_eq!(rack.choke_groups, vec![None, Some(4)]);
+        assert_eq!(rack.pad_index_for_note(38), None);
+        assert_eq!(rack.pad_index_for_member(1), Some(1));
+        assert_eq!(rack.choke_group(1), Some(4));
+    }
+
+    #[test]
     fn record_armed_round_trips_and_defaults_off() {
         let mut project = sample_project();
         project.record_armed = vec![true, false];
@@ -3737,6 +4458,26 @@ mod tests {
     }
 
     #[test]
+    fn project_tracks_without_saved_names_remain_backward_compatible() {
+        let project = sample_project();
+        let mut json = serde_json::to_value(project).expect("serialize project");
+        for track in json["tracks"]
+            .as_array_mut()
+            .expect("serialized project tracks")
+        {
+            track
+                .as_object_mut()
+                .expect("serialized project track")
+                .remove("name");
+        }
+
+        let restored: ProjectFile =
+            serde_json::from_value(json).expect("deserialize project without track names");
+
+        assert!(restored.tracks.iter().all(|track| track.name.is_none()));
+    }
+
+    #[test]
     fn current_project_format_roundtrips() {
         let mut project = sample_project();
         let identity = crate::process::project_slot_identity_id(
@@ -3759,6 +4500,8 @@ mod tests {
         assert_eq!(restored.name, project.name);
         assert_eq!(restored.current_pattern, project.current_pattern);
         assert_eq!(restored.current_track, project.current_track);
+        assert_eq!(restored.tracks[0].name.as_deref(), Some("Warm Prophet"));
+        assert_eq!(restored.tracks[1].name.as_deref(), Some("Studio Kick"));
         assert_eq!(
             restored.patterns[0].project_process_lane_overrides,
             project.patterns[0].project_process_lane_overrides
@@ -4373,7 +5116,10 @@ mod tests {
     }
 
     #[test]
-    fn rack_track_serializes_and_deserializes_by_pitch_pad_metadata() {
+    /// Projects written before the v1 drum rack was deleted still carry
+    /// `"routing":"by_pitch"`; they must parse rather than fail the load
+    /// (docs/drum-rack-v2-spec.md, "What survives from rack v1").
+    fn legacy_by_pitch_rack_project_still_deserializes_and_drops_its_pad_map() {
         let json = r#"
         {
             "version": 1,
@@ -4459,23 +5205,57 @@ mod tests {
         }
         let rack = project.patterns[0].rack_tracks[0].as_ref().unwrap();
         assert_eq!(rack.routing, ProjectRackRouting::ByPitch);
-        assert_eq!(rack.slots[0].pad_note, Some(0));
         assert_eq!(rack.slots[0].choke_group, Some(1));
         assert_eq!(rack.slots[0].max_polyphony, 1);
-        assert_eq!(rack.slots[1].pad_note, Some(2));
         assert_eq!(rack.slots[1].choke_group, Some(1));
         assert_eq!(rack.slots[1].instrument_base_note_offset, 7.0);
 
+        // Per-slot pad notes were the v1 pad selector and no longer round-trip;
+        // everything else about the rack survives the load.
         let serialized = serde_json::to_string(&project).unwrap();
         assert!(serialized.contains("\"routing\":\"by_pitch\""));
-        assert!(serialized.contains("\"pad_note\":0"));
+        assert!(!serialized.contains("\"pad_note\""));
         assert!(serialized.contains("\"choke_group\":1"));
 
         let restored: ProjectFile = serde_json::from_str(&serialized).unwrap();
         let restored_rack = restored.patterns[0].rack_tracks[0].as_ref().unwrap();
         assert_eq!(restored_rack.routing, ProjectRackRouting::ByPitch);
-        assert_eq!(restored_rack.slots[0].pad_note, Some(0));
-        assert_eq!(restored_rack.slots[1].pad_note, Some(2));
+        assert_eq!(restored_rack.slots[0].choke_group, Some(1));
+    }
+
+    #[test]
+    fn legacy_by_pitch_rack_loads_as_a_plain_layering_rack() {
+        let pattern = ProjectRackTrackPattern {
+            routing: ProjectRackRouting::ByPitch,
+            slots: vec![ProjectRackSlotPattern {
+                instrument_type: ProjectInstrumentType::Sampler,
+                instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
+                instrument_base_note_offset: 0.0,
+                choke_group: None,
+                gain: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                max_polyphony: 4,
+                param_plocks: Vec::new(),
+                instrument_slot: ProjectEffectSlot::default(),
+                effect_slots: Vec::new(),
+                custom_effects: Vec::new(),
+                track_sound_state: ProjectTrackSoundState::default(),
+                sample_path: Some("samples/kick.wav".to_string()),
+                sample_name: Some("kick".to_string()),
+            }],
+            macros: default_project_rack_macros(),
+        };
+
+        let snapshot = RackTrackSnapshot::from(pattern);
+
+        assert_eq!(
+            snapshot.slots.len(),
+            1,
+            "the pitch-routed drum rack is gone; legacy racks degrade to plain \
+             layering with every slot still audible"
+        );
     }
 
     #[test]
@@ -4529,6 +5309,8 @@ mod tests {
             },
             track: ProjectTrack {
                 id: TrackId(1),
+                name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {
@@ -4548,7 +5330,6 @@ mod tests {
                     instrument_type: ProjectInstrumentType::Sampler,
                     instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -4581,6 +5362,85 @@ mod tests {
     }
 
     #[test]
+    fn kit_preset_roundtrips_pad_map_choke_groups_and_per_pad_sounds() {
+        let pad_sound = |name: &str, sample: &str| ProjectSoundPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: name.to_string(),
+                tags: Vec::new(),
+                author: String::new(),
+            },
+            track: ProjectTrack {
+                id: TrackId(1),
+                name: None,
+                name_user_authored: false,
+                color: None,
+                collapsed: false,
+                kind: ProjectTrackKind::Rack {
+                    routing: ProjectRackRouting::Broadcast,
+                    slots: vec![ProjectRackTrackSlot {
+                        instrument_type: ProjectInstrumentType::Sampler,
+                        sample_path: Some(sample.to_string()),
+                        sample_name: Some(name.to_string()),
+                        instrument_name: None,
+                    }],
+                },
+            },
+            rack: ProjectRackTrackPattern {
+                macros: default_project_rack_macros(),
+                routing: ProjectRackRouting::Broadcast,
+                slots: Vec::new(),
+            },
+        };
+        let kit = ProjectKitPreset {
+            version: project_file_version(),
+            metadata: ProjectSoundMetadata {
+                name: "House Kit".to_string(),
+                tags: vec!["house".to_string()],
+                author: "Test".to_string(),
+            },
+            color: [0.9, 0.45, 0.15],
+            pads: vec![
+                ProjectKitPad {
+                    pad_note: 36,
+                    choke_group: None,
+                    name: "Kick".to_string(),
+                    sound: pad_sound("Kick", "samples/kick.wav"),
+                },
+                ProjectKitPad {
+                    pad_note: 42,
+                    choke_group: Some(1),
+                    name: "Hat".to_string(),
+                    sound: pad_sound("Hat", "samples/hat.wav"),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&kit).expect("serialize kit");
+        let restored: ProjectKitPreset = serde_json::from_str(&json).expect("deserialize kit");
+        assert_eq!(restored.metadata.name, "House Kit");
+        assert_eq!(restored.color, [0.9, 0.45, 0.15]);
+        assert_eq!(restored.pads.len(), 2);
+        assert_eq!(restored.pads[1].pad_note, 42);
+        assert_eq!(restored.pads[1].choke_group, Some(1));
+        assert_eq!(restored.pads[1].name, "Hat");
+        match &restored.pads[1].sound.track.kind {
+            ProjectTrackKind::Rack { slots, .. } => {
+                assert_eq!(slots[0].sample_path.as_deref(), Some("samples/hat.wav"));
+            }
+            _ => panic!("kit pads carry container Sounds"),
+        }
+        // Kits are files in their own browser directory, named like every
+        // other saved object.
+        assert_eq!(
+            kit_preset_path("House Kit")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("House-Kit.kit"),
+        );
+    }
+
+    #[test]
     fn container_preset_storage_roundtrips_validated_rack_payload() {
         let directory = std::env::temp_dir().join(format!(
             "eseq-rack-preset-storage-{}-{:?}",
@@ -4596,6 +5456,8 @@ mod tests {
             },
             track: ProjectTrack {
                 id: TrackId(1),
+                name: None,
+                name_user_authored: false,
                 color: None,
                 collapsed: false,
                 kind: ProjectTrackKind::Rack {

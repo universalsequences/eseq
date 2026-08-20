@@ -10,10 +10,37 @@
 ;; callers still spell flat.  Five are lisp-side (effects/track-panels.lisp
 ;; paints the track-panel header with the mixer's colour/mute helpers);
 ;; thirteen are `mixer-v2-*` entry points driven by name from Rust
-;; state_values tests; `seq-ctrl-g` is the global C-g dispatcher that
-;; src/ui/input.rs evals by name.  Deleted as each consumer converts.
+;; state_values tests; `seq-ctrl-g` is the global Ctrl+G / Cmd+G dispatcher
+;; that src/ui/input.rs evals by name.  Deleted as each consumer converts.
 
 (import eseq.track-collapse)
+(import eseq.drum-rack-v2)
+
+(defstate %track-menu-open false)
+(defstate %track-menu-col 0)
+(defstate %track-menu-row 0)
+(defstate %track-menu-track -1)
+(defstate %track-menu-group-id -1)
+(defstate %track-renaming -1)
+(defstate %track-rename-draft "")
+(defstate %group-renaming -1)
+(defstate %group-rename-draft "")
+
+;; Data, rather than menu-specific control flow, is the extension seam for
+;; Duplicate/Delete/Group/color actions added later.
+(def %track-menu-actions
+  (list (dict :id :rename :label "Rename")))
+
+(def %group-menu-actions
+  (list
+    (dict :id :rename :label "Rename")
+    (dict :id :convert-drum-rack :label "Convert to Drum Rack")
+    (dict :id :ungroup :label "Ungroup")))
+
+(def %rack-group-menu-actions
+  (list
+    (dict :id :rename :label "Rename")
+    (dict :id :ungroup :label "Ungroup")))
 
 (def %track-peak (i)
   (bind-seq (str "track-peak-" i)))
@@ -36,6 +63,14 @@
 
 (def %track-delete-target-binding (i)
   (bind-seq (str "mixer-track-delete-target-" i)))
+
+;; Group targets are ID-stable and sparse, so derive their selected state from
+;; the shared target plus its reactive version instead of registering one field
+;; per current group.
+(def %group-delete-target? (group-id)
+  (do
+    SEQ.delete-target-version
+    (seq-delete-target? :mixer-group (dict :group-id group-id))))
 
 (def %track-pattern-cell-active-binding (track pattern-id)
   (bind-seq (str "track-pattern-cell-active-" track "-" pattern-id)))
@@ -94,8 +129,13 @@
 (def %event-volume (event)
   (%pointer-volume (get event :sy)))
 
+;; Stable endpoint for Finder-style range extension. Cmd-click deliberately
+;; leaves it untouched; a plain selection starts a new range.
+(def %track-selection-anchor nil)
+
 (def select-track (i)
   (do
+    (set! %track-selection-anchor i)
     (set! eseq.seq-core-state/selected-bus -1)
     (%clear-delete-target)
     (seq-set-track i)
@@ -103,6 +143,7 @@
 
 (def select-track-delete-target (i)
   (do
+    (set! %track-selection-anchor i)
     (set! eseq.seq-core-state/selected-bus -1)
     (seq-set-track i)
     (host-command "reveal-sequencer-track" (dict :track i))
@@ -120,21 +161,53 @@
 (def %toggle-track-select (i)
   (do
     (set! eseq.seq-core-state/selected-bus -1)
-    (%clear-delete-target)
     (seq-toggle-track-selected i)
     (host-command "reveal-sequencer-track" (dict :track i))))
 
-;; Plain click = single-select; cmd-click = toggle membership in the set.
-(def %track-body-click (event i)
-  (if (%multi-select-click? event)
-    (%toggle-track-select i)
-    (select-track i)))
+(def %track-position (order track)
+  (reduce |found pos|
+    (if (>= found 0) found (if (= (nth order pos) track) pos found))
+    -1
+    (range 0 (len order))))
 
-;; The label preserves its delete-target gesture on a plain click.
+(def %visual-track-range (anchor target)
+  (let ((order (eseq.drum-rack-v2/mixer-visible-track-order)))
+    (let ((anchor-pos (%track-position order anchor))
+        (target-pos (%track-position order target)))
+      (if (or (< anchor-pos 0) (< target-pos 0))
+        (list target)
+        (reduce |tracks pos|
+          (append tracks (list (nth order pos)))
+          (list)
+          (range (min anchor-pos target-pos) (+ (max anchor-pos target-pos) 1)))))))
+
+(def %range-track-select (i)
+  (let ((anchor (if (= %track-selection-anchor nil)
+                  SEQ.current-track
+                  %track-selection-anchor)))
+    (do
+      (set! %track-selection-anchor anchor)
+      (set! eseq.seq-core-state/selected-bus -1)
+      (seq-select-tracks (%visual-track-range anchor i) i)
+      (host-command "reveal-sequencer-track" (dict :track i)))))
+
+;; Plain click = single-select; shift-click = replace with the anchored range;
+;; cmd-click = toggle membership without moving the range anchor.
+(def %track-body-click (event i)
+  (if (get event :shift)
+    (%range-track-select i)
+    (if (%multi-select-click? event)
+      (%toggle-track-select i)
+      (select-track i))))
+
+;; The label preserves its delete-target gesture on a plain click. Shift-click
+;; clears that target just like cmd-click and selects the anchored range.
 (def %track-label-click (event i)
-  (if (%multi-select-click? event)
-    (%toggle-track-select i)
-    (select-track-delete-target i)))
+  (if (get event :shift)
+    (%range-track-select i)
+    (if (%multi-select-click? event)
+      (%toggle-track-select i)
+      (select-track-delete-target i))))
 
 (def %select-bus (i)
   (do
@@ -166,11 +239,7 @@
               (host-command "add-track-from-sound" (dict :path path))
               (status "Drop a Sound item, not a folder"))
             (if (= (get event :drag-type) "instrument")
-              (if name
-                (do
-                  (set! sbrowser-loading-instrument-name name)
-                  (host-command "add-track-instrument" (dict :name name)))
-                (status "Drop an instrument, not a folder"))
+              (eseq.browser/drop-instrument-new-track payload)
               (if path
                 (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
                 (status "Drop a sample file, not a folder")))))))))
@@ -677,7 +746,7 @@
             (seq-set-track-volume i (%pointer-volume sy)))))
       (%track-meter i))))
 
-(def %bus-meter-control (i)
+(def %bus-meter-control (i is-group)
   (box :width 3.65 :height 4.24
     :on-click (lambda (event)
       (do
@@ -691,9 +760,9 @@
         ;;(seq-set-bus-volume i (%event-volume event))
         ))
     (v-stack
-      (box :width :fill :height 6.5)
+      (box :width :fill :height 5.9)
       (h-stack :gap 0.06 
-        (box :width 2 )
+        (box :width (if is-group 6 2))
         (mixer-v2-volume-triangle
           :value (bind-seq-nth "bus-volumes" i)
           :on-click (lambda (sx sy region)
@@ -760,7 +829,8 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :on-click (lambda (event) (%track-body-click event i))
-      (v-stack :gap 0.20
+      :on-right-click (lambda (event) (%open-track-menu event i))
+      (v-stack :gap 0.18
         ;; Grouped tracks drop the output dropdown (their output is the group
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
@@ -832,6 +902,130 @@
         :color (if (nth SEQ.record-armed i) :black :dim)
         :on-click (lambda (event) (do (%activate-track-control i) (seq-toggle-record-arm i)))))))
 
+(def %open-track-menu (event i)
+  (do
+    (set! %track-menu-track i)
+    (set! %track-menu-group-id -1)
+    (set! %track-menu-col (get event :col))
+    (set! %track-menu-row (get event :row))
+    (set! %track-menu-open true)))
+
+(def %open-group-menu (event gidx)
+  (do
+    (set! %track-menu-track -1)
+    (set! %track-menu-group-id (get (nth SEQ.groups gidx) :id))
+    (set! %track-menu-col (get event :col))
+    (set! %track-menu-row (get event :row))
+    (set! %track-menu-open true)))
+
+(def %begin-track-rename (i)
+  (do
+    (set! %track-menu-open false)
+    (set! %track-renaming i)
+    (set! %track-rename-draft (nth SEQ.track-names i))))
+
+(def %finish-track-rename (i commit)
+  (if (= %track-renaming i)
+    (do
+      (if commit
+        (host-command "rename-track" (dict :track i :name %track-rename-draft))
+        nil)
+      (set! %track-renaming -1)
+      (set! %track-rename-draft ""))
+    nil))
+
+(def %begin-group-rename (group-id)
+  (let ((gidx (%group-index-by-id group-id)))
+    (if (>= gidx 0)
+      (do
+        (set! %track-menu-open false)
+        (set! %group-renaming group-id)
+        (set! %group-rename-draft (get (nth SEQ.groups gidx) :name)))
+      nil)))
+
+(def %finish-group-rename (group-id commit)
+  (if (= %group-renaming group-id)
+    (do
+      (if commit
+        (host-command "rename-group"
+          (dict :group-id group-id :name %group-rename-draft))
+        nil)
+      (set! %group-renaming -1)
+      (set! %group-rename-draft ""))
+    nil))
+
+(def %track-menu-target-selected? ()
+  (> (len (filter (lambda (track) (= track %track-menu-track)) SEQ.selected-tracks)) 0))
+
+(def %track-context-menu-actions ()
+  (if (>= %track-menu-group-id 0)
+    (let ((gidx (%group-index-by-id %track-menu-group-id)))
+      (if (< gidx 0)
+        (list)
+        (if (get (nth SEQ.groups gidx) :rack)
+          %rack-group-menu-actions
+          %group-menu-actions)))
+    (if (and (>= (len SEQ.selected-tracks) 2) (%track-menu-target-selected?))
+      (append %track-menu-actions (list (dict :id :group :label "Group Tracks")))
+      %track-menu-actions)))
+
+(def %select-track-menu-action (action)
+  (if (= (get action :id) :rename)
+    (if (>= %track-menu-group-id 0)
+      (%begin-group-rename %track-menu-group-id)
+      (%begin-track-rename %track-menu-track))
+    (if (= (get action :id) :convert-drum-rack)
+      (do
+        (set! %track-menu-open false)
+        (host-command "convert-group-to-drum-rack"
+          (dict :group-id %track-menu-group-id)))
+      (if (= (get action :id) :group)
+        (do
+          (set! %track-menu-open false)
+          (%group-selected))
+        (if (= (get action :id) :ungroup)
+          (do
+            (set! %track-menu-open false)
+            (host-command "ungroup-tracks"
+              (dict :group-id %track-menu-group-id)))
+          nil)))))
+
+(def %track-context-menu ()
+  (context-menu :is-open %track-menu-open
+    :anchor-col %track-menu-col
+    :anchor-row %track-menu-row
+    :on-close (lambda () (set! %track-menu-open false))
+    (each (%track-context-menu-actions) |action|
+      (menu-item (get action :label)
+        :key (str "track-menu-" (get action :id))
+        :on-select (lambda (event) (%select-track-menu-action action))))))
+
+(def %rename-input (key width font-size value on-change on-submit on-cancel)
+  (text-input
+    :key key
+    :width width :height 1.0 :font-size font-size
+    :value value
+    :auto-focus true
+    :select-all-on-focus true
+    :on-change on-change
+    :on-submit on-submit
+    :on-cancel on-cancel
+    :on-blur on-submit))
+
+(def %track-rename-input (i key-prefix width font-size)
+  (%rename-input
+    (str key-prefix i) width font-size %track-rename-draft
+    (lambda (name) (set! %track-rename-draft name))
+    (lambda () (%finish-track-rename i true))
+    (lambda () (%finish-track-rename i false))))
+
+(def %group-rename-input (group-id)
+  (%rename-input
+    (str "group-rename-input-" group-id) 6.8 9 %group-rename-draft
+    (lambda (name) (set! %group-rename-draft name))
+    (lambda () (%finish-group-rename group-id true))
+    (lambda () (%finish-group-rename group-id false))))
+
 ;; Name label in its own subtree: rename/mute changes rerun just the label.
 (def %strip-label (i)
   (let ((muted (muted? i)))
@@ -851,22 +1045,24 @@
       :selected-background-color :fx-panel-header-selected-bg
       :on-click (lambda (event) (%track-label-click event i))
       :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
-      (badge (substring (nth SEQ.track-names i) 0 10)
-        :key (str "track-label-content-" i)
-        :icon (eseq.track-collapse/type-icon i)
-        :width 9.8
-        :height 1.0
-        :padding 0
-        :font-size 10
-        :h-align :center
-        :background-color :transparent
-        :border-color :transparent
-        :highlight-color :transparent
-        :shadow-color :transparent
-        :color (if muted :dim :black)
-        :active (%track-delete-target-binding i)
-        :active-color :white
-        :bg :transparent))))
+      (if (= %track-renaming i)
+        (%track-rename-input i "track-rename-input-" 9.8 10)
+        (badge (substring (nth SEQ.track-names i) 0 10)
+          :key (str "track-label-content-" i)
+          :icon (eseq.track-collapse/type-icon i)
+          :width 9.8
+          :height 1.0
+          :padding 0
+          :font-size 10
+          :h-align :left
+          :background-color :transparent
+          :border-color :transparent
+          :highlight-color :transparent
+          :shadow-color :transparent
+          :color (if muted :dim :black)
+          :active (%track-delete-target-binding i)
+          :active-color :white
+          :bg :transparent)))))
 
 (def track-collapsed-label (i)
   (str (+ i 1) " " (substring (nth SEQ.track-names i) 0 3)))
@@ -890,6 +1086,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (drop-on-track event))
       :on-click (lambda (event) (%track-body-click event i))
+      :on-right-click (lambda (event) (%open-track-menu event i))
       (v-stack :gap 0.42 :align :center
         (box :width :fill :height 3.45 :bg :transparent)
         (%track-meter-control i)
@@ -912,22 +1109,24 @@
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (%track-label-click event i))
           :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
-          (badge (track-collapsed-label i)
-            :key (str "track-collapsed-label-content-" i)
-            :icon (eseq.track-collapse/type-icon i)
-            :width 3.65
-            :height 1.0
-            :padding 0
-            :font-size 9
-            :h-align :center
-            :background-color :transparent
-            :border-color :transparent
-            :highlight-color :transparent
-            :shadow-color :transparent
-            :color (if muted :dim :black)
-            :active (%track-delete-target-binding i)
-            :active-color :white
-            :bg :transparent))))))
+          (if (= %track-renaming i)
+            (%track-rename-input i "track-collapsed-rename-input-" 3.65 9)
+            (badge (track-collapsed-label i)
+              :key (str "track-collapsed-label-content-" i)
+              :icon (eseq.track-collapse/type-icon i)
+              :width 3.65
+              :height 1.0
+              :padding 0
+              :font-size 9
+              :h-align :center
+              :background-color :transparent
+              :border-color :transparent
+              :highlight-color :transparent
+              :shadow-color :transparent
+              :color (if muted :dim :black)
+              :active (%track-delete-target-binding i)
+              :active-color :white
+              :bg :transparent)))))))
 
 (def %bus-label (i)
   (if (= i 0) "Main" (nth SEQ.bus-names i)))
@@ -1024,7 +1223,7 @@
         ;  )
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 5.0)
-          (%bus-meter-control i))
+          (%bus-meter-control i false))
         (box :height 2.8)
         (h-stack :gap 0.35
           (button (%bus-mute-label i)
@@ -1057,12 +1256,32 @@
 (def %list-contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
 
-;; Index (in SEQ.groups) of the group anchored at track i (lowest member), else -1.
+;; A group drawn inside another group's block (a rack in a plain group,
+;; docs/drum-rack-v2-spec.md) is not a top-level render item: its parent draws
+;; it. `:parent` is the containing group's id, or -1.
+(def %group-nested? (gidx)
+  (let ((p (get (nth SEQ.groups gidx) :parent)))
+    (if p (>= p 0) false)))
+
+;; Index (in SEQ.groups) of the group with the given id, else -1.
+(def %group-index-by-id (gid)
+  (reduce |acc gidx|
+    (if (>= acc 0) acc (if (= (get (nth SEQ.groups gidx) :id) gid) gidx acc))
+    -1
+    (range 0 (len SEQ.groups))))
+
+;; Index (in SEQ.groups) of the TOP-LEVEL group anchored at track i (lowest
+;; member), else -1. A nested rack is skipped here and drawn by its parent; the
+;; parent itself anchors at the lowest track of any of its units, so a nested
+;; rack's tracks still land inside the parent's block.
 (def %group-anchored-at (i)
   (reduce |acc gidx|
     (if (>= acc 0)
       acc
-      (if (= (get (nth SEQ.groups gidx) :anchor) i) gidx acc))
+      (if (and (not (%group-nested? gidx))
+            (= (%group-anchor gidx) i))
+        gidx
+        acc))
     -1
     (range 0 (len SEQ.groups))))
 
@@ -1074,6 +1293,26 @@
       (if (%list-contains? (get (nth SEQ.groups gidx) :members) i) gidx acc))
     -1
     (range 0 (len SEQ.groups))))
+
+;; Child rack indices (in SEQ.groups) of a group, in id order.
+(def %child-racks (gidx)
+  (filter (lambda (c) (>= c 0))
+    (map (lambda (gid) (%group-index-by-id gid))
+      (or (get (nth SEQ.groups gidx) :rack-members) (list)))))
+
+;; Where a group sits in the flat track order: the lowest member track of the
+;; group itself or of any rack nested inside it. -1 when nothing is claimed yet.
+(def %group-anchor (gidx)
+  (let ((own (if (= (len (get (nth SEQ.groups gidx) :members)) 0)
+            -1
+            (get (nth SEQ.groups gidx) :anchor))))
+    (reduce |acc child|
+      (let ((a (if (= (len (get (nth SEQ.groups child) :members)) 0)
+              -1
+              (get (nth SEQ.groups child) :anchor))))
+        (if (< acc 0) a (if (< a 0) acc (if (< a acc) a acc))))
+      own
+      (%child-racks gidx))))
 
 (def %track-grouped? (i)
   (>= (%group-of-track i) 0))
@@ -1101,16 +1340,28 @@
 ;; Build the flat mixer render-item list: loose tracks and group containers,
 ;; each group anchored at its lowest member index (visual contiguity without
 ;; reindexing the track Vec).
-(def %render-order ()
-  (reduce |acc i|
-    (let ((ganch (%group-anchored-at i)))
-      (if (>= ganch 0)
-        (append acc (list (dict :kind "group" :gidx ganch)))
-        (if (%track-grouped? i)
-          acc
-          (append acc (list (dict :kind "loose" :track i))))))
+;; Top-level groups that have claimed no track yet (an empty rack: its pads are
+;; lazy) have no anchor, so they follow the tracks — the grid does the same.
+(def %unanchored-groups ()
+  (reduce |acc gidx|
+    (if (and (not (%group-nested? gidx)) (< (%group-anchor gidx) 0))
+      (append acc (list (dict :kind "group" :gidx gidx)))
+      acc)
     (list)
-    (range 0 SEQ.num-tracks)))
+    (range 0 (len SEQ.groups))))
+
+(def %render-order ()
+  (append
+    (reduce |acc i|
+      (let ((ganch (%group-anchored-at i)))
+        (if (>= ganch 0)
+          (append acc (list (dict :kind "group" :gidx ganch)))
+          (if (%track-grouped? i)
+            acc
+            (append acc (list (dict :kind "loose" :track i))))))
+      (list)
+      (range 0 SEQ.num-tracks))
+    (%unanchored-groups)))
 
 (def %toggle-group-collapsed (gid)
   (seq-toggle-group-collapsed gid))
@@ -1121,21 +1372,67 @@
       (%select-bus idx)
       false)))
 
+(def %select-group-delete-target (gidx)
+  (let ((group (nth SEQ.groups gidx)))
+    (do
+      (%select-group gidx)
+      (seq-set-delete-target :mixer-group (dict :group-id (get group :id))))))
+
 ;; True when this group's backing bus is the currently selected channel.
 (def %group-selected? (gidx)
   (let ((idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (and (>= idx 0) (= eseq.seq-core-state/selected-bus idx))))
 
+;; Mute and solo always operate on the group's backing bus. A rack additionally
+;; owns a pad-play arm state; a plain mixer group deliberately has no arm
+;; control because it is not an input target.
+(def %group-control-buttons (gidx bus-idx)
+  (let ((gid (get (nth SEQ.groups gidx) :id))
+      (rack (get (nth SEQ.groups gidx) :rack))
+      (muted (nth SEQ.bus-mutes bus-idx))
+      (soloed (nth SEQ.bus-solos bus-idx))
+      (armed (and rack (= SEQ.armed-rack-id gid))))
+    (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
+      ;; Mute is lit when the strip is *passing* audio and goes dark when
+      ;; muted, matching the track and bus strips right next to it.
+      (button "M"
+        :key (str "group-mute-" gid)
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
+        :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
+        :color (if muted :dim :black)
+        :on-click (lambda (event)
+          (do (%select-group gidx) (seq-toggle-bus-mute bus-idx))))
+      (button "S"
+        :key (str "group-solo-" gid)
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :border-color :transparent
+        :background-color (%button-bg soloed)
+        :color (if soloed :black :dim)
+        :on-click (lambda (event)
+          (do (%select-group gidx) (seq-toggle-bus-solo bus-idx))))
+      (if rack
+        (button "R"
+          :key (str "group-arm-" gid)
+          :width 2.1 :height 1.0 :padding 0 :font-size 10
+          :border-color :transparent
+          :background-color (%arm-bg armed)
+          :color (if armed :black :dim)
+          :on-click (lambda (event)
+            (do (%select-group gidx) (seq-toggle-rack-arm gid))))
+        (box :width 0.0 :height 0.0 :bg :transparent)))))
+
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
-;; the container, over the container color.
+;; the container, over the container color. It matches a bus strip's width so
+;; the full rack mute/solo/arm row has room without crowding the container.
 (def %group-header-slot (gidx)
   (let ((group (nth SEQ.groups gidx))
       (c (%group-color gidx))
       (bus-idx (%bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 9.0 :height 13.72
+      :width 10.2 :height 13.72
       :corner-radius 12
-      :padding 0.0
+      :padding 0.1
       :background-color :mixer-strip-bg
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-types (if (>= bus-idx 0)
@@ -1143,35 +1440,50 @@
         (list))
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event gidx))
-      (v-stack :gap 0.4 :align :center
+      (v-stack :gap 0.3 :align :center
         
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (%bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
-          (box  :width :fill :height 9.55
-            (%bus-meter-control bus-idx))
+          (v-stack :gap 0.4 :align :center
+            (box :width :fill :height 9.6 
+              (%bus-meter-control bus-idx true)
+              )
+            )
           (box :width 0.0 :height 0.0 :bg :transparent))
-        (box :height 0.95)
+        (%group-control-buttons gidx bus-idx)
         (%bus-mod-port-row (get group :bus-id))
-        (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
+        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.2
           :key (str "group-badge-" (get group :id))
-          :on-click (lambda (event) (%select-group gidx))
+          :selected (%group-delete-target? (get group :id))
+          :selected-background-color :fx-panel-header-selected-bg
+          :on-click (lambda (event) (%select-group-delete-target gidx))
+          :on-right-click (lambda (event) (%open-group-menu event gidx))
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")
               :width 2.0 :height 0.9 :padding 0 :font-size 14
-              :background-color '(rgba 0.1 0.1 0.1 0.5)
-              :border-color '(rgba 0.8 0.8 0.8 0.9)
+              :corner-radius 16
+              :background-color '(rgba 0.1 0.1 0.1 0.35)
+              :border-color :transparent
               :color :white
               :on-click (lambda (event)
                 (do
                   (%select-group gidx)
                   (%toggle-group-collapsed (get group :id)))))
-            (label (substring (get group :name) 0 10)
-              :font-size 11
-              :h-align :center
-              :color :black
-              :bg :transparent))        )))))
+            (if (= %group-renaming (get group :id))
+              (%group-rename-input (get group :id))
+              (label (substring (get group :name) 0 10)
+                :key (str "group-name-label-" (get group :id))
+                :font-size 11
+                :height 0.9
+                :h-align :center
+                :background-color :transparent
+                :border-color :transparent
+                :highlight-color :transparent
+                :shadow-color :transparent
+                :color :black
+                :bg :transparent)))        )))))
 
 (def %drop-new-track-into-group (event gidx)
   (let ((payload (get event :payload))
@@ -1182,11 +1494,16 @@
       (do
         (%select-group gidx)
         (if (= (get event :drag-type) "instrument")
-          (if name
-            (do
-              (set! sbrowser-loading-instrument-name name)
-              (host-command "add-track-instrument" (dict :name name :group-id group-id)))
-            (status "Drop an instrument, not a folder"))
+          ;; The builtin add-track host commands take no :group-id (a rack even
+          ;; creates its own group), so a builtin dropped on a group header is
+          ;; refused rather than silently landing outside the group (eseq-mj8).
+          (if (= (get payload :kind) "builtin-instrument")
+            (status "Builtin instruments cannot be added inside a group")
+            (if name
+              (do
+                (set! sbrowser-loading-instrument-name name)
+                (host-command "add-track-instrument" (dict :name name :group-id group-id)))
+              (status "Drop an instrument, not a folder")))
           (if path
             (host-command "add-track-sample"
               (dict :path path :group-id group-id :preserve-browser-context true))
@@ -1229,7 +1546,13 @@
             (h-stack :gap 0.1
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)
-                  (%group-member-strip m))))
+                  (%group-member-strip m)))
+              ;; Child racks draw as their own container inside this block —
+              ;; collapsed, that is a single header strip; expanded, the rack
+              ;; header plus its members (docs/drum-rack-v2-spec.md).
+              (each (%child-racks gidx) |child|
+                (subtree :key (str "mixer-v2-group-" (get (nth SEQ.groups child) :id))
+                  (%group-container child))))
             ))))))
 
 (def %render-item (item)
@@ -1329,7 +1652,8 @@
 (effect-buffer "*patch-mixer*"
   (box :padding 0.2
     (subtree :key (str "patch-mixer-track-" SEQ.current-track)
-      (patch-mixer-strip SEQ.current-track))))
+      (patch-mixer-strip SEQ.current-track))
+    (%track-context-menu)))
 
 (effect-buffer "*mixer*"
   (h-stack :padding 0.2 :gap 0.3
@@ -1343,22 +1667,23 @@
         (subtree :key (str "mixer-v2-bus-" i)
           (if (%group-bus-id? (nth SEQ.bus-ids i))
             (box :width 0.0 :height 0.0)
-            (%bus-strip i)))))))
+            (%bus-strip i)))))
+    (%track-context-menu)))
 
-;; C-g — fold the multi-selected tracks into a new group.
+;; Ctrl+G / Cmd+G — fold the multi-selected tracks into a new group.
 (def %group-selected ()
   (do
     (host-command "group-selected-tracks" (dict))
     true))
 
-;; Global C-g dispatcher: a 2+ track multi-selection only exists via mixer
-;; cmd-click, so group when one is present; otherwise open the agent.
+;; Global grouping dispatcher. Multi-selection is shared across the sequencer
+;; UI, so both shortcuts work from any tile that accepts global UI shortcuts.
 (def seq-ctrl-g ()
   (if (>= (len SEQ.selected-tracks) 2)
     (%group-selected)
-    (eseq.agent/agent-open-instrument)))
+    (status "Select 2+ tracks to group")))
 
-(define-mode "seq-mixer-mode" :read-only true :on-key "handle-key")
+(define-mode "seq-mixer-mode" :read-only true :live-keys true :on-key "handle-key")
 (mode-bind-key "seq-mixer-mode" "LEFT" "select-prev-channel")
 (mode-bind-key "seq-mixer-mode" "RIGHT" "select-next-channel")
 (set-buffer-mode-for "*mixer*" "seq-mixer-mode")

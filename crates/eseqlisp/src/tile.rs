@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::backend::Color;
 use crate::host::BufferId;
+use crate::editor::widget_focus::AutoFocusMark;
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{BufferMode, TokenSpan};
 use crate::ui::hit::HitGrid;
@@ -97,6 +98,9 @@ pub struct TileLeaf {
     // Per-tile interaction state (moved from Editor)
     pub focused_widget_id: Option<u64>,
     pub focused_widget_node: Option<LayoutNode>,
+    /// `:auto-focus` is a one-shot per appearance of the widget; this records
+    /// the target already honoured so a deliberate focus-clear stays cleared.
+    pub consumed_auto_focus: Option<AutoFocusMark>,
     pub widget_scroll_top: f32,
     pub widget_viewport_width: f32,
     pub widget_viewport_height: f32,
@@ -201,6 +205,7 @@ impl TileLeaf {
             on_collapse: None,
             focused_widget_id: None,
             focused_widget_node: None,
+            consumed_auto_focus: None,
             widget_scroll_top: 0.0,
             widget_viewport_width: 0.0,
             widget_viewport_height: 0.0,

@@ -14,7 +14,6 @@ impl GraphController<'_> {
                 "Rack tracks support at most {MAX_RACK_SLOTS} slots"
             ));
         }
-        validate_rack_slot_pad_map(rack.routing, &rack.slots)?;
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
             match slot.instrument_type {
                 InstrumentType::Sampler => {

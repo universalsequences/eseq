@@ -119,12 +119,6 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-sounds",
-        build_all_track_drum_sounds_value(app),
-    );
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
@@ -629,14 +623,7 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "track-drum-sounds",
-        build_all_track_drum_sounds_value(app),
-    );
     sync_all_rack_slot_selection_binding_fields(rt, app);
-    sync_all_drum_lane_step_binding_fields(rt, state, app);
     rt.set_reactive(
         "SEQ",
         "track-mod-output-available",
@@ -734,28 +721,6 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
 pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
     sync_bus_mixer_control_state(rt, app);
     rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
-    rt.set_reactive("SEQ", "bus-steps", build_bus_steps_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "bus-velocities",
-        build_bus_param_lists(app, "velocity"),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "bus-durations",
-        build_bus_param_lists(app, "duration"),
-    );
-    rt.set_reactive("SEQ", "bus-syncs", build_bus_param_lists(app, "sync"));
-    rt.set_reactive("SEQ", "bus-num-steps", build_bus_num_steps_value(app));
-    rt.set_reactive("SEQ", "bus-timebases", build_bus_timebase_value(app));
-    rt.set_reactive("SEQ", "bus-swings", build_bus_swing_value(app));
-    rt.set_reactive(
-        "SEQ",
-        "bus-swing-resolutions",
-        build_bus_swing_resolution_value(app),
-    );
-    rt.set_reactive("SEQ", "bus-step-has-plocks", build_bus_step_has_plocks(app));
-    rt.set_reactive("SEQ", "bus-playheads", build_bus_playheads_value(app));
 }
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
@@ -766,8 +731,6 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
@@ -781,148 +744,5 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "bus-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-solos", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-steps", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-velocities", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-durations", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-syncs", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-num-steps", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-timebases", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-swings", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-swing-resolutions", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-step-has-plocks", Value::List(vec![]));
-    rt.set_reactive("SEQ", "bus-playheads", Value::List(vec![]));
 }
 
-pub(crate) fn build_bus_playheads_value(app: &app::App) -> Value {
-    Value::List(
-        bus_playhead_snapshot(app)
-            .into_iter()
-            .map(|step| Rc::new(RefCell::new(Value::Number(step as f64))))
-            .collect(),
-    )
-}
-
-pub(crate) fn bus_playhead_snapshot(app: &app::App) -> Vec<usize> {
-    let playheads = app.graph.bus_gate_playheads.lock().unwrap();
-    app.buses
-        .iter()
-        .map(|bus| {
-            playheads
-                .iter()
-                .find(|(id, _)| *id == bus.id)
-                .map(|(_, step)| *step)
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
-pub(crate) fn build_bus_steps_value(app: &app::App) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| {
-                Rc::new(RefCell::new(Value::List(
-                    bus.gate_sequence
-                        .steps
-                        .iter()
-                        .map(|active| Rc::new(RefCell::new(Value::Bool(*active))))
-                        .collect(),
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_bus_param_lists(app: &app::App, param: &str) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| {
-                let values = match param {
-                    "duration" => &bus.gate_sequence.durations,
-                    "sync" => &bus.gate_sequence.syncs,
-                    _ => &bus.gate_sequence.velocities,
-                };
-                Rc::new(RefCell::new(Value::List(
-                    values
-                        .iter()
-                        .map(|value| Rc::new(RefCell::new(Value::Number(*value as f64))))
-                        .collect(),
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_bus_num_steps_value(app: &app::App) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| {
-                Rc::new(RefCell::new(Value::Number(
-                    bus.gate_sequence.num_steps as f64,
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_bus_timebase_value(app: &app::App) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| {
-                Rc::new(RefCell::new(Value::String(
-                    bus.gate_sequence.timebase.label().to_string(),
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_bus_swing_value(app: &app::App) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.gate_sequence.swing as f64))))
-            .collect(),
-    )
-}
-
-pub(crate) fn build_bus_swing_resolution_value(app: &app::App) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| {
-                Rc::new(RefCell::new(Value::String(
-                    bus.gate_sequence.swing_resolution.label().to_string(),
-                )))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn build_bus_step_has_plocks(app: &app::App) -> Value {
-    Value::List(
-        app.buses
-            .iter()
-            .map(|bus| {
-                Rc::new(RefCell::new(Value::List(
-                    (0..MAX_STEPS)
-                        .map(|step| {
-                            let effect_has_plock = bus.effect_slots.iter().any(|slot| {
-                                slot.plocks
-                                    .get(step)
-                                    .map(|params| params.iter().any(Option::is_some))
-                                    .unwrap_or(false)
-                            });
-                            Rc::new(RefCell::new(Value::Bool(
-                                bus.gate_sequence.has_step_plock(step) || effect_has_plock,
-                            )))
-                        })
-                        .collect(),
-                )))
-            })
-            .collect(),
-    )
-}

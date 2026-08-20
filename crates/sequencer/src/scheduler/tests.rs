@@ -2,7 +2,8 @@
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, invoke_process_cascade,
         midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
-        reconcile_graph_runtimes, resolve_effect_params, resolve_instrument_plocks,
+        reconcile_graph_runtimes, resolve_effect_defaults, resolve_effect_params,
+        resolve_instrument_plocks,
         resolve_sampler_params, resolve_track_send_params, resolved_slot_param_value,
         run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
         swing_delay_samples_from_quarter, swung_network_sample_time,
@@ -239,7 +240,6 @@
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             crate::sequencer::RackTrackSnapshot::new(
-                crate::sequencer::RackRouting::Broadcast,
                 Vec::new(),
                 macros,
             ),
@@ -4654,6 +4654,50 @@
                 },
             ]
         );
+    }
+
+    // eseq-ur4: a stale/legacy pool copy of an effect slot can carry an empty
+    // `param_node_indices` while still reporting params. The old positional
+    // fallback then treated descriptor param N as node param N — and Space
+    // Echo's node param 16 is its sample-rate state slot, not a param, so a
+    // knob-scale value landed there and the audio worker aborted on the next
+    // block. An unknown layout must produce no params at all.
+    #[test]
+    fn effect_slot_without_param_layout_pushes_nothing() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor {
+            name: "space echo-ish".to_string(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "wow".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                // Descriptor param 16 maps to node param 20; node param 16 is
+                // the device's sample-rate state slot.
+                node_param_idx: 20,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
+        state.pattern.effect_chains[track][0].set_plock(step, 0, 0.75);
+
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        let stale_track = Arc::make_mut(&mut snapshot.tracks[track]);
+        stale_track.effect_slots[0].param_node_indices.clear();
+
+        assert!(resolve_effect_params(&snapshot, track, step).is_empty());
+        assert!(resolve_effect_defaults(&snapshot, track).is_empty());
     }
 
     #[test]

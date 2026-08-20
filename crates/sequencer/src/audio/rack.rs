@@ -166,24 +166,6 @@ pub(super) fn rack_slot_accepts_resolved(params: ResolvedRackSlotParams, has_sol
     }
 }
 
-pub(super) fn rack_slot_matches_routing(
-    slot: &RackSlotSnapshot,
-    routing: RackRouting,
-    transpose: f32,
-) -> bool {
-    match routing {
-        RackRouting::Broadcast => true,
-        RackRouting::ByPitch => slot.pad_note == Some(transpose.round() as i32),
-    }
-}
-
-pub(super) fn rack_slot_playback_transpose(routing: RackRouting, transpose: f32) -> f32 {
-    match routing {
-        RackRouting::Broadcast => transpose,
-        RackRouting::ByPitch => 0.0,
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RackSlotNoteOff {
     Custom { logical_id: u64 },
@@ -285,6 +267,179 @@ pub(super) fn collect_rack_choke_group_voice_releases(
         ));
     }
     note_offs
+}
+
+/// Drum rack v2 choke, the per-member-track counterpart of
+/// [`collect_rack_slot_active_voice_releases`] (docs/drum-rack-v2-spec.md,
+/// "Trigger routing"). A rack pad is a real track, so choke releases a whole
+/// track's sounding voices instead of a slot's. Modulator and v1 rack tracks
+/// are skipped, exactly as the per-slot version skips those slot types.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_track_active_voice_releases(
+    state: &SequencerState,
+    voice_pools: &mut [VoicePool],
+    custom_engine_pools: &mut [CustomEnginePool],
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    track_idx: usize,
+    release_sample: u64,
+    note_offs: &mut Vec<RackSlotNoteOff>,
+) {
+    let instrument_type = InstrumentType::from_runtime_flag(
+        state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+    );
+    match instrument_type {
+        InstrumentType::Sampler => {
+            if track_idx >= voice_pools.len() {
+                return;
+            }
+            cancel_chops_for_track(countdown_events, block_events, track_idx);
+            // The choke recycles this track's voice lids, so any live-key
+            // entry here is stale: leaving it would make the eventual key
+            // release note-off a lid the sequencer has already re-triggered.
+            active_keyboard_notes[track_idx] = [None; MAX_VOICES];
+            let num_voices = voice_pools[track_idx].num_voices;
+            for voice_idx in 0..num_voices {
+                let voice = &voice_pools[track_idx].voices[voice_idx];
+                if !voice.active || voice.logical_id == 0 {
+                    continue;
+                }
+                let (lid, gatepitch_id) = (voice.logical_id, voice.gatepitch_id);
+                voice_pools[track_idx].release_voice_by_logical_id(lid);
+                cancel_gate_off_for_lid(countdown_events, block_events, lid);
+                if gatepitch_id > 0 {
+                    note_offs.push(RackSlotNoteOff::Custom {
+                        logical_id: gatepitch_id as u64,
+                    });
+                }
+                note_offs.push(RackSlotNoteOff::Sampler { logical_id: lid });
+            }
+        }
+        InstrumentType::Custom => {
+            let Some(engine_id) = track_engine_id(state, track_idx) else {
+                return;
+            };
+            if engine_id >= custom_engine_pools.len() {
+                return;
+            }
+            cancel_chops_for_track(countdown_events, block_events, track_idx);
+            active_keyboard_notes[track_idx] = [None; MAX_VOICES];
+            let free_patch =
+                track_custom_run_mode(state, track_idx) == CustomInstrumentRunMode::FreePatch;
+            let num_voices = custom_engine_pools[engine_id].num_voices;
+            for voice_idx in 0..num_voices {
+                let voice = &custom_engine_pools[engine_id].voices[voice_idx];
+                if !voice.active || voice.assigned_track != Some(track_idx) {
+                    continue;
+                }
+                let lid = voice.logical_id;
+                if free_patch {
+                    custom_engine_pools[engine_id].release_free_patch_voice_by_logical_id(lid);
+                } else {
+                    custom_engine_pools[engine_id].release_voice_by_logical_id(lid, release_sample);
+                }
+                cancel_gate_off_for_lid(countdown_events, block_events, lid);
+                note_offs.push(RackSlotNoteOff::Custom { logical_id: lid });
+            }
+        }
+        InstrumentType::Modulator | InstrumentType::Rack => {}
+    }
+}
+
+/// Collects the note-offs for a drum rack v2 choke: the sounding voices of
+/// every *other* member track sharing the triggering track's choke group.
+/// Membership is not walked here — the control thread flattens the pad map
+/// into one key per track (`App::publish_rack_choke_runtime`), so two tracks
+/// choke each other iff their keys match and are non-zero. A track that fired
+/// at this very sample is left alone, so two pads of one choke group landing
+/// on the same frame (closed + open hat on one step) do not cut each other's
+/// brand-new voice.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_rack_choke_group_track_releases(
+    state: &SequencerState,
+    voice_pools: &mut [VoicePool],
+    custom_engine_pools: &mut [CustomEnginePool],
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    active_keyboard_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    last_trigger: &[u64; MAX_TRACKS],
+    triggering_track: usize,
+    release_sample: u64,
+    note_offs: &mut Vec<RackSlotNoteOff>,
+) {
+    let num_tracks = state.active_track_count().min(MAX_TRACKS);
+    if triggering_track >= num_tracks {
+        return;
+    }
+    let key = state.runtime.rack_choke_keys[triggering_track].load(Ordering::Acquire);
+    if key == 0 {
+        return;
+    }
+    for track_idx in 0..num_tracks {
+        if track_idx == triggering_track || last_trigger[track_idx] == release_sample {
+            continue;
+        }
+        if state.runtime.rack_choke_keys[track_idx].load(Ordering::Acquire) != key {
+            continue;
+        }
+        collect_track_active_voice_releases(
+            state,
+            voice_pools,
+            custom_engine_pools,
+            countdown_events,
+            block_events,
+            active_keyboard_notes,
+            track_idx,
+            release_sample,
+            note_offs,
+        );
+    }
+}
+
+/// Runs the drum rack v2 choke pass for a pad that just triggered, live or
+/// sequenced. Real-time safe: the note-off scratch buffer lives on the
+/// callback data, so a steady-state block allocates nothing.
+pub(super) fn release_rack_choke_group_track_voices(
+    data: &mut AudioCallbackData,
+    triggering_track: usize,
+    release_sample: u64,
+    frame_offset: u32,
+) {
+    if triggering_track >= MAX_TRACKS
+        || data.state.runtime.rack_choke_keys[triggering_track].load(Ordering::Acquire) == 0
+    {
+        return;
+    }
+    data.rack_choke_last_trigger[triggering_track] = release_sample;
+    let mut note_offs = std::mem::take(&mut data.rack_choke_note_offs);
+    note_offs.clear();
+    collect_rack_choke_group_track_releases(
+        &data.state,
+        &mut data.voice_pools,
+        &mut data.custom_engine_pools,
+        &mut data.countdown_events,
+        &mut data.block_events,
+        &mut data.active_keyboard_notes,
+        &data.rack_choke_last_trigger,
+        triggering_track,
+        release_sample,
+        &mut note_offs,
+    );
+    for note_off in note_offs.iter().copied() {
+        let seq = next_block_event_sequence(data);
+        unsafe {
+            match note_off {
+                RackSlotNoteOff::Custom { logical_id } => {
+                    send_custom_note_off(data.lg.0, logical_id, frame_offset, seq);
+                }
+                RackSlotNoteOff::Sampler { logical_id } => {
+                    send_sampler_note_off(data.lg.0, logical_id, frame_offset, seq);
+                }
+            }
+        }
+    }
+    data.rack_choke_note_offs = note_offs;
 }
 
 pub(super) fn dispatch_rack_slot_note_offs(
@@ -407,9 +562,6 @@ pub(super) fn fire_live_keyboard_rack_note(
     let mut active_voice_count = 0;
 
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
-        if !rack_slot_matches_routing(slot, rack.routing, transpose) {
-            continue;
-        }
         if !rack_slot_accepts_trigger(slot, has_solo) {
             continue;
         }
@@ -423,7 +575,6 @@ pub(super) fn fire_live_keyboard_rack_note(
                 0,
             );
         }
-        let playback_transpose = rack_slot_playback_transpose(rack.routing, transpose);
         let instrument_params = resolve_rack_slot_instrument_defaults(&slot.instrument_slot);
         match slot.instrument_type {
             InstrumentType::Sampler => {
@@ -460,7 +611,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                 let (voice_lid, gatepitch_id, modulator_id) = {
                     let voice = data.voice_pools[pool_id]
                         .allocate_voice_retriggering_same_note_with_limit(
-                            playback_transpose,
+                            transpose,
                             slot.max_polyphony,
                         );
                     (voice.logical_id, voice.gatepitch_id, voice.modulator_id)
@@ -482,7 +633,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             0,
                             gatepitch_seq,
                             custom_pitch_hz(
-                                playback_transpose + slot.instrument_base_note_offset,
+                                transpose + slot.instrument_base_note_offset,
                                 0.0,
                             ),
                             trigger.velocity,
@@ -496,7 +647,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         voice_lid,
                         0,
                         sampler_seq,
-                        playback_transpose + slot.instrument_base_note_offset,
+                        transpose + slot.instrument_base_note_offset,
                         trigger.velocity,
                         sampler_params.playback_speed,
                         attack_samples,
@@ -551,7 +702,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             parent_track_idx,
                             rack_slot_pool_index(parent_track_idx, slot_idx)
                                 .expect("validated rack slot must have a route identity"),
-                            playback_transpose,
+                            transpose,
                         )
                     else {
                         continue;
@@ -562,7 +713,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         parent_track_idx,
                         rack_slot_pool_index(parent_track_idx, slot_idx)
                             .expect("validated rack slot must have a route identity"),
-                        playback_transpose,
+                        transpose,
                         slot.max_polyphony > 1,
                         slot.max_polyphony,
                     )
@@ -580,7 +731,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                 }
                 let key_locked_instrument_params = key_locked_snapshot_instrument_params(
                     &slot.instrument_slot,
-                    playback_transpose,
+                    transpose,
                     slot.instrument_base_note_offset,
                     None,
                     &instrument_params,
@@ -591,7 +742,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                     slot.instrument_base_note_offset,
                 );
                 let pitch_hz =
-                    custom_pitch_hz(playback_transpose, slot.instrument_base_note_offset);
+                    custom_pitch_hz(transpose, slot.instrument_base_note_offset);
                 cancel_gate_off_for_lid(
                     &mut data.countdown_events,
                     &mut data.block_events,
@@ -945,21 +1096,6 @@ pub(super) fn fire_rack_resolved(
         if !rack_slot_accepts_resolved(slot_params, has_solo) {
             continue;
         }
-        let receives_trigger = if chord.count > 0 {
-            (0..chord.count).any(|note_idx| {
-                let transpose = resolved_chord_transpose(
-                    chord.notes[note_idx],
-                    chord.step_transpose,
-                    resolved.transpose,
-                );
-                rack_slot_matches_routing(slot, rack.routing, transpose)
-            })
-        } else {
-            rack_slot_matches_routing(slot, rack.routing, resolved.transpose)
-        };
-        if !receives_trigger {
-            continue;
-        }
         unsafe {
             dispatch_snapshot_effect_params_at_step(data.lg.0, &slot.effect_slots, step);
         }
@@ -987,9 +1123,6 @@ pub(super) fn fire_rack_resolved(
                     chord.step_transpose,
                     resolved.transpose,
                 );
-                if !rack_slot_matches_routing(slot, rack.routing, transpose) {
-                    continue;
-                }
                 if let Some(choke_group) = slot.choke_group {
                     release_rack_choke_group_voices(
                         data,
@@ -1000,11 +1133,10 @@ pub(super) fn fire_rack_resolved(
                         frame_offset,
                     );
                 }
-                let playback_transpose = rack_slot_playback_transpose(rack.routing, transpose);
                 let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
                     key_locked_snapshot_instrument_params(
                         &slot.instrument_slot,
-                        playback_transpose,
+                        transpose,
                         slot_params.base_note_offset,
                         key_lock_plock_step,
                         &instrument_params,
@@ -1024,7 +1156,7 @@ pub(super) fn fire_rack_resolved(
                     slot_idx,
                     slot,
                     slot_params,
-                    playback_transpose,
+                    transpose,
                     resolved.velocity,
                     resolved.speed,
                     note_gate,
@@ -1035,9 +1167,6 @@ pub(super) fn fire_rack_resolved(
                 );
             }
         } else {
-            if !rack_slot_matches_routing(slot, rack.routing, resolved.transpose) {
-                continue;
-            }
             if let Some(choke_group) = slot.choke_group {
                 release_rack_choke_group_voices(
                     data,
@@ -1048,11 +1177,10 @@ pub(super) fn fire_rack_resolved(
                     frame_offset,
                 );
             }
-            let playback_transpose = rack_slot_playback_transpose(rack.routing, resolved.transpose);
             let note_instrument_params = if slot.instrument_type == InstrumentType::Custom {
                 key_locked_snapshot_instrument_params(
                     &slot.instrument_slot,
-                    playback_transpose,
+                    resolved.transpose,
                     slot_params.base_note_offset,
                     key_lock_plock_step,
                     &instrument_params,
@@ -1072,7 +1200,7 @@ pub(super) fn fire_rack_resolved(
                 slot_idx,
                 slot,
                 slot_params,
-                playback_transpose,
+                resolved.transpose,
                 resolved.velocity,
                 resolved.speed,
                 rack_gate,

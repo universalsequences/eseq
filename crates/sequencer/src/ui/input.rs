@@ -9,9 +9,24 @@ pub(crate) struct HeldKeyboardNote {
     key: char,
     sequence_roll_code: Option<crossterm::event::KeyCode>,
     transpose: f32,
-    positions: Vec<(usize, sequencer::sequencer::RecordPosition)>,
     press_time: Instant,
-    tracks: Vec<usize>,
+    /// Everything this key press sounds on, with the record position each
+    /// target was pressed at. One entry per armed track, plus the rack pad
+    /// target when a drum rack is armed.
+    targets: Vec<LiveNoteTarget>,
+}
+
+/// One live-keyboard target of a held key: the track it sounds on, at the
+/// transpose it sounds at, from the record position of the press. Armed tracks
+/// play chromatically (the key's own transpose); with a drum rack armed the
+/// matching pad plays its member track at base pitch — transpose 0 — so the
+/// member's own base note decides the pitch (docs/drum-rack-v2-spec.md,
+/// "Arming & live play").
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LiveNoteTarget {
+    track: usize,
+    transpose: f32,
+    position: sequencer::sequencer::RecordPosition,
 }
 
 pub(crate) fn layout_node_by_id(
@@ -71,6 +86,32 @@ fn widget_type_captures_text_input(widget_type: &str) -> bool {
 fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
     widget_type_captures_text_input(node.widget_type.as_str())
         || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
+}
+
+fn focused_number_picker_is_editing(editor: &Editor) -> bool {
+    editor.focused_widget_node().is_some_and(|node| {
+        node.widget_type == "number-picker"
+            && number_picker_edit_state(node.widget_id).editing
+    })
+}
+
+/// Whether the editor currently permits sequencer live-keyboard shortcuts.
+///
+/// Two ways in. Text-bearing buffers must opt in through their major mode, so
+/// source and special text modes keep ownership of their bare keys. Widget-only
+/// buffers (`ViewMode::UiOnly` — piano roll, browser, arrangement, transport…)
+/// are admitted without an opt-in: they have no text pane, so there is nothing
+/// for the keys to be stolen from, and requiring each to declare a mode meant
+/// every GUI buffer that never called `set-buffer-mode-for` silently went mute.
+///
+/// Either way focus supersedes mode: prompts and focused text or numeric
+/// editors retain ownership of keys, including inside a UiOnly buffer.
+fn editor_accepts_live_keyboard_input(editor: &Editor) -> bool {
+    (editor.active_mode_accepts_live_keys() || active_buffer_accepts_global_ui_shortcuts(editor))
+        && editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && !focused_number_picker_is_editing(editor)
 }
 
 /// A focused patcher owns Cmd+Z/Cmd+Shift+Z for its graph-level undo history,
@@ -161,6 +202,39 @@ fn select_track_for_edit(editor: &mut Editor, track: usize) {
             "(do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track {track}))"
         ));
     }
+}
+
+fn select_track_relative(
+    editor: &mut Editor,
+    current: usize,
+    delta: isize,
+    track_count: usize,
+) {
+    if let Some(callable) = editor
+        .runtime_mut()
+        .global_value("eseq.drum-rack-v2/track-relative")
+    {
+        let next = editor.runtime_mut().invoke(
+            callable,
+            vec![
+                Value::Number(current as f64),
+                Value::Number(delta as f64),
+            ],
+        );
+        if let Ok(Some(Value::Number(next))) = next {
+            if next.is_finite() && next >= 0.0 && next.fract() == 0.0 && next < track_count as f64 {
+                select_track_for_edit(editor, next as usize);
+            }
+        }
+        return;
+    }
+
+    let next = if delta < 0 {
+        if current == 0 { track_count - 1 } else { current - 1 }
+    } else {
+        (current + 1) % track_count
+    };
+    select_track_for_edit(editor, next);
 }
 
 fn focused_widget_is(editor: &Editor, stable_key: &str, widget_type: &str) -> bool {
@@ -392,9 +466,9 @@ pub(crate) fn held_note_for_key(
     })
 }
 
-/// Rate keys are transport-level roll controls, not armed-track input. They
-/// remain available whenever roll mode is enabled; focused text/value editors
-/// still take precedence through `should_route_to_live_keyboard`.
+/// Identify transport-level roll-rate key candidates independently of track
+/// arming. `should_route_to_live_keyboard` applies the active-mode and editor
+/// focus gate before a candidate can change the roll rate.
 pub(crate) fn is_active_roll_rate_key(
     state: &SequencerState,
     key: &crossterm::event::KeyEvent,
@@ -434,7 +508,7 @@ pub(crate) fn should_route_to_live_keyboard(
         return false;
     }
 
-    if focused_widget_captures_text_input(editor) {
+    if !editor_accepts_live_keyboard_input(editor) {
         return false;
     }
 
@@ -543,6 +617,16 @@ pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
         editor.runtime_mut().eval_str("(eseq.seq-core-state/seq-has-selected-bus?)"),
         Ok(Some(Value::Bool(true)))
     )
+}
+
+fn metal_selected_drum_rack_bus(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str(
+        "(if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0) \
+           eseq.seq-core-state/selected-bus -1)",
+    ) {
+        Ok(Some(Value::Number(bus))) if bus >= 0.0 => Some(bus as usize),
+        _ => None,
+    }
 }
 
 fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
@@ -1233,16 +1317,8 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     return true;
                 }
                 let current = current_track.load(Ordering::Relaxed).min(track_count - 1);
-                let next = if key.code == KeyCode::Up {
-                    if current == 0 {
-                        track_count - 1
-                    } else {
-                        current - 1
-                    }
-                } else {
-                    (current + 1) % track_count
-                };
-                select_track_for_edit(editor, next);
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                select_track_relative(editor, current, delta, track_count);
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
                 return true;
@@ -1257,14 +1333,26 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && !focused_widget_captures_text_input(editor)
     {
         if let Some(shortcut) = pattern_length_shortcut(key) {
-            if metal_has_selected_bus(editor) {
-                return false;
-            }
-            let command = match shortcut {
-                PatternLengthShortcut::Double => "(eseq.seq-grid-mode/double-track-pattern)",
-                PatternLengthShortcut::Halve => "(eseq.seq-grid-mode/halve-track-pattern)",
+            let command = if metal_has_selected_bus(editor) {
+                let Some(bus) = metal_selected_drum_rack_bus(editor) else {
+                    return false;
+                };
+                let operation = match shortcut {
+                    PatternLengthShortcut::Double => "double",
+                    PatternLengthShortcut::Halve => "halve",
+                };
+                format!("(seq-resize-drum-rack-patterns {bus} :{operation})")
+            } else {
+                match shortcut {
+                    PatternLengthShortcut::Double => {
+                        "(eseq.seq-grid-mode/double-track-pattern)".to_string()
+                    }
+                    PatternLengthShortcut::Halve => {
+                        "(eseq.seq-grid-mode/halve-track-pattern)".to_string()
+                    }
+                }
             };
-            let _ = editor.runtime_mut().eval_str(command);
+            let _ = editor.runtime_mut().eval_str(&command);
             editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
             return true;
@@ -1340,12 +1428,12 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         }
     }
 
-    if key.modifiers.contains(KeyModifiers::CONTROL)
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
     {
-        // A 2+ track multi-selection only exists via mixer cmd-click, so C-g
-        // groups when one is present; otherwise it opens the agent. The Lisp
-        // dispatcher (seq-ctrl-g) decides.
+        // Ctrl+G and Cmd+G share the same global track-group dispatcher.
         let _ = editor.runtime_mut().eval_str("(eseq.mixer/seq-ctrl-g)");
         editor.refresh_runtime_side_effects();
         return true;
@@ -1520,12 +1608,49 @@ fn quantized_record_position(
     }
 }
 
+/// Record position a live key press lands on for `track`. The latency
+/// compensated record clock is authoritative; a track with no anchor yet
+/// (stopped transport) falls back to its published playhead.
+fn press_record_position(
+    state: &Arc<SequencerState>,
+    track: usize,
+    press_time: Instant,
+) -> sequencer::sequencer::RecordPosition {
+    state
+        .record_position_at_instant(track, press_time)
+        .unwrap_or_else(|| sequencer::sequencer::RecordPosition {
+            step: state.transport.track_playheads[track].load(Ordering::Relaxed) as usize,
+            phase: f32::from_bits(
+                state.transport.track_playhead_phases[track].load(Ordering::Relaxed),
+            )
+            .clamp(0.0, 1.0),
+        })
+}
+
+/// Member track the armed rack's pad for `note` plays, if any. This is the
+/// whole of live pad routing (docs/drum-rack-v2-spec.md): the note selects a
+/// pad by `pad_note`, the pad names a member track, and that track is
+/// triggered directly — no `ByPitch` slot matching, and unmapped notes are
+/// simply ignored.
+fn armed_rack_pad_track(
+    groups: &[sequencer::project::ProjectTrackGroup],
+    armed_rack: Option<u64>,
+    note: f32,
+) -> Option<usize> {
+    let group_id = armed_rack?;
+    groups
+        .iter()
+        .find(|group| group.id == group_id)?
+        .rack_pad_track(note.round() as i32)
+}
+
 /// Intercept keyboard events for live recording.
 pub(crate) fn handle_recording_key(
     key: &crossterm::event::KeyEvent,
     app: &mut sequencer::app::App,
     state: &Arc<SequencerState>,
     record_armed: &Arc<Mutex<Vec<bool>>>,
+    armed_rack: &Arc<Mutex<Option<u64>>>,
     recording: &Arc<AtomicBool>,
     keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
@@ -1561,9 +1686,8 @@ pub(crate) fn handle_recording_key(
                         key: '\0',
                         sequence_roll_code: Some(normalized_code),
                         transpose: 0.0,
-                        positions: Vec::new(),
                         press_time: Instant::now(),
-                        tracks: Vec::new(),
+                        targets: Vec::new(),
                     });
                     state
                         .transport
@@ -1662,12 +1786,37 @@ pub(crate) fn handle_recording_key(
                 return RecordingKeyOutcome::Consumed;
             }
 
-            let armed = record_armed.lock().unwrap();
             let octave = keyboard_octave.load(Ordering::Relaxed);
             let transpose = (note + octave) as f32;
-            let mut pressed_tracks = Vec::new();
             let press_time = Instant::now();
-            let mut positions = Vec::new();
+            let mut targets: Vec<LiveNoteTarget> = Vec::new();
+            {
+                let armed = record_armed.lock().unwrap();
+                for (track, a) in armed.iter().enumerate() {
+                    if *a {
+                        targets.push(LiveNoteTarget {
+                            track,
+                            transpose,
+                            position: press_record_position(state, track, press_time),
+                        });
+                    }
+                }
+            }
+            // Rack arm = pad-play mode: the key's note picks a pad, and the
+            // pad's member track is triggered at base pitch. A note with no
+            // pad is ignored; a member that is somehow armed as a track too
+            // keeps its chromatic entry rather than sounding twice.
+            if let Some(track) =
+                armed_rack_pad_track(&app.groups, *armed_rack.lock().unwrap(), transpose)
+            {
+                if !targets.iter().any(|t| t.track == track) {
+                    targets.push(LiveNoteTarget {
+                        track,
+                        transpose: 0.0,
+                        position: press_record_position(state, track, press_time),
+                    });
+                }
+            }
 
             // With roll mode on the sequencer owns triggering outright:
             // presses never take the immediate live path — playing OR
@@ -1677,37 +1826,22 @@ pub(crate) fn handle_recording_key(
             // however racy) clean, with no out-of-time live hit leaking in
             // ahead of the quantized roll. (Amends rolling-core-spec 4.3's
             // "stopped behaves as normal live keys".)
-            // Send note-on to audio thread for all armed tracks
-            for (track, a) in armed.iter().enumerate() {
-                if *a {
-                    pressed_tracks.push(track);
-                    let position = state
-                        .record_position_at_instant(track, press_time)
-                        .unwrap_or_else(|| sequencer::sequencer::RecordPosition {
-                            step: state.transport.track_playheads[track].load(Ordering::Relaxed)
-                                as usize,
-                            phase: f32::from_bits(
-                                state.transport.track_playhead_phases[track]
-                                    .load(Ordering::Relaxed),
-                            )
-                            .clamp(0.0, 1.0),
-                        });
-                    positions.push((track, position));
-                    if roll_mode {
-                        // No hit on keydown (F1): the scheduler fires the
-                        // first hit at the next roll-grid boundary.
-                        state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
-                            track,
-                            transpose,
-                        });
-                    } else {
-                        let _ = keyboard_tx.send(KeyboardTrigger {
-                            track,
-                            transpose,
-                            velocity: 1.0,
-                            note_off: false,
-                        });
-                    }
+            // Send note-on to audio thread for every target.
+            for target in &targets {
+                if roll_mode {
+                    // No hit on keydown (F1): the scheduler fires the
+                    // first hit at the next roll-grid boundary.
+                    state.push_roll_command(sequencer::sequencer::RollCommand::NoteOn {
+                        track: target.track,
+                        transpose: target.transpose,
+                    });
+                } else {
+                    let _ = keyboard_tx.send(KeyboardTrigger {
+                        track: target.track,
+                        transpose: target.transpose,
+                        velocity: 1.0,
+                        note_off: false,
+                    });
                 }
             }
 
@@ -1715,9 +1849,8 @@ pub(crate) fn handle_recording_key(
                 key: c,
                 sequence_roll_code: None,
                 transpose,
-                positions,
                 press_time,
-                tracks: pressed_tracks,
+                targets,
             });
             RecordingKeyOutcome::Consumed
         }
@@ -1731,20 +1864,20 @@ pub(crate) fn handle_recording_key(
 
             // Record into pattern if recording + playing
             if let Some(note) = held_entry {
-                for track in &note.tracks {
+                for target in &note.targets {
                     if roll_mode {
                         // Cancels every roll hit not yet inside the lookahead
                         // horizon (F3).
                         state.push_roll_command(sequencer::sequencer::RollCommand::NoteOff {
-                            track: *track,
-                            transpose: note.transpose,
+                            track: target.track,
+                            transpose: target.transpose,
                         });
                     }
                     // The audio note-off always goes out so a sounding voice
                     // (rolled or normal) releases its envelope.
                     let _ = keyboard_tx.send(KeyboardTrigger {
-                        track: *track,
-                        transpose: note.transpose,
+                        track: target.track,
+                        transpose: target.transpose,
                         velocity: 0.0,
                         note_off: true,
                     });
@@ -1777,13 +1910,18 @@ pub(crate) fn handle_recording_key(
                     // arrangement view promotes into arrangement capture so
                     // this performance records as a take; the session view
                     // stamps loop overdub into the looping live pattern.
-                    if !note.positions.is_empty() {
+                    if !note.targets.is_empty() {
                         app.stamp_recording_kind_for_note();
                     }
                     let song_authority = app.song_playback_authority_active();
                     let overdub = app.recording_kind
                         == Some(sequencer::app::song_transport::RecordingKind::Overdub);
-                    for (track, position) in &note.positions {
+                    for &LiveNoteTarget {
+                        track,
+                        transpose,
+                        position,
+                    } in &note.targets
+                    {
                         // Song-mode take recording (takes spec 8.4): while
                         // arrangement capture is active, an armed track's
                         // notes retarget into its pending take at
@@ -1792,9 +1930,9 @@ pub(crate) fn handle_recording_key(
                         // pattern is NOT written.
                         if !overdub
                             && app.take_record_note(
-                                *track,
+                                track,
                                 note.press_time,
-                                note.transpose,
+                                transpose,
                                 duration_steps,
                             )
                         {
@@ -1815,35 +1953,39 @@ pub(crate) fn handle_recording_key(
                             // across row boundaries and the layered notes
                             // are audible. A lane currently playing a take
                             // refuses overdub — its note is dropped.
-                            if !app.claim_overdub_lane(*track) {
+                            if !app.claim_overdub_lane(track) {
                                 continue;
                             }
                         }
-                        let num_steps = state.pattern.track_params[*track].get_num_steps();
+                        // Each target quantizes against its OWN track's
+                        // timebase and length, which is what lets one rack
+                        // performance land a 1/64 hat pad and a 1/16 kick pad
+                        // on their own grids.
+                        let num_steps = state.pattern.track_params[track].get_num_steps();
                         let (local_step, delay) = quantized_record_position(
                             position.step,
                             position.phase,
                             num_steps,
-                            state.pattern.track_params[*track].get_timebase(),
+                            state.pattern.track_params[track].get_timebase(),
                             quantize,
                         );
-                        if !state.pattern.patterns[*track].is_active(local_step) {
-                            state.pattern.patterns[*track].toggle_step(local_step);
+                        if !state.pattern.patterns[track].is_active(local_step) {
+                            state.pattern.patterns[track].toggle_step(local_step);
                         }
-                        state.pattern.chord_data[*track].add_note_with_timing(
+                        state.pattern.chord_data[track].add_note_with_timing(
                             local_step,
-                            note.transpose,
+                            transpose,
                             duration_steps,
                             delay,
                         );
-                        let first_note = state.pattern.chord_data[*track].get(local_step, 0);
-                        state.pattern.step_data[*track].set(
+                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
+                        state.pattern.step_data[track].set(
                             local_step,
                             StepParam::Transpose,
                             first_note,
                         );
-                        state.pattern.step_data[*track].set(local_step, StepParam::Velocity, 1.0);
-                        state.pattern.step_data[*track].set(
+                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
+                        state.pattern.step_data[track].set(
                             local_step,
                             StepParam::Duration,
                             duration_steps,
@@ -1869,13 +2011,15 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
-        handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        handle_recording_key, held_note_for_key, is_active_roll_rate_key, note_from_key,
+        armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
+        handle_metal_command_shortcut, handle_metal_soft_step_param_key,
+        handle_number_picker_edit_key_for_widget, handle_recording_key, held_note_for_key,
+        is_active_roll_rate_key, note_from_key, number_picker_edit_state,
         quantized_record_position,
-        sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
-        HeldKeyboardNote, RollRecordBuffer, SequencerHistoryShortcut, SoftStepParamEdit,
-        PROCESS_LANE_MODE_OFFSET,
+        sequencer_history_shortcut, should_route_to_live_keyboard,
+        ExpandedStepProjectionRegistry, ExpandedStepViewport,
+        HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
+        SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1895,6 +2039,19 @@ mod live_keyboard_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
+    fn live_keyboard_routing_editor(live_keys: bool) -> Editor {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(do (define-mode \"routing-mode\" :live-keys {}) (set-buffer-mode \"routing-mode\"))",
+                if live_keys { "true" } else { "false" },
+            ))
+            .expect("define routing mode");
+        editor.refresh_runtime_side_effects();
+        editor
+    }
+
     fn soft_edit_test_app(state: Arc<SequencerState>) -> sequencer::app::App {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = sequencer::app::App::new(
@@ -1905,8 +2062,7 @@ mod live_keyboard_tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -1960,15 +2116,15 @@ mod live_keyboard_tests {
             key: 'a',
             sequence_roll_code: None,
             transpose: 0.0,
-            positions: vec![(
-                0,
-                RecordPosition {
+            press_time: Instant::now(),
+            targets: vec![LiveNoteTarget {
+                track: 0,
+                transpose: 0.0,
+                position: RecordPosition {
                     step: 0,
                     phase: 0.0,
                 },
-            )],
-            press_time: Instant::now(),
-            tracks: vec![0],
+            }],
         }]));
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
 
@@ -1990,11 +2146,141 @@ mod live_keyboard_tests {
     }
 
     #[test]
+    fn live_keyboard_routing_requires_an_opted_in_major_mode() {
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let note_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let roll_hold_key = KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE);
+
+        let source_editor = Editor::new(Runtime::new(), EditorConfig::default());
+        assert!(!should_route_to_live_keyboard(
+            &source_editor,
+            &note_key,
+            &held,
+            false,
+        ));
+        assert!(!should_route_to_live_keyboard(
+            &source_editor,
+            &roll_hold_key,
+            &held,
+            true,
+        ));
+
+        let special_text_mode = live_keyboard_routing_editor(false);
+        assert!(!should_route_to_live_keyboard(
+            &special_text_mode,
+            &note_key,
+            &held,
+            false,
+        ));
+
+        let sequencer_mode = live_keyboard_routing_editor(true);
+        assert!(should_route_to_live_keyboard(
+            &sequencer_mode,
+            &note_key,
+            &held,
+            false,
+        ));
+        assert!(should_route_to_live_keyboard(
+            &sequencer_mode,
+            &roll_hold_key,
+            &held,
+            true,
+        ));
+    }
+
+    /// A widget-only buffer has no text pane, so it gets live keys without
+    /// declaring a `:live-keys` major mode. Requiring the opt-in muted every
+    /// GUI buffer that never called `set-buffer-mode-for` (piano roll, sample
+    /// browser, arrangement, transport).
+    #[test]
+    fn widget_only_buffers_accept_live_keys_without_a_mode_opt_in() {
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let note_key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        let mut editor = live_keyboard_routing_editor(false);
+        assert!(
+            !should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "a text-bearing buffer still needs its mode to opt in",
+        );
+
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        assert!(
+            should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "widget-only buffers route live keys without a mode opt-in",
+        );
+
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        assert!(
+            !should_route_to_live_keyboard(&editor, &note_key, &held, false),
+            "showing the text pane hands the keys back to the editor",
+        );
+    }
+
+    #[test]
+    fn focused_number_picker_edit_suppresses_live_and_roll_keys() {
+        let mut editor = live_keyboard_routing_editor(true);
+        editor.set_layout_viewport(30, 8);
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "routing-picker" :value 12 :min 0 :max 99
+                     :decimals 0 :width 8 :height 1.4)"#,
+            )
+            .expect("build number picker")
+            .expect("number picker widget tree");
+        editor.active_buffer_mut().set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let _ = editor.widget_layout().expect("number picker layout");
+        assert!(editor.focus_widget_by_stable_key("routing-picker", Some("number-picker")));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        let picker_id = editor.focused_widget_id().expect("focused picker");
+        assert!(number_picker_edit_state(picker_id).editing);
+
+        let held = Arc::new(Mutex::new(Vec::new()));
+        assert!(!should_route_to_live_keyboard(
+            &editor,
+            &KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+            &held,
+            false,
+        ));
+        assert!(!should_route_to_live_keyboard(
+            &editor,
+            &KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE),
+            &held,
+            true,
+        ));
+    }
+
+    #[test]
+    fn held_note_release_bypasses_live_key_mode_gate() {
+        let editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            key: 'a',
+            sequence_roll_code: None,
+            transpose: 0.0,
+            press_time: Instant::now(),
+            targets: Vec::new(),
+        }]));
+        let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+
+        assert!(should_route_to_live_keyboard(
+            &editor,
+            &release,
+            &held,
+            false,
+        ));
+    }
+
+    #[test]
     fn semantic_sequence_roll_binding_handles_non_char_press_and_release() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         state.transport.roll_mode.store(true, Ordering::Release);
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let record_armed = Arc::new(Mutex::new(vec![false]));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let recording = Arc::new(AtomicBool::new(false));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(0));
@@ -2008,6 +2294,7 @@ mod live_keyboard_tests {
             &mut app,
             &state,
             &record_armed,
+            &armed_rack,
             &recording,
             &keyboard_tx,
             &keyboard_octave,
@@ -2030,6 +2317,7 @@ mod live_keyboard_tests {
             &mut app,
             &state,
             &record_armed,
+            &armed_rack,
             &recording,
             &keyboard_tx,
             &keyboard_octave,
@@ -2044,6 +2332,262 @@ mod live_keyboard_tests {
             state.drain_roll_commands().as_slice(),
             [sequencer::sequencer::RollCommand::SequenceRoll { on: false }]
         ));
+    }
+
+    /// Drum rack v2 slice 3 (`docs/drum-rack-v2-spec.md`, "Arming & live
+    /// play"): a kit whose pads answer notes 36 and 38 on member tracks 1
+    /// and 2.
+    fn rack_fixture() -> sequencer::project::ProjectTrackGroup {
+        sequencer::project::ProjectTrackGroup {
+            id: 7,
+            name: "Kit".to_string(),
+            color: [0.5, 0.5, 0.5],
+            collapsed: false,
+            members: vec![1, 2],
+            bus_id: 2,
+            rack: Some(sequencer::project::ProjectRackConfig {
+                pads: vec![
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 36,
+                        member: 0,
+                    },
+                    sequencer::project::ProjectRackPad {
+                        pad_note: 38,
+                        member: 1,
+                    },
+                ],
+                choke_groups: vec![None, None],
+            }),
+            rack_members: Vec::new(),
+        }
+    }
+
+    fn rack_test_app(state: Arc<SequencerState>, track_count: usize) -> sequencer::app::App {
+        let mut app = soft_edit_test_app(state);
+        app.tracks = (0..track_count).map(|i| format!("Track {i}")).collect();
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(track_count)
+                .expect("test track registry");
+        app.groups = vec![rack_fixture()];
+        app
+    }
+
+    /// Press `key` with the octave placing `a` at MIDI 36, then release it.
+    fn press_and_release_rack_key(
+        key: char,
+        app: &mut sequencer::app::App,
+        state: &Arc<SequencerState>,
+        record_armed: &Arc<Mutex<Vec<bool>>>,
+        armed_rack: &Arc<Mutex<Option<u64>>>,
+        recording: &Arc<AtomicBool>,
+        keyboard_tx: &std::sync::mpsc::Sender<sequencer::sequencer::KeyboardTrigger>,
+        held: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    ) -> RecordingKeyOutcome {
+        let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(36));
+        let roll_record = Arc::new(Mutex::new(RollRecordBuffer::default()));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let mut event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE);
+        event.kind = KeyEventKind::Press;
+        handle_recording_key(
+            &event,
+            app,
+            state,
+            record_armed,
+            armed_rack,
+            recording,
+            keyboard_tx,
+            &keyboard_octave,
+            held,
+            &roll_record,
+            &ui_epoch,
+            false,
+        );
+        event.kind = KeyEventKind::Release;
+        handle_recording_key(
+            &event,
+            app,
+            state,
+            record_armed,
+            armed_rack,
+            recording,
+            keyboard_tx,
+            &keyboard_octave,
+            held,
+            &roll_record,
+            &ui_epoch,
+            false,
+        )
+    }
+
+    #[test]
+    fn armed_rack_maps_pad_notes_to_member_tracks_and_ignores_the_rest() {
+        let groups = [rack_fixture()];
+        assert_eq!(
+            armed_rack_pad_track(&groups, Some(7), 36.0),
+            Some(1),
+            "pad note 36 plays the first member track"
+        );
+        assert_eq!(armed_rack_pad_track(&groups, Some(7), 38.0), Some(2));
+        assert_eq!(
+            armed_rack_pad_track(&groups, Some(7), 37.0),
+            None,
+            "a note with no pad is ignored"
+        );
+        assert_eq!(
+            armed_rack_pad_track(&groups, None, 36.0),
+            None,
+            "no rack armed means no pad routing at all"
+        );
+        assert_eq!(
+            armed_rack_pad_track(&groups, Some(99), 36.0),
+            None,
+            "an arm pointing at no live group routes nothing"
+        );
+    }
+
+    #[test]
+    fn rack_arm_plays_pad_member_track_at_base_pitch() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        let record_armed = Arc::new(Mutex::new(vec![false; 3]));
+        let armed_rack = Arc::new(Mutex::new(Some(7)));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+
+        // 'a' at this octave is MIDI 36 — the first pad.
+        press_and_release_rack_key(
+            'a',
+            &mut app,
+            &state,
+            &record_armed,
+            &armed_rack,
+            &recording,
+            &keyboard_tx,
+            &held,
+        );
+        let on = keyboard_rx.recv().expect("pad note-on");
+        assert_eq!(on.track, 1, "pad 36 triggers its member track");
+        assert_eq!(
+            on.transpose, 0.0,
+            "a pad plays its member at base pitch, not at the key's pitch"
+        );
+        assert!(!on.note_off);
+        let off = keyboard_rx.recv().expect("pad note-off");
+        assert_eq!((off.track, off.transpose, off.note_off), (1, 0.0, true));
+
+        // 'w' is MIDI 37 — no pad answers it.
+        press_and_release_rack_key(
+            'w',
+            &mut app,
+            &state,
+            &record_armed,
+            &armed_rack,
+            &recording,
+            &keyboard_tx,
+            &held,
+        );
+        assert!(
+            keyboard_rx.try_recv().is_err(),
+            "an unmapped note triggers nothing"
+        );
+    }
+
+    #[test]
+    fn arming_a_member_track_plays_it_chromatically_instead_of_as_a_pad() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        // Member track 1 armed as an ordinary track; the rack is not armed —
+        // the two are mutually exclusive.
+        let record_armed = Arc::new(Mutex::new(vec![false, true, false]));
+        let armed_rack = Arc::new(Mutex::new(None));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+
+        press_and_release_rack_key(
+            'a',
+            &mut app,
+            &state,
+            &record_armed,
+            &armed_rack,
+            &recording,
+            &keyboard_tx,
+            &held,
+        );
+        let on = keyboard_rx.recv().expect("chromatic note-on");
+        assert_eq!(
+            (on.track, on.transpose),
+            (1, 36.0),
+            "an armed member plays the key's pitch, not a pad at base pitch"
+        );
+        let off = keyboard_rx.recv().expect("chromatic note-off");
+        assert_eq!((off.track, off.transpose, off.note_off), (1, 36.0, true));
+        assert!(
+            keyboard_rx.try_recv().is_err(),
+            "only the armed track sounds"
+        );
+    }
+
+    #[test]
+    fn rack_recording_quantizes_each_pad_against_its_own_member_timebase() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        // Kick pad: 16 steps of 1/16. Hat pad: 64 steps of 1/64. Both are
+        // passing step 5 when the pads are hit, so only the member's own
+        // timebase decides where the hit lands.
+        state.pattern.track_params[1].set_num_steps(16);
+        state.pattern.track_params[1].set_timebase(Timebase::Sixteenth);
+        state.pattern.track_params[2].set_num_steps(64);
+        state.pattern.track_params[2].set_timebase(Timebase::SixtyFourth);
+        for track in [1usize, 2] {
+            state.transport.track_playheads[track].store(5, Ordering::Relaxed);
+            state.transport.track_playhead_phases[track].store(0f32.to_bits(), Ordering::Relaxed);
+        }
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state
+            .transport
+            .record_quantize
+            .store(RecordQuantize::Quarter as u32, Ordering::Relaxed);
+
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        let record_armed = Arc::new(Mutex::new(vec![false; 3]));
+        let armed_rack = Arc::new(Mutex::new(Some(7)));
+        let recording = Arc::new(AtomicBool::new(true));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+
+        for key in ['a', 's'] {
+            assert_eq!(
+                press_and_release_rack_key(
+                    key,
+                    &mut app,
+                    &state,
+                    &record_armed,
+                    &armed_rack,
+                    &recording,
+                    &keyboard_tx,
+                    &held,
+                ),
+                RecordingKeyOutcome::Recorded,
+                "pad {key} should record into its member pattern"
+            );
+        }
+
+        // 1/16 track: a quarter-note grid is 4 steps, so step 5 snaps to 4.
+        assert!(state.pattern.patterns[1].is_active(4));
+        assert_eq!(state.pattern.chord_data[1].get(4, 0), 0.0);
+        // 1/64 track: the same grid is 16 steps, so step 5 snaps to 0 — a
+        // different landing step from the same performance.
+        assert!(state.pattern.patterns[2].is_active(0));
+        assert_eq!(state.pattern.chord_data[2].get(0, 0), 0.0);
+        assert!(
+            !state.pattern.patterns[2].is_active(4),
+            "the hat pad must not borrow the kick's grid"
+        );
+        assert!(
+            (0..16).all(|step| !state.pattern.patterns[0].is_active(step)),
+            "a track outside the rack records nothing"
+        );
     }
 
     #[test]
@@ -2127,6 +2671,61 @@ mod live_keyboard_tests {
             &step_clipboard,
         ));
         assert_eq!(current_track.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn up_down_uses_lisp_visual_track_order_for_non_contiguous_group_members() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate eseq.seq-core-state/selected-bus -1)
+                (def eseq.drum-rack-v2/track-relative (track delta)
+                  (if (= track 7)
+                    (if (> delta 0) 10 1)
+                    (if (= track 10)
+                      (if (< delta 0) 7 11)
+                      nil)))
+                "#,
+            )
+            .expect("install visual-order navigation fixture");
+        let current_track = Arc::new(AtomicUsize::new(7));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(Value::Number(*track))
+            });
+        let state = Arc::new(SequencerState::new(12, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 10);
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 7);
     }
 
     #[test]
@@ -3167,6 +3766,75 @@ mod live_keyboard_tests {
     }
 
     #[test]
+    fn command_and_control_g_share_track_group_dispatcher() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.mixer/seq-ctrl-g ()
+                  (host-command "group-selected-tracks" (dict)))
+                "#,
+            )
+            .expect("install track group dispatcher");
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+            assert!(handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char('g'), modifiers),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ));
+        }
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|command| matches!(
+            command,
+            HostCommand::Custom { name, .. } if name == "group-selected-tracks"
+        )));
+    }
+
+    /// Cmd/Ctrl+G belongs to track grouping now, so Agent Mode's entry point
+    /// is the `C-x a` chord registered by ui/agent.lisp. Prove the chord is
+    /// not swallowed by the live-keyboard/`a` handling and reaches the
+    /// `agent-open` handler.
+    #[test]
+    fn control_x_a_chord_opens_the_agent_panel() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (module eseq.agent)
+                (def agent-open ()
+                  (host-command "agent-open-probe" (dict)))
+                (bind-key "C-x a" "agent-open")
+                "#,
+            )
+            .expect("install agent-open binding");
+        editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, .. } if name == "agent-open-probe"
+            )),
+            "C-x a should reach agent-open, got {commands:?}"
+        );
+    }
+
+    #[test]
     fn command_i_queues_new_instrument_editor() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
@@ -3373,6 +4041,53 @@ mod live_keyboard_tests {
                 .unwrap(),
             Some(Value::String("".to_string()))
         );
+    }
+
+    #[test]
+    fn command_plus_and_minus_resize_all_patterns_when_drum_rack_bus_is_selected() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate eseq.seq-core-state/selected-bus 2)
+                (def eseq.seq-core-state/seq-has-selected-bus? () true)
+                (def eseq.drum-rack-v2/rack-of-bus (bus) 4)
+                "#,
+            )
+            .expect("install selected rack fixture");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor.runtime_mut().register_native(
+                "seq-resize-drum-rack-patterns",
+                move |args, _ctx| {
+                    calls.lock().unwrap().push(args.to_vec());
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        for (key, operation) in [('+', "double"), ('-', "halve")] {
+            assert!(handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ));
+            let calls = calls.lock().unwrap();
+            let args = calls.last().expect("rack resize native call");
+            assert_eq!(args.first(), Some(&Value::Number(2.0)));
+            assert_eq!(args.get(1), Some(&Value::Keyword(operation.to_string())));
+        }
     }
 
     #[test]

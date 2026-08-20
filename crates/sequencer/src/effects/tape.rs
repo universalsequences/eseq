@@ -222,7 +222,8 @@ struct BiquadCoefs {
 
 // 2nd-order Butterworth LP. fs is the sample rate the biquad will run at.
 fn butterworth_lp(cutoff_hz: f32, fs: f32) -> BiquadCoefs {
-    let omega = std::f32::consts::TAU * cutoff_hz.clamp(10.0, fs * 0.49) / fs;
+    let fs = super::safe_sample_rate(fs);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(cutoff_hz, fs, 10.0, 0.49) / fs;
     let cos_w = omega.cos();
     let sin_w = omega.sin();
     // Q = 1/sqrt(2), so alpha = sin(omega) / (2Q).
@@ -245,7 +246,8 @@ fn butterworth_lp(cutoff_hz: f32, fs: f32) -> BiquadCoefs {
 // Low-shelf biquad for the "head bump" — boost below cutoff by `gain_db`.
 fn low_shelf(cutoff_hz: f32, gain_db: f32, fs: f32) -> BiquadCoefs {
     let a = (10.0_f32).powf(gain_db / 40.0);
-    let omega = std::f32::consts::TAU * cutoff_hz.clamp(10.0, fs * 0.49) / fs;
+    let fs = super::safe_sample_rate(fs);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(cutoff_hz, fs, 10.0, 0.49) / fs;
     let cos_w = omega.cos();
     let sin_w = omega.sin();
     let s = 1.0; // shelf slope
@@ -513,7 +515,7 @@ unsafe extern "C" fn tape_process(
         return;
     }
 
-    let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
     let fs_os = sr * OVERSAMPLE as f32;
     let drive = db_to_amp((*s.add(STATE_DRIVE_DB)).clamp(-12.0, 24.0));
     let output = db_to_amp((*s.add(STATE_OUTPUT_DB)).clamp(-24.0, 12.0));

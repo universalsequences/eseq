@@ -6,9 +6,11 @@
 ;; (import eseq.effects.buffers) from library code.
 (module eseq.effects.buffers)
 
+(import eseq.drum-rack-v2)
 (import eseq.effects.drag-drop :as dd)
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.instrument-panel :as ip)
+(import eseq.effects.panel-frame :as pf)
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
@@ -93,6 +95,105 @@
         :width 30 :font-size 12 :h-align :center
         :color :dim :bg :transparent))))
 
+;; ── Drum rack selection panel (docs/drum-rack-v2-spec.md) ──────────────
+;; Selecting a rack selects its backing bus (ui/sequencer.lisp, %select-rack),
+;; so without this branch a kit shows up here as a bare — usually empty — bus
+;; chain. A rack has to feel like a track in *fx*: its kit first, then the
+;; rack-level effects that bus chain really is.
+;;
+;; The pads come from ui/sequencer.lisp — one pad-cell component, so drops,
+;; badges and audition cannot drift between this panel and any other surface
+;; that draws them. The eseq.sequencer names are spelled qualified rather than
+;; imported ON PURPOSE: this module is loaded from the effects manifest, which
+;; several Rust harnesses load on its own, and an import edge would drag the
+;; whole sequencer view (and its top-level registrations) into every one of
+;; them.
+;; They only run inside the rack branch, which cannot be reached without the
+;; sequencer loaded. eseq.drum-rack-v2 IS imported (at the top of this file):
+;; %selected-rack asks it about every bus selection, and it is a pure lookups
+;; module over SEQ.groups — no view, no top-level registrations — that answers
+;; -1 when no groups state exists.
+
+(def %selected-rack ()
+  (if (pw/has-selected-bus?)
+    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
+    -1))
+
+(def %rack-pad-member-name (gidx pad)
+  (let ((track (if (= pad nil) -1 (get pad :track))))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (nth SEQ.track-names track)
+      "")))
+
+;; Pad focus controls stay beside the grid; rack identity and persistence live
+;; in the instrument-style header above it.
+(def %rack-panel-controls (gidx)
+  (let ((pad (eseq.sequencer/selected-pad gidx)))
+    (v-stack :debug-name "rack-fx-panel-controls"
+      :width 8.8 :height :fill :gap 0.3 :align :start :padding 0.1
+      (label (if (= pad nil) "No pad selected" (str "Pad " (get pad :label)))
+        :font-size 8 :color :dim :bg :transparent)
+      (label (substring (%rack-pad-member-name gidx pad) 0 14)
+        :font-size 8 :color :white :bg :transparent)
+      (button "OPEN PAD TRACK"
+        :key (str "rack-fx-open-pad-" (eseq.drum-rack-v2/group-id gidx))
+        :width 8.4 :height 1.1 :padding 0 :font-size 8
+        :background-color (if (= pad nil)
+          '(rgba 0.1 0.1 0.1 1.0)
+          '(rgba 0.18 0.22 0.23 1.0))
+        :border-color :transparent
+        :color (if (= pad nil) :dim :white)
+        :on-click |x y r| (if (= pad nil) nil (eseq.sequencer/open-pad-member-fx gidx pad)))
+      (box :flex 1 :width 0 :height 0 :bg :transparent)
+      (label "Drop a sample or instrument on a pad"
+        :width 8.4 :font-size 6.8 :color :dim :bg :transparent))))
+
+(def %rack-selection-panel (gidx)
+  (v-stack :padding 0.05 :gap 1
+    (h-stack :gap 1 :align :start
+      (box :debug-name "rack-fx-pads-panel"
+        :key (str "rack-fx-pads-panel-" (eseq.drum-rack-v2/group-id gidx))
+        :background "fx-panel-bg"
+        :color :instrument-panel-bg
+        :header :fx-panel-header-bg
+        :selected-header :fx-panel-header-selected-bg
+        :height st/fx-fixed-panel-height
+        :padding 0
+        :v-align :start :h-align :start
+        (v-stack :gap 0 :height :fill
+          (box :debug-name "rack-fx-header-box"
+            :width :fill :height 1 :padding 0 :v-align :center :h-align :start
+            (h-stack :debug-name "rack-fx-header-row" :gap 0.6 :align :baseline :width :fill
+              (pf/fx-panel-header-leading-spacer)
+              (label (substring (eseq.drum-rack-v2/group-name gidx) 0 12)
+                :font-size 11 :color :white :bg :transparent)
+              (box :flex 1 :height 0.15)
+              (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
+                (v-stack
+                  (box :width 2.05 :height 1.45
+                  (fx-mini-save-icon
+                    :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
+                    :on-click |x y r|
+                    (eseq.browser/enter-kit-save
+                      (eseq.drum-rack-v2/group-id gidx)
+                      (eseq.drum-rack-v2/group-name gidx))
+                    :active 0))))
+              (box :width 0.5)))
+          (pf/fx-panel-body "rack-fx-pads-body"
+            ;; Mini-map on the LEFT of the enlarged grid, the way a drum rack
+            ;; reads: the whole note range at a glance, the enlarged window
+            ;; highlighted inside it (eseq-4b5.15).
+            (h-stack :gap 0.2 :align :start
+              (eseq.sequencer/rack-pad-map gidx)
+              (eseq.sequencer/rack-pad-grid gidx)
+              ))))
+      ;; Rack-level fx still matter: the bus chain stays right here, edited the
+      ;; same way an ordinary bus selection edits it.
+      (each (filter |fx| (> (len (get fx :params)) 0) (%selected-bus-effects)) |fx slot-idx|
+        (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
+          (ep/fx-panel (get fx :name) (get fx :params) fx)))
+      (%drop-placeholder-panel))))
+
 (def %bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
@@ -142,7 +243,10 @@
 
 (effect-buffer "*fx*"
   (if (pw/has-selected-bus?)
-    (%bus-selection-panel)
+    (let ((gidx (%selected-rack)))
+      (if (>= gidx 0)
+        (%rack-selection-panel gidx)
+        (%bus-selection-panel)))
     (if (= SEQ.num-tracks 0)
     (empty-track-fallback)
     ;; Mapping changes the wrapper structure of every compatible parameter.
@@ -157,7 +261,7 @@
         (%track-selection-panel))
       (%track-selection-panel))))))
 
-(define-mode "seq-fx-mode" :read-only true)
+(define-mode "seq-fx-mode" :read-only true :live-keys true)
 ;; Handler strings qualify against THIS module; the two below live in other
 ;; converted modules, so they are written pre-qualified (dispatch resolves an
 ;; already-qualified name directly, resolve_handler_name).
@@ -173,7 +277,7 @@
       true)
     false))
 
-(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true)
+(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true :live-keys true)
 (mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "BS" "delete-selected-plock-row-key")
 (mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "Delete" "delete-selected-plock-row-key")
 (set-buffer-mode-for "*track*" "eseq.effects.buffers/seq-plock-panel-mode")

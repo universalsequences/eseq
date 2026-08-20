@@ -724,9 +724,9 @@ unsafe extern "C" fn roar_process(
     // below the center frequency.
     let half_w = fb_width * 0.5;
     let fb_hp_coef_target =
-        one_pole_coef((fb_freq * 0.5_f32.powf(half_w)).clamp(10.0, sr * 0.45), sr);
+        one_pole_coef(super::nyquist_clamp(fb_freq * 0.5_f32.powf(half_w), sr, 10.0, 0.45), sr);
     let fb_lp_coef_target =
-        one_pole_coef((fb_freq * 2.0_f32.powf(half_w)).clamp(10.0, sr * 0.45), sr);
+        one_pole_coef(super::nyquist_clamp(fb_freq * 2.0_f32.powf(half_w), sr, 10.0, 0.45), sr);
 
     let drive_mod_amt = [
         finite_clamp(*s.add(STATE_MOD_DRIVE_DEPTH_1), -24.0, 24.0, 0.0),
@@ -788,7 +788,7 @@ unsafe extern "C" fn roar_process(
         let mut ap_coef = [0.0_f32; 4];
         for (section, coef) in ap_coef.iter_mut().enumerate() {
             let off = (section as f32 - 1.5) * res;
-            let f = (freq * off.exp2()).clamp(20.0, sr * 0.45);
+            let f = super::nyquist_clamp(freq * off.exp2(), sr, 20.0, 0.45);
             let t = (std::f32::consts::PI * f / sr).tan();
             *coef = (t - 1.0) / (t + 1.0);
         }

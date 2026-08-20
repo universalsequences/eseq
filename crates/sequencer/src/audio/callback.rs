@@ -62,7 +62,6 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     data.transport_was_playing = transport_playing;
     let host_transport_clock = compute_host_transport_clock(data, block_start_sample);
-    sync_bus_gate_params(data, block_start_sample);
     sync_instrument_host_clock_params(data, host_transport_clock);
     sync_effect_modulator_transport_clock_params(data, host_transport_clock);
     sync_dj_mixer_transport_phase(data, block_start_sample);
@@ -110,6 +109,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         } else {
             // Note-on: allocate voice and trigger
             enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
+            release_rack_choke_group_track_voices(data, kt.track, block_start_sample, 0);
             let resolved_transpose = resolve_live_keyboard_transpose(
                 &data.state,
                 data.accumulator_states[kt.track],

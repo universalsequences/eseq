@@ -234,7 +234,8 @@ struct Biquad {
 }
 
 fn lowpass_biquad(freq: f32, sr: f32) -> Biquad {
-    let omega = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.49) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 20.0, 0.49) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin * std::f32::consts::FRAC_1_SQRT_2;

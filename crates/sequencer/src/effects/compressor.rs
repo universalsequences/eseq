@@ -158,8 +158,8 @@ pub fn auto_makeup_db(threshold_db: f32, ratio: f32, knee_db: f32, expand: bool)
 /// RBJ biquad coefficients for the sidechain filter.
 /// `filter_type`: 0 lowpass, 1 highpass, 2 bandpass, 3 notch.
 fn sc_filter_coefs(filter_type: usize, freq: f32, q: f32, sample_rate: f32) -> [f32; 5] {
-    let sr = sample_rate.max(1.0);
-    let freq = freq.clamp(10.0, sr * 0.45);
+    let sr = super::safe_sample_rate(sample_rate);
+    let freq = super::nyquist_clamp(freq, sr, 10.0, 0.45);
     let q = q.clamp(0.05, 12.0);
     let w0 = 2.0 * std::f32::consts::PI * freq / sr;
     let (sin_w0, cos_w0) = w0.sin_cos();
@@ -268,7 +268,7 @@ unsafe extern "C" fn compressor_process(
         return;
     }
 
-    let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
     let threshold = (*s.add(STATE_THRESHOLD_DB)).clamp(-70.0, 6.0);
     let ratio = (*s.add(STATE_RATIO)).clamp(1.0, 40.0);
     let knee = (*s.add(STATE_KNEE_DB)).clamp(0.0, 18.0);

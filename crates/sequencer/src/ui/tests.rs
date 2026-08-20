@@ -1,5 +1,5 @@
     use super::{
-        apply_bus_mixer_history_host_command, apply_drum_lane_history_host_command,
+        apply_bus_mixer_history_host_command,
         apply_piano_roll_gesture_update,
         apply_piano_roll_history_host_command,
         apply_selected_steps_delete, apply_slice3_history_host_command,
@@ -13,7 +13,7 @@
         pull_shared_bus_state, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        track_and_bus_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
         FxDeleteChain, ParamSyncRevision, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
         NEW_INSTRUMENT_STARTER_DSP,
     };
@@ -38,8 +38,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -64,6 +63,55 @@
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn rename_group_host_command_trims_rejects_empty_and_is_undoable() {
+        let (_state, mut app) = history_test_app();
+        let bus = app.buses[0].id;
+        app.buses[0].name = "Original Kit".to_string();
+        app.groups.push(sequencer::project::ProjectTrackGroup {
+            id: 41,
+            name: "Original Kit".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0],
+            bus_id: bus.0,
+            rack: Some(sequencer::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        });
+
+        let rename = history_value_map([
+            ("group-id", Value::Number(41.0)),
+            ("name", Value::String("  Night Kit  ".to_string())),
+        ]);
+        super::host_commands::apply_rename_group_host_command(&mut app, &rename)
+            .expect("rename group through host command seam");
+        assert_eq!(app.groups[0].name, "Night Kit");
+        assert_eq!(
+            app.buses.iter().find(|item| item.id == bus).unwrap().name,
+            "Night Kit"
+        );
+
+        let empty = history_value_map([
+            ("group-id", Value::Number(41.0)),
+            ("name", Value::String("   ".to_string())),
+        ]);
+        assert!(super::host_commands::apply_rename_group_host_command(
+            &mut app,
+            &empty,
+        ).is_err());
+        assert_eq!(app.groups[0].name, "Night Kit");
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.groups[0].name, "Original Kit");
+        assert_eq!(
+            app.buses.iter().find(|item| item.id == bus).unwrap().name,
+            "Original Kit"
+        );
     }
 
     #[test]
@@ -379,85 +427,6 @@
             sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
-        assert!(!state.pattern.patterns[0].is_active(5));
-    }
-
-    #[test]
-    fn metal_drum_lane_edits_are_individually_replayable() {
-        let (state, mut app) = history_test_app();
-
-        let toggle = history_value_map([
-            ("op", Value::Keyword("toggle".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("step", Value::Number(2.0)),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &toggle)
-            .expect("toggle drum-lane step");
-        assert!(state.pattern.patterns[0].is_active(2));
-
-        let duration = history_value_map([
-            ("op", Value::Keyword("duration".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("step", Value::Number(2.0)),
-            ("duration", Value::Number(3.0)),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &duration)
-            .expect("set drum-lane duration");
-        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
-
-        let move_action = history_value_map([
-            ("op", Value::Keyword("move".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("steps", piano_roll_id_list([2])),
-            ("delta", Value::Number(3.0)),
-            ("move-selection", Value::Bool(false)),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &move_action)
-            .expect("move drum-lane step");
-        assert!(!state.pattern.patterns[0].is_active(2));
-        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
-
-        let clear = history_value_map([
-            ("op", Value::Keyword("clear".to_string())),
-            ("track", Value::Number(0.0)),
-            ("pad-note", Value::Number(36.0)),
-            ("steps", piano_roll_id_list([5])),
-        ]);
-        apply_drum_lane_history_host_command(&mut app, &clear)
-            .expect("clear drum-lane step");
-        assert!(!state.pattern.patterns[0].is_active(5));
-        assert_eq!(app.history.undo_len(), 4);
-
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert_ne!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
-        assert!(matches!(
-            sequencer::app::edit::undo(&mut app),
-            sequencer::app::history::HistoryReplay::Applied(_)
-        ));
-        assert!(!state.pattern.patterns[0].is_active(2));
-
-        for _ in 0..4 {
-            assert!(matches!(
-                sequencer::app::edit::redo(&mut app),
-                sequencer::app::history::HistoryReplay::Applied(_)
-            ));
-        }
         assert!(!state.pattern.patterns[0].is_active(5));
     }
 
@@ -1258,11 +1227,11 @@
     }
 
     #[test]
-    fn sequencer_visibility_keeps_track_meter_bindings_live_without_mixer() {
-        assert!(track_meter_bindings_visible(true, false));
-        assert!(track_meter_bindings_visible(false, true));
-        assert!(track_meter_bindings_visible(true, true));
-        assert!(!track_meter_bindings_visible(false, false));
+    fn sequencer_visibility_keeps_track_and_drum_rack_bus_meter_bindings_live_without_mixer() {
+        assert!(track_and_bus_meter_bindings_visible(true, false));
+        assert!(track_and_bus_meter_bindings_visible(false, true));
+        assert!(track_and_bus_meter_bindings_visible(true, true));
+        assert!(!track_and_bus_meter_bindings_visible(false, false));
     }
 
     #[test]
@@ -1873,6 +1842,7 @@
         let recording = Arc::new(AtomicBool::new(false));
         let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
@@ -1883,7 +1853,6 @@
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
-            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -1903,6 +1872,7 @@
             master_recording.clone(),
             master_recorder.clone(),
             record_armed.clone(),
+            armed_rack.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),
@@ -2523,6 +2493,7 @@
         let recording = Arc::new(AtomicBool::new(false));
         let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
@@ -2536,7 +2507,6 @@
             midi_fx_names: _,
             sample_browser,
             piano_roll_clipboard,
-            selected_drum_lane_steps,
         } = init_runtime(
             &app,
             state.clone(),
@@ -2556,6 +2526,7 @@
             master_recording.clone(),
             master_recorder.clone(),
             record_armed.clone(),
+            armed_rack.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),
@@ -4886,6 +4857,7 @@
                 bus_node_ids: bus_node_ids.clone(),
                 track_groups: track_groups.clone(),
                 record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
                 recording: recording.clone(),
                 master_recording: master_recording.clone(),
                 held_notes: Arc::new(Mutex::new(Vec::new())),
@@ -4897,7 +4869,6 @@
                 accumulator_names: accumulator_names.clone(),
                 piano_roll_clipboard: piano_roll_clipboard.clone(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-                selected_drum_lane_steps: selected_drum_lane_steps.clone(),
             };
             let mut sessions = EditSessionState::default();
             let mut frame_diff = FrameDiffState::default();
@@ -5512,8 +5483,7 @@
                         .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
                         .unwrap_or_else(|| {
                             panic!(
-                                "the *step* panel must render a number-picker keyed {picker_key} \
-                                 (a drum-rack track swaps Transpose for a sound dropdown)"
+                                "the *step* panel must render a number-picker keyed {picker_key}"
                             )
                         });
                     (
@@ -5925,6 +5895,7 @@
                 bus_node_ids: bus_node_ids.clone(),
                 track_groups: track_groups.clone(),
                 record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
                 recording: recording.clone(),
                 master_recording: master_recording.clone(),
                 held_notes: Arc::new(Mutex::new(Vec::new())),
@@ -5936,7 +5907,6 @@
                 accumulator_names: accumulator_names.clone(),
                 piano_roll_clipboard: piano_roll_clipboard.clone(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-                selected_drum_lane_steps: selected_drum_lane_steps.clone(),
             };
             let mut sessions = EditSessionState::default();
             let mut gesture_state = GestureState::default();
@@ -9617,6 +9587,7 @@
         let recording = Arc::new(AtomicBool::new(false));
         let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
         let auto_follow_override_until = Arc::new(Mutex::new(None));
@@ -9626,7 +9597,6 @@
             midi_fx_names: _,
             sample_browser: _,
             piano_roll_clipboard: _,
-            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -9646,6 +9616,7 @@
             master_recording.clone(),
             master_recorder.clone(),
             record_armed.clone(),
+            armed_rack.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),

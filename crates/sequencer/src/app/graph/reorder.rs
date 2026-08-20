@@ -20,10 +20,10 @@ impl GraphController<'_> {
             values.insert(target, value);
         }
         move_last_to(&mut self.app.tracks, target);
+        move_last_to(&mut self.app.track_name_user_authored, target);
         move_last_to(&mut self.app.track_colors, target);
         move_last_to(&mut self.app.track_collapsed, target);
         move_last_to(&mut self.app.rack_selected_slots, target);
-        move_last_to(&mut self.app.rack_pad_bank_starts, target);
         move_last_to(&mut self.app.sampler_paths, target);
         move_last_to(&mut self.app.graph.track_node_ids, target);
         move_last_to(&mut self.app.graph.track_buffer_ids, target);

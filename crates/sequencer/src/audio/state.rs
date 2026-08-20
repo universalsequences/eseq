@@ -110,6 +110,15 @@ pub(super) struct AudioCallbackData {
     pub(super) host_clock_was_playing: bool,
     pub(super) host_clock_play_start_sample: u64,
     pub(super) free_patch_transport_routes: [FreePatchTransportRouteState; MAX_TRACKS],
+    /// Sample at which each track last fired a drum rack v2 choke trigger,
+    /// `u64::MAX` for never. Two pads of one choke group hit on the same frame
+    /// (closed + open hat on one step) would otherwise choke each other's
+    /// brand-new voice and both fall silent; a track that triggered at the
+    /// same sample is skipped by the choke pass instead.
+    pub(super) rack_choke_last_trigger: [u64; MAX_TRACKS],
+    /// Reused note-off buffer for the choke pass, so cutting voices allocates
+    /// nothing on the audio thread after the first block that needs it.
+    pub(super) rack_choke_note_offs: Vec<RackSlotNoteOff>,
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pub(super) pending_accum_reset: [bool; MAX_TRACKS],
     pub(super) scheduled_events: Arc<ScheduledEventQueue<SCHEDULED_EVENT_QUEUE_CAPACITY>>,
@@ -118,17 +127,10 @@ pub(super) struct AudioCallbackData {
     pub(super) block_events_need_sort: bool,
     pub(super) current_callback_nframes: usize,
     pub(super) rendered_samples: Arc<AtomicU64>,
-    pub(super) bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
-    /// RT-side snapshot of `bus_gate_runtime`. Refreshed by pointer-comparing
-    /// under `try_lock`; a failed lock just means the callback keeps using the
-    /// previous snapshot for one block. Never deep-cloned on the audio thread.
-    pub(super) bus_gate_cache: Arc<Vec<BusGateRuntimeState>>,
-    pub(super) bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
-    /// Reused buffer for publishing playheads without per-block allocation.
-    pub(super) bus_gate_playheads_scratch: Vec<(BusId, usize)>,
-    pub(super) bus_gate_clocks: Vec<BusGateClock>,
-    pub(super) bus_gate_was_playing: bool,
-    pub(super) bus_gate_play_start_sample: u64,
+    /// Bus effect slots, published by the UI thread so the callback can reach
+    /// each bus effect's modulator node for the transport clock/phase
+    /// broadcasts. Read under `try_lock`; a failed lock just skips a block.
+    pub(super) bus_effect_runtime: Arc<Mutex<Arc<Vec<BusEffectRuntimeState>>>>,
     pub(super) dropped_scheduled_events: u64,
     pub(super) late_scheduled_events: u64,
     pub(super) event_seq: u64,
@@ -190,13 +192,6 @@ pub(super) struct FreePatchTransportRouteTarget {
     pub(super) engine_id: usize,
     pub(super) route_hash: u64,
     pub(super) open: bool,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct BusGateClock {
-    pub(super) id: crate::sequencer::BusId,
-    pub(super) last_target: f32,
-    pub(super) last_step: Option<usize>,
 }
 
 pub(super) fn clear_active_keyboard_note_by_lid(

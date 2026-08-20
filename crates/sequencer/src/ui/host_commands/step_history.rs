@@ -6,7 +6,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "piano-roll-gesture-update",
     "piano-roll-gesture-finish",
     "piano-roll-history-action",
-    "drum-lane-history-action",
     "delete-selected-steps",
     "paste-steps",
     "set-step-param-history",
@@ -14,6 +13,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "print-step-param-release",
     "move-step-history",
     "slice2-history-action",
+    "resize-drum-rack-patterns",
     "slice3-history-action",
     "bus-mixer-history-action",
     "toggle-step",
@@ -46,7 +46,6 @@ pub(super) fn handle(
     let auto_follow_override_until = ctx.shared.auto_follow_override_until.clone();
     let bus_state = ctx.shared.bus_state.clone();
     let piano_roll_clipboard = ctx.shared.piano_roll_clipboard.clone();
-    let selected_drum_lane_steps = ctx.shared.selected_drum_lane_steps.clone();
     match name {
         "midi-fx-history-action" => {
             let Value::Map(ref map) = payload else {
@@ -379,76 +378,6 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
             }
         }
-        "drum-lane-history-action" => {
-            match apply_drum_lane_history_host_command(&mut app, &payload) {
-                Ok((app::edit::EditOutcome::Applied(result), action)) => {
-                    let track = action.track();
-                    let bindings = editor.runtime().reactive_binding_store();
-                    match action {
-                        DrumLaneHistoryAction::Toggle { .. } => {
-                            if !selected_steps.lock().unwrap().is_empty() {
-                                selected_steps.lock().unwrap().clear();
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
-                            clear_drum_lane_selection(
-                                &bindings,
-                                &mut selected_drum_lane_steps.lock().unwrap(),
-                            );
-                        }
-                        DrumLaneHistoryAction::Move {
-                            pad_note,
-                            steps,
-                            delta,
-                            move_selection: true,
-                            ..
-                        } => {
-                            let mut selected = selected_drum_lane_steps.lock().unwrap();
-                            for step in steps {
-                                let old = DrumLaneStepSelection {
-                                    track,
-                                    pad_note,
-                                    step,
-                                };
-                                selected.remove(&old);
-                                write_drum_lane_selection(&bindings, old, false);
-                                let new = DrumLaneStepSelection {
-                                    track,
-                                    pad_note,
-                                    step: (step as isize + delta) as usize,
-                                };
-                                selected.insert(new);
-                                write_drum_lane_selection(&bindings, new, true);
-                            }
-                        }
-                        DrumLaneHistoryAction::Clear { .. } => {
-                            clear_drum_lane_selection(
-                                &bindings,
-                                &mut selected_drum_lane_steps.lock().unwrap(),
-                            );
-                        }
-                        DrumLaneHistoryAction::Duration { .. }
-                        | DrumLaneHistoryAction::Move {
-                            move_selection: false,
-                            ..
-                        } => {}
-                    }
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::Pattern(
-                        PatternInvalidation::WholeTrack { track },
-                    ));
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    editor.show_transient_message(result.label);
-                }
-                Ok((app::edit::EditOutcome::NoOp, _)) => {}
-                Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
-                    editor.handle_host_event(HostEvent::Error(
-                        "Drum-lane edit was applied without history".to_string(),
-                    ));
-                }
-                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
-            }
-        }
         "delete-selected-steps" => {
             let track = match &payload {
                 Value::Map(map) => map_usize(map, "track"),
@@ -715,6 +644,71 @@ pub(super) fn handle(
                     ));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+            }
+        }
+        "resize-drum-rack-patterns" => {
+            let Value::Map(map) = &payload else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Drum rack pattern resize failed: invalid payload".to_string(),
+                ));
+                return;
+            };
+            let Some(bus_index) = map_usize(map, "bus") else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Drum rack pattern resize failed: invalid bus".to_string(),
+                ));
+                return;
+            };
+            let Some(bus_id) = app.buses.get(bus_index).map(|bus| bus.id.0) else {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Drum rack pattern resize failed: bus {bus_index} does not exist"
+                )));
+                return;
+            };
+            let Some(group) = app
+                .groups
+                .iter()
+                .find(|group| group.bus_id == bus_id && group.rack.is_some())
+            else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Drum rack pattern resize failed: selected bus is not a drum rack"
+                        .to_string(),
+                ));
+                return;
+            };
+            let group_id = group.id;
+            let members = group.members.clone();
+            let change = match map_string(map, "op").as_deref() {
+                Some("double") => app::edit::PatternLengthChange::Double,
+                Some("halve") => app::edit::PatternLengthChange::Halve,
+                _ => {
+                    editor.handle_host_event(HostEvent::Error(
+                        "Drum rack pattern resize failed: invalid operation".to_string(),
+                    ));
+                    return;
+                }
+            };
+            match app.resize_drum_rack_patterns_recorded(group_id, change) {
+                Ok(app::edit::EditOutcome::Applied(result)) => {
+                    *auto_follow_override_until.lock().unwrap() =
+                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                    for track in members {
+                        ui_invalidations.push(UiInvalidation::Pattern(
+                            PatternInvalidation::WholeTrack { track },
+                        ));
+                    }
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.show_transient_message(result.label);
+                }
+                Ok(app::edit::EditOutcome::NoOp) => {}
+                Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
+                    editor.handle_host_event(HostEvent::Error(
+                        "Drum rack resize was applied without history".to_string(),
+                    ));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                    "Could not resize drum rack patterns: {error:?}"
+                ))),
             }
         }
         "slice3-history-action" => {
@@ -1752,8 +1746,7 @@ mod tests {
                     bus_l_id: 0,
                     bus_r_id: 0,
                     default_bus_nodes: Vec::new(),
-                    bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                    bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                    bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                     reverb_bus_id: 0,
                     reverb_node_id: 0,
                 },
@@ -1814,6 +1807,7 @@ mod tests {
                 bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
                 track_groups: Arc::new(Mutex::new(app.groups.clone())),
                 record_armed: record_armed.clone(),
+                armed_rack: Arc::new(Mutex::new(None)),
                 recording: Arc::new(AtomicBool::new(false)),
                 master_recording: Arc::new(AtomicBool::new(false)),
                 held_notes: Arc::new(Mutex::new(Vec::new())),
@@ -1828,7 +1822,6 @@ mod tests {
                 accumulator_names: accumulator_names.clone(),
                 piano_roll_clipboard: super::super::super::new_piano_roll_clipboard(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-                selected_drum_lane_steps: Arc::new(Mutex::new(HashSet::new())),
             };
             Self {
                 app,
@@ -2018,49 +2011,6 @@ mod tests {
                 },
                 other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
             }
-        }
-
-        /// Turn TRACK into a by-pitch drum rack with one slot per pad note, so
-        /// the expanded lane grid renders one row per pad. The lane grid places
-        /// a hit on the row named by the step's `StepParam::Transpose`.
-        fn install_drum_rack(&mut self, pad_notes: &[i32]) {
-            let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
-            let slots = pad_notes
-                .iter()
-                .map(|pad_note| sequencer::sequencer::RackSlotSnapshot {
-                    instrument_type: sequencer::sequencer::InstrumentType::Sampler,
-                    instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
-                    instrument_base_note_offset: 0.0,
-                    pad_note: Some(*pad_note),
-                    choke_group: None,
-                    gain: 1.0,
-                    pan: 0.0,
-                    mute: false,
-                    solo: false,
-                    max_polyphony: 1,
-                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
-                    instrument_slot:
-                        sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
-                            &sampler_desc,
-                            0,
-                            0,
-                        ),
-                    effect_slots: sequencer::sequencer::RackSlotSnapshot::empty_effect_slots(),
-                    effect_descriptors: sequencer::effects::EffectDescriptor::default_full_chain(),
-                    custom_effect_names:
-                        sequencer::sequencer::RackSlotSnapshot::empty_effect_names(),
-                    track_sound_state: sequencer::sequencer::TrackSoundState::default(),
-                    sample_id: Some((42, "DS FM".to_string(), 48_000)),
-                })
-                .collect::<Vec<_>>();
-            self.state.set_rack_track_for_all_pattern_snapshots(
-                TRACK,
-                sequencer::sequencer::RackTrackSnapshot::new(
-                    sequencer::sequencer::RackRouting::ByPitch,
-                    slots,
-                    sequencer::sequencer::default_rack_macros(),
-                ),
-            );
         }
 
         fn bool_field(&self, field: &str) -> bool {
@@ -2288,48 +2238,6 @@ mod tests {
                 "step {step} must be released when the note is shortened"
             );
         }
-    }
-
-    /// A drum-rack track's expanded lane grid derives its pad row from the
-    /// step's `StepParam::Transpose` (`drum_lane_step_active`), and BOTH
-    /// production sound pickers — the `*step*` panel's Sound dropdown and the
-    /// expanded lane's own dropdown — lower to `set-step-param-history` with
-    /// `:transpose`. The removed `ui_epoch` bump used to be the only writer for
-    /// `drum-lane-step-active-{track}-{pad}-{step}`, so the targeted Param
-    /// invalidation must publish it now or the hit stays drawn on the old pad.
-    #[test]
-    fn set_step_transpose_moves_the_drum_lane_hit_to_the_new_pad_row() {
-        let mut harness = Harness::new();
-        harness.install_drum_rack(&[0, 7]);
-        let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
-
-        harness.set_step_param("transpose", 7.0);
-
-        assert!(
-            harness.bool_field(&drum_lane_step_active_field(TRACK, 7, STEP)),
-            "the hit must appear on the pad the new transpose names"
-        );
-        assert!(
-            !harness.bool_field(&drum_lane_step_active_field(TRACK, 0, STEP)),
-            "the hit must leave the pad row it was drawn on before"
-        );
-
-        // ...and back, so the write is a real re-derivation and not a one-shot.
-        harness.set_step_param("transpose", 0.0);
-        assert!(
-            harness.bool_field(&drum_lane_step_active_field(TRACK, 0, STEP)),
-            "returning to the default transpose must move the hit back"
-        );
-        assert!(
-            !harness.bool_field(&drum_lane_step_active_field(TRACK, 7, STEP)),
-            "the pad row the hit left must be cleared"
-        );
-        assert_eq!(
-            harness.ui_epoch.load(Ordering::Relaxed),
-            epoch_before,
-            "the drum-lane grid must be reached by the targeted path, not an \
-             epoch resync"
-        );
     }
 
     /// The compact step shell's p-lock tick / variant tint is

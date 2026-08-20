@@ -93,12 +93,12 @@ use crate::scheduled_event::{
     ScheduledSamplerParams,
 };
 use crate::sequencer::{
-    rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackRouting, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
+    rack_slot_pool_index, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
     SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
     MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
-use crate::app::BusGateRuntimeState;
+use crate::app::BusEffectRuntimeState;
 
 const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;

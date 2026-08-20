@@ -23,7 +23,6 @@ pub enum RackSlotInstrumentBuildSpec<'a> {
 pub struct RackSlotBuildSpec<'a> {
     pub instrument: RackSlotInstrumentBuildSpec<'a>,
     pub instrument_base_note_offset: f32,
-    pub pad_note: Option<i32>,
     pub choke_group: Option<u8>,
     pub gain: f32,
     pub pan: f32,

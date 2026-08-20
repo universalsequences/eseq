@@ -82,6 +82,34 @@ pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {
         Value::String(app.current_project_name.clone().unwrap_or_default()),
     );
     rt.set_reactive("SEQ", "sound-presets", build_sound_presets_value());
+    rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
+}
+
+/// Builds `SEQ.kit-presets`: the drum-rack kits the browser's Kits tab lists
+/// (docs/drum-rack-v2-spec.md, "Polish"). One entry per `.kit` file, with the
+/// pad count so a kit reads as a kit and not as another Sound.
+pub(crate) fn build_kit_presets_value() -> Value {
+    let kits = sequencer::project::list_kit_presets().unwrap_or_default();
+    list_value(kits.into_iter().filter_map(|path| {
+        let kit = sequencer::project::load_kit_preset(&path).ok()?;
+        let label = if kit.metadata.name.trim().is_empty() {
+            path.file_stem()?.to_str()?.to_string()
+        } else {
+            kit.metadata.name
+        };
+        Some(map_value([
+            ("kind", Value::String("kit".to_string())),
+            ("label", Value::String(label.clone())),
+            ("name", Value::String(label)),
+            ("path", Value::String(path.to_string_lossy().to_string())),
+            ("pads", Value::Number(kit.pads.len() as f64)),
+            ("author", Value::String(kit.metadata.author)),
+            (
+                "tags",
+                list_value(kit.metadata.tags.into_iter().map(Value::String)),
+            ),
+        ]))
+    }))
 }
 
 pub(crate) fn build_sound_presets_value() -> Value {

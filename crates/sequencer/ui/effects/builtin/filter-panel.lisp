@@ -39,12 +39,12 @@
       (if (and mode-p cutoff-p resonance-p)
         (v-stack :gap 0.15
           (h-stack :gap 0.34 :align :start
-            (box :width 5.45 :height 6.30 :padding 0.28
+            (box :width 5.45 :height 6.60 :padding 0.28
               :background-color :fx-inner-panel-bg :corner-radius 7
               (v-stack :gap 0.3
                 (eseq.effects.builtin.filter-core/builtin-fx-filter-cutoff-knob fx cutoff-p)
                 (eseq.effects.builtin.filter-core/builtin-fx-filter-resonance-knob fx resonance-p)))
-              (box :width 28.8 :height 6.30
+              (box :width 28.8 :height 8.00
                 ;; Own subtree: the curve's band dict reads param state, so any
                 ;; future body-level read reruns one widget instead of the whole
                 ;; Filter panel (which is what made curve drags 12x a knob).

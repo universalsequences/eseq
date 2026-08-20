@@ -940,8 +940,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -989,6 +988,7 @@ mod tests {
             bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
             track_groups: Arc::new(Mutex::new(app.groups.clone())),
             record_armed: Arc::new(Mutex::new(vec![false])),
+            armed_rack: Arc::new(Mutex::new(None)),
             recording: Arc::new(AtomicBool::new(false)),
             master_recording: Arc::new(AtomicBool::new(false)),
             held_notes: Arc::new(Mutex::new(Vec::new())),
@@ -1003,7 +1003,6 @@ mod tests {
             accumulator_names: Arc::new(Mutex::new(Vec::new())),
             piano_roll_clipboard: super::super::super::new_piano_roll_clipboard(),
             arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
-            selected_drum_lane_steps: Arc::new(Mutex::new(HashSet::new())),
         };
         let mut sessions = EditSessionState::default();
         let mut frame = FrameDiffState::default();

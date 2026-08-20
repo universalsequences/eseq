@@ -13,12 +13,14 @@
 ;; seq-panels.lisp toggles the expanded lane, seq-grid-mode.lisp routes the
 ;; *sequencer* keymap (both the `(seqv-handle-key …)` call and the "C-h"
 ;; `mode-bind-key` handler string, which dispatches through `invoke_global` and
-;; therefore through the alias rung), and the drum-rack capture fixture drives
-;; the track menu and param mode.  The rest are entry points src/ui/input.rs and
+;; therefore through the alias rung).  The rest are entry points src/ui/input.rs and
 ;; the Rust state_values / ui tests drive by name.  Deleted as each consumer
 ;; converts.
 
 (import eseq.track-collapse)
+
+;; Drum rack v2: rack lookups over SEQ.groups (docs/drum-rack-v2-spec.md).
+(import eseq.drum-rack-v2)
 
 (import eseq.seq-panels)
 
@@ -326,24 +328,10 @@
                 (if (> (len SEQ.process-lanes) 0) eseq.seqv-track-params/seqv-process-lane-mode-offset -1)
                 -1))))))))
 
-(def %selected-drum-sound (track)
-  (let ((selected
-          (filter
-            (lambda (sound)
-              (> (reactive-value (%drum-slot-selected-binding sound)) 0.5))
-            (eseq.seqv-track-params/seqv-track-drum-sounds track))))
-    (if (> (len selected) 0) (nth selected 0) nil)))
-
 (def select-all-current-track-steps ()
-  (let ((track SEQ.current-track))
-    (do
-      (set! eseq.seq-core-state/selected-bus -1)
-      (if (eseq.seqv-track-params/seqv-track-drum-rack? track)
-        (let ((sound (%selected-drum-sound track)))
-          (if sound
-            (seq-select-all-drum-rack-steps (get sound :transpose))
-            nil))
-        (eseq.step-grid-interactions/select-all-steps)))))
+  (do
+    (set! eseq.seq-core-state/selected-bus -1)
+    (eseq.step-grid-interactions/select-all-steps)))
 
 (def collapse-all-tracks ()
   (do
@@ -389,7 +377,8 @@
           (track (get target :track)))
       (if path
         (do
-          (%activate-track-for-edit track)
+          (if (not (get target :from-pad))
+            (%activate-track-for-edit track))
           (eseq.browser/drop-sample-on-track event))
         (status "Drop a sample file, not a folder")))))
 
@@ -409,11 +398,7 @@
           (host-command "add-track-from-sound" (dict :path path))
           (status "Drop a Sound item, not a folder"))
         (if (= (get event :drag-type) "instrument")
-          (if name
-            (do
-              (set! sbrowser-loading-instrument-name name)
-              (host-command "add-track-instrument" (dict :name name)))
-            (status "Drop an instrument, not a folder"))
+          (eseq.browser/drop-instrument-new-track payload)
           (if path
             (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
             (status "Drop a sample file, not a folder")))))))
@@ -425,6 +410,25 @@
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.45)
       (rgba 0 0 0 0))))
+
+(defwidget group-track-indicator
+  :width 1.5 :height 1.5
+  :state ()
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/translate -0.4 0 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate -0.4 0.5 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate -0.4 -0.5 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate 0 1.0 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate -0.4 1.0 (sdf/circle 0.2))
+      :dim)
+    (sdf/fill (sdf/translate 0.4 1.0 (sdf/circle 0.2))
+      :dim)
+    ))
 
 (defwidget seqv-rec-arm-dot
   :width 1.5 :height 1.5
@@ -797,9 +801,9 @@
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
 ;; The header lives in its own subtree so name/mute/solo/arm changes rerun
 ;; only this header instead of the whole track row (incl. its step grid).
-(def track-header (i)
+(def track-header (i is-bare-track)
   (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
-    (%track-header-body i)))
+    (%track-header-body i is-bare-track)))
 
 (def %track-volume-control (i)
   (v-stack (box :height 0.13 )
@@ -816,7 +820,7 @@
       :on-drag (lambda (event) (%set-track-volume-from-event i event))))
   )
 
-(def %track-header-body (i)
+(def %track-header-body (i is-bare-track)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.1
@@ -836,6 +840,7 @@
           :key (str "arm-" i)
           :active (if (nth SEQ.record-armed i) 1 0)
           :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-record-arm i)))
+        (if is-bare-track (box :width 1.55))
         (button (str (+ i 1))
           :key (str "mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
@@ -920,7 +925,6 @@
 
 (def %drag-track nil)
 (def %duration-drag-source nil)
-(def %drum-drag-pad nil)
 
 (def %duration-edge? (evt)
   (let ((sx (get evt :sx)))
@@ -991,67 +995,6 @@
     (set! %drag-track nil)
     (set! %duration-drag-source nil)))
 
-(def %set-drum-duration-from-drag (track pad-note source step)
-  (do
-    (seq-set-track track)
-    (seq-set-drum-lane-step-duration
-      track
-      pad-note
-      source
-      (max 1 (min 32 (+ (- step source) 1))))))
-
-(def %grid-drum-step-select-drag-over (track pad-note step evt)
-  (if (%track-song-governed? track)
-    nil
-    (if (and (= %drag-track track)
-          (= %drum-drag-pad pad-note)
-          (not (= %duration-drag-source nil)))
-      (%set-drum-duration-from-drag
-        track pad-note %duration-drag-source step)
-      (if (and (= %drag-track track) (= %drum-drag-pad pad-note))
-        (eseq.step-grid-interactions/drum-step-select-drag-over track pad-note step evt)
-        nil))))
-
-(def %grid-drum-step-pointer-down (track slot-idx pad-note step evt)
-  (if (%track-song-governed? track)
-    nil
-    (do
-      (%select-drum-slot-index track slot-idx)
-      (set! eseq.seq-core-state/selected-bus -1)
-      (seq-set-track track)
-      (set! %drag-track track)
-      (set! %drum-drag-pad pad-note)
-      (if (and (seq-drum-lane-step-active? track pad-note step)
-            (not (eseq.step-grid-interactions/selection-click? evt))
-            (%duration-edge? evt))
-        (do
-          (set! %duration-drag-source step)
-          (eseq.step-grid-interactions/step-clear-drag-state)
-          (eseq.seq-core-state/cool-off-follow)
-          (eseq.step-grid-interactions/drum-step-set-cursor track pad-note step)
-          (%set-drum-duration-from-drag track pad-note step step))
-        (eseq.step-grid-interactions/drum-step-pointer-down track pad-note step evt)))))
-
-(def %grid-drum-step-pointer-up (track pad-note step evt)
-  (do
-    (if (and (= %drag-track track)
-          (= %drum-drag-pad pad-note)
-          (= %duration-drag-source nil)
-          (not (%track-song-governed? track)))
-      (eseq.step-grid-interactions/drum-step-pointer-up track pad-note step evt)
-      nil)
-    (set! %drag-track nil)
-    (set! %drum-drag-pad nil)
-    (set! %duration-drag-source nil)))
-
-(def %grid-drum-step-double-click (track slot-idx pad-note step evt)
-  (if (%track-song-governed? track)
-    nil
-    (do
-      (%select-drum-slot-index track slot-idx)
-      (seq-set-track track)
-      (eseq.step-grid-interactions/drum-step-double-click track pad-note step evt))))
-
 ;; Single tight step button (no slider, no number).
 (def %track-step-value (lists track step fallback)
   (let ((track-list (if (< track (len lists)) (nth lists track) '())))
@@ -1107,62 +1050,6 @@
         :plock-kind plock-kind
         :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
         :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-        :muted muted
-        :hide (if visible 0 1)
-        :track-r track-r :track-g track-g :track-b track-b
-        :variant-r variant-r :variant-g variant-g :variant-b variant-b
-        :color :sequencer-step-border
-        :selected-color :sequencer-step-selected-border
-        :off-fill (if (= (%step-odd step) 1)
-          :sequencer-step-off-fill-alt
-          :sequencer-step-off-fill)
-        :background "seqv-step-shell"))))
-
-(def %drum-lane-step-cell (track slot-idx pad-note step visible)
-  (let ((track-r (bind-seq-nth "step-color-r-effective" track))
-      (track-g (bind-seq-nth "step-color-g-effective" track))
-      (track-b (bind-seq-nth "step-color-b-effective" track))
-      (muted (bind-seq-nth "track-muted-effective" track))
-      (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
-      (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
-      (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
-      (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
-    (box
-      :width 3.05 :height 1.55
-      :key (str "drum-lane-step-" track "-" pad-note "-" step)
-      :debug-name "seqv-drum-lane-step"
-      :on-mouse-down (lambda (evt)
-        (if visible
-          (%grid-drum-step-pointer-down track slot-idx pad-note step evt)
-          nil))
-      :on-drag (lambda (evt)
-        (if visible
-          (%grid-drum-step-select-drag-over track pad-note step evt)
-          nil))
-      :on-mouse-up (lambda (evt)
-        (if visible
-          (%grid-drum-step-pointer-up track pad-note step evt)
-          nil))
-      :on-double-click (lambda (evt)
-        (if visible
-          (%grid-drum-step-double-click track slot-idx pad-note step evt)
-          nil))
-      :active (if (and (= eseq.step-grid-interactions/drum-step-cursor-track track)
-                    (= eseq.step-grid-interactions/drum-step-cursor-pad pad-note))
-        (%cursor-highlight-binding track step)
-        0)
-      :selected (track-selected-binding track)
-      :hide (if visible 0 1)
-      :background "cursor-highlight"
-      (box
-        :width 3.05 :height 1.55
-        :align :center
-        :active (bind-seq (str "drum-lane-step-active-" track "-" pad-note "-" step))
-        :plock-kind plock-kind
-        :selected (bind-seq
-          (str "drum-lane-step-selected-" track "-" pad-note "-" step))
-        :duration (bind-seq
-          (str "drum-lane-step-duration-" track "-" pad-note "-" step))
         :muted muted
         :hide (if visible 0 1)
         :track-r track-r :track-g track-g :track-b track-b
@@ -1389,11 +1276,6 @@
       (%set-expanded-step-param track track-id step mode slider-value)
       nil)))
 
-(def %set-expanded-slot-sound (track track-id slot sound-index)
-  (%set-expanded-slot-param
-    track track-id slot 3
-    (eseq.seqv-track-params/seqv-drum-sound-transpose-at-index track sound-index)))
-
 (def %set-expanded-step-param (track track-id step mode slider-value)
   (do
     (%activate-track-for-edit track)
@@ -1425,11 +1307,6 @@
         (track-current-step track track-id)
         (eseq.seqv-track-params/seqv-param-keyword mode)
         (eseq.seqv-track-params/seqv-step-param-value mode value)))))
-
-(def %set-expanded-current-sound (track track-id label)
-  (%set-expanded-current-param
-    track track-id 3
-    (eseq.seqv-track-params/seqv-drum-sound-transpose-for-label track label)))
 
 (def %set-expanded-timebase (track label)
   (let ((plock-selected
@@ -1474,7 +1351,7 @@
 (def %param-header-name (track mode)
   (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
     (%clip-label (eseq.seqv-track-params/seqv-track-param-name track mode) 28)
-    (if (eseq.seqv-track-params/seqv-drum-sound-mode? track mode) "Sound" (eseq.seqv-track-params/seqv-param-name mode))))
+    (eseq.seqv-track-params/seqv-param-name mode)))
 
 (def %param-header-width (mode)
   (if (eseq.seqv-track-params/seqv-process-lane-mode? mode) 17.8 6.4))
@@ -1555,23 +1432,12 @@
             :key (str "expanded-sync-label-" track-id)
             (label (%expanded-sync-current-label track track-id)
               :font-size 11 :color :white :bg :transparent))
-          (if (eseq.seqv-track-params/seqv-drum-sound-mode? track mode)
-            (if (> (eseq.seqv-track-params/seqv-drum-sound-count track) 0)
-              (dropdown :key (str "expanded-sound-picker-" track-id)
-                :value (eseq.seqv-track-params/seqv-drum-sound-label-for-transpose track
-                  (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id)))
-                :options (eseq.seqv-track-params/seqv-drum-sound-labels track)
-                :on-change (lambda (label) (%set-expanded-current-sound track track-id label))
-                :width 13 :height 1.3 :font-size 9)
-              (box :width 13 :height 1.3
-                :key (str "expanded-no-sounds-" track-id)
-                (label "No drum pads" :font-size 9 :color :dim :bg :transparent)))
-            (number-picker :key (str "expanded-param-number-picker-" track-id)
-              :border-color :white
-              :value (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id))
-              :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode) :decimals (eseq.seqv-track-params/seqv-track-param-decimals track mode)
-              :on-change (lambda (v) (%set-expanded-current-param track track-id mode v))
-              :width 8 :height 1.3 :font-size 11)))
+          (number-picker :key (str "expanded-param-number-picker-" track-id)
+            :border-color :white
+            :value (eseq.seqv-track-params/seqv-param-value-at track mode (track-current-step track track-id))
+            :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode) :decimals (eseq.seqv-track-params/seqv-track-param-decimals track mode)
+            :on-change (lambda (v) (%set-expanded-current-param track track-id mode v))
+            :width 8 :height 1.3 :font-size 11))
         (h-stack :gap 0.4 :align :center
           (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
             :key (str "expanded-half-" track-id)
@@ -1608,9 +1474,7 @@
                       :bg :transparent)))))))))))
 
 (def %expanded-track-editor (track track-id)
-  (let ((mode (track-param-mode track-id))
-        (sound-mode (eseq.seqv-track-params/seqv-drum-sound-mode? track (track-param-mode track-id)))
-        (sound-count (eseq.seqv-track-params/seqv-drum-sound-count track)))
+  (let ((mode (track-param-mode track-id)))
     (box :padding 0.25
       (box 
         :background-color (rgba 0.1 0.1 0.1 0.2) :corner-radius 8
@@ -1619,7 +1483,7 @@
             (box :width 1)
             (%param-tab track track-id 0 "vel")
             (%param-tab track track-id 1 "dur")
-            (%param-tab track track-id 3 (if (eseq.seqv-track-params/seqv-track-drum-rack? track) "sound" "tpose"))
+            (%param-tab track track-id 3 "tpose")
             (%param-tab track track-id 4 "pan")
             (%param-tab track track-id 5 "sync")
             (%param-tab track track-id 6 "delay")
@@ -1654,59 +1518,30 @@
                       (track-g (%expanded-track-color-g track))
                       (track-b (%expanded-track-color-b track)))
                     (list
-                      (if sound-mode
-                        (if (> sound-count 0)
-                          (vslider :height %expanded-step-slider-height
-                            :key (str "expanded-step-sound-slider-" track-id "-" i)
-                            :width 1
-                            :min 0 :max (- sound-count 1)
-                            :origin 0
-                            :value (eseq.seqv-track-params/seqv-drum-sound-index-for-transpose track
-                              (reactive-value (%slot-param-slider-binding track-id mode i)))
-                            :haptic-value (eseq.seqv-track-params/seqv-drum-sound-index-for-transpose track
-                              (reactive-value (%slot-param-haptic-binding track-id mode i)))
-                            :haptic-min 0 :haptic-max (- sound-count 1)
-                            :haptic-pivot-position 1 :haptic-pivot-value (- sound-count 1)
-                            :haptic-exponent 1
-                            :items (eseq.seqv-track-params/seqv-drum-sound-short-labels track)
-                            :font-size 11
-                            :color :white
-                            :fill (%expanded-slider-fill track)
-                            :dot-color :dark-gray
-                            :active active-ref
-                            :track-r track-r
-                            :track-g track-g
-                            :track-b track-b
-                            :material (eseq.sequencer/step-slider-track-material)
-                            :on-change (lambda (v)
-                              (%set-expanded-slot-sound track track-id i v)))
-                          (box :height %expanded-step-slider-height :width 3
-                            :key (str "expanded-step-no-sound-" track-id "-" i)
-                            (label "No pad" :font-size 8 :color :dim :bg :transparent)))
-                        (vslider :height %expanded-step-slider-height
-                          :key (str "expanded-step-slider-" track-id "-" i)
-                          :width (if (= mode 5) 2 1)
-                          :min (eseq.seqv-track-params/seqv-track-param-slider-min track mode) :max (eseq.seqv-track-params/seqv-track-param-slider-max track mode)
-                          :origin (eseq.seqv-track-params/seqv-track-param-origin track mode)
-                          :value (%slot-param-slider-binding track-id mode i)
-                          :haptic-value (%slot-param-haptic-binding track-id mode i)
-                          :haptic-min (eseq.seqv-track-params/seqv-track-param-min track mode)
-                          :haptic-max (eseq.seqv-track-params/seqv-track-param-max track mode)
-                          :haptic-pivot-position (eseq.seqv-track-params/seqv-param-haptic-pivot-position mode)
-                          :haptic-pivot-value (eseq.seqv-track-params/seqv-track-param-haptic-pivot-value track mode)
-                          :haptic-exponent (eseq.seqv-track-params/seqv-param-haptic-exponent mode)
-                          :items (if (= mode 5) SEQ.sync-labels '())
-                          :font-size 11
-                          :color :white
-                          :fill (%expanded-slider-fill track)
-                          :dot-color :dark-gray
-                          :active active-ref
-                          :track-r track-r
-                          :track-g track-g
-                          :track-b track-b
-                          :material (eseq.sequencer/step-slider-track-material)
-                          :on-change (lambda (v)
-                            (%set-expanded-slot-param track track-id i mode v))))
+                      (vslider :height %expanded-step-slider-height
+                        :key (str "expanded-step-slider-" track-id "-" i)
+                        :width (if (= mode 5) 2 1)
+                        :min (eseq.seqv-track-params/seqv-track-param-slider-min track mode) :max (eseq.seqv-track-params/seqv-track-param-slider-max track mode)
+                        :origin (eseq.seqv-track-params/seqv-track-param-origin track mode)
+                        :value (%slot-param-slider-binding track-id mode i)
+                        :haptic-value (%slot-param-haptic-binding track-id mode i)
+                        :haptic-min (eseq.seqv-track-params/seqv-track-param-min track mode)
+                        :haptic-max (eseq.seqv-track-params/seqv-track-param-max track mode)
+                        :haptic-pivot-position (eseq.seqv-track-params/seqv-param-haptic-pivot-position mode)
+                        :haptic-pivot-value (eseq.seqv-track-params/seqv-track-param-haptic-pivot-value track mode)
+                        :haptic-exponent (eseq.seqv-track-params/seqv-param-haptic-exponent mode)
+                        :items (if (= mode 5) SEQ.sync-labels '())
+                        :font-size 11
+                        :color :white
+                        :fill (%expanded-slider-fill track)
+                        :dot-color :dark-gray
+                        :active active-ref
+                        :track-r track-r
+                        :track-g track-g
+                        :track-b track-b
+                        :material (eseq.sequencer/step-slider-track-material)
+                        :on-change (lambda (v)
+                          (%set-expanded-slot-param track track-id i mode v)))
                       (box
                         :key (str "expanded-step-toggle-" track-id "-" i)
                         :active active-ref
@@ -1780,204 +1615,614 @@
     )
   )
 
-(def %drum-slot-name-max-chars 14)
+;; Which sound payloads a track will accept as a replacement of what it already
+;; plays. Shared by the track row and the pad grid's occupied cells: dropping on
+;; a pad replaces that pad's sound on its member track, so the two must agree.
+(def %sound-drop-types (i)
+  (if (eseq.track-collapse/replaceable-instrument? i)
+    (list "sample" "instrument" "sound")
+    (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample"))))
 
-(def %drum-slot-name-display (name)
-  (if (> (len name) %drum-slot-name-max-chars)
-    (str (substring name 0 (- %drum-slot-name-max-chars 2)) "..")
-    name))
+;; One track's grid row. Rack members render through this exact path — a rack
+;; member is an ordinary track, so its pattern length, timebase p-locks,
+;; accumulator and expanded step editor all come along for free.
+;; :muted is a binding (not a value read) so mute/solo changes update the row
+;; chrome without rerunning the enclosing subtree.
+(def %track-row (i is-bare-track)
+  (box :width :fill
+      :key (str "track-drop-" i)
+      :selected (track-selected-binding i)
+      :muted (bind-seq-nth "track-muted-effective" i)
+      :background-color :buffer-bg
+      :selected-background-color :mixer-strip-selected-bg
+      :muted-background-color :mixer-strip-muted-bg
+      :border-width 2
+      :corner-radius 10
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :muted-border-color :mixer-strip-border
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types (%sound-drop-types i)
+      :drop-meta (dict :kind "track" :track i)
+      :on-drop (lambda (event) (drop-on-track event))
+      :padding 0.0145
+      :on-click |x y r| (select-track-for-edit i)
+      (if (%track-expanded? (nth SEQ.track-ids i))
+        (v-stack 
+          :width :fill :gap 0.2
+          (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+            (track-header i is-bare-track)
+            (%expanded-track-quick-controls i (nth SEQ.track-ids i))
+            (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+            (%track-actions i))
+          (%expanded-track-editor i (nth SEQ.track-ids i)))
+        (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
+          (v-stack (box :height 0.1)
+            (track-header i is-bare-track))
+          (%track-grid i)
+          (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+          (%track-actions i)))))
 
-;; Slot gain spans 0..2 (unity at 1), so the meter shows gain/2 and drags map
-;; the widget's -1..1 sx straight onto the gain range.
-(def %drum-slot-gain-max 2.0)
+;; ── Track groups ────────────────────────────────────────────────────────
+;; Regular groups and drum racks share one nested block: a header row owns the
+;; backing bus's mute/solo/volume, name and collapse state, with member tracks
+;; beneath as ordinary rows. A drum rack additionally owns pad-play arming and
+;; rack-specific member chrome; regular groups deliberately have no Arm control.
 
-(def %drum-slot-set-gain-from-event (track-idx sound event)
+(def %group-ui-kind (gidx)
+  (if (eseq.drum-rack-v2/rack? gidx) "rack" "group"))
+
+(def %group-element-key (gidx element)
+  (str (%group-ui-kind gidx) "-" element "-" (eseq.drum-rack-v2/group-id gidx)))
+
+;; Keep group fills opaque because the rounded-box renderer draws its border
+;; behind the inset fill. Reproduce the old alpha-0.22 track tint by compositing
+;; it over the active theme's buffer surface in Lisp; selection then changes
+;; only the border without changing the original fill appearance.
+(def %group-container-bg (c)
+  (let ((bg THEME.buffer_bg))
+    (rgba
+      (+ (* (nth c 0) 0.22) (* (nth bg 0) 0.78))
+      (+ (* (nth c 1) 0.22) (* (nth bg 1) 0.78))
+      (+ (* (nth c 2) 0.22) (* (nth bg 2) 0.78))
+      1.0)))
+
+(def %group-bus-volume-from-event (bus-idx event)
   (let ((sx (get event :sx)))
     (if (= sx nil)
       nil
-      (host-command "set-rack-slot-gain"
-        (dict :track track-idx
-          :slot (get sound :slot-idx)
-          :value (max 0.0 (min %drum-slot-gain-max (+ sx 1.0))))))))
+      (seq-set-bus-volume bus-idx (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0))))))))
 
-;; bind-seq is a float binding: Bool publishes arrive as 1.0/0.0 and `not`
-;; doesn't negate numbers, so compare against 0.5 to get a real boolean.
-(def %drum-slot-flag (sound field-key)
-  (let ((field (get sound field-key)))
-    (if field (> (reactive-value (bind-seq field)) 0.5) false)))
+;; Volume/meter for a group's backing bus. Group bus lists are rebuilt per
+;; frame, so an unresolved index degrades to a spacer instead of an error.
+(def %group-volume-control (gidx bus-idx)
+  (let ((c (eseq.drum-rack-v2/color gidx)))
+    (v-stack (box :height 0.13)
+      (if (>= bus-idx 0)
+        (box
+          :key (%group-element-key gidx "volume-control")
+          :width 8.2 :height 1.25
+          :background "seqv-track-volume-meter"
+          :level (bind-seq (str "bus-peak-" bus-idx))
+          :volume (bind-seq-nth "bus-volumes" bus-idx)
+          :track-r (nth c 0)
+          :track-g (nth c 1)
+          :track-b (nth c 2)
+          :on-click (lambda (event) (%group-bus-volume-from-event bus-idx event))
+          :on-drag (lambda (event) (%group-bus-volume-from-event bus-idx event)))
+        (box :width 8.2 :height 1.25 :bg :transparent)))))
 
-(def %drum-slot-selected-binding (sound)
-  (bind-seq (get sound :selected-field)))
+;; Selecting a group selects its backing bus, exactly as the mixer header does,
+;; so the fx panel follows the group chain.
+(def %select-group (gidx)
+  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
+    (if (>= bus-idx 0)
+      (set! eseq.seq-core-state/selected-bus bus-idx)
+      false)))
 
-(def %select-drum-slot-index (track-idx slot-idx)
-  (do
-    (select-track-for-edit track-idx)
-    (host-command "select-rack-slot" (dict :track track-idx :slot slot-idx))))
+(def %group-selected? (gidx)
+  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
+    (and (>= bus-idx 0) (= eseq.seq-core-state/selected-bus bus-idx))))
 
-(def %select-drum-slot (track-idx sound)
-  (%select-drum-slot-index track-idx (get sound :slot-idx)))
+;; ── Group member chrome ─────────────────────────────────────────────────
+;; Every group member gets the same indented prefix used by drum racks. It
+;; visually connects the ordinary track row to the containing group header.
 
-(def %drum-slot-toggle (label-text track-idx sound param command active)
-  (button label-text
-    :key (str "drum-slot-" param "-" track-idx "-" (get sound :slot-idx))
-    
-    :width 1.55 :height 1.2    
-    :padding 0 :font-size 10
-    ;:border-color :transparent
-    :background-color (if active (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-    :color (if active :black :dim)
-    :on-click |x y r| (do
-      (%select-drum-slot track-idx sound)
-      (host-command command
-        (dict :track track-idx :slot (get sound :slot-idx) :value (not active))))))
+(def %rack-pad-badge (gidx pad)
+  (h-stack :gap 0.08 :align :center
+    (button "-"
+      :key (str "rack-pad-down-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+      :width 1.0 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent
+      :color :dim
+      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad -1))
+    (badge (get pad :label)
+      :key (str "rack-pad-note-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+      :font-size 9 :width 2.6 :height 0.9 :padding 0
+      :h-align :center
+      :background-color '(rgba 0.18 0.22 0.23 1.0)
+      :border-color :transparent
+      :highlight-color :transparent
+      :shadow-color :transparent
+      :color :white)
+    (button "+"
+      :key (str "rack-pad-up-" (eseq.drum-rack-v2/group-id gidx) "-" (get pad :pad-note))
+      :width 1.0 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent
+      :color :dim
+      :on-click |x y r| (eseq.drum-rack-v2/nudge-pad-note gidx pad 1))))
 
-;; A drum pad's note is its identity in the sequencer, just as a regular
-;; track's number is its identity. Its enabled state means the pad is audible,
-;; so the visual state intentionally inverts the underlying mute flag.
-(def %drum-slot-mute-button (track-idx sound muted)
-  (button (get sound :pad-label)
-    :key (str "drum-slot-mute-" track-idx "-" (get sound :slot-idx))
-    :width 1.9 :height 1.2
-    :padding 0 :font-size 10
-    :background-color (%mute-bg muted)
-    :color (if muted :gray :black)
-    :on-click |x y r| (do
-      (%select-drum-slot track-idx sound)
-      (host-command "set-rack-slot-mute"
-        (dict :track track-idx :slot (get sound :slot-idx) :value (not muted))))))
-
-(def %drum-slot-volume-control (track-idx sound)
-  (let ((gain-field (get sound :gain-field))
-      (peak-field (get sound :peak-field))
-      (gain (if gain-field (reactive-value (bind-seq gain-field)) 1.0)))
-    (box
-      :key (str "drum-slot-volume-" track-idx "-" (get sound :slot-idx))
-      :width 8.2 :height 1.1
-      :background "seqv-track-volume-meter"
-      :level (if peak-field (bind-seq peak-field) 0)
-      :volume (* 0.5 gain)
-      :track-r (%track-color-r-binding track-idx)
-      :track-g (%track-color-g-binding track-idx)
-      :track-b (%track-color-b-binding track-idx)
-      :on-click (lambda (event) (do
-        (%select-drum-slot track-idx sound)
-        (%drum-slot-set-gain-from-event track-idx sound event)))
-      :on-drag (lambda (event) (do
-        (%select-drum-slot track-idx sound)
-        (%drum-slot-set-gain-from-event track-idx sound event))))))
-
-(def %drum-track-grid (track-idx)
-  (let ((num-steps (nth SEQ.track-num-steps track-idx))
-      (rows (max 1 (floor (/ (+ num-steps (- %row-width 1)) %row-width))))
-      (sounds (eseq.seqv-track-params/seqv-track-drum-sounds track-idx)))
-    (box :padding 0.15
-      (box :background-color :buffer-bg
-        (v-stack :gap 0.5
-          (each sounds |sound|
-            (let ((pad-note (get sound :transpose))
-                (muted (%drum-slot-flag sound :mute-field))
-                (soloed (%drum-slot-flag sound :solo-field)))
-              (box
-                :key (str "drum-lane-" track-idx "-" pad-note)
-                :debug-name "seqv-drum-slot-lane"
-                :selected (%drum-slot-selected-binding sound)
-                :background-color :transparent
-                :selected-background-color (rgba 0.12 0.17 0.20 0.55)
-                :border-width 1
-                :border-color :transparent
-                :selected-border-color (rgba 0.30 0.74 0.88 0.62)
-                :on-click |x y r| (%select-drum-slot track-idx sound)
-                (h-stack
-                  :padding 0.5
-                  :gap 0.45
-                  :align :top
-                ;; Per-slot gutter mirrors the track-header order: note/mute, solo,
-                ;; name, volume. The note control is bright while its pad is audible.
-                (box :width 2.65)
-                (h-stack :align :baseline :gap 0.45
-                  (%drum-slot-mute-button track-idx sound muted)
-                  (%drum-slot-toggle "S" track-idx sound "solo" "set-rack-slot-solo" soloed)
-                  (label
-                    (%drum-slot-name-display (get sound :name))
-                    :key (str "drum-lane-label-" track-idx "-" pad-note)
-                    :debug-name "seqv-drum-slot-label"
-                    :width 8.6
-                    ;:height 1.55
-                    :bg :transparent
-                    :font-size 10
-                    :h-align :left
-                    :color (if muted :dark-gray :dim))
-                  (%drum-slot-volume-control track-idx sound)
-                  (box :width 0.3))
-                (v-stack :gap -0.04
-                  (each (range 0 rows) |row|
-                    (v-stack :gap -0.16
-                      (h-stack :gap 0.0
-                        (each (range 0 %row-width) |col|
-                          (let ((step (+ (* row %row-width) col)))
-                            (%drum-lane-step-cell
-                              track-idx
-                              (get sound :slot-idx)
-                              pad-note
-                              step
-                              (< step num-steps)))))
-                      (%playhead-row
-                        track-idx
-                        (nth SEQ.track-ids track-idx)
-                        row))))))))))))
+(def %group-member-chrome (gidx i)
+  (group-track-indicator
+    :key (str "group-track-indicator-" (eseq.drum-rack-v2/group-id gidx) "-" i))
   )
+
+(def %group-member-row (gidx i)
+  (h-stack :width :fill :gap 0.15 :align :start
+    (%group-member-chrome gidx i)
+    (box :width 0 :flex 1 (%track-row i false))))
+
+;; ── Pad grid performance view ───────────────────────────────────────────
+;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
+;; owns no sequencing state: a cell reads its pad from SEQ.groups and a hit
+;; goes straight down the live pad path. The grid renders in the *fx* buffer's
+;; rack panel (ui/effects/buffers.lisp); the sequencer header carries no pad
+;; toggle of its own.
+;;
+;; Cells are NOTE-POSITIONAL: a cell is a fixed MIDI note and draws whichever
+;; pad answers to it, so label and position can never contradict each other.
+;; The note geometry — octave-aligned pages, lowest note bottom-left — lives
+;; in eseq.drum-rack-v2; what lives here is which page is showing.
+
+;; Which page of notes the grid shows, as (group id, page). One rack panel is
+;; on screen at a time, so a single slot scoped by group id IS per-rack state:
+;; a rack the page was never set for — or any rack other than the one last
+;; paged — re-derives its own default instead of inheriting a stale page.
+(defstate %pad-grid-page-group -1)
+(defstate %pad-grid-page 0)
+
+(def %pad-page (gidx)
+  (if (= %pad-grid-page-group (eseq.drum-rack-v2/group-id gidx))
+    (eseq.drum-rack-v2/clamp-pad-page %pad-grid-page)
+    (eseq.drum-rack-v2/default-pad-page gidx)))
+
+(def %set-pad-page (gidx page)
+  (do
+    (set! %pad-grid-page-group (eseq.drum-rack-v2/group-id gidx))
+    (set! %pad-grid-page (eseq.drum-rack-v2/clamp-pad-page page))))
+
+;; The note a grid position names on the visible page — the cell's identity,
+;; occupied or not.
+(def %pad-cell-note (gidx cell)
+  (eseq.drum-rack-v2/cell-note (%pad-page gidx) cell))
+
+;; Pad drawn at a grid position: the one whose pad note IS this cell's note,
+;; or nil. Pads on other pages simply do not render here; the grid is sparse
+;; by design and never compacts.
+(def %pad-at (gidx cell)
+  (eseq.drum-rack-v2/pad-at-note gidx (%pad-cell-note gidx cell)))
+
+(def %pad-cell-name (pad)
+  (let ((track (get pad :track)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (nth SEQ.track-names track)
+      "")))
+
+;; The pad the rack's *fx* panel is focused on, as (group id, pad note) — the
+;; pad map's own key, so the focus survives track reindexing exactly as chokes
+;; and note nudges do. Per-pad fx are the member track's own chain by design
+;; (docs/drum-rack-v2-spec.md, "UI"), so all a pad selection has to do is name
+;; the member the panel offers to open.
+(defstate %pad-selected-group -1)
+(defstate %pad-selected-note -1)
+
+(def %select-pad (gidx pad)
+  (do
+    (set! %pad-selected-group (eseq.drum-rack-v2/group-id gidx))
+    (set! %pad-selected-note (get pad :pad-note))))
+
+(def pad-selected? (gidx pad)
+  (and (not (= pad nil))
+    (= %pad-selected-group (eseq.drum-rack-v2/group-id gidx))
+    (= %pad-selected-note (get pad :pad-note))))
+
+;; The focused pad of a rack, or nil when the focus names another rack (or no
+;; pad answers to the focused note any more).
+(def selected-pad (gidx)
+  (if (= %pad-selected-group (eseq.drum-rack-v2/group-id gidx))
+    (reduce |acc pad| (if (= (get pad :pad-note) %pad-selected-note) pad acc)
+      nil
+      (eseq.drum-rack-v2/pads gidx))
+    nil))
+
+;; Lazy pads (docs/drum-rack-v2-spec.md, "Track budget"): dropping a sound on an
+;; EMPTY cell is what makes that pad claim a track. The new member is mapped to
+;; exactly this cell's pad note, so it is playable by pad click and armed key
+;; the moment it lands.
+(def %drop-on-empty-pad (event gidx cell)
+  (let ((payload (get event :payload))
+      (group-id (eseq.drum-rack-v2/group-id gidx))
+      (note (%pad-cell-note gidx cell)))
+    (let ((path (get payload :path))
+        (name (get payload :name)))
+      (if (= (get event :drag-type) "instrument")
+        ;; A pad needs a member track in this rack's group on a specific pad
+        ;; note; the builtin add-track host commands take neither, so builtins
+        ;; are refused instead of landing as a loose track (eseq-mj8).
+        (if (= (get payload :kind) "builtin-instrument")
+          (status "Drop a sample or saved instrument onto a pad")
+          (if name
+            (do
+              (set! sbrowser-loading-instrument-name name)
+              (host-command "add-track-instrument"
+                (dict :name name :group-id group-id :pad-note note)))
+            (status "Drop an instrument, not a folder")))
+        (if path
+          (host-command "add-track-sample"
+            (dict :path path :group-id group-id :pad-note note
+              :preserve-browser-context true))
+          (status "Drop a sample file, not a folder"))))))
+
+;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
+;; same replacement a drop on the member's grid row does — so pad identity,
+;; pattern data, mixer settings and chokes all stay put.
+(def %pad-cell-track (pad)
+  (if (= pad nil) -1 (get pad :track)))
+
+(def %pad-cell-drop-types (pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (%sound-drop-types track)
+      (list "sample" "instrument"))))
+
+(def %pad-cell-drop-meta (gidx cell pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (dict :kind "track" :track track :from-pad true)
+      (dict :kind "rack-pad"
+        :group-id (eseq.drum-rack-v2/group-id gidx)
+        :cell cell
+        :pad-note (%pad-cell-note gidx cell)))))
+
+(def %drop-on-pad-cell (event gidx cell)
+  (let ((track (%pad-cell-track (%pad-at gidx cell))))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (drop-on-track event)
+      (%drop-on-empty-pad event gidx cell))))
+
+;; A pad's own fx ARE its member track's chain (docs/drum-rack-v2-spec.md,
+;; "UI"), so "open this pad" means: make its member the track under edit. That
+;; drops the bus selection, which is exactly what swaps the *fx* buffer from
+;; the rack panel to that member's instrument and effects — in place, without
+;; touching the workspace layout.
+(def open-pad-member-fx (gidx pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (and (>= track 0) (< track SEQ.num-tracks))
+      (select-track-for-edit track)
+      nil)))
+
+;; Pad trigger light (eseq-4b5.16): the host publishes one flag per rack member
+;; track, lit for as long as that track is sounding whatever fired it — a hit on
+;; this cell, an armed rack's keys, or its own sequenced steps. It rides the
+;; box's BOUND `selected` state rather than a lisp-computed colour so a hit
+;; repaints the cell without re-rendering the grid, the way a mixer meter does;
+;; the persistent pad focus keeps its own border, computed below.
+(def %pad-trigger-binding (pad)
+  (let ((track (%pad-cell-track pad)))
+    (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)))
+
+(def %pad-cell (gidx cell)
+  (let ((pad (%pad-at gidx cell)))
+    (box
+      :key (str "rack-pad-cell-" (eseq.drum-rack-v2/group-id gidx) "-" cell)
+      :width 6.4 :height 2.3 :padding 0.15
+      :background-color (if (= pad nil)
+        :bg
+        :mixer-strip-bg
+        )
+      :selected (%pad-trigger-binding pad)
+      :selected-background-color :accent 
+      :border-width 1
+      :border-color (if (pad-selected? gidx pad)
+        :mixer-strip-selected-border
+        '(rgba 0.30 0.31 0.32 1.0))
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-hover-background-color :mixer-control-bg
+      :corner-radius 8
+      :drop-types (%pad-cell-drop-types pad)
+      :drop-meta (%pad-cell-drop-meta gidx cell pad)
+      :on-drop (lambda (event) (%drop-on-pad-cell event gidx cell))
+      ;; A hit both plays the pad and focuses it: auditioning IS how you pick
+      ;; the pad you then want to open, so the two must not need two gestures.
+      :on-click |x y r| (if (= pad nil)
+        nil
+        (do
+          (%select-pad gidx pad)
+          (eseq.drum-rack-v2/trigger-pad gidx pad)))
+      (v-stack :width :fill :height :fill :gap 0.05
+        ;; The note is the cell's own, so an empty cell still says which note
+        ;; a drop here would claim.
+        (label (if (= pad nil)
+            (eseq.drum-rack-v2/note-label (%pad-cell-note gidx cell))
+            (get pad :label))
+          :font-size 8 :color (if (= pad nil) '(rgba 0.42 0.44 0.46 1.0) :dim)
+          :active (%pad-trigger-binding pad)
+          :active-color :black
+          :bg :transparent
+          :width :fill :text-align :center)
+        (label (if (= pad nil) "" (substring (%pad-cell-name pad) 0 12))
+          :active (%pad-trigger-binding pad)
+          :active-color :black
+          :font-size 6.8 :color :white :bg :transparent
+          :width :fill :text-align :center)
+        (label (if (= pad nil)
+            ""
+            (if (< (get pad :choke) 0) "" (str "choke " (get pad :choke))))
+          :font-size 6.2 :color :dim :bg :transparent
+          :width :fill :text-align :center)))))
+
+;; Row 0 renders at the TOP and carries the page's HIGHEST four notes: the
+;; grid reads bottom-up, so the bottom-left cell is the page's C.
+(def %pad-grid-row (gidx row)
+  (h-stack :gap 0.15 :align :center
+    (each (range 0 4) |col|
+      (%pad-cell gidx (+ (* row 4) col)))))
+
+;; Paging walks the note range, not the pad list: every octave is reachable so
+;; a new pad can be placed anywhere, and the readout names the notes on screen
+;; rather than a meaningless "1/2".
+(def %pad-grid-page-selector (gidx)
+  (h-stack :gap 0.15 :align :center
+    (button "◂"
+      :key (str "rack-pad-page-prev-" (eseq.drum-rack-v2/group-id gidx))
+      :width 1.4 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent :color :dim
+      :on-click |x y r| (%set-pad-page gidx (- (%pad-page gidx) 1)))
+    (label (eseq.drum-rack-v2/pad-page-label (%pad-page gidx))
+      :key (str "rack-pad-page-label-" (eseq.drum-rack-v2/group-id gidx))
+      :font-size 8 :color :dim :bg :transparent)
+    (button "▸"
+      :key (str "rack-pad-page-next-" (eseq.drum-rack-v2/group-id gidx))
+      :width 1.4 :height 0.9 :padding 0 :font-size 8
+      :background-color '(rgba 0.1 0.1 0.1 1.0)
+      :border-color :transparent :color :dim
+      :on-click |x y r| (%set-pad-page gidx (+ (%pad-page gidx) 1)))))
+
+(def %pad-grid-intrinsic-width 26.45)
+
+;; The pad grid as a component: the *fx* rack panel draws it at its intrinsic
+;; width beside the rack's own controls. It lives here, next to the pad cell it
+;; is made of, so pad badges, drops and audition stay one definition wherever a
+;; future surface draws them.
+(def rack-pad-grid (gidx)
+  (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
+    :width %pad-grid-intrinsic-width :padding 0.2
+    :background-color :bg
+    :corner-radius 14
+    (v-stack :gap 0.1 :align :start
+      (each (range 0 4) |row|
+        (%pad-grid-row gidx row)))))
+
+;; ── Octave overview mini-map (eseq-4b5.15) ──────────────────────────────
+;; A slim full-range map to the LEFT of the pad grid: every note the grid can
+;; address as a tiny cell, four to a row, lowest at the bottom, with the
+;; sixteen notes currently enlarged drawn as a highlighted block. Occupied
+;; notes are filled, so a kit that lives three octaves up is visible without
+;; paging there — and a click on any row pages the grid to it, which is the
+;; affordance the arrows can only offer one octave at a time.
+;;
+;; It is a second VIEW of %pad-grid-page, not a second page state: the
+;; highlight and the click both go through the same page functions the grid
+;; uses.
+;;
+;; The pad map is read ONCE at the root and flattened into a note-indexed
+;; track list there. A per-cell read of SEQ.groups would re-render all 88
+;; cells on any pad edit — whole-list reads are the expensive kind of
+;; reactivity here — and a per-cell scan of the pads would walk the map 88
+;; times over to draw it once.
+
+(def %pad-map-cell-width 0.75)
+(def %pad-map-cell-height 0.34)
+
+;; Where a note sits in that flattened list. Pad notes are transposes around C4
+;; and so go negative, which no list index does: the map is indexed from the
+;; lowest note the grid can name.
+(def %pad-map-slot (note)
+  (- note (eseq.drum-rack-v2/min-grid-pad-note)))
+
+;; Slot -> the member track behind that note, -1 where no pad answers. The map
+;; needs the track, not just "occupied", because a cell's trigger light is that
+;; track's (eseq-4b5.16) — and "occupied" is just `track >= 0`, so one pass over
+;; the pads still answers both questions.
+(def %pad-note-tracks (pads)
+  (reduce |acc pad|
+    (let ((note (get pad :pad-note)))
+      (if (and (>= note (eseq.drum-rack-v2/min-grid-pad-note))
+          (<= note (eseq.drum-rack-v2/max-grid-pad-note)))
+        (set-nth acc (%pad-map-slot note) (get pad :track))
+        acc))
+    (map (lambda (n) -1)
+      (range 0 (+ (%pad-map-slot (eseq.drum-rack-v2/max-grid-pad-note)) 1)))
+    pads))
+
+(def %note-track (tracks note)
+  (nth tracks (%pad-map-slot note)))
+
+(def %note-occupied? (tracks note)
+  (>= (%note-track tracks note) 0))
+
+;; The map lights on the same per-track binding the enlarged grid does, which
+;; is what makes a hit on a pad the grid is NOT showing still visible here.
+(def %pad-map-cell (gid tracks note)
+  (let ((track (%note-track tracks note)))
+    (box :key (str "rack-pad-map-cell-" gid "-" note)
+      :width %pad-map-cell-width :height %pad-map-cell-height
+      :background-color (if (>= track 0)
+        '(rgba 0.60 0.72 0.75 1.0)
+        '(rgba 0.19 0.20 0.21 1.0))
+      :selected (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)
+      :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
+      :corner-radius 2)))
+
+;; A row is the click target, not its cells: four notes is already a finer jump
+;; than the octave-aligned pages the click snaps to, and one handler per row
+;; keeps the map cheap.
+(def %pad-map-row (gidx gid tracks row page)
+  (let ((base (eseq.drum-rack-v2/pad-map-row-base row))
+      (on-page (eseq.drum-rack-v2/pad-map-row-on-page? row page)))
+    (box :key (str "rack-pad-map-row-" gid "-" base)
+      :background-color (if on-page
+        '(rgba 0.24 0.32 0.34 1.0)
+        :transparent)
+      :border-width 1
+      :border-color (if on-page :mixer-strip-selected-border :transparent)
+      :corner-radius 2
+      :on-click |x y r| (%set-pad-page gidx (eseq.drum-rack-v2/page-of-note base))
+      (h-stack :gap 0.08 :align :center
+        (each (range 0 4) |col|
+          (%pad-map-cell gid tracks (+ base col)))))))
+
+(def %pad-map-intrinsic-width 3.6)
+
+(def rack-pad-map (gidx)
+  (let ((gid (eseq.drum-rack-v2/group-id gidx))
+      (tracks (%pad-note-tracks (eseq.drum-rack-v2/pads gidx)))
+      (page (%pad-page gidx)))
+    (box :debug-name "rack-pad-map"
+      :key (str "rack-pad-map-" gid)
+      :width %pad-map-intrinsic-width :height :fill :padding 0.15
+      :background-color :bg
+      :corner-radius 8
+      :v-align :center :h-align :center
+      (v-stack :gap 0.05 :align :center
+        (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
+          (%pad-map-row gidx gid tracks row page))))))
+
+(def %group-header-body (gidx)
+  (let ((c (eseq.drum-rack-v2/color gidx))
+      (bus-idx (eseq.drum-rack-v2/bus-index gidx))
+      (rack (eseq.drum-rack-v2/rack? gidx))
+      (armed (eseq.drum-rack-v2/armed? gidx))
+      (muted (and (>= bus-idx 0) (nth SEQ.bus-mutes bus-idx)))
+      (soloed (and (>= bus-idx 0) (nth SEQ.bus-solos bus-idx))))
+    (box :background "seqv-track-container"
+      :padding 0.1
+      :on-click |x y r| (%select-group gidx)
+      (h-stack :gap 0.4 :align :center
+        (box
+          :key (%group-element-key gidx "color-badge")
+          :width 0.68 :height 2.0
+          :background "seqv-track-color-badge"
+          :track-r (nth c 0)
+          :track-g (nth c 1)
+          :track-b (nth c 2)
+          :on-click |x y r| (%select-group gidx))
+        (button (if (eseq.drum-rack-v2/collapsed? gidx) "▸" "▾")
+          :key (%group-element-key gidx "collapse")
+          :width 1.55 :height 1.4 :padding 0 :font-size 15
+          :background-color '(rgba 0.1 0.1 0.1 1.0)
+          :border-color :transparent
+          :color :white
+          :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))
+        ;; Arm = drum-rack pad-play mode. A regular group is not an input
+        ;; target and therefore contributes no Arm control or placeholder.
+        (if rack
+          (box :width 2 :height 1.5
+            :background "seqv-rec-arm-dot"
+            :key (%group-element-key gidx "arm")
+            :active (if armed 1 0)
+            :on-click |x y r| (do
+              (%select-group gidx)
+              (eseq.drum-rack-v2/toggle-armed gidx)))
+          (box :width 2.0 :height 0.0 :bg :transparent))
+        (button "M"
+          :key (%group-element-key gidx "mute")
+          :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :border-color :transparent
+          :background-color (%mute-bg muted)
+          :color (if muted :gray :black)
+          :on-click |x y r| (if (>= bus-idx 0)
+            (do (%select-group gidx) (seq-toggle-bus-mute bus-idx))
+            nil))
+        (button "S"
+          :key (%group-element-key gidx "solo")
+          :width 1.55 :height 1.2 :padding 0 :font-size 10
+          :background-color (%solo-bg soloed)
+          :border-color :transparent
+          :color (if soloed :white :gray)
+          :on-click |x y r| (if (>= bus-idx 0)
+            (do (%select-group gidx) (seq-toggle-bus-solo bus-idx))
+            nil))
+        (box :width 8.6 :height 1
+          :key (%group-element-key gidx "select")
+          :background-color :transparent
+          :on-click |x y r| (%select-group gidx)
+          (badge (%track-name-display (eseq.drum-rack-v2/group-name gidx))
+            :key (%group-element-key gidx "name-label")
+            :icon (eseq.track-collapse/group-type-icon (nth SEQ.groups gidx))
+            :font-size 11 :width 8.6 :height 1 :padding 0
+            :h-align :left
+            :background-color :transparent
+            :border-color :transparent
+            :highlight-color :transparent
+            :shadow-color :transparent
+            :color (if muted (rgba 0.4 0.4 0.4 0.6) :dim)
+            :bg :transparent))
+        ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid
+        ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
+        ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
+        ;; name/meter shape an ordinary track header has.
+        (%group-volume-control gidx bus-idx)))))
+
+(def %group-header-row (gidx)
+  (subtree :key (str "seqv-" (%group-ui-kind gidx) "-header-" (eseq.drum-rack-v2/group-id gidx))
+    (%group-header-body gidx)))
+
+(def %group-block (gidx)
+  (let ((c (eseq.drum-rack-v2/color gidx)))
+    (box :width :fill
+      :key (%group-element-key gidx "block")
+      :selected (%group-selected? gidx)
+      :background-color (%group-container-bg c)
+      :selected-background-color (%group-container-bg c)
+      :border-width 2
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :corner-radius 10
+      :padding 0.345
+      ;; Hit testing chooses the deepest clickable widget, so member-track
+      ;; clicks keep selecting the track; only exposed container chrome reaches
+      ;; this handler and selects the group's backing bus for the FX panel.
+      :on-click |x y r| (%select-group gidx)
+      (v-stack :width :fill :gap 0.1
+        (%group-header-row gidx)
+        (if (eseq.drum-rack-v2/collapsed? gidx)
+          (box :width 0.0 :height 0.0 :bg :transparent)
+          (v-stack :width :fill :gap 0.0
+            (each (eseq.drum-rack-v2/visible-members gidx) |m|
+              (subtree :key (str "sequencer-track-" (nth SEQ.track-ids m))
+                (%group-member-row gidx m)))
+            (each (eseq.drum-rack-v2/child-racks gidx) |child|
+              (subtree :key (str "sequencer-rack-" (eseq.drum-rack-v2/group-id child))
+                (%group-block child)))))))))
+
+(def %grid-render-item (item)
+  (if (= (get item :kind) "group")
+    (let ((gidx (get item :gidx)))
+      (subtree :key (str "sequencer-" (%group-ui-kind gidx) "-" (eseq.drum-rack-v2/group-id gidx))
+        (%group-block gidx)))
+    (let ((i (get item :track)))
+      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
+        (%track-row i true)))))
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0
-    (each (eseq.track-collapse/visible-track-indices) |i|
-      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        ;; :muted is a binding (not a value read) so mute/solo changes update
-        ;; the row chrome without rerunning this subtree.
-        (box :width :fill
-          :key (str "track-drop-" i)
-          :selected (track-selected-binding i)
-          :muted (bind-seq-nth "track-muted-effective" i)
-          :background-color :buffer-bg
-          :selected-background-color :mixer-strip-selected-bg
-          :muted-background-color :mixer-strip-muted-bg
-          :border-width 2
-          :corner-radius 10
-          :border-color :mixer-strip-border
-          :selected-border-color :mixer-strip-selected-border
-          :muted-border-color :mixer-strip-border
-          :drop-hover-border-color :mixer-strip-selected-border
-          :drop-types (if (eseq.track-collapse/replaceable-instrument? i)
-            (list "sample" "instrument" "sound")
-            (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample")))
-          :drop-meta (dict :kind "track" :track i)
-          :on-drop (lambda (event) (drop-on-track event))
-          :padding 0.0145
-          :on-click |x y r| (select-track-for-edit i)
-          (if (%track-expanded? (nth SEQ.track-ids i))
-            (v-stack 
-              :width :fill :gap 0.2
-              (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (track-header i)
-                (%expanded-track-quick-controls i (nth SEQ.track-ids i))
-                (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (%track-actions i))
-              (%expanded-track-editor i (nth SEQ.track-ids i)))
-            (if (eseq.seqv-track-params/seqv-track-drum-rack? i)
-              ;; Drum racks put the rack header on its own row so the slot
-              ;; lanes get the full width for their per-slot gutters.
-              (v-stack :width :fill :gap 0.2
-                (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                  (track-header i)
-                  (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                  (%track-actions i))
-                (%drum-track-grid i))
-              (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (v-stack (box :height 0.1)
-                  (track-header i))
-                (%track-grid i)
-                (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (%track-actions i)))))))
-   
+    (each (eseq.drum-rack-v2/grid-render-items) |item|
+      (%grid-render-item item))
+
      (box :key "new-track-drop-zone"
       :width :fill :height 2.4 :flex 1
       :background-color :transparent

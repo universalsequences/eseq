@@ -32,7 +32,6 @@ pub struct PatternSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct RackTrackSnapshot {
-    pub routing: RackRouting,
     pub slots: Vec<RackSlotSnapshot>,
     pub macros: Vec<RackMacro>,
     pub(crate) runtime_macro_values: Option<Arc<RackMacroRuntimeValues>>,
@@ -40,9 +39,8 @@ pub struct RackTrackSnapshot {
 }
 
 impl RackTrackSnapshot {
-    pub fn new(routing: RackRouting, slots: Vec<RackSlotSnapshot>, macros: Vec<RackMacro>) -> Self {
+    pub fn new(slots: Vec<RackSlotSnapshot>, macros: Vec<RackMacro>) -> Self {
         Self {
-            routing,
             slots,
             macros,
             runtime_macro_values: None,
@@ -165,7 +163,6 @@ pub struct RackSlotSnapshot {
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub instrument_base_note_offset: f32,
-    pub pad_note: Option<i32>,
     pub choke_group: Option<u8>,
     pub gain: f32,
     pub pan: f32,
@@ -420,7 +417,6 @@ pub(super) fn replace_rack_slot_source_preserving_controls(
     slot: &mut RackSlotSnapshot,
     replacement: &RackSlotSnapshot,
 ) {
-    let pad_note = slot.pad_note;
     let choke_group = slot.choke_group;
     let instrument_base_note_offset = slot.instrument_base_note_offset;
     let gain = slot.gain;
@@ -434,7 +430,6 @@ pub(super) fn replace_rack_slot_source_preserving_controls(
     let custom_effect_names = slot.custom_effect_names.clone();
 
     *slot = replacement.clone();
-    slot.pad_note = pad_note;
     slot.choke_group = choke_group;
     slot.instrument_base_note_offset = instrument_base_note_offset;
     slot.gain = gain;

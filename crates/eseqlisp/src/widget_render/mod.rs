@@ -3,6 +3,7 @@ pub mod box_widget;
 pub mod button;
 pub mod cable;
 pub mod compressor_display;
+pub mod context_menu;
 pub mod dropdown;
 pub mod eq8_editor;
 pub mod event_view;
@@ -20,6 +21,7 @@ pub mod lane_preview;
 pub mod live_audio;
 pub mod linegraph;
 pub mod matrix;
+pub(crate) mod menu_style;
 pub mod mixer_meter;
 pub mod modal;
 pub mod modulator_curve;
@@ -58,12 +60,15 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
-use crate::layout::{Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, get_map};
+use crate::layout::{
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, get_map,
+};
 use crate::theme;
 use crate::vm::Value;
 
@@ -81,6 +86,12 @@ static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+    /// Text measurer available to render-pass code. Widget metrics that are
+    /// normally cached as a side effect of measure() (e.g. text-input
+    /// per-character widths) can be recomputed on a cache miss instead of
+    /// falling back to approximations — measure() may be skipped entirely when
+    /// subtree layout reuse re-renders a widget whose size did not change.
+    static RENDER_TEXT_MEASURER: RefCell<Option<Rc<dyn TextMeasurer>>> = const { RefCell::new(None) };
 }
 
 pub fn bump_widget_state_generation() {
@@ -91,14 +102,25 @@ pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
 }
 
-pub fn set_pointer_hover_widget(widget_id: Option<u64>) {
+pub fn set_render_text_measurer(measurer: Rc<dyn TextMeasurer>) {
+    RENDER_TEXT_MEASURER.with(|m| *m.borrow_mut() = Some(measurer));
+}
+
+pub(crate) fn with_render_text_measurer<R>(f: impl FnOnce(&dyn TextMeasurer) -> R) -> Option<R> {
+    RENDER_TEXT_MEASURER.with(|m| m.borrow().as_ref().map(|measurer| f(measurer.as_ref())))
+}
+
+/// Updates the widget under the pointer, returning whether the visual state changed.
+pub fn set_pointer_hover_widget(widget_id: Option<u64>) -> bool {
     POINTER_HOVER_WIDGET_ID.with(|hovered| {
         let mut hovered = hovered.borrow_mut();
-        if *hovered != widget_id {
-            *hovered = widget_id;
-            bump_widget_state_generation();
+        if *hovered == widget_id {
+            return false;
         }
-    });
+        *hovered = widget_id;
+        bump_widget_state_generation();
+        true
+    })
 }
 
 pub fn pointer_hovered(widget_id: u64) -> bool {
@@ -1054,6 +1076,9 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &knob_number::KNOB_NUMBER_WIDGET,
     &mixer_meter::MIXER_METER_WIDGET,
     &modal::MODAL_WIDGET,
+    &context_menu::CONTEXT_MENU_WIDGET,
+    &context_menu::MENU_ITEM_WIDGET,
+    &context_menu::MENU_SEPARATOR_WIDGET,
     &modulator_curve::MODULATOR_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
     &patcher::PATCHER_WIDGET,
@@ -1105,8 +1130,16 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Widgets that render as frame-anchored overlay panels (subtree diverted to
+/// the overlay pass, focus/dismissal handled by the modal-family intercepts).
+pub fn is_overlay_panel_widget(widget_type: &str) -> bool {
+    matches!(widget_type, "modal" | "context-menu")
+}
+
 pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
     let has_pointer_callback = node.props.contains_key("on-click")
+        || node.props.contains_key("on-right-click")
+        || node.props.contains_key("on-select")
         || node.props.contains_key("on-press")
         || node.props.contains_key("on-release")
         || node.props.contains_key("on-drag")
@@ -1575,7 +1608,7 @@ fn scroll_cull_band_excludes(node: &LayoutNode, band: ScrollCullBand) -> bool {
 
 #[cfg(target_os = "macos")]
 fn subtree_contains_modal(node: &LayoutNode) -> bool {
-    node.widget_type == "modal" || node.children.iter().any(subtree_contains_modal)
+    is_overlay_panel_widget(&node.widget_type) || node.children.iter().any(subtree_contains_modal)
 }
 
 /// The cull band for children of a scroll container: the intersection of the
@@ -1967,15 +2000,24 @@ fn collect_modal_overlay(
     }
     let nested_overlay = split_off_overlay_primitives(mark);
 
-    // The scrim gets its own clip segment: overlay drawing batches primitive
-    // classes within a segment, so an unsegmented scrim rect would paint over
-    // the panel background instance.
-    push_overlay_primitive(MetalPrimitive::PushClipRect(screen_frame));
-    modal::emit_modal_scrim(&node.props, screen_frame, viewport);
-    push_overlay_primitive(MetalPrimitive::PopClipRect);
-    modal::emit_modal_panel_chrome(&node.props, screen_modal, viewport);
-    push_overlay_primitive(MetalPrimitive::PushClipRect(screen_modal));
-    modal::emit_modal_title(&node.props, screen_modal, viewport);
+    let is_context_menu = node.widget_type == "context-menu";
+    if is_context_menu {
+        // Context menus draw no scrim: the page beneath stays visible, and a
+        // click outside the panel dismisses via the same modal-family
+        // intercepts.
+        context_menu::emit_menu_chrome(&node.props, screen_modal, viewport);
+        push_overlay_primitive(MetalPrimitive::PushClipRect(screen_modal));
+    } else {
+        // The scrim gets its own clip segment: overlay drawing batches primitive
+        // classes within a segment, so an unsegmented scrim rect would paint over
+        // the panel background instance.
+        push_overlay_primitive(MetalPrimitive::PushClipRect(screen_frame));
+        modal::emit_modal_scrim(&node.props, screen_frame, viewport);
+        push_overlay_primitive(MetalPrimitive::PopClipRect);
+        modal::emit_modal_panel_chrome(&node.props, screen_modal, viewport);
+        push_overlay_primitive(MetalPrimitive::PushClipRect(screen_modal));
+        modal::emit_modal_title(&node.props, screen_modal, viewport);
+    }
     for mut prim in subtree {
         offset_primitive_x_mut(&mut prim, dx, viewport);
         offset_primitive_y_mut(&mut prim, dy, viewport);
@@ -2023,7 +2065,7 @@ fn collect_metal_primitives_recursive(
 
     // Modal: the whole subtree renders in the overlay pass, nothing in the
     // tile scene.
-    if node.widget_type == "modal" {
+    if is_overlay_panel_widget(&node.widget_type) {
         collect_modal_overlay(node, node_viewport, _scroll_top, _max_rows);
         return;
     }
@@ -2118,7 +2160,7 @@ fn collect_metal_primitive_runs_recursive(
     };
 
     // Modal: subtree renders in the overlay pass only — no retained runs.
-    if node.widget_type == "modal" {
+    if is_overlay_panel_widget(&node.widget_type) {
         collect_modal_overlay(node, node_viewport, _scroll_top, _max_rows);
         return;
     }
@@ -2300,7 +2342,7 @@ fn collect_metal_primitive_runs_retained_recursive(
 
     // Modal: subtree renders in the overlay pass only; overlay content is
     // rebuilt every collection, never retained.
-    if node.widget_type == "modal" {
+    if is_overlay_panel_widget(&node.widget_type) {
         collect_modal_overlay(node, node_viewport, _scroll_top, _max_rows);
         return;
     }

@@ -266,6 +266,7 @@ impl SequencerState {
                 sampler_onset_ptr_lo: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 sampler_onset_ptr_hi: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 sampler_analysis_status: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                rack_choke_keys: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),

@@ -130,6 +130,110 @@ fn focused_text_input_survives_on_change_rerender() {
 }
 
 #[test]
+fn remapped_focus_after_relayout_does_not_reselect_all() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def name (state "Track"))
+            (effect
+              (box :width 24 :height 3
+                (text-input
+                  :key "rename-input"
+                  :width 20
+                  :value name
+                  :select-all-on-focus true
+                  :on-change |v| (set! name v))))
+            "#,
+        )
+        .expect("build rename fixture");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    editor.widget_layout().expect("rename layout");
+    assert!(editor.focus_widget_by_stable_key("rename-input", Some("text-input")));
+
+    // Select-all-on-focus: the first keystroke replaces the whole name.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime_mut().eval_str("name"),
+        Ok(Some(Value::String("l".to_string())))
+    );
+
+    // A relayout can hand the focused input a fresh widget_id; the post-layout
+    // remap then re-focuses the same logical widget under the new id. That
+    // must not re-apply select-all (it would make the next keystroke replace
+    // what was just typed) and must carry the caret to the new id.
+    let layout = editor.widget_layout().expect("layout after first keystroke");
+    let mut remapped = super::find_layout_node_by_stable_key(layout.as_ref(), "rename-input")
+        .expect("rename input after keystroke")
+        .clone();
+    remapped.widget_id += 101;
+    editor.set_focused_widget(remapped);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime_mut().eval_str("name"),
+        Ok(Some(Value::String("lu".to_string()))),
+        "remapped focus must keep the caret at the end, not re-select the typed text"
+    );
+}
+
+#[test]
+fn text_input_auto_focus_submit_and_blur_callbacks_drive_inline_edit_lifecycle() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.runtime_mut().eval_str(
+        r#"
+        (def editing (state true))
+        (def submitted (state false))
+        (def cancelled (state false))
+        (def blurred (state false))
+        (effect
+          (box :width 24 :height 4
+            (if editing
+              (text-input :key "rename-input" :width 20 :value "Track"
+                :auto-focus true :select-all-on-focus true
+                :on-submit (lambda () (do (set! submitted true) (set! editing false)))
+                :on-cancel (lambda () (do (set! cancelled true) (set! editing false)))
+                :on-blur (lambda () (set! blurred true)))
+              (label "done"))))
+        "#,
+    ).expect("build inline edit fixture");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    editor.widget_layout().expect("inline edit layout");
+    assert!(editor.focused_widget_id().is_some(), "auto-focus should focus the input");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(editor.runtime_mut().eval_str("cancelled"), Ok(Some(Value::Bool(true))));
+
+    editor.runtime_mut().eval_str("(set! editing true)").unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.widget_layout().expect("submit edit layout");
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(editor.runtime_mut().eval_str("submitted"), Ok(Some(Value::Bool(true))));
+
+    editor.runtime_mut().eval_str("(set! editing true)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let layout = editor.widget_layout().expect("rebuilt inline edit layout");
+    let input = super::find_layout_node_by_stable_key(layout.as_ref(), "rename-input")
+        .expect("rebuilt rename input");
+    editor.focus_widget_by_stable_key("rename-input", Some("text-input"));
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 25, 3),
+        0,
+        0,
+        30,
+        8,
+        input.rect.col + input.rect.width + 2.0,
+        input.rect.row + input.rect.height + 1.0,
+    );
+    assert_eq!(editor.runtime_mut().eval_str("blurred"), Ok(Some(Value::Bool(true))));
+}
+
+#[test]
 fn default_window_split_bindings_survive_runtime_sync() {
     let runtime = Runtime::with_init_source("(bind-key \"C-c C-c\" \"ignore\")");
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -12020,6 +12124,10 @@ fn register_active_layout_overlays(editor: &mut Editor) {
         .current_layout
         .clone()
         .expect("active widget layout");
+    // Mirror the backend: overlay rects are emitted in post-scroll tile-local
+    // space, so the tile's live scroll has to reach the collector.
+    let scroll_left = editor.widget_layout_scroll_left();
+    let scroll_top = editor.total_scroll_top();
     let _ = crate::widget_render::collect_metal_primitives(
         &layout,
         crate::widget_render::WidgetViewport {
@@ -12031,11 +12139,11 @@ fn register_active_layout_overlays(editor: &mut Editor) {
             focused_widget_id: None,
             focused_branch: false,
             overlay_viewport_bottom: 20.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
+            scroll_top,
+            scroll_left,
             inherited_hover: false,
         },
-        0.0,
+        scroll_top,
         20,
     );
 }
@@ -13113,6 +13221,30 @@ fn module_define_mode_qualifies_name_and_on_key_handler() {
     );
 }
 
+#[test]
+fn major_modes_must_explicitly_opt_into_host_live_keys() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(define-mode "text-mode")
+(define-mode "performance-mode" :live-keys true)
+(set-buffer-mode "text-mode")
+"#,
+        )
+        .expect("define modes");
+    editor.refresh_runtime_side_effects();
+    assert!(!editor.active_mode_accepts_live_keys());
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-buffer-mode "performance-mode")"#)
+        .expect("select performance mode");
+    editor.refresh_runtime_side_effects();
+    assert!(editor.active_mode_accepts_live_keys());
+}
+
 /// A declared module's mode
 /// reference is qualified against the *caller*, and must still fall back to
 /// a vanilla mode the module never defined.
@@ -13576,3 +13708,457 @@ fn module_fn_named_select_compiles_with_correct_arity() {
 }
 
 
+
+// ── Context menu: right-click plumbing + anchored overlay (eseq-dkn) ────────
+
+#[cfg(target_os = "macos")]
+const CONTEXT_MENU_PROGRAM: &str = r#"
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (effect-buffer "*panel*"
+      (v-stack
+        (box :width 58 :height 3
+          :on-right-click (lambda (event)
+            (set! menu-col (get event :col))
+            (set! menu-row (get event :row))
+            (set! menu-open true)))
+        (context-menu :is-open menu-open
+                      :anchor-col menu-col
+                      :anchor-row menu-row
+                      :on-close (lambda () (set! menu-open false))
+          (menu-item "Rename" :shortcut "cmd-R"
+            :on-select (lambda (event) (set! selected "rename")))
+          (menu-separator)
+          (menu-item "Blocked" :disabled true
+            :on-select (lambda (event) (set! selected "blocked")))
+          (menu-item "Delete"
+            :on-select (lambda (event) (set! selected "delete"))))))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+/// Same shape, but with a panel far wider and taller than its tile so the
+/// tile can be panned/scrolled underneath the right-click.
+#[cfg(target_os = "macos")]
+const SCROLLED_CONTEXT_MENU_PROGRAM: &str = r#"
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (effect-buffer "*panel*"
+      (v-stack
+        (box :width 200 :height 30
+          :on-right-click (lambda (event)
+            (set! menu-col (get event :col))
+            (set! menu-row (get event :row))
+            (set! menu-open true)))
+        (context-menu :is-open menu-open
+                      :anchor-col menu-col
+                      :anchor-row menu-row
+                      :on-close (lambda () (set! menu-open false))
+          (menu-item "Rename" :shortcut "cmd-R"
+            :on-select (lambda (event) (set! selected "rename")))
+          (menu-separator)
+          (menu-item "Delete"
+            :on-select (lambda (event) (set! selected "delete"))))))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+#[cfg(target_os = "macos")]
+fn context_menu_two_tile_editor() -> Editor {
+    context_menu_two_tile_editor_for(CONTEXT_MENU_PROGRAM)
+}
+
+#[cfg(target_os = "macos")]
+fn context_menu_two_tile_editor_for(program: &str) -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.runtime_mut().eval_str(program).unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    // Activate the panel tile with a click, then rebuild so the runtime
+    // layout is the panel's, laid out against the whole-window viewport.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let panel_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*panel*")
+        .unwrap();
+    let panel_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(panel_idx)
+        .unwrap()
+        .id;
+    assert_eq!(editor.active_tile, panel_tile, "panel tile must be active");
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor
+}
+
+/// Right-click at the given point, then rebuild the frame and register the
+/// resulting overlay entries, as a live render would.
+#[cfg(target_os = "macos")]
+fn right_click_at(editor: &mut Editor, col: f32, row: f32) {
+    for kind in [
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::Up(MouseButton::Right),
+    ] {
+        editor.handle_tiled_mouse_precise(mouse_event(kind, col as u16, row as u16), col, row, 0);
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(editor, 60, 20);
+    register_active_layout_overlays(editor);
+}
+
+#[cfg(target_os = "macos")]
+fn eval_string(editor: &mut Editor, expr: &str) -> String {
+    match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
+        Value::String(value) => value,
+        other => panic!("{expr} => {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_menu_item<'a>(
+    node: &'a crate::layout::LayoutNode,
+    text: &str,
+) -> Option<&'a crate::layout::LayoutNode> {
+    if node.widget_type == "menu-item"
+        && matches!(node.props.get("text"), Some(Value::String(t)) if t == text)
+    {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_menu_item(child, text))
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn right_click_opens_the_context_menu_at_the_pointer() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    assert!(
+        eval_bool(&mut editor, "menu-open"),
+        ":on-right-click must open the menu"
+    );
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert_eq!(entry.kind, crate::widget_render::OverlayKind::Modal);
+    assert!(
+        (entry.rect.col - 6.0).abs() < 0.5 && (entry.rect.row - 1.5).abs() < 0.5,
+        "panel {:?} must open at the pointer",
+        entry.rect
+    );
+    assert!(
+        !eval_bool(&mut editor, "underlay-clicked"),
+        "right-click must not activate widgets underneath"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_flips_and_clamps_near_the_screen_edge() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 57.5, 1.5);
+
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert!(
+        entry.rect.col + entry.rect.width <= 60.001,
+        "panel {:?} must stay inside the 60-col frame",
+        entry.rect
+    );
+    assert!(entry.rect.col >= -0.001, "panel {:?} clamped left", entry.rect);
+    assert!(
+        entry.rect.row + entry.rect.height <= 20.001,
+        "panel {:?} must stay inside the 20-row frame",
+        entry.rect
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_anchors_at_the_pointer_when_the_tile_is_scrolled() {
+    // eseq-05t: :col/:row reach the handler in tile CONTENT space (scroll
+    // folded in), while the frame viewport the panel is clamped against is
+    // fixed in frame space. Panning used to add the scroll to the anchor
+    // without ever subtracting it back, flipping the panel to the left of the
+    // pointer once the anchor ran past the frame's right edge.
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(SCROLLED_CONTEXT_MENU_PROGRAM);
+    {
+        let leaf = editor.active_leaf_mut();
+        leaf.widget_scroll_left = 55.0;
+        leaf.widget_scroll_top = 18.0;
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    assert_eq!(editor.widget_scroll_left(), 55.0, "pan must survive clamping");
+    assert_eq!(editor.total_scroll_top(), 18.0, "scroll must survive clamping");
+
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    assert!(
+        eval_bool(&mut editor, "menu-open"),
+        ":on-right-click must open the menu"
+    );
+    // The handler sees the content-space pointer, past the frame's right edge.
+    assert!(
+        (eval_number(editor.runtime_mut(), "menu-col") - 61.0).abs() < 0.5,
+        "anchor is reported in content space"
+    );
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert!(
+        (entry.rect.col - 6.0).abs() < 0.5 && (entry.rect.row - 1.5).abs() < 0.5,
+        "panel {:?} must open at the pointer despite the 55x18 tile scroll",
+        entry.rect
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Rename").expect("Rename item").clone();
+    let hover_col = item.rect.col + item.rect.width * 0.5;
+    let hover_row = item.rect.row + item.rect.height * 0.5;
+    crate::widget_render::set_pointer_hover_widget(None);
+    editor.clear_needs_redraw();
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            hover_col.floor() as u16,
+            hover_row.floor() as u16,
+        ),
+        hover_col,
+        hover_row,
+        0,
+    );
+
+    assert!(crate::widget_render::pointer_hovered(item.widget_id));
+    assert!(
+        editor.needs_redraw(),
+        "changing render-only pointer hover state must schedule the next frame"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Delete").expect("Delete item").clone();
+    let click_col = item.rect.col + item.rect.width * 0.5;
+    let click_row = item.rect.row + item.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col as u16, click_row as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+
+    assert_eq!(
+        eval_string(&mut editor, "selected"),
+        "delete",
+        "exactly the clicked item's handler must fire"
+    );
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "selecting an item must close the menu"
+    );
+    assert!(!eval_bool(&mut editor, "underlay-clicked"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_disabled_item_click_neither_fires_nor_closes() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Blocked").expect("Blocked item").clone();
+    let click_col = item.rect.col + item.rect.width * 0.5;
+    let click_row = item.rect.row + item.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col as u16, click_row as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+    assert!(
+        eval_bool(&mut editor, "menu-open"),
+        "a disabled item must not close the menu"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_outside_click_closes_without_firing_items() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+    assert!(eval_bool(&mut editor, "menu-open"));
+
+    // Click well below the panel, over the sequencer tile's underlay button.
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(mouse_event(kind, 30, 15), 30.0, 15.5, 0);
+    }
+
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "outside click must request close"
+    );
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+    assert!(
+        !eval_bool(&mut editor, "underlay-clicked"),
+        "the dismissing click must be consumed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn context_menu_escape_closes_without_firing_items() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+    assert!(editor.modal_is_open(), "menu must gate keyboard input");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "Escape must request close"
+    );
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+}
+
+/// A modal whose body can open a context menu inside itself — the nested
+/// modal-family stack Escape has to unwind one panel at a time.
+#[cfg(target_os = "macos")]
+const MODAL_WITH_CONTEXT_MENU_PROGRAM: &str = r#"
+    (def modal-open (state true))
+    (def menu-open (state false))
+    (def menu-col (state 0))
+    (def menu-row (state 0))
+    (def selected (state ""))
+    (def underlay-clicked (state false))
+    (effect-buffer "*panel*"
+      (modal :is-open modal-open
+             :on-close (lambda () (set! modal-open false))
+        (v-stack
+          (box :width 30 :height 6
+            :on-right-click (lambda (event)
+              (set! menu-col (get event :col))
+              (set! menu-row (get event :row))
+              (set! menu-open true)))
+          (context-menu :is-open menu-open
+                        :anchor-col menu-col
+                        :anchor-row menu-row
+                        :on-close (lambda () (set! menu-open false))
+            (menu-item "Rename"
+              :on-select (lambda (event) (set! selected "rename")))))))
+    (effect-buffer "*sequencer*"
+      (button "underlay"
+        :width 60
+        :height 18
+        :on-click (lambda (event) (set! underlay-clicked true))))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn escape_closes_the_context_menu_first_then_the_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(MODAL_WITH_CONTEXT_MENU_PROGRAM);
+    register_active_layout_overlays(&mut editor);
+    assert!(eval_bool(&mut editor, "modal-open"), "modal starts open");
+
+    // Right-click a spot inside the modal panel to raise the context menu.
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let target = find_widget_of_type(&layout, "box")
+        .expect("modal body box")
+        .clone();
+    right_click_at(
+        &mut editor,
+        target.rect.col + target.rect.width * 0.5,
+        target.rect.row + target.rect.height * 0.5,
+    );
+    assert!(eval_bool(&mut editor, "menu-open"), "right-click opens menu");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "menu-open"),
+        "first escape closes the context menu"
+    );
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "first escape must leave the modal open"
+    );
+    assert_eq!(eval_string(&mut editor, "selected"), "");
+
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    register_active_layout_overlays(&mut editor);
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "second escape reaches the modal"
+    );
+}

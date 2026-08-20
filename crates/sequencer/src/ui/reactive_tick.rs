@@ -206,7 +206,6 @@ pub(crate) fn reactive_tick_and_render(
         let output_latency_bits = output_latency_seconds.to_bits();
         let transport_playhead = ctx.shared.state.transport.playhead.load(Ordering::Relaxed);
         let playhead = ctx.shared.state.transport.track_playheads[ct].load(Ordering::Relaxed);
-        let bus_playheads = bus_playhead_snapshot(&app);
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
         let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
         let mixer_visible = editor_has_visible_mixer_buffer(&editor);
@@ -215,8 +214,8 @@ pub(crate) fn reactive_tick_and_render(
         let step_visible = editor_has_visible_buffer(&editor, "*step*");
         let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
         let master_meter_visible = transport_visible || mixer_visible;
-        let track_meter_visible =
-            track_meter_bindings_visible(mixer_visible, sequencer_visible);
+        let track_and_bus_meter_visible =
+            track_and_bus_meter_bindings_visible(mixer_visible, sequencer_visible);
         let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
             || editor_has_visible_buffer(&editor, "*piano-roll*");
         let previous_playhead = ctx.frame.prev_playhead;
@@ -431,6 +430,22 @@ pub(crate) fn reactive_tick_and_render(
                 let rt = editor.runtime_mut();
                 sync_groups_bindings(rt, &app.groups);
                 ctx.frame.prev_groups = groups_snapshot;
+                needs_reactive_cycle = true;
+            }
+        }
+
+        // Rack pad-arm reconcile: the arm native mutates the shared handle;
+        // the grid header reads SEQ.armed-rack-id (-1 = no rack armed).
+        {
+            let armed_rack = *ctx.shared.armed_rack.lock().unwrap();
+            if armed_rack != ctx.frame.prev_armed_rack {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "armed-rack-id",
+                    Value::Number(armed_rack.map(|id| id as f64).unwrap_or(-1.0)),
+                );
+                ctx.frame.prev_armed_rack = armed_rack;
                 needs_reactive_cycle = true;
             }
         }
@@ -707,7 +722,7 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_peak_r_level = ctx.meters.cached_peak_r_level;
         }
         if ctx.meters.cached_track_peak_levels != ctx.frame.prev_track_peak_levels {
-            if track_meter_visible {
+            if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_track_peak_field_delta(
                     editor.runtime_mut(),
                     &ctx.frame.prev_track_peak_levels,
@@ -717,7 +732,7 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_track_peak_levels = ctx.meters.cached_track_peak_levels.clone();
         }
         if ctx.meters.cached_rack_slot_peak_levels != ctx.frame.prev_rack_slot_peak_levels {
-            if track_meter_visible {
+            if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_rack_slot_peak_field_delta(
                     editor.runtime_mut(),
                     &ctx.frame.prev_rack_slot_peak_levels,
@@ -727,7 +742,7 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_rack_slot_peak_levels = ctx.meters.cached_rack_slot_peak_levels.clone();
         }
         if ctx.meters.cached_bus_peak_levels != ctx.frame.prev_bus_peak_levels {
-            if mixer_visible {
+            if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_bus_peak_field_delta(
                     editor.runtime_mut(),
                     &ctx.frame.prev_bus_peak_levels,
@@ -743,6 +758,32 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.state,
                 &mut ctx.meters.visualization_liveness,
             );
+        }
+        // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
+        // reading is what consumes the audio thread's trigger latch, so it must
+        // not be skipped — but publishing is gated on the panel that draws
+        // them, exactly as the modulator readouts below are.
+        {
+            let rack_pad_triggers = read_rack_pad_trigger_flags(
+                &app,
+                &ctx.shared.state,
+                &track_active_notes,
+                &mut ctx.frame.rack_pad_triggered_at,
+                Instant::now(),
+            );
+            // `prev` mirrors what the runtime holds, so it is NOT updated
+            // while the panel is hidden: the first visible tick then publishes
+            // exactly what changed in the meantime — a pad that decayed while
+            // hidden goes dark, one that lit comes up — instead of leaving a
+            // stale light behind.
+            if fx_visible && rack_pad_triggers != ctx.frame.prev_rack_pad_triggers {
+                needs_reactive_cycle |= sync_rack_pad_trigger_field_delta(
+                    editor.runtime_mut(),
+                    &ctx.frame.prev_rack_pad_triggers,
+                    &rack_pad_triggers,
+                );
+                ctx.frame.prev_rack_pad_triggers = rack_pad_triggers;
+            }
         }
         if ctx.meters.cached_modulator_phases != ctx.frame.prev_modulator_phases {
             if fx_visible {
@@ -763,17 +804,6 @@ pub(crate) fn reactive_tick_and_render(
                 );
             }
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
-        }
-        if bus_playheads != ctx.frame.prev_bus_playheads {
-            if metal_visible {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "bus-playheads",
-                    build_bus_playheads_value(&app),
-                );
-                needs_reactive_cycle = true;
-            }
-            ctx.frame.prev_bus_playheads = bus_playheads;
         }
         if sequencer_visible {
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();
@@ -1073,10 +1103,8 @@ pub(crate) fn reactive_tick_and_render(
             let started = Instant::now();
             sync_track_mixer_state(rt, &app, &ctx.shared.state);
             sync_bus_mixer_state(rt, &app);
-            if track_meter_visible {
+            if track_and_bus_meter_visible {
                 sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
-            }
-            if mixer_visible {
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             }
             sync_mixer_elapsed = started.elapsed();

@@ -279,6 +279,10 @@ fn build_render_frame_with_layout_viewport(
     layout_height: f32,
 ) -> RenderFrame {
     editor.refresh_inline_widget_runtime_values();
+    // Before any relayout this pass can run: frame-anchored widgets resolve
+    // their rects against the frame viewport, which only lines up with the
+    // content space those rects are drawn in once the tile's scroll is known.
+    editor.sync_layout_content_scroll();
     editor.set_layout_viewport_exact(layout_width, layout_height);
     editor.position_inline_widget_layout(layout_width);
     {

@@ -88,8 +88,8 @@ pub struct BusStructureState {
     pub volume: f32,
     pub mute: bool,
     pub solo: bool,
-    pub gate_sequence: crate::sequencer::BusGateSequence,
     pub effects: BusEffectChainState,
+    pub output: crate::project::BusOutput,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +107,10 @@ pub struct GroupStructureState {
     pub collapsed: bool,
     pub members: Vec<TrackId>,
     pub bus_id: BusId,
+    pub rack: Option<crate::project::ProjectRackConfig>,
+    /// Child racks, by stable `GroupId` — nesting survives undo unchanged
+    /// because group ids, unlike track indices, never shift.
+    pub rack_members: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +135,8 @@ impl BusGroupStructurePatch {
 
 #[derive(Clone, Debug)]
 pub struct TrackPresentationState {
+    pub name: String,
+    pub name_user_authored: bool,
     pub color: crate::track_color::TrackColor,
     pub collapsed: bool,
 }
@@ -151,6 +157,9 @@ impl TrackPresentationPatch {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.changes.capacity() * std::mem::size_of::<TrackPresentationChange>()
+            + self.changes.iter()
+                .map(|change| change.before.name.capacity() + change.after.name.capacity())
+                .sum::<usize>()
     }
 }
 
@@ -466,6 +475,7 @@ pub struct RackContainerSlotState {
 pub struct TrackInstrumentState {
     pub source: TrackInstrumentSource,
     pub display_name: String,
+    pub display_name_user_authored: bool,
     pub patterns: TrackInstrumentPatternStateSnapshot,
     pub macro_mappings: TrackInstrumentMacroMappings,
 }
@@ -484,6 +494,8 @@ pub struct TrackCreationPatch {
     pub color: Option<crate::track_color::TrackColor>,
     pub collapsed: bool,
     pub group: Option<(u64, u64)>,
+    /// Rack pad this track was created to back, when the group is a drum rack.
+    pub rack_pad: Option<i32>,
 }
 
 impl TrackCreationPatch {
@@ -520,7 +532,6 @@ pub struct TrackDeletionPatch {
     pub color: Option<crate::track_color::TrackColor>,
     pub collapsed: bool,
     pub rack_selected_slot: usize,
-    pub rack_pad_bank_start: i32,
     pub record_armed: bool,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub macro_mappings: crate::macro_engine::TrackTopologyMacroMappings,

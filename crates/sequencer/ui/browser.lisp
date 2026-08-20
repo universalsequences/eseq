@@ -21,6 +21,7 @@
 ;; and are a host→script protocol, not this module's API).
 
 (import eseq.track-collapse)
+(import eseq.drum-rack-v2)
 
 ;; ── State ──
 ;; The `eseq.vanilla/` names below are the §3 cross-module def escape hatch
@@ -64,6 +65,11 @@
 ;; Preset save state
 (defstate %preset-name "")
 (defstate %preset-save-mode "")  ;; "" or "save-preset"
+;; Kit saves are initiated by the drum rack's FX-panel header, but completed
+;; here so naming and browser placement are explicit before anything is written.
+(defstate %kit-save-name "")
+(defstate %kit-save-group-id -1)
+(defstate %kit-save-mode false)
 (defstate preset-filter "")
 (defstate sbrowser-script-name "")
 (defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
@@ -210,34 +216,61 @@
   (host-command "add-track-instrument" (dict :name name))
   (status (str "Loading instrument: " name)))
 
-(def %swap-track-instrument (track name)
+(def %swap-track-instrument (track name preserve-track-selection)
   (if (or (= name nil) (= name ""))
     (status "Drop an instrument, not a folder")
     (if (eseq.track-collapse/replaceable-instrument? track)
       (do
         (set! sbrowser-loading-instrument-name name)
-        (host-command "swap-track-instrument" (dict :track track :name name))
+        (host-command "swap-track-instrument"
+          (dict :track track :name name
+            :preserve-track-selection preserve-track-selection))
         (status (str "Loading instrument swap: " name)))
       (status "Saved instruments can replace sampler or custom instrument tracks"))))
 
-(def %swap-track-builtin-instrument (track name)
+(def %swap-track-builtin-instrument (track name preserve-track-selection)
+  ;; Only the sampler has an in-place conversion. A modulator rewrite would be a
+  ;; different engine on a track that may already carry pattern data, and the
+  ;; racks are group/slot entities with no single track to become — so a drop
+  ;; that visually landed adds the builtin as a new track instead of dead-ending
+  ;; (eseq-mj8).
   (if (and (= name "sampler") (eseq.track-collapse/replaceable-instrument? track))
     (do
-      (host-command "swap-track-builtin-instrument" (dict :track track :name name))
+      (host-command "swap-track-builtin-instrument"
+        (dict :track track :name name
+          :preserve-track-selection preserve-track-selection))
       (set! sbrowser-tab "samples")
       (status "Loading sampler"))
-    (status "Only sampler conversion is supported")))
+    (add-builtin-instrument-track name)))
+
+;; Every "drop onto the new-track / empty zone" site routes through here so the
+;; builtin rows never fall into add-track-instrument, which resolves SAVED
+;; instruments by name and would look for a file literally called "modulator".
+;; Builtins also skip the loading spinner, which is keyed to saved-instrument
+;; loads (eseq-mj8).
+(def drop-instrument-new-track (payload)
+  (let ((name (get payload :name)))
+    (if name
+      (if (= (get payload :kind) "builtin-instrument")
+        (add-builtin-instrument-track name)
+        (do
+          (set! sbrowser-loading-instrument-name name)
+          (host-command "add-track-instrument" (dict :name name))))
+      (status "Drop an instrument, not a folder"))))
 
 (def drop-instrument-on-track (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
-    (if (= (get payload :kind) "builtin-instrument")
-      (%swap-track-builtin-instrument
-        (get target :track)
-        (get payload :name))
-      (%swap-track-instrument
-        (get target :track)
-        (get payload :name)))))
+    (let ((preserve-track-selection (get target :from-pad)))
+      (if (= (get payload :kind) "builtin-instrument")
+        (%swap-track-builtin-instrument
+          (get target :track)
+          (get payload :name)
+          preserve-track-selection)
+        (%swap-track-instrument
+          (get target :track)
+          (get payload :name)
+          preserve-track-selection)))))
 
 (def drop-sample-on-track (event)
   (let ((payload (get event :payload))
@@ -247,26 +280,31 @@
       (if path
         (if (eseq.track-collapse/custom-instrument? track)
           (host-command "convert-track-to-sampler"
-            (dict :track track :path path :preserve-browser-context true))
+            (dict :track track :path path :preserve-browser-context true
+              :preserve-track-selection (get target :from-pad)))
           (host-command "load-sample-into-track"
-            (dict :track track :path path :preserve-browser-context true)))
+            (dict :track track :path path :preserve-browser-context true
+              :preserve-track-selection (get target :from-pad))))
         (status "Drop a sample file, not a folder")))))
 
 (def drop-sound-on-track (event)
   (if (= (get event :drag-type) "sound")
     (host-command "load-sound-onto-track"
       (dict :track (get (get event :target) :track)
-            :path (get (get event :payload) :path)))
+            :path (get (get event :payload) :path)
+            :preserve-track-selection (get (get event :target) :from-pad)))
     (if (= (get event :drag-type) "instrument")
       (drop-instrument-on-track event)
       (drop-sample-on-track event))))
 
 (def %activate-instrument (name)
-  (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
-    (%swap-track-instrument SEQ.current-track name)
-    (do
-      (%add-instrument-track name)
-      (status (str "Adding instrument track: " name)))))
+  (if (>= (%selected-drum-rack-id) 0)
+    (status "Saved instruments cannot replace a selected drum rack")
+    (if (eseq.track-collapse/replaceable-instrument? SEQ.current-track)
+      (%swap-track-instrument SEQ.current-track name false)
+      (do
+        (%add-instrument-track name)
+        (status (str "Adding instrument track: " name))))))
 
 (def add-sampler-track ()
   (host-command "add-track-sampler" (dict))
@@ -288,16 +326,19 @@
   (set! sbrowser-tab "samples")
   (status "Add drum rack"))
 
-(def %current-rack-routing ()
+;; True when a rack panel is actually open in the sidebar — the only thing the
+;; old `:routing` string ever distinguished now that Broadcast is the sole
+;; routing (docs/drum-rack-v2-spec.md).
+(def %rack-panel-open? ()
   (if (= SEQ.sidebar-kind "rack")
     (if (> (len SEQ.instrument-panel) 0)
-      (get (nth SEQ.instrument-panel 0) :routing)
-      "")
-    ""))
+      (= (get (nth SEQ.instrument-panel 0) :is-rack) true)
+      false)
+    false))
 
 (def add-layer-rack-track ()
   (let ((path (sample-selected-path)))
-    (if (and (= (%current-rack-routing) "broadcast")
+    (if (and (%rack-panel-open?)
              (not (= path "")))
       (do
         (set! sbrowser-auditioned-sample path)
@@ -418,6 +459,15 @@
         (host-command "preview-sample" (dict :path %preview-path)))
       (status "Sample preview on"))))
 
+(def %selected-drum-rack ()
+  (if (eseq.seq-core-state/seq-has-selected-bus?)
+    (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
+    -1))
+
+(def %selected-drum-rack-id ()
+  (let ((gidx (%selected-drum-rack)))
+    (if (>= gidx 0) (eseq.drum-rack-v2/group-id gidx) -1)))
+
 (def activate-sample (item)
   (let ((path (get item :path)))
     (if path
@@ -513,12 +563,13 @@
 (def active-tree-key ()
   (if (= sbrowser-tab "samples") (%tree-key "samples-tab-tree")
     (if (= sbrowser-tab "sounds") (%tree-key "sounds-tab-tree")
+    (if (= sbrowser-tab "kits") (%tree-key "kits-tab-tree")
     (if (= sbrowser-tab "instruments") (%tree-key "instruments-tab-tree")
       (if (= sbrowser-tab "audio-fx") (%tree-key "audio-fx-tab-tree")
         (if (= sbrowser-tab "midi-fx") (%tree-key "midi-fx-tab-tree")
           (if (= sbrowser-tab "presets") (%tree-key "presets-tab-tree")
             (if (= sbrowser-tab "scripts") (%tree-key "scripts-tab-tree")
-              (%tree-key "projects-tab-tree")))))))))
+              (%tree-key "projects-tab-tree"))))))))))
 
 (def list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
@@ -813,7 +864,7 @@
   (set! sbrowser-editor-name "")
   (host-command "enter-new-instrument-editor" (dict)))
 
-(def %add-builtin-instrument-track (name)
+(def add-builtin-instrument-track (name)
   (if (= name "sampler")
     (add-sampler-track)
     (if (= name "modulator")
@@ -825,10 +876,14 @@
           (status "Choose an instrument"))))))
 
 (def %activate-builtin-instrument (name)
+  ;; With a drum rack selected SEQ.current-track is whatever was selected
+  ;; before the rack, so converting it in place would rewrite an unrelated
+  ;; track behind the visible selection: add a new track instead.
   (if (and (= name "sampler")
+           (< (%selected-drum-rack-id) 0)
            (eseq.track-collapse/replaceable-instrument? SEQ.current-track))
-    (%swap-track-builtin-instrument SEQ.current-track name)
-    (%add-builtin-instrument-track name)))
+    (%swap-track-builtin-instrument SEQ.current-track name false)
+    (add-builtin-instrument-track name)))
 
 (def select-create-item (item)
   (let ((kind (get item :kind)))
@@ -874,7 +929,10 @@
         (do
           (host-command "move-saved-instrument" (dict :name name :folder folder))
           (status (str "Move instrument to " (get target :label))))
-        (status "Drop instruments onto a folder")))))
+        ;; Builtins are not files on disk, so there is nothing to move.
+        (if (= (get payload :kind) "builtin-instrument")
+          (status "Builtin instruments cannot be moved into a folder")
+          (status "Drop instruments onto a folder"))))))
 
 (def %loading-instrument? ()
   (not (= sbrowser-loading-instrument-name "")))
@@ -908,6 +966,7 @@
   (list
     (dict :name "samples" :label "Samples" :icon :waveform)
     (dict :name "sounds" :label "Sounds" :icon :piano)
+    (dict :name "kits" :label "Kits" :icon :sampler)
     (dict :name "instruments" :label "Instruments" :icon :piano)
     (dict :name "audio-fx" :label "Audio FX" :icon :sliders)
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
@@ -922,10 +981,14 @@
       SEQ.sound-presets)))
 
 (def %load-sound (item)
-  (if (= SEQ.num-tracks 0)
-    (status "Create a track before loading a Sound")
-    (host-command "load-sound-onto-track"
-      (dict :track SEQ.current-track :path (get item :path)))))
+  (let ((rack-id (%selected-drum-rack-id)))
+    (if (>= rack-id 0)
+      (host-command "audition-sound-on-rack"
+        (dict :group-id rack-id :path (get item :path)))
+      (if (= SEQ.num-tracks 0)
+        (status "Create a track before loading a Sound")
+        (host-command "load-sound-onto-track"
+          (dict :track SEQ.current-track :path (get item :path)))))))
 
 (def %sounds-panel ()
   (let ((items (%visible-sounds)))
@@ -940,6 +1003,90 @@
                 :focusable true
                 :drag-type "sound"
                 :on-activate (lambda (item) (%load-sound item))))))))
+
+;; ── Kits (docs/drum-rack-v2-spec.md, "Polish") ──────────────────────────
+;; A kit is a drum rack saved as a browser object: group config + one Sound
+;; per pad, no patterns. Activating one replaces the selected drum rack's kit;
+;; with no rack selected it builds a new rack beside the existing tracks.
+
+(def %visible-kits ()
+  (if (= search-filter "") SEQ.kit-presets
+    (filter (lambda (item)
+      (string-contains? (lowercase (get item :label)) (lowercase search-filter)))
+      SEQ.kit-presets)))
+
+(def %load-kit (item)
+  (let ((rack-id (%selected-drum-rack-id)))
+    (if (>= rack-id 0)
+      (host-command "load-kit" (dict :path (get item :path) :group-id rack-id))
+      (host-command "load-kit" (dict :path (get item :path))))))
+
+(def enter-kit-save (group-id name)
+  (set! search-filter "")
+  (set! %mode "audition")
+  (set! %preset-save-mode "")
+  (set! sbrowser-script-save-mode "")
+  (set! %kit-save-group-id group-id)
+  (set! %kit-save-name name)
+  (set! %kit-save-mode true)
+  (select-tab "kits"))
+
+(def %exit-kit-save ()
+  (set! %kit-save-mode false)
+  (set! %kit-save-group-id -1))
+
+(def %save-kit ()
+  (if (= (len %kit-save-name) 0)
+    (status "Enter a kit name")
+    (do
+      (host-command "save-rack-as-kit"
+        (dict :group-id %kit-save-group-id
+              :name %kit-save-name
+              :overwrite false))
+      (%exit-kit-save))))
+
+(def %kit-save-panel ()
+  (box :key "kit-save-panel" :width :fill :padding 0.5
+    (v-stack :width :fill :gap 0.5
+      (h-stack :width :fill :gap 0.5 :align :center
+        (label "Save Kit" :font-size 12 :color :white :bg :transparent)
+        (box :flex 1 :height 0)
+        (button "Cancel"
+          :key "kit-save-cancel"
+          :variant :ghost
+          :width 5.5 :height 1.2 :font-size 9
+          :on-click |x y r| (%exit-kit-save)
+          :color :gray))
+      (text-input
+        :key "kit-save-name"
+        :width :fill
+        :value %kit-save-name
+        :placeholder "kit name..."
+        :on-change (lambda (value) (set! %kit-save-name value))
+        :height 1.5
+        :font-size 12)
+      (button "Save Kit"
+        :key "kit-save-confirm"
+        :variant :primary
+        :width 10 :height 1.2 :font-size 11
+        :on-click |x y r| (%save-kit)
+        :color :white))))
+
+(def %kits-panel ()
+  (if %kit-save-mode
+    (%kit-save-panel)
+    (let ((items (%visible-kits)))
+      (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+        (if (= (len items) 0)
+          (%empty-message "No kits yet. Use the save icon in a drum rack's FX-panel header.")
+          (scroll :key "kits-tab-scroll" :width :fill :flex 1
+            (tree :key "kits-tab-tree"
+                  :width :fill
+                  :background-color :buffer-bg
+                  :items items
+                  :focusable true
+                  :drag-type "kit"
+                  :on-activate (lambda (item) (%load-kit item)))))))))
 
 (def drop-preset-on-sounds (event)
   (if (= (get event :drag-type) "instrument-preset")
@@ -1303,12 +1450,13 @@
 (def active-tab-panel ()
   (if (= sbrowser-tab "samples") (%samples-panel)
     (if (= sbrowser-tab "sounds") (%sounds-panel)
+    (if (= sbrowser-tab "kits") (%kits-panel)
     (if (= sbrowser-tab "instruments") (%instruments-panel)
       (if (= sbrowser-tab "audio-fx") (%audio-fx-panel)
         (if (= sbrowser-tab "midi-fx") (%midi-fx-panel)
           (if (= sbrowser-tab "presets") (%presets-tab-panel)
             (if (= sbrowser-tab "scripts") (%scripts-tab-panel)
-              (%projects-tab-panel)))))))))
+              (%projects-tab-panel))))))))))
 
 (def tabbed-content ()
   (h-stack :key "tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch

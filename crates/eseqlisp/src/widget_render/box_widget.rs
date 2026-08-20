@@ -123,6 +123,24 @@ fn box_mouse_info(
         "y".to_string(),
         Rc::new(RefCell::new(Value::Number(wr as f64))),
     );
+    // Absolute pointer position in tile-local layout CONTENT cells: the
+    // tile's own scroll offsets are already folded in, so this matches the
+    // space layout rects live in (the backend draws the layout, and the
+    // overlay channel, translated by -scroll). It is therefore the space
+    // `context-menu` :anchor-col/:anchor-row are expressed in — a
+    // frame-anchored widget reconciles the two via `current_frame_viewport`,
+    // which reports the frame in this same content space.
+    //
+    // Not folded in: the offset of an enclosing `scroll` WIDGET, which
+    // children read separately via `scroll::current_event_scroll_offset`.
+    info.insert(
+        "col".to_string(),
+        Rc::new(RefCell::new(Value::Number(local_col as f64))),
+    );
+    info.insert(
+        "row".to_string(),
+        Rc::new(RefCell::new(Value::Number(local_row as f64))),
+    );
     info.insert(
         "sx".to_string(),
         Rc::new(RefCell::new(Value::Number(sx as f64))),
@@ -291,8 +309,8 @@ impl WidgetDefinition for BoxWidget {
             "selected", "selected-background-color", "selected-border-color", "muted",
             "muted-background-color", "muted-border-color", "drop-hover-background-color",
             "drop-hover-border-color", "drag-type", "drag-payload", "drag-modifier",
-            "capture-pointer", "focusable", "key", "on-click", "on-double-click", "on-drag",
-            "on-drop", "on-mouse-down", "on-mouse-up",
+            "capture-pointer", "focusable", "key", "on-click", "on-right-click",
+            "on-double-click", "on-drag", "on-drop", "on-mouse-down", "on-mouse-up",
         ]
     }
 
@@ -519,7 +537,32 @@ impl WidgetDefinition for BoxWidget {
         _cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
+            MouseEventKind::Down(MouseButton::Right) => {
+                if node.props.contains_key("on-right-click") {
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                        "right-click",
+                        modifiers,
+                        node,
+                        local_col,
+                        local_row,
+                    )));
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
+                // macOS convention: ctrl+click is a right-click synonym (some
+                // terminals swallow the right button). Only when the widget
+                // opts in via :on-right-click.
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && node.props.contains_key("on-right-click")
+                {
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                        "right-click",
+                        modifiers,
+                        node,
+                        local_col,
+                        local_row,
+                    )));
+                }
                 if node.props.contains_key("on-mouse-down") {
                     return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
                         "down", modifiers, node, local_col, local_row,
@@ -581,6 +624,7 @@ impl WidgetDefinition for BoxWidget {
                 }?;
                 let callback_name = match phase.as_str() {
                     "click" => "on-click",
+                    "right-click" => "on-right-click",
                     "double-click" => "on-double-click",
                     "down" => "on-mouse-down",
                     "drag" => "on-drag",

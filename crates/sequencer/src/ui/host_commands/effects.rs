@@ -823,7 +823,7 @@ pub(super) fn handle(
                                         ),
                                     ) {
                                         Ok(()) => {
-                                            app.publish_bus_gate_runtime();
+                                            app.publish_bus_effect_runtime();
                                             *bus_state.lock().unwrap() =
                                                 app.buses.clone();
                                             if sync_bus_effect_param_value_field(
@@ -861,7 +861,7 @@ pub(super) fn handle(
                                         },
                                     );
                                     if result.is_ok() {
-                                        app.publish_bus_gate_runtime();
+                                        app.publish_bus_effect_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
                                     } else if let Err(error) = result {
                                         editor.handle_host_event(HostEvent::Status(format!(

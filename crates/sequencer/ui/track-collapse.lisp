@@ -45,8 +45,17 @@
     (let ((track-type (nth SEQ.track-instrument-types track)))
       (if (= track-type "sampler")
         :waveform
-        (if (= track-type "custom") :piano nil)))
+        (if (= track-type "custom")
+          :piano
+          (if (= track-type "rack")
+            :sliders
+            (if (= track-type "modulator") :sine nil)))))
     nil))
+
+(def group-type-icon (group)
+  ;; The browser's Kits tab uses :sampler. A drum rack is the corresponding
+  ;; track-group identity, distinct from the slot-based rack's :sliders icon.
+  (if (get group :rack) :sampler nil))
 
 (def toggle-collapsed-ui (track)
   (seq-toggle-track-collapsed track))

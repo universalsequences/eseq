@@ -71,16 +71,92 @@ pub const NO_TRANSPORT_PHASE_PARAM: u32 = u32::MAX;
 /// Names of every effect presented through the built-in effect path.
 ///
 /// This combines native and DGenLisp-backed effects and sorts the result for
-/// direct use by user-facing effect lists.
+/// direct use by user-facing effect lists. Retired built-ins
+/// ([`EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES`]) are omitted: they stay
+/// loadable for saved projects but are no longer offered when picking a new
+/// effect.
 pub fn builtin_effect_names() -> Vec<&'static str> {
-    let mut names = EffectDescriptor::builtin_insert_names().to_vec();
+    let mut names = EffectDescriptor::listable_builtin_insert_names();
     names.extend_from_slice(dgen_builtin::NAMES);
     names.sort_by_key(|name| name.to_ascii_lowercase());
     names
 }
 
+/// Canonical name a built-in effect is stored under in project/preset files:
+/// the `builtin:` prefix plus its canonical name. Covers *both* families in
+/// [`builtin_effect_names`] — native inserts and DGenLisp-hosted builtins
+/// (Filter Table, Convolution Reverb) — so a saved slot can always be told
+/// apart from a saved custom effect. Returns `None` for names that are not
+/// built-ins.
+pub fn builtin_effect_project_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
+        dgen_builtin::find(trimmed)
+            .map(|builtin| format!("{}{}", EffectDescriptor::BUILTIN_INSERT_PREFIX, builtin.name))
+    })
+}
+
+/// Inverse of [`builtin_effect_project_name`]: the built-in this saved name
+/// refers to, or `None` when the name belongs to a saved custom effect.
+///
+/// Bare (unprefixed) built-in names are accepted as well, which repairs files
+/// written before rack-slot chains qualified their built-ins — see
+/// `eseq-zck`.
+pub fn builtin_effect_name_from_project_name(name: &str) -> Option<&'static str> {
+    let trimmed = name.trim();
+    let bare = trimmed
+        .strip_prefix(EffectDescriptor::BUILTIN_INSERT_PREFIX)
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    EffectDescriptor::canonical_builtin_insert_name(bare)
+        .or_else(|| dgen_builtin::find(bare).map(|builtin| builtin.name))
+}
+
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
+
+/// Fallback sample rate used when a node's stored sample rate is unusable.
+pub const FALLBACK_SAMPLE_RATE: f32 = 48_000.0;
+
+/// Sanitise a sample rate read out of node state before deriving coefficients.
+///
+/// A node whose state slots were written by a stale/short param layout can hold
+/// junk (0.0, a knob-scale 0.5, NaN) where the host writes the sample rate. Any
+/// such value must never reach a coefficient formula: `sr * 0.49 < 20.0` makes
+/// `f32::clamp(20.0, sr * 0.49)` panic with `min > max`, and effect process
+/// functions are `extern "C"` (nounwind), so that panic aborts the process from
+/// an audio worker thread.
+#[inline]
+pub fn safe_sample_rate(sr: f32) -> f32 {
+    if sample_rate_is_usable(sr) {
+        sr
+    } else {
+        FALLBACK_SAMPLE_RATE
+    }
+}
+
+/// True when a stored sample rate is plainly not a sample rate — the signal that
+/// a node's state has not been initialised (or was clobbered by a stale layout).
+#[inline]
+pub fn sample_rate_is_usable(sr: f32) -> bool {
+    sr.is_finite() && sr >= 1_000.0
+}
+
+/// Clamp `freq` into `[lo, frac * sr]` without ever forming an inverted range.
+///
+/// `sr` is sanitised first, and the low bound is pulled down to the high bound
+/// if they ever cross, so the returned value is always finite and the clamp can
+/// never panic.
+#[inline]
+pub fn nyquist_clamp(freq: f32, sr: f32, lo: f32, frac: f32) -> f32 {
+    let hi = safe_sample_rate(sr) * frac;
+    let lo = lo.min(hi);
+    if freq.is_finite() {
+        freq.clamp(lo, hi)
+    } else {
+        lo
+    }
+}
 
 // ── ParamKind ──
 
@@ -365,8 +441,9 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        builtin_effect_names, tensor_param_descriptors_from_manifest, EffectDescriptor,
-        EffectSlotSnapshot, EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        builtin_effect_name_from_project_name, builtin_effect_names,
+        tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
+        EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
         TensorParamDescriptor,
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
@@ -716,6 +793,94 @@ mod tests {
         ));
         assert!(snapshot.bit_exact_eq(&snapshot.clone()));
         crate::effects::filter_table::clear_instance(424_243);
+    }
+
+    // eseq-ur4: restoring a stale/legacy snapshot that carries no param layout
+    // must leave the live slot's node param mapping alone. Zeroing it would
+    // reroute every param to node param 0, and a positional guess would write
+    // knob values into device state slots such as Space Echo's sample rate.
+    #[test]
+    fn restoring_a_snapshot_without_a_layout_keeps_the_live_node_param_mapping() {
+        let desc = EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "cutoff".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 20,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        let live = EffectSlotState::new(&desc, 42);
+
+        let mut stale = EffectSlotSnapshot::capture(&live);
+        stale.param_node_indices.clear();
+        stale.restore(&live);
+
+        assert_eq!(live.param_node_indices[0].load(Ordering::Relaxed), 20);
+        assert_eq!(EffectSlotSnapshot::capture(&live).node_param_idx(0), Some(20));
+    }
+
+    // eseq-ur4 follow-up: the layout guard above declines to adopt a missing
+    // layout, but `num_params` was still stored unconditionally — so a snapshot
+    // claiming more params than the live device left the tail params mapped to
+    // node param 0 (`STATE_ENABLED`), silently bypassing the effect.
+    #[test]
+    fn restoring_a_snapshot_without_a_layout_clamps_num_params_to_the_live_layout() {
+        let params: Vec<ParamDescriptor> = (0..15)
+            .map(|i| ParamDescriptor {
+                name: format!("p{i}"),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                // Non-positional node layout, as on Space Echo.
+                node_param_idx: i + 1,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            })
+            .collect();
+        let desc = EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params,
+        };
+        let live = EffectSlotState::new(&desc, 42);
+
+        // A stale snapshot claiming 20 params while carrying no layout at all.
+        let mut stale = EffectSlotSnapshot::capture(&live);
+        stale.param_node_indices.clear();
+        stale.num_params = 20;
+        stale.restore(&live);
+
+        assert_eq!(live.num_params.load(Ordering::Relaxed), 15);
+
+        let recaptured = EffectSlotSnapshot::capture(&live);
+        assert_eq!(recaptured.num_params, 15);
+        assert_eq!(recaptured.param_node_indices.len(), 15);
+        for i in 0..15 {
+            assert_eq!(recaptured.node_param_idx(i), Some(i as u32 + 1));
+        }
+        for i in 15..20 {
+            // Never `Some(0)`: node param 0 is STATE_ENABLED.
+            assert_eq!(recaptured.node_param_idx(i), None);
+        }
     }
 
     #[test]
@@ -1523,13 +1688,33 @@ mod tests {
                 "Tape"
             ]
         );
+        // Retired built-ins are absent from every user-facing listing…
+        assert_eq!(
+            EffectDescriptor::listable_builtin_insert_names(),
+            vec![
+                "Compressor",
+                "Dimension",
+                "DJ Mixer",
+                "EQ8",
+                "Filter",
+                "Filterbank",
+                "Glue Compressor",
+                "Limiter",
+                "Multiverb",
+                "OTT",
+                "Phaser-Flanger",
+                "Reverb",
+                "Roar",
+                "Space Echo",
+                "Str8 Delay",
+                "Tape"
+            ]
+        );
         assert_eq!(
             builtin_effect_names(),
             vec![
-                "444 Compressor",
                 "Compressor",
                 "Convolution Reverb",
-                "Delay",
                 "Dimension",
                 "DJ Mixer",
                 "EQ8",
@@ -1548,6 +1733,31 @@ mod tests {
                 "Tape"
             ]
         );
+        // …but still resolve and instantiate by name, so saved projects load.
+        for retired in EffectDescriptor::RETIRED_BUILTIN_INSERT_NAMES {
+            assert!(EffectDescriptor::is_retired_builtin_insert_name(retired));
+            assert_eq!(
+                EffectDescriptor::canonical_builtin_insert_name(retired),
+                Some(*retired)
+            );
+            assert_eq!(
+                EffectDescriptor::builtin_insert(retired)
+                    .unwrap_or_else(|| panic!("retired {retired} should still load"))
+                    .name,
+                *retired
+            );
+            assert_eq!(
+                builtin_effect_name_from_project_name(&format!(
+                    "{}{retired}",
+                    EffectDescriptor::BUILTIN_INSERT_PREFIX
+                )),
+                Some(*retired)
+            );
+        }
+        assert!(!EffectDescriptor::is_retired_builtin_insert_name(
+            "Str8 Delay"
+        ));
+        assert!(EffectDescriptor::is_retired_builtin_insert_name("Dynamics"));
         assert_eq!(
             EffectDescriptor::canonical_builtin_insert_name("404 Compressor"),
             Some("444 Compressor")
@@ -2446,6 +2656,14 @@ impl EffectDescriptor {
         }
     }
 
+    /// Built-ins that are still loadable but no longer offered in any
+    /// add-effect picker: superseded by newer builtins (see `eseq-wyu`).
+    /// "444 Compressor" is replaced by "Compressor"/"Glue Compressor" and
+    /// "Delay" by "Str8 Delay".
+    pub const RETIRED_BUILTIN_INSERT_NAMES: &'static [&'static str] = &["444 Compressor", "Delay"];
+
+    /// Every built-in insert that can be instantiated, including retired ones.
+    /// User-facing pickers want [`Self::listable_builtin_insert_names`].
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
             "444 Compressor",
@@ -2467,6 +2685,22 @@ impl EffectDescriptor {
             "Str8 Delay",
             "Tape",
         ]
+    }
+
+    /// True when `name` (canonical or legacy alias) names a retired built-in.
+    pub fn is_retired_builtin_insert_name(name: &str) -> bool {
+        Self::canonical_builtin_insert_name(name)
+            .is_some_and(|canonical| Self::RETIRED_BUILTIN_INSERT_NAMES.contains(&canonical))
+    }
+
+    /// Built-in inserts offered when picking a new effect: everything in
+    /// [`Self::builtin_insert_names`] minus the retired ones.
+    pub fn listable_builtin_insert_names() -> Vec<&'static str> {
+        Self::builtin_insert_names()
+            .iter()
+            .copied()
+            .filter(|name| !Self::RETIRED_BUILTIN_INSERT_NAMES.contains(name))
+            .collect()
     }
 
     pub fn builtin_insert_project_name(name: &str) -> Option<String> {
@@ -9276,18 +9510,39 @@ impl EffectSlotSnapshot {
         slot.node_id.store(self.node_id, Ordering::Relaxed);
         slot.modulator_node_id
             .store(self.modulator_node_id, Ordering::Relaxed);
-        slot.num_params.store(self.num_params, Ordering::Relaxed);
+        // `num_params` must never outrun the layout that will actually be in
+        // place after this restore. Params past the layout have no node param
+        // index, and `capture()` would then hand them a fabricated `0` — which
+        // is node param 0, `STATE_ENABLED` on most devices, so the effect
+        // silently switches itself off at the next param push.
+        //
+        // A param index ends up with a valid layout when either the snapshot
+        // supplies one (adopted below for `i < self.param_node_indices.len()`)
+        // or the live slot already had one (`i < live_num_params`, kept because
+        // the guard below declines to overwrite it). Both are prefixes, so the
+        // covered count is the larger of the two, capped by the slot's storage.
+        let live_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+        let covered = self
+            .param_node_indices
+            .len()
+            .max(live_num_params)
+            .min(slot.param_node_indices.len());
+        let np = (self.num_params as usize).min(covered);
+        slot.num_params.store(np as u32, Ordering::Relaxed);
         slot.transport_phase_param_idx
             .store(self.transport_phase_param_idx, Ordering::Relaxed);
-        let np = self.num_params as usize;
 
         for i in 0..np {
             if i < self.defaults.len() {
                 slot.defaults.set(i, self.defaults[i]);
             }
-            if i < slot.param_node_indices.len() {
-                let idx = self.param_node_indices.get(i).copied().unwrap_or(0);
-                slot.param_node_indices[i].store(idx, Ordering::Relaxed);
+            // A snapshot with no layout of its own (a stale or legacy copy)
+            // must not overwrite the live slot's node param mapping with
+            // zeros — that would reroute every param to node param 0.
+            if let Some(idx) = self.param_node_indices.get(i).copied() {
+                if i < slot.param_node_indices.len() {
+                    slot.param_node_indices[i].store(idx, Ordering::Relaxed);
+                }
             }
             if i < slot.param_node_spans.len() {
                 let span = self.param_node_spans.get(i).copied().unwrap_or(1).max(1);
@@ -9373,6 +9628,20 @@ impl EffectSlotSnapshot {
 
     pub fn clear(&mut self) {
         *self = Self::new_empty();
+    }
+
+    /// Node param index for `param_idx`, or `None` when this slot's layout is
+    /// unknown — a stale or legacy copy whose `param_node_indices` is missing
+    /// or shorter than `num_params`.
+    ///
+    /// There is deliberately no positional fallback. Descriptor param order
+    /// stops matching node state slots as soon as a device keeps non-param
+    /// state inline (Space Echo's sample rate is node param 16), so treating
+    /// `param_idx` as a node index silently writes knob-scale values into
+    /// unrelated state — which is how a zeroed sample rate reached the audio
+    /// worker and aborted the process.
+    pub fn node_param_idx(&self, param_idx: usize) -> Option<u32> {
+        self.param_node_indices.get(param_idx).copied()
     }
 
     fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {

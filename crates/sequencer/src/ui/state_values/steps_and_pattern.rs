@@ -242,18 +242,6 @@ pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
     format!("seq-track-step-active-{track}-{step}")
 }
 
-pub(crate) fn drum_lane_step_active_field(track: usize, pad_note: i32, step: usize) -> String {
-    format!("drum-lane-step-active-{track}-{pad_note}-{step}")
-}
-
-pub(crate) fn drum_lane_step_selected_field(track: usize, pad_note: i32, step: usize) -> String {
-    format!("drum-lane-step-selected-{track}-{pad_note}-{step}")
-}
-
-pub(crate) fn drum_lane_step_duration_field(track: usize, pad_note: i32, step: usize) -> String {
-    format!("drum-lane-step-duration-{track}-{pad_note}-{step}")
-}
-
 /// Registry field caching a hex digest of all four per-step binding lanes for
 /// a track. When it is unchanged, the per-step field writes are skipped
 /// entirely; single-step sync paths invalidate it by writing Nil.
@@ -396,6 +384,17 @@ pub(crate) fn sync_track_pattern_cell_selected_fields(
     }
 }
 
+fn mixer_track_delete_target_selected(
+    active_delete_target: Option<&ActiveDeleteTarget>,
+    track: usize,
+) -> bool {
+    match active_delete_target {
+        Some(ActiveDeleteTarget::MixerTrack { track: selected }) => *selected == track,
+        Some(ActiveDeleteTarget::MixerTracks { tracks }) => tracks.contains(&track),
+        _ => false,
+    }
+}
+
 pub(crate) fn sync_mixer_delete_target_binding_fields(
     rt: &mut Runtime,
     track_count: usize,
@@ -407,10 +406,7 @@ pub(crate) fn sync_mixer_delete_target_binding_fields(
         rt.set_reactive(
             "SEQ",
             &mixer_track_delete_target_field(track),
-            Value::Bool(matches!(
-                active_delete_target,
-                Some(ActiveDeleteTarget::MixerTrack { track: selected }) if *selected == track
-            )),
+            Value::Bool(mixer_track_delete_target_selected(active_delete_target, track)),
         );
         let rack_slot_count = rack_tracks
             .get(track)
@@ -440,6 +436,20 @@ pub(crate) fn sync_mixer_delete_target_binding_fields(
         "selected-mod-routes",
         selected_mod_routes_value(active_delete_target),
     );
+}
+
+#[cfg(test)]
+mod delete_target_binding_tests {
+    use super::*;
+
+    #[test]
+    fn multiple_mixer_track_target_selects_each_member_only() {
+        let target = ActiveDeleteTarget::MixerTracks { tracks: vec![1, 3] };
+        assert!(!mixer_track_delete_target_selected(Some(&target), 0));
+        assert!(mixer_track_delete_target_selected(Some(&target), 1));
+        assert!(!mixer_track_delete_target_selected(Some(&target), 2));
+        assert!(mixer_track_delete_target_selected(Some(&target), 3));
+    }
 }
 
 pub(crate) fn sync_track_selection_binding_fields(
@@ -483,10 +493,24 @@ pub(crate) fn sync_selected_tracks_bindings(
 }
 
 /// Builds `SEQ.groups`: one map per group with id, name, color, bus-id, anchor
-/// (lowest member index), collapsed flag, and ordered member indices.
+/// (lowest member index), collapsed flag, ordered member indices, and — for a
+/// drum rack (`docs/drum-rack-v2-spec.md`) — the `rack` flag plus its pad map.
+///
+/// Each pad carries both `member` (its position in `members`, the serialized
+/// form) and `track` (the resolved track index), so the UI can badge a member
+/// row without re-walking the member list.
 pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup]) -> Value {
     list_value(groups.iter().map(|group| {
         let anchor = group.members.iter().copied().min().unwrap_or(0);
+        // Nesting, both ways: `rack-members` are the child racks this group
+        // draws inside its own block, `parent` is the group id drawing this
+        // one (-1 when it is top level). See docs/drum-rack-v2-spec.md,
+        // "Racks inside track groups".
+        let parent = groups
+            .iter()
+            .find(|candidate| candidate.rack_members.contains(&group.id))
+            .map(|candidate| candidate.id as f64)
+            .unwrap_or(-1.0);
         map_value([
             ("id", Value::Number(group.id as f64)),
             ("name", Value::String(group.name.clone().into())),
@@ -501,6 +525,51 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
                 "members",
                 list_value(group.members.iter().map(|m| Value::Number(*m as f64))),
             ),
+            ("rack", Value::Bool(group.is_rack())),
+            ("pads", build_rack_pads_value(group)),
+            (
+                "rack-members",
+                list_value(
+                    group
+                        .rack_members
+                        .iter()
+                        .map(|id| Value::Number(*id as f64)),
+                ),
+            ),
+            ("parent", Value::Number(parent)),
+        ])
+    }))
+}
+
+/// Builds a rack group's `pads` entry: one map per pad with its note, its note
+/// name (the pad badge's label), member position, resolved track index and
+/// choke group (`-1` when unassigned).
+/// Empty for a plain group.
+fn build_rack_pads_value(group: &sequencer::project::ProjectTrackGroup) -> Value {
+    let Some(rack) = group.rack.as_ref() else {
+        return list_value(std::iter::empty());
+    };
+    list_value(rack.pads.iter().enumerate().map(|(pad_idx, pad)| {
+        let track = group.members.get(pad.member).copied();
+        let choke = rack
+            .choke_groups
+            .get(pad_idx)
+            .copied()
+            .flatten()
+            .map(|g| g as f64)
+            .unwrap_or(-1.0);
+        map_value([
+            ("pad-note", Value::Number(pad.pad_note as f64)),
+            (
+                "label",
+                Value::String(super::drum_rack::drum_rack_pad_label(pad.pad_note)),
+            ),
+            ("member", Value::Number(pad.member as f64)),
+            (
+                "track",
+                Value::Number(track.map(|t| t as f64).unwrap_or(-1.0)),
+            ),
+            ("choke", Value::Number(choke)),
         ])
     }))
 }

@@ -2,9 +2,10 @@ use crate::macro_engine::{Macro, MacroMapping};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, BUILTIN_SLOT_COUNT};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, PatternId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
+    BusId, PatternId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId,
+    DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE, MAX_STEPS,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -30,6 +31,9 @@ use super::fx_chain::{
     rewire_fx_chain, FxChainLocator, FxGraphEditBatch, RetainedEffectSource,
 };
 
+/// Header tint a freshly created drum rack starts with; members can differ.
+const DEFAULT_RACK_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditError {
     UnsupportedCommand,
@@ -48,6 +52,12 @@ pub enum EditOutcome {
     NoOp,
     Applied(HistoryMove),
     AppliedUnrecorded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternLengthChange {
+    Double,
+    Halve,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -142,6 +152,12 @@ fn rollback_effect_chain_edit<S: EffectChainHistoryState>(
             "{context} failed ({error}); restoring the original chain also failed ({rollback_error})"
         ),
     }
+}
+
+/// Pad order used when adopting a plain group's existing member tracks: begin
+/// on the default C4 page, then wrap from the top of the pad domain to C1.
+fn group_conversion_pad_notes() -> impl Iterator<Item = i32> {
+    (0..=DRUM_RACK_LAST_PAD_NOTE).chain(DRUM_RACK_FIRST_PAD_NOTE..0)
 }
 
 impl App {
@@ -454,10 +470,16 @@ impl App {
                     runtime.apply_authoring_values(&values)?;
                     saved.effect_descriptors[slot] = instance.descriptor.clone();
                     saved.effect_slots[slot] = runtime;
-                    saved.custom_effect_names[slot] = Some(match &instance.source {
+                    // Retained sources carry bare descriptor names; rack-slot
+                    // chains are saved verbatim, so qualify built-ins here or
+                    // they reload as missing custom effects (eseq-zck).
+                    let name = match &instance.source {
                         RetainedEffectSource::NativeBuiltin { name } => name.clone(),
                         RetainedEffectSource::Compiled { name, .. } => name.clone(),
-                    });
+                    };
+                    saved.custom_effect_names[slot] = Some(
+                        crate::effects::builtin_effect_project_name(&name).unwrap_or(name),
+                    );
                 } else {
                     saved.effect_descriptors[slot] = EffectDescriptor::empty_custom_slot();
                     saved.effect_slots[slot] = EffectSlotSnapshot::new_empty();
@@ -742,7 +764,7 @@ impl App {
                     }
                 }
                 self.push_bus_effect_slot_defaults(bus_idx, slot);
-                self.publish_bus_gate_runtime();
+                self.publish_bus_effect_runtime();
                 return Err(error);
             }
         };
@@ -864,7 +886,6 @@ impl App {
                 self.buses[bus_idx].custom_effect_names[slot] = None;
             }
         }
-        self.buses[bus_idx].gate_sequence = target.live.gate_sequence.clone();
         let new_host = self.fx_chain_host(locator)?;
         let batch = FxGraphEditBatch::new(self.graph.lg.0);
         rewire_fx_chain(self.graph.lg.0, &old_host, &new_host);
@@ -903,7 +924,7 @@ impl App {
             .map_err(|error| format!("{error:?}"))?;
         self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
         self.refresh_effect_sidechain_labels();
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
         for slot in 0..target.instances.len() {
             self.push_bus_effect_slot_defaults(bus_idx, slot);
         }
@@ -1592,6 +1613,10 @@ impl App {
         Ok(TrackInstrumentState {
             source,
             display_name: self.tracks[track].clone(),
+            display_name_user_authored: self.track_name_user_authored
+                .get(track)
+                .copied()
+                .unwrap_or(false),
             patterns: self.state.capture_track_instrument_pattern_state(track)?,
             macro_mappings: self
                 .macro_engine
@@ -1629,6 +1654,14 @@ impl App {
             group: self.groups.iter()
                 .find(|group| group.members.contains(&track))
                 .map(|group| (group.id, group.bus_id)),
+            rack_pad: self.groups.iter()
+                .find(|group| group.members.contains(&track))
+                .and_then(|group| {
+                    let rack = group.rack.as_ref()?;
+                    let member = group.members.iter().position(|m| *m == track)?;
+                    let pad = rack.pad_index_for_member(member)?;
+                    Some(rack.pads[pad].pad_note)
+                }),
         };
         let retained_bytes = patch.retained_bytes();
         self.history.commit(label, None, EditPatch::TrackCreation(patch), retained_bytes);
@@ -1891,6 +1924,50 @@ impl App {
         ))
     }
 
+    pub fn apply_recorded_track_name(
+        &mut self,
+        track: usize,
+        name: &str,
+    ) -> Result<EditOutcome, String> {
+        finish_active_gesture(self);
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(EditOutcome::NoOp);
+        }
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
+        self.normalize_track_name_authorship();
+        if self.tracks[track] == name && self.track_name_user_authored[track] {
+            return Ok(EditOutcome::NoOp);
+        }
+        self.normalize_track_colors();
+        self.normalize_track_collapsed();
+        let before = TrackPresentationState {
+            name: self.tracks[track].clone(),
+            name_user_authored: self.track_name_user_authored[track],
+            color: self.track_colors[track],
+            collapsed: self.track_collapsed[track],
+        };
+        let after = TrackPresentationState {
+            name: name.to_string(),
+            name_user_authored: true,
+            color: before.color,
+            collapsed: before.collapsed,
+        };
+        self.tracks[track] = after.name.clone();
+        self.track_name_user_authored[track] = true;
+        let patch = TrackPresentationPatch {
+            changes: vec![TrackPresentationChange { track: track_id, before, after }],
+        };
+        let retained_bytes = patch.retained_bytes();
+        Ok(EditOutcome::Applied(self.history.commit(
+            "Rename track",
+            None,
+            EditPatch::TrackPresentation(patch),
+            retained_bytes,
+        )))
+    }
+
     pub fn apply_recorded_track_collapsed(
         &mut self,
         collapsed: Vec<bool>,
@@ -1903,6 +1980,11 @@ impl App {
         }
         let changes = collapsed.iter().enumerate().filter_map(|(track, target)| {
             let before = TrackPresentationState {
+                name: self.tracks[track].clone(),
+                name_user_authored: self.track_name_user_authored
+                    .get(track)
+                    .copied()
+                    .unwrap_or(false),
                 color: self.track_colors[track],
                 collapsed: self.track_collapsed[track],
             };
@@ -1910,6 +1992,8 @@ impl App {
                 return None;
             }
             let after = TrackPresentationState {
+                name: before.name.clone(),
+                name_user_authored: before.name_user_authored,
                 color: before.color,
                 collapsed: *target,
             };
@@ -1951,7 +2035,10 @@ impl App {
                 }
             }));
         }
+        self.normalize_track_name_authorship();
         for (track, target) in resolved {
+            self.tracks[track] = target.name.clone();
+            self.track_name_user_authored[track] = target.name_user_authored;
             self.track_colors[track] = target.color;
             self.track_collapsed[track] = target.collapsed;
         }
@@ -1990,14 +2077,8 @@ impl App {
         let mut buses = Vec::with_capacity(self.buses.len());
         for bus_idx in 0..self.buses.len() {
             let bus = &self.buses[bus_idx];
-            let (id, name, volume, mute, solo, gate_sequence) = (
-                bus.id,
-                bus.name.clone(),
-                bus.volume,
-                bus.mute,
-                bus.solo,
-                bus.gate_sequence.clone(),
-            );
+            let (id, name, volume, mute, solo) =
+                (bus.id, bus.name.clone(), bus.volume, bus.mute, bus.solo);
             let effects = self.capture_bus_effect_chain_state(bus_idx, None)?;
             buses.push(BusStructureState {
                 id,
@@ -2005,8 +2086,8 @@ impl App {
                 volume,
                 mute,
                 solo,
-                gate_sequence,
                 effects,
+                output: self.buses[bus_idx].output,
             });
         }
         let groups = self.groups.iter().map(|group| {
@@ -2021,6 +2102,8 @@ impl App {
                 collapsed: group.collapsed,
                 members,
                 bus_id: BusId(group.bus_id),
+                rack: group.rack.clone(),
+                rack_members: group.rack_members.clone(),
             })
         }).collect::<Result<Vec<_>, String>>()?;
         Ok(BusGroupStructureState {
@@ -2056,6 +2139,8 @@ impl App {
                 collapsed: group.collapsed,
                 members,
                 bus_id: group.bus_id.0,
+                rack: group.rack.clone(),
+                rack_members: group.rack_members.clone(),
             })
         }).collect::<Result<Vec<_>, String>>()?;
 
@@ -2091,16 +2176,20 @@ impl App {
             bus.volume = target_bus.volume;
             bus.mute = target_bus.mute;
             bus.solo = target_bus.solo;
-            bus.gate_sequence.clone_from(&target_bus.gate_sequence);
+            bus.output = target_bus.output;
         }
         self.groups = groups;
+        // Chained bus outputs are replayed as part of the topology: the
+        // destination bus may only have just been recreated above.
+        self.graph_controller().apply_all_bus_output_routing();
         self.restore_scene_structure_state(&target.scenes)?;
         for track in 0..self.tracks.len() {
             let mut graph = self.graph_controller();
             graph.apply_track_output_routing(track);
             graph.apply_track_bus_sends(track);
         }
-        self.publish_bus_gate_runtime();
+        self.publish_bus_effect_runtime();
+        self.publish_rack_choke_runtime();
         self.state.publish_scheduler_snapshot();
         Ok(())
     }
@@ -2136,6 +2225,7 @@ impl App {
                 };
             }
         };
+        self.publish_rack_choke_runtime();
         let patch = BusGroupStructurePatch { before, after };
         let retained_bytes = patch.retained_bytes();
         self.history.commit(label, None, EditPatch::BusGroupStructure(patch), retained_bytes);
@@ -2189,23 +2279,46 @@ impl App {
         })
     }
 
-    pub fn group_tracks_recorded(&mut self, mut members: Vec<usize>) -> Result<BusId, String> {
+    pub fn group_tracks_recorded(&mut self, members: Vec<usize>) -> Result<BusId, String> {
+        self.group_tracks_and_racks_recorded(members, Vec::new())
+    }
+
+    /// Groups loose tracks and whole racks into one new plain group. A rack
+    /// joins as a single unit: it keeps its own group and bus, and that bus
+    /// chains into the new parent's bus, so parent volume/fx/mute reach the
+    /// rack through the audio chain (docs/drum-rack-v2-spec.md, "Racks inside
+    /// track groups"). Two members of any kind are required.
+    pub fn group_tracks_and_racks_recorded(
+        &mut self,
+        mut members: Vec<usize>,
+        mut racks: Vec<u64>,
+    ) -> Result<BusId, String> {
         members.sort_unstable();
         members.dedup();
+        racks.dedup();
         self.apply_recorded_bus_group_structure_mutation("Group tracks", |app| {
-            if members.len() < 2
+            if members.len() + racks.len() < 2
                 || members.iter().any(|track| *track >= app.tracks.len())
                 || members.iter().any(|track| app.groups.iter().any(|group| group.members.contains(track)))
             {
                 return Err("At least two ungrouped tracks are required".to_string());
+            }
+            for rack in &racks {
+                app.check_rack_is_groupable(*rack)?;
             }
             let group_index = app.groups.len() + 1;
             let bus = app.add_bus_channel(format!("Group {group_index}"));
             for track in &members {
                 app.set_track_output_all_scenes_unrecorded(*track, crate::sequencer::TrackOutput::Bus(bus));
             }
-            let color = app.track_colors.get(members[0])
+            // With only racks selected there is no loose member to take a color
+            // from, so fall back to the first rack's own group color.
+            let color = members.first()
+                .and_then(|track| app.track_colors.get(*track))
                 .map(|color| [color.r, color.g, color.b])
+                .or_else(|| racks.first().and_then(|rack| {
+                    app.groups.iter().find(|group| group.id == *rack).map(|group| group.color)
+                }))
                 .unwrap_or([0.5, 0.5, 0.5]);
             let group_id = app.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
             app.groups.push(crate::project::ProjectTrackGroup {
@@ -2215,9 +2328,177 @@ impl App {
                 collapsed: false,
                 members,
                 bus_id: bus.0,
+                rack: None,
+                rack_members: racks.clone(),
             });
+            for rack in &racks {
+                app.set_rack_bus_output(*rack, Some(bus))?;
+            }
             Ok(bus)
         })
+    }
+
+    /// Rejects a group id that cannot join a plain group as a rack unit. The
+    /// nesting rule (docs/drum-rack-v2-spec.md): only racks nest, and only into
+    /// one parent — plain groups never contain plain groups, and racks never
+    /// contain racks.
+    fn check_rack_is_groupable(&self, rack_id: u64) -> Result<(), String> {
+        let rack = self.groups.iter().find(|group| group.id == rack_id)
+            .ok_or_else(|| format!("Track group {rack_id} does not exist"))?;
+        if !rack.is_rack() {
+            return Err("Only drum racks can be grouped as a unit".to_string());
+        }
+        if self.rack_parent_group(rack_id).is_some() {
+            return Err("This rack already belongs to a group".to_string());
+        }
+        Ok(())
+    }
+
+    /// Index (in `groups`) of the plain group holding this rack, if any.
+    pub fn rack_parent_group(&self, rack_id: u64) -> Option<usize> {
+        self.groups
+            .iter()
+            .position(|group| group.rack_members.contains(&rack_id))
+    }
+
+    /// Points a rack's backing bus at `parent` (or back at the master mix with
+    /// `None`) and re-wires the graph to match.
+    fn set_rack_bus_output(&mut self, rack_id: u64, parent: Option<BusId>) -> Result<(), String> {
+        let rack_bus = self.groups.iter().find(|group| group.id == rack_id)
+            .map(|group| BusId(group.bus_id))
+            .ok_or_else(|| format!("Track group {rack_id} does not exist"))?;
+        let output = match parent {
+            Some(parent) if parent != rack_bus => crate::project::BusOutput::Bus(parent.0),
+            _ => crate::project::BusOutput::Mix,
+        };
+        let bus = self.buses.iter_mut().find(|bus| bus.id == rack_bus)
+            .ok_or_else(|| format!("Track group {rack_id} has no backing bus"))?;
+        bus.output = output;
+        self.graph_controller().apply_bus_output_routing(rack_bus);
+        // The audible set under solo follows the chain, so re-derive it.
+        self.push_bus_solo_mutes();
+        Ok(())
+    }
+
+    /// Makes every rack bus's output agree with the group nesting, which is the
+    /// source of truth. Used on load, where the two are deserialized
+    /// independently and can disagree.
+    pub(crate) fn reconcile_rack_group_bus_outputs(&mut self) {
+        let desired = self.groups.iter()
+            .filter(|group| group.is_rack())
+            .map(|group| (group.id, self.rack_parent_group(group.id)
+                .map(|parent| BusId(self.groups[parent].bus_id))))
+            .collect::<Vec<_>>();
+        for (rack_id, parent) in desired {
+            let _ = self.set_rack_bus_output(rack_id, parent);
+        }
+    }
+
+    /// Number of membership units in a group: tracks plus child racks. A plain
+    /// group dissolves below two, exactly as it did when tracks were the only
+    /// kind of member.
+    fn group_unit_count(&self, group_index: usize) -> usize {
+        let group = &self.groups[group_index];
+        group.members.len() + group.rack_members.len()
+    }
+
+    /// Moves a rack into a plain group as one unit, chaining its bus into the
+    /// parent's. Leaving a previous parent dissolves that parent if it drops
+    /// below two units, mirroring `move_track_to_group_recorded`.
+    pub fn move_rack_to_group_recorded(
+        &mut self,
+        rack_id: u64,
+        target_group: usize,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Move rack to group", |app| {
+            let target_id = app.groups.get(target_group)
+                .map(|group| group.id)
+                .ok_or_else(|| "Group is out of range".to_string())?;
+            if !app.groups.iter().any(|group| group.id == rack_id && group.is_rack()) {
+                return Err("Only drum racks can be grouped as a unit".to_string());
+            }
+            if app.groups[target_group].is_rack() {
+                return Err("A drum rack cannot contain another rack".to_string());
+            }
+            if app.groups[target_group].rack_members.contains(&rack_id) {
+                return Err("Rack is already in this group".to_string());
+            }
+            let source_id = app.rack_parent_group(rack_id).map(|index| app.groups[index].id);
+            if source_id.is_some() {
+                app.detach_rack_member(rack_id);
+            }
+            let target = app.groups.iter().position(|group| group.id == target_id)
+                .expect("target group was resolved above");
+            app.groups[target].rack_members.push(rack_id);
+            let parent_bus = BusId(app.groups[target].bus_id);
+            app.set_rack_bus_output(rack_id, Some(parent_bus))?;
+            if let Some(source_id) = source_id {
+                app.dissolve_group_if_undersized(source_id)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Takes a rack back out of its parent group; its bus returns to the mix.
+    pub fn remove_rack_from_group_recorded(&mut self, rack_id: u64) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Remove rack from group", |app| {
+            let parent = app.rack_parent_group(rack_id)
+                .ok_or_else(|| "Rack is not grouped".to_string())?;
+            let parent_id = app.groups[parent].id;
+            app.detach_rack_member(rack_id);
+            app.set_rack_bus_output(rack_id, None)?;
+            app.dissolve_group_if_undersized(parent_id)
+        })
+    }
+
+    /// Removes `rack_id` from whatever plain group holds it. Bus routing is the
+    /// caller's business, as with `detach_group_member`.
+    fn detach_rack_member(&mut self, rack_id: u64) -> Option<usize> {
+        let parent = self.rack_parent_group(rack_id)?;
+        let position = self.groups[parent].rack_members.iter()
+            .position(|member| *member == rack_id)?;
+        self.groups[parent].rack_members.remove(position);
+        Some(parent)
+    }
+
+    /// Dissolves a plain group (and its bus) once it holds fewer than two
+    /// units. Racks never dissolve: their pads are lazy, so an empty rack is a
+    /// legal kit waiting for sounds.
+    fn dissolve_group_if_undersized(&mut self, group_id: u64) -> Result<(), String> {
+        let Some(index) = self.groups.iter().position(|group| group.id == group_id) else {
+            return Ok(());
+        };
+        if self.groups[index].is_rack() || self.group_unit_count(index) >= 2 {
+            return Ok(());
+        }
+        let orphans = self.groups[index].rack_members.clone();
+        for rack in orphans {
+            self.detach_rack_member(rack);
+            self.set_rack_bus_output(rack, None)?;
+        }
+        let bus = BusId(self.groups[index].bus_id);
+        if !self.delete_bus_channel(bus) {
+            return Err("Could not dissolve the group bus".to_string());
+        }
+        let index = self.groups.iter().position(|group| group.id == group_id)
+            .expect("group was resolved above");
+        self.groups.remove(index);
+        Ok(())
+    }
+
+    /// Removes `track` from whatever group holds it, dropping the pad it backed
+    /// and shifting the pads behind it. Returns the group index it left.
+    /// Routing and group dissolution are the caller's business.
+    fn detach_group_member(&mut self, track: usize) -> Option<usize> {
+        let group_index = self.groups.iter()
+            .position(|group| group.members.contains(&track))?;
+        let group = &mut self.groups[group_index];
+        let position = group.members.iter().position(|member| *member == track)?;
+        group.members.remove(position);
+        if let Some(rack) = group.rack.as_mut() {
+            rack.remap_after_member_removed(position);
+        }
+        Some(group_index)
     }
 
     pub fn move_track_to_group_recorded(
@@ -2229,8 +2510,8 @@ impl App {
             if track >= app.tracks.len() {
                 return Err("Track is out of range".to_string());
             }
-            let (target_id, target_bus) = app.groups.get(target_group)
-                .map(|group| (group.id, BusId(group.bus_id)))
+            let target_id = app.groups.get(target_group)
+                .map(|group| group.id)
                 .ok_or_else(|| "Group is out of range".to_string())?;
             if app.groups[target_group].members.contains(&track) {
                 return Err("Track is already in this group".to_string());
@@ -2238,24 +2519,14 @@ impl App {
             let source_id = app.groups.iter()
                 .find(|group| group.id != target_id && group.members.contains(&track))
                 .map(|group| group.id);
-            app.set_track_output_all_scenes_unrecorded(
-                track,
-                crate::sequencer::TrackOutput::Bus(target_bus),
-            );
-            app.groups[target_group].members.push(track);
-            app.groups[target_group].members.sort_unstable();
-            app.groups[target_group].members.dedup();
+            // Leave the old group first so the pad map (which addresses members
+            // by position) is remapped before the track joins its new home.
+            if source_id.is_some() {
+                app.detach_group_member(track);
+            }
+            app.attach_track_to_group(track, target_id, None)?;
             if let Some(source_id) = source_id {
-                let source = app.groups.iter().position(|group| group.id == source_id)
-                    .expect("source group was resolved above");
-                app.groups[source].members.retain(|member| *member != track);
-                if app.groups[source].members.len() < 2 {
-                    let bus = BusId(app.groups[source].bus_id);
-                    if !app.delete_bus_channel(bus) {
-                        return Err("Could not dissolve the source group bus".to_string());
-                    }
-                    app.groups.remove(source);
-                }
+                app.dissolve_group_if_undersized(source_id)?;
             }
             Ok(())
         })
@@ -2263,16 +2534,60 @@ impl App {
 
     pub fn remove_track_from_group_recorded(&mut self, track: usize) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Remove track from group", |app| {
-            let group = app.groups.iter().position(|group| group.members.contains(&track))
+            let group = app.detach_group_member(track)
                 .ok_or_else(|| "Track is not grouped".to_string())?;
+            let group_id = app.groups[group].id;
             app.set_track_output_all_scenes_unrecorded(track, crate::sequencer::TrackOutput::Mix);
-            app.groups[group].members.retain(|member| *member != track);
-            if app.groups[group].members.len() < 2 {
-                let bus = BusId(app.groups[group].bus_id);
-                if !app.delete_bus_channel(bus) {
-                    return Err("Could not dissolve the group bus".to_string());
-                }
-                app.groups.remove(group);
+            // A rack keeps existing with zero members: its pads are lazy.
+            app.dissolve_group_if_undersized(group_id)?;
+            Ok(())
+        })
+    }
+
+    /// Dissolves a group without deleting any of its member tracks. Direct
+    /// members move into the enclosing plain group when dissolving a nested
+    /// rack, or back to the master mix otherwise. Child racks follow the same
+    /// scope. The group bus and rack-only pad metadata disappear in the same
+    /// recorded topology edit, so undo restores the complete group identity.
+    pub fn ungroup_tracks_recorded(&mut self, group_id: u64) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Ungroup tracks", |app| {
+            let group_index = app.groups.iter().position(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let group = app.groups[group_index].clone();
+            let parent_id = app.rack_parent_group(group_id)
+                .map(|parent| app.groups[parent].id);
+
+            if parent_id.is_some() {
+                app.detach_rack_member(group_id);
+            }
+            app.groups.remove(group_index);
+
+            let destination = if let Some(parent_id) = parent_id {
+                let parent = app.groups.iter_mut().find(|parent| parent.id == parent_id)
+                    .ok_or_else(|| format!("Parent track group {parent_id} disappeared"))?;
+                parent.members.extend(group.members.iter().copied());
+                parent.rack_members.extend(group.rack_members.iter().copied());
+                crate::sequencer::TrackOutput::Bus(BusId(parent.bus_id))
+            } else {
+                crate::sequencer::TrackOutput::Mix
+            };
+
+            for track in &group.members {
+                app.set_track_output_all_scenes_unrecorded(*track, destination.clone());
+            }
+            let parent_bus = match destination {
+                crate::sequencer::TrackOutput::Bus(bus) => Some(bus),
+                _ => None,
+            };
+            for rack in &group.rack_members {
+                app.set_rack_bus_output(*rack, parent_bus)?;
+            }
+
+            if !app.delete_bus_channel(BusId(group.bus_id)) {
+                return Err("Could not delete the track group's backing bus".to_string());
+            }
+            if let Some(parent_id) = parent_id {
+                app.dissolve_group_if_undersized(parent_id)?;
             }
             Ok(())
         })
@@ -2289,13 +2604,377 @@ impl App {
                     crate::sequencer::TrackOutput::Mix,
                 );
             }
+            // Child racks outlive their parent as free racks routed to the mix.
+            let child_racks = app.groups[group].rack_members.clone();
+            for rack in child_racks {
+                app.detach_rack_member(rack);
+                app.set_rack_bus_output(rack, None)?;
+            }
+            // Deleting a rack that sits inside a group vacates that slot, which
+            // can leave the parent below two units.
+            let parent_id = app.rack_parent_group(group_id)
+                .map(|parent| app.groups[parent].id);
+            if parent_id.is_some() {
+                app.detach_rack_member(group_id);
+            }
+            let group = app.groups.iter().position(|group| group.id == group_id)
+                .expect("group was resolved above");
             let bus = BusId(app.groups[group].bus_id);
             if !app.delete_bus_channel(bus) {
                 return Err("Could not delete the track group's backing bus".to_string());
             }
             app.groups.remove(group);
+            if let Some(parent_id) = parent_id {
+                app.dissolve_group_if_undersized(parent_id)?;
+            }
             Ok(())
         })
+    }
+
+    /// Deletes a mixer group as a container: its direct tracks and every rack
+    /// nested in it are removed with their complete track lanes. The ordinary
+    /// `delete_group_recorded` operation remains the non-destructive dissolve
+    /// primitive; this is the destructive badge + Backspace operation.
+    pub fn delete_group_with_members_recorded(&mut self, group_id: u64) -> Result<usize, String> {
+        let group_index = self.groups.iter().position(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let child_racks = self.groups[group_index].rack_members.clone();
+        let mut tracks = self.groups[group_index].members.clone();
+        for rack_id in &child_racks {
+            let rack = self.groups.iter().find(|group| group.id == *rack_id)
+                .ok_or_else(|| format!("Child rack {rack_id} does not exist"))?;
+            tracks.extend(rack.members.iter().copied());
+        }
+        tracks.sort_unstable();
+        tracks.dedup();
+
+        let checkpoint = self.history.clone();
+        let checkpoint_len = self.history.undo_len();
+        let result = (|| {
+            // Remove containers first. Track-deletion patches then capture the
+            // already-unlinked structure, so undo restores tracks before it
+            // restores group membership and bus routing.
+            self.delete_group_recorded(group_id)?;
+            for rack_id in child_racks {
+                self.delete_group_recorded(rack_id)?;
+            }
+            // The graph deliberately keeps one live track. If this group owns
+            // every track, create a fresh loose sampler before removing its
+            // members; the creation joins the same composite history entry.
+            if tracks.len() == self.tracks.len() {
+                let replacement = self.graph_controller().add_blank_sampler_track()?;
+                self.commit_created_track(replacement, "Replace deleted group")?;
+            }
+            let mut selected = self.tracks.len().saturating_sub(1);
+            for track in tracks.into_iter().rev() {
+                selected = self.delete_track_recorded(track)?;
+            }
+            squash_history_since(self, checkpoint_len, "Delete track group");
+            Ok(selected)
+        })();
+        match result {
+            Ok(selected) => Ok(selected),
+            Err(error) => match rollback_history_to(self, checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Track-group delete failed ({error}); rolling it back also failed ({rollback_error:?})"
+                )),
+            },
+        }
+    }
+
+    /// Creates an empty drum rack: a track group carrying a rack config, its
+    /// backing bus, and *zero* member tracks. Pads claim tracks lazily, when a
+    /// sound is dropped on them (docs/drum-rack-v2-spec.md, "Track budget").
+    pub fn create_drum_rack_recorded(
+        &mut self,
+        name: Option<String>,
+    ) -> Result<(u64, BusId), String> {
+        self.apply_recorded_bus_group_structure_mutation("Create drum rack", move |app| {
+            let name = name.unwrap_or_else(|| format!("Drum Rack {}", app.groups.len() + 1));
+            let bus = app.add_bus_channel(name.clone());
+            let group_id = app.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+            app.groups.push(crate::project::ProjectTrackGroup {
+                id: group_id,
+                name,
+                color: DEFAULT_RACK_COLOR,
+                collapsed: false,
+                members: Vec::new(),
+                bus_id: bus.0,
+                rack: Some(crate::project::ProjectRackConfig::default()),
+                rack_members: Vec::new(),
+            });
+            Ok((group_id, bus))
+        })
+    }
+
+    /// Upgrades a plain track group to a drum rack without replacing its bus
+    /// or member lanes. Existing members claim consecutive pads from C4 in
+    /// group order, wrapping to C1 after the highest supported pad note.
+    pub fn convert_group_to_drum_rack_recorded(
+        &mut self,
+        group_id: u64,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Convert group to drum rack", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            if group.is_rack() {
+                return Err(format!("Track group {group_id} is already a drum rack"));
+            }
+            if !group.rack_members.is_empty() {
+                return Err(
+                    "A group containing drum racks cannot be converted to a drum rack"
+                        .to_string(),
+                );
+            }
+            if group.members.len() > crate::sequencer::DRUM_RACK_TOTAL_PAD_NOTES {
+                return Err(format!(
+                    "Track group {group_id} has more members than a drum rack has pads"
+                ));
+            }
+
+            let mut rack = crate::project::ProjectRackConfig::default();
+            for (member, pad_note) in group_conversion_pad_notes()
+                .take(group.members.len())
+                .enumerate()
+            {
+                rack.push_pad(crate::project::ProjectRackPad { pad_note, member });
+            }
+            if rack.pads.len() != group.members.len() {
+                return Err("Could not assign every group member to a drum rack pad".to_string());
+            }
+            group.rack = Some(rack);
+            Ok(())
+        })
+    }
+
+    /// Browser "create drum rack", both halves as one transaction: the rack
+    /// group (with its backing bus) and — when a sound was dropped onto the
+    /// browser action — the member track that claims the rack's first pad.
+    ///
+    /// The group half records first, so a failing sample half used to leave a
+    /// phantom rack behind: recorded, but denied by the status message and
+    /// never synced into the UI. Roll the whole thing back instead, and on
+    /// success squash the halves into a single "Add drum rack" undo entry.
+    pub fn create_drum_rack_with_pad_recorded(
+        &mut self,
+        sample: Option<&std::path::Path>,
+    ) -> Result<(u64, Option<usize>), String> {
+        let checkpoint = self.history.clone();
+        let checkpoint_len = self.history.undo_len();
+        match self.create_drum_rack_with_pad(sample) {
+            Ok((group_id, track)) => {
+                if track.is_some() {
+                    squash_history_since(self, checkpoint_len, "Add drum rack");
+                }
+                Ok((group_id, track))
+            }
+            Err(error) => match rollback_history_to(self, checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Drum rack creation failed ({error}); rolling it back also failed ({rollback_error:?})"
+                )),
+            },
+        }
+    }
+
+    fn create_drum_rack_with_pad(
+        &mut self,
+        sample: Option<&std::path::Path>,
+    ) -> Result<(u64, Option<usize>), String> {
+        let (group_id, _) = self.create_drum_rack_recorded(None)?;
+        let Some(sample) = sample else {
+            return Ok((group_id, None));
+        };
+        let track = self.graph_controller().add_track(sample)?;
+        // The track is not in history yet, so undo cannot take it back: drop it
+        // here if it never reaches the pad.
+        let pad = Some(DRUM_RACK_FIRST_PAD_NOTE);
+        if let Err(error) = self.attach_track_to_group(track, group_id, pad) {
+            let _ = self.graph_controller().delete_track(track);
+            return Err(error);
+        }
+        self.commit_created_track(track, "Add drum rack pad")?;
+        Ok((group_id, Some(track)))
+    }
+
+    /// Adds an existing track to a group as a member routed into the group's
+    /// backing bus. With `pad_note`, the group must be a rack and the track
+    /// becomes the member backing that pad. Without one, a rack group still
+    /// maps the member — to its next free pad note — because a padless rack
+    /// member is invisible in the pad grid and unreachable by pad click, armed
+    /// key or choke (docs/drum-rack-v2-spec.md, "Core model"). Every add path
+    /// (mixer group-header drop, move-track-to-group, badge drag) therefore
+    /// lands on the grid without having to know about pads.
+    /// Unrecorded: callers either wrap this in a bus/group structure mutation
+    /// or commit the created track.
+    pub fn attach_track_to_group(
+        &mut self,
+        track: usize,
+        group_id: u64,
+        pad_note: Option<i32>,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        let group_index = self.groups.iter().position(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        if self.groups.iter().any(|group| group.members.contains(&track)) {
+            return Err(format!("Track {} already belongs to a group", track + 1));
+        }
+        let pad_note = match (pad_note, self.groups[group_index].rack.as_ref()) {
+            (Some(_), None) => {
+                return Err(format!("Track group {group_id} is not a drum rack"));
+            }
+            (Some(pad_note), Some(rack)) => {
+                if !(DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad_note) {
+                    return Err(format!("Unsupported drum rack pad note {pad_note}"));
+                }
+                if rack.pad_index_for_note(pad_note).is_some() {
+                    return Err(format!("Drum rack pad {pad_note} is already occupied"));
+                }
+                Some(pad_note)
+            }
+            // Joining a rack without a note: claim the next free pad rather
+            // than land as an unreachable padless member. All notes mapped is
+            // a full rack, not a silent half-add.
+            (None, Some(rack)) => Some(rack.next_free_pad_note().ok_or_else(|| {
+                format!("Drum rack {group_id} has no free pad left")
+            })?),
+            (None, None) => None,
+        };
+        let bus_id = BusId(self.groups[group_index].bus_id);
+        self.set_track_output_all_scenes_unrecorded(
+            track,
+            crate::sequencer::TrackOutput::Bus(bus_id),
+        );
+        let group = &mut self.groups[group_index];
+        // Members stay sorted; pads address members by position, so pads at or
+        // after the insertion point shift up with them.
+        let position = group.members.partition_point(|member| *member < track);
+        group.members.insert(position, track);
+        if let Some(rack) = group.rack.as_mut() {
+            for pad in &mut rack.pads {
+                if pad.member >= position {
+                    pad.member += 1;
+                }
+            }
+            if let Some(pad_note) = pad_note {
+                rack.push_pad(crate::project::ProjectRackPad { pad_note, member: position });
+            }
+        }
+        self.publish_rack_choke_runtime();
+        Ok(())
+    }
+
+    /// Recorded form of [`App::attach_track_to_group`] for assigning an
+    /// existing track to a rack pad.
+    pub fn assign_rack_pad_track_recorded(
+        &mut self,
+        group_id: u64,
+        pad_note: i32,
+        track: usize,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Assign drum rack pad", |app| {
+            app.attach_track_to_group(track, group_id, Some(pad_note))
+        })
+    }
+
+    /// Sets (or clears, with `None`) the choke group of a rack pad. Choke is a
+    /// cross-track voice release at trigger time (docs/drum-rack-v2-spec.md,
+    /// "Trigger routing"), so the recorded mutation republishes the audio
+    /// thread's per-track choke table on the way out.
+    pub fn set_rack_pad_choke_group_recorded(
+        &mut self,
+        group_id: u64,
+        pad_note: i32,
+        choke: Option<u8>,
+    ) -> Result<(), String> {
+        // Choke group 0 packs to the "unassigned" runtime key (`rack_choke_key`),
+        // so a pad stored with Some(0) would look assigned but never choke.
+        if choke == Some(0) {
+            return Err("Choke groups start at 1; use None to clear".to_string());
+        }
+        self.apply_recorded_bus_group_structure_mutation("Set drum rack choke group", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let rack = group.rack.as_mut()
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let pad_index = rack.pad_index_for_note(pad_note)
+                .ok_or_else(|| format!("Drum rack has no pad {pad_note}"))?;
+            if rack.choke_group(pad_index) == choke {
+                return Err("Pad choke group is unchanged".to_string());
+            }
+            rack.set_choke_group(pad_index, choke);
+            Ok(())
+        })
+    }
+
+    /// Moves a pad to a different note on the pad keyboard. The pad keeps its
+    /// grid position, member track and choke group — only the note the live
+    /// keyboard answers with changes (docs/drum-rack-v2-spec.md, "UI": the
+    /// pad-note badge on a member row).
+    pub fn set_rack_pad_note_recorded(
+        &mut self,
+        group_id: u64,
+        pad_note: i32,
+        new_note: i32,
+    ) -> Result<(), String> {
+        if !(DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&new_note) {
+            return Err(format!("Unsupported drum rack pad note {new_note}"));
+        }
+        self.apply_recorded_bus_group_structure_mutation("Set drum rack pad note", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let rack = group.rack.as_mut()
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let pad_index = rack.pad_index_for_note(pad_note)
+                .ok_or_else(|| format!("Drum rack has no pad {pad_note}"))?;
+            if new_note == pad_note {
+                return Err("Pad note is unchanged".to_string());
+            }
+            if rack.pad_index_for_note(new_note).is_some() {
+                return Err(format!("Drum rack pad {new_note} is already occupied"));
+            }
+            rack.pads[pad_index].pad_note = new_note;
+            Ok(())
+        })
+    }
+
+    /// Resizes every member's own pattern in one history transaction. Members
+    /// deliberately keep independent lengths, so each command applies the
+    /// normal per-track clamping and duplication semantics.
+    pub fn resize_drum_rack_patterns_recorded(
+        &mut self,
+        group_id: u64,
+        change: PatternLengthChange,
+    ) -> Result<EditOutcome, EditError> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .ok_or_else(|| EditError::InvalidTarget(format!(
+                "track group {group_id} does not exist"
+            )))?;
+        if group.rack.is_none() {
+            return Err(EditError::InvalidTarget(format!(
+                "track group {group_id} is not a drum rack"
+            )));
+        }
+        let commands = group
+            .members
+            .iter()
+            .copied()
+            .map(|track| match change {
+                PatternLengthChange::Double => AppCommand::DuplicateTrackPattern { track },
+                PatternLengthChange::Halve => AppCommand::HalveTrackPattern { track },
+            })
+            .collect::<Vec<_>>();
+        let label = match change {
+            PatternLengthChange::Double => "Double drum rack patterns",
+            PatternLengthChange::Halve => "Halve drum rack patterns",
+        };
+        apply_recorded_pattern_geometry_commands(self, &commands, label)
     }
 
     pub fn rename_group_recorded(&mut self, group_id: u64, name: String) -> Result<(), String> {
@@ -2479,6 +3158,8 @@ impl App {
             }
         }
         self.tracks[track] = target.display_name.clone();
+        self.normalize_track_name_authorship();
+        self.track_name_user_authored[track] = target.display_name_user_authored;
         let descriptor = self.graph.instrument_descriptors[track].clone();
         let (node_id, modulator_node_id) = match self.graph.track_instrument_types[track] {
             crate::sequencer::InstrumentType::Custom => {
@@ -2560,6 +3241,8 @@ impl App {
             self.restore_track_instrument_state(track, &patch.state)?;
         } else {
             self.tracks[track] = patch.state.display_name.clone();
+            self.normalize_track_name_authorship();
+            self.track_name_user_authored[track] = patch.state.display_name_user_authored;
             let descriptor = self.graph.instrument_descriptors[track].clone();
             let node_id = self.graph.track_node_ids[track].mod_env_id as u32;
             self.state.restore_track_instrument_pattern_state(
@@ -2574,16 +3257,8 @@ impl App {
             self.track_colors[track] = color;
         }
         self.track_collapsed[track] = patch.collapsed;
-        if let Some((group_id, bus_id)) = patch.group {
-            let group = self.groups.iter_mut().find(|group| group.id == group_id)
-                .ok_or_else(|| format!("Track history group {group_id} no longer exists"))?;
-            group.members.push(track);
-            group.members.sort_unstable();
-            group.members.dedup();
-            self.set_track_output_all_scenes_unrecorded(
-                track,
-                crate::sequencer::TrackOutput::Bus(crate::sequencer::BusId(bus_id)),
-            );
+        if let Some((group_id, _)) = patch.group {
+            self.attach_track_to_group(track, group_id, patch.rack_pad)?;
         }
         self.state.publish_scheduler_snapshot();
         Ok(())
@@ -2591,14 +3266,80 @@ impl App {
 
     fn remap_groups_after_track_delete(&mut self, deleted: usize) {
         for group in &mut self.groups {
+            let position = group.members.iter().position(|member| *member == deleted);
             group.members.retain(|member| *member != deleted);
             for member in &mut group.members {
                 if *member > deleted {
                     *member -= 1;
                 }
             }
+            // Pads address members by position in `members`, so a removed
+            // member drops its pad and shifts the pads behind it down.
+            if let (Some(position), Some(rack)) = (position, group.rack.as_mut()) {
+                rack.remap_after_member_removed(position);
+            }
         }
-        self.groups.retain(|group| !group.members.is_empty());
+        // A rack with no pads is still a rack (lazy pads); a plain group is
+        // still a group while it holds a child rack, whose bus chains into
+        // this group's bus. A plain group with neither is nothing at all.
+        // Mirrors the load-path predicate in `projects.rs` (see the group
+        // filter around `!group.rack_members.is_empty()`); the two must agree,
+        // or a group dropped here silently reroutes its racks to the mix on
+        // reload.
+        self.groups.retain(|group| {
+            group.is_rack() || !group.members.is_empty() || !group.rack_members.is_empty()
+        });
+        self.publish_rack_choke_runtime();
+    }
+
+    /// Deletes several tracks as one atomic, undoable edit. Indices refer to
+    /// the topology at method entry and are removed in descending order so
+    /// each deletion continues to address the intended track.
+    pub fn delete_tracks_recorded(&mut self, mut tracks: Vec<usize>) -> Result<usize, String> {
+        finish_active_gesture(self);
+        tracks.sort_unstable();
+        tracks.dedup();
+        if tracks.is_empty() {
+            return Err("No tracks selected for deletion".to_string());
+        }
+        if tracks.last().is_some_and(|track| *track >= self.tracks.len()) {
+            return Err("The track selection contains a missing track".to_string());
+        }
+        if tracks.len() >= self.tracks.len() {
+            return Err("Cannot delete all remaining tracks".to_string());
+        }
+
+        let checkpoint = self.history.clone();
+        let checkpoint_len = self.history.undo_len();
+        let result = (|| {
+            let mut selected = self.tracks.len().saturating_sub(1);
+            for track in tracks.into_iter().rev() {
+                selected = self.delete_track_recorded(track)?;
+            }
+
+            // Plain groups represent at least two mixer units. Deleting
+            // several members at once can leave one track or rack behind, so
+            // dissolve those containers inside the same history transaction.
+            let undersized_groups: Vec<u64> = self.groups.iter()
+                .enumerate()
+                .filter(|(index, group)| !group.is_rack() && self.group_unit_count(*index) < 2)
+                .map(|(_, group)| group.id)
+                .collect();
+            for group_id in undersized_groups {
+                self.delete_group_recorded(group_id)?;
+            }
+            squash_history_since(self, checkpoint_len, "Delete tracks");
+            Ok(selected.min(self.tracks.len().saturating_sub(1)))
+        })();
+        match result {
+            Ok(selected) => Ok(selected),
+            Err(error) => match rollback_history_to(self, checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Multi-track delete failed ({error}); rolling it back also failed ({rollback_error:?})"
+                )),
+            },
+        }
     }
 
     pub fn delete_track_recorded(&mut self, track: usize) -> Result<usize, String> {
@@ -2641,8 +3382,6 @@ impl App {
             color: self.track_colors.get(track).copied(),
             collapsed: self.track_collapsed.get(track).copied().unwrap_or(false),
             rack_selected_slot: self.rack_selected_slots.get(track).copied().unwrap_or(0),
-            rack_pad_bank_start: self.rack_pad_bank_starts.get(track).copied()
-                .unwrap_or(crate::sequencer::DRUM_RACK_FIRST_PAD_NOTE),
             record_armed: self.graph.record_armed.get(track).copied().unwrap_or(false),
             groups: self.groups.clone(),
             macro_mappings: self.macro_engine.capture_track_topology_mappings(track),
@@ -2683,11 +3422,14 @@ impl App {
         self.track_colors[appended] = patch.color.unwrap_or(self.track_colors[appended]);
         self.track_collapsed[appended] = patch.collapsed;
         self.rack_selected_slots[appended] = patch.rack_selected_slot;
-        self.rack_pad_bank_starts[appended] = patch.rack_pad_bank_start;
         self.graph.record_armed[appended] = patch.record_armed;
         self.state.move_appended_track_pattern_lane_to(patch.index, &patch.patterns)?;
         self.graph_controller().move_appended_track_to(patch.index)?;
         self.groups = patch.groups.clone();
+        // The runtime choke table still holds the post-delete reindexed keys;
+        // restoring the pre-delete groups has to republish it or choke fires
+        // on the wrong tracks until the next group edit.
+        self.publish_rack_choke_runtime();
         self.macro_engine.restore_track_topology_mappings(&patch.macro_mappings)
             .map_err(|error| format!("Could not restore track macro mappings: {error:?}"))?;
         self.state.publish_macro_overrides(self.macro_engine.override_snapshot());
@@ -2778,6 +3520,8 @@ impl App {
             self.restore_rack_effect_chain_state(track, slot_index, &current, &slot.effects)?;
         }
         self.tracks[track] = target.display_name.clone();
+        self.normalize_track_name_authorship();
+        self.track_name_user_authored[track] = target.display_name_user_authored;
         self.macro_engine
             .restore_instrument_mappings_for_track(track, &target.macro_mappings)
             .map_err(|error| format!("{error:?}"))?;
@@ -7084,83 +7828,140 @@ fn apply_recorded_pattern_geometry_command(
     app: &mut App,
     cmd: &AppCommand,
 ) -> Result<EditOutcome, EditError> {
-    let track = pattern_geometry_track(cmd).ok_or(EditError::UnsupportedCommand)?;
-    let track_id = app
-        .track_registry
-        .id_at(track)
-        .ok_or(EditError::TrackOutOfRange { track })?;
-    // Lazily materialize the pattern when the current scene is bare for the
-    // track (takes spec 11.1): the first edit in a bare scene creates the
-    // pattern and lifts the empty-cell silencing.
-    let pattern_id =
-        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
-    let target = TrackPatternId {
-        track: track_id,
-        pattern: pattern_id,
-    };
-    let steps = (0..MAX_STEPS).collect::<Vec<_>>();
-    let (before, registry_before) = app
-        .state
-        .capture_pattern_step_cells(track, pattern_id, &steps)
-        .map_err(EditError::ReplayFailed)?;
-    let num_steps_before = app
-        .state
-        .capture_pattern_num_steps(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
+    apply_recorded_pattern_geometry_commands(
+        app,
+        std::slice::from_ref(cmd),
+        pattern_geometry_label(cmd),
+    )
+}
 
-    super::command::execute_command(app, cmd.clone());
-    app.state.reconcile_plock_variant_registry_for_track(track);
+/// Applies pattern geometry edits to distinct tracks as one atomic history
+/// entry. Capturing every target before executing any command keeps a rack-wide
+/// resize from becoming a sequence of independently undoable track edits.
+fn apply_recorded_pattern_geometry_commands(
+    app: &mut App,
+    commands: &[AppCommand],
+    label: &'static str,
+) -> Result<EditOutcome, EditError> {
+    struct PendingGeometry {
+        command: AppCommand,
+        track: usize,
+        target: TrackPatternId,
+        pattern_id: PatternId,
+        steps: Vec<usize>,
+        before: Vec<StepCellSnapshot>,
+        registry_before: PlockVariantRegistry,
+        num_steps_before: usize,
+    }
 
-    let (after, registry_after) = app
-        .state
-        .capture_pattern_step_cells(track, pattern_id, &steps)
-        .map_err(EditError::ReplayFailed)?;
-    let num_steps_after = app
-        .state
-        .capture_pattern_num_steps(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
-    let cells = steps
-        .into_iter()
-        .zip(before)
-        .zip(after)
-        .filter_map(|((step, before), after)| {
-            (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
-                step,
-                before,
-                after,
+    let mut seen_tracks = HashSet::new();
+    let mut pending = Vec::with_capacity(commands.len());
+    for command in commands {
+        let track = pattern_geometry_track(command).ok_or(EditError::UnsupportedCommand)?;
+        if !seen_tracks.insert(track) {
+            return Err(EditError::InvalidTarget(format!(
+                "pattern geometry batch contains track {track} more than once"
+            )));
+        }
+        let track_id = app
+            .track_registry
+            .id_at(track)
+            .ok_or(EditError::TrackOutOfRange { track })?;
+        // Lazily materialize the pattern when the current scene is bare for the
+        // track (takes spec 11.1), exactly as a single-track geometry edit does.
+        let pattern_id =
+            ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
+        let target = TrackPatternId {
+            track: track_id,
+            pattern: pattern_id,
+        };
+        let steps = (0..MAX_STEPS).collect::<Vec<_>>();
+        let (before, registry_before) = app
+            .state
+            .capture_pattern_step_cells(track, pattern_id, &steps)
+            .map_err(EditError::ReplayFailed)?;
+        let num_steps_before = app
+            .state
+            .capture_pattern_num_steps(track, pattern_id)
+            .map_err(EditError::ReplayFailed)?;
+        pending.push(PendingGeometry {
+            command: command.clone(),
+            track,
+            target,
+            pattern_id,
+            steps,
+            before,
+            registry_before,
+            num_steps_before,
+        });
+    }
+
+    let mut patches = Vec::with_capacity(pending.len());
+    for pending in pending {
+        super::command::execute_command(app, pending.command);
+        app.state
+            .reconcile_plock_variant_registry_for_track(pending.track);
+        let (after, registry_after) = app
+            .state
+            .capture_pattern_step_cells(pending.track, pending.pattern_id, &pending.steps)
+            .map_err(EditError::ReplayFailed)?;
+        let num_steps_after = app
+            .state
+            .capture_pattern_num_steps(pending.track, pending.pattern_id)
+            .map_err(EditError::ReplayFailed)?;
+        let cells = pending
+            .steps
+            .into_iter()
+            .zip(pending.before)
+            .zip(after)
+            .filter_map(|((step, before), after)| {
+                (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
+                    step,
+                    before,
+                    after,
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    if cells.is_empty() && num_steps_before == num_steps_after {
+            .collect::<Vec<_>>();
+        if cells.is_empty() && pending.num_steps_before == num_steps_after {
+            continue;
+        }
+        patches.push(PatternGeometryPatch {
+            target: pending.target,
+            num_steps_before: pending.num_steps_before,
+            num_steps_after,
+            cells: StepCellsPatch {
+                target: pending.target,
+                cells,
+                variant_registry_before: pending.registry_before,
+                variant_registry_after: registry_after,
+            },
+        });
+    }
+
+    if patches.is_empty() {
         return Ok(EditOutcome::NoOp);
     }
-    let patch = PatternGeometryPatch {
-        target,
-        num_steps_before,
-        num_steps_after,
-        cells: StepCellsPatch {
-            target,
-            cells,
-            variant_registry_before: registry_before,
-            variant_registry_after: registry_after,
-        },
+    let patch = if patches.len() == 1 {
+        EditPatch::PatternGeometry(patches.pop().expect("one geometry patch"))
+    } else {
+        EditPatch::Composite(
+            patches
+                .into_iter()
+                .map(EditPatch::PatternGeometry)
+                .collect(),
+        )
     };
-    if let Err(error) = replay_pattern_geometry_patch(app, &patch, ApplyMode::Redo) {
-        return match replay_pattern_geometry_patch(app, &patch, ApplyMode::Undo) {
+    if let Err(error) = replay_patch(app, &patch, ApplyMode::Redo) {
+        return match replay_patch(app, &patch, ApplyMode::Undo) {
             Ok(_) => Err(error),
             Err(rollback_error) => Err(EditError::ReplayFailed(format!(
                 "{error:?}; rollback also failed: {rollback_error:?}"
             ))),
         };
     }
-    let retained_bytes = patch.retained_bytes();
+    let retained_bytes = edit_patch_retained_bytes(&patch);
     finish_active_gesture(app);
-    let history_move = app.history.commit(
-        pattern_geometry_label(cmd),
-        None,
-        EditPatch::PatternGeometry(patch),
-        retained_bytes,
-    );
+    let history_move = app.history.commit(label, None, patch, retained_bytes);
     Ok(EditOutcome::Applied(history_move))
 }
 
@@ -7809,7 +8610,7 @@ fn replay_bus_effect_values_patch(
                 .map_err(EditError::ReplayFailed)?;
         }
         app.push_bus_effect_slot_defaults(bus_idx, slot);
-        app.publish_bus_gate_runtime();
+        app.publish_bus_effect_runtime();
     }
     app.state.publish_scheduler_snapshot();
     Ok(())
@@ -8196,15 +8997,14 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             ApplyMode::Undo => {
                 let track = app.track_registry.index_of(patch.track)
                     .ok_or(EditError::MissingStableTrack { track: patch.track })?;
-                if let Some((group_id, _)) = patch.group {
-                    if let Some(group) = app.groups.iter_mut().find(|group| group.id == group_id) {
-                        group.members.retain(|member| *member != track);
-                    }
-                }
                 app.device_registry.clear_track(patch.track);
                 app.graph_controller().delete_track(track)
-                    .map(|_| ())
-                    .map_err(EditError::ReplayFailed)
+                    .map_err(EditError::ReplayFailed)?;
+                // Same group bookkeeping as the track-deletion redo arm: drop
+                // the member (and the rack pad it backed), shift the member
+                // indices behind it, and republish the choke runtime table.
+                app.remap_groups_after_track_delete(track);
+                Ok(())
             }
             ApplyMode::Redo => app.restore_created_track(patch)
                 .map_err(EditError::ReplayFailed),
@@ -8628,9 +9428,23 @@ mod tests {
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, InstrumentType, PatternSnapshot, SequencerState,
-        SwingResolution, Timebase,
+        SwingResolution, Timebase, DRUM_RACK_TOTAL_PAD_NOTES,
     };
     use crate::app::AudioBuses;
+
+    #[test]
+    fn group_conversion_pad_order_starts_at_c4_and_wraps_at_the_maximum() {
+        let notes = group_conversion_pad_notes().collect::<Vec<_>>();
+        assert_eq!(notes.len(), DRUM_RACK_TOTAL_PAD_NOTES);
+        assert_eq!(notes[0], 0, "the first adopted member lands on C4");
+        assert_eq!(notes[DRUM_RACK_LAST_PAD_NOTE as usize], DRUM_RACK_LAST_PAD_NOTE);
+        assert_eq!(
+            notes[DRUM_RACK_LAST_PAD_NOTE as usize + 1],
+            DRUM_RACK_FIRST_PAD_NOTE,
+            "the note after the top of the domain wraps to C1",
+        );
+        assert_eq!(notes.last(), Some(&-1));
+    }
 
     struct TestLiveGraph(LiveGraphPtr);
 
@@ -8662,8 +9476,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
-                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                bus_effect_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
             },
@@ -8973,6 +9786,32 @@ mod tests {
     }
 
     #[test]
+    fn recorded_track_rename_trims_rejects_empty_and_round_trips_authorship() {
+        let mut app = test_app(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        app.normalize_track_name_authorship();
+        let original = app.tracks[0].clone();
+
+        assert!(matches!(
+            app.apply_recorded_track_name(0, "  Aurora Layers  "),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.tracks[0], "Aurora Layers");
+        assert!(app.track_name_user_authored[0]);
+        assert_eq!(app.apply_recorded_track_name(0, "   "), Ok(EditOutcome::NoOp));
+        assert_eq!(app.tracks[0], "Aurora Layers");
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.tracks[0], original);
+        assert!(!app.track_name_user_authored[0]);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.tracks[0], "Aurora Layers");
+        assert!(app.track_name_user_authored[0]);
+    }
+
+    #[test]
     fn recorded_track_collapse_round_trips_by_stable_track_identity() {
         let mut app = test_app(SequencerState::new(
             1,
@@ -9171,6 +10010,68 @@ mod tests {
                 expected,
             ));
         }
+    }
+
+    // eseq-ur4: the effect-slot twin of
+    // `sampler_range_edit_survives_stale_pattern_pool_descriptor`. An older
+    // project's pool copy of an effect slot can hold fewer params than the live
+    // descriptor. Device-value edits used to fail forever with "device scalar
+    // descriptor changed while replaying history", leaving the stale layout in
+    // the pool to misroute params into device state slots later.
+    #[test]
+    fn effect_param_edit_survives_stale_pattern_pool_descriptor() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 7);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+
+        // Simulate the old-project pool copy: fewer params and no layout.
+        app.state.with_scenes_mut(|scenes| {
+            assert!(scenes.track_pools[0].edit(pattern, |data| {
+                let stale_params = (data.effect_slots[0].num_params as usize).saturating_sub(2);
+                data.effect_slots[0].num_params = stale_params as u32;
+                data.effect_slots[0].defaults.truncate(stale_params);
+                data.effect_slots[0].param_node_indices.clear();
+            }));
+        });
+        app.state.publish_scheduler_snapshot();
+
+        let outcome = apply_coalesced_device_value_batch(
+            &mut app,
+            &[AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 900.0,
+            }],
+            "effect-cutoff",
+            "Set effect cutoff",
+        );
+        assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        finish_active_gesture(&mut app);
+
+        // The pool copy must be healed back to the live layout.
+        let live_num_params = app.state.pattern.effect_chains[0][0]
+            .num_params
+            .load(Ordering::Relaxed);
+        app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0].get(pattern).unwrap();
+            assert_eq!(data.effect_slots[0].num_params, live_num_params);
+            assert_eq!(
+                data.effect_slots[0].param_node_indices.len(),
+                live_num_params as usize
+            );
+            assert_eq!(data.effect_slots[0].defaults.get(2).copied(), Some(900.0));
+        });
     }
 
     #[test]
@@ -9704,13 +10605,11 @@ mod tests {
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             crate::sequencer::RackTrackSnapshot::new(
-                crate::sequencer::RackRouting::Broadcast,
                 vec![crate::sequencer::RackSlotSnapshot {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode:
                         crate::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -9797,12 +10696,10 @@ mod tests {
         state.set_rack_track_for_all_pattern_snapshots(
             0,
             crate::sequencer::RackTrackSnapshot::new(
-                crate::sequencer::RackRouting::Broadcast,
                 vec![crate::sequencer::RackSlotSnapshot {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: crate::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
-                    pad_note: None,
                     choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
@@ -10638,6 +11535,137 @@ mod tests {
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
         assert_eq!(app.state.pattern.track_params[0].get_num_steps(), 32);
         assert!(app.state.pattern.patterns[0].is_active(19));
+    }
+
+    #[test]
+    fn drum_rack_pattern_resize_uses_member_lengths_and_one_undo_entry() {
+        let mut app = test_app(SequencerState::new(
+            3,
+            vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ],
+        ));
+        app.tracks = vec![
+            "Kick".to_string(),
+            "Snare".to_string(),
+            "Hat".to_string(),
+        ];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(3).unwrap();
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 41,
+            name: "Kit".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0, 1, 2],
+            bus_id: 7,
+            rack: Some(crate::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        });
+        for (track, length) in [8, 1, MAX_STEPS].into_iter().enumerate() {
+            app.state.pattern.track_params[track].set_num_steps(length);
+        }
+        app.state.pattern.patterns[0].set_step_active(3, true);
+
+        let doubled = app
+            .resize_drum_rack_patterns_recorded(41, PatternLengthChange::Double)
+            .expect("double rack member patterns");
+        assert!(matches!(doubled, EditOutcome::Applied(_)));
+        fn lengths(app: &App) -> Vec<usize> {
+            (0..3)
+                .map(|track| app.state.pattern.track_params[track].get_num_steps())
+                .collect()
+        }
+        assert_eq!(lengths(&app), vec![16, 2, MAX_STEPS]);
+        assert!(app.state.pattern.patterns[0].is_active(11));
+        assert_eq!(app.history.undo_len(), 1, "rack resize is one undo step");
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(lengths(&app), vec![8, 1, MAX_STEPS]);
+        assert!(!app.state.pattern.patterns[0].is_active(11));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+
+        let halved = app
+            .resize_drum_rack_patterns_recorded(41, PatternLengthChange::Halve)
+            .expect("halve rack member patterns");
+        assert!(matches!(halved, EditOutcome::Applied(_)));
+        assert_eq!(lengths(&app), vec![8, 1, MAX_STEPS / 2]);
+        assert_eq!(app.history.undo_len(), 2, "halve adds one undo step");
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(lengths(&app), vec![16, 2, MAX_STEPS]);
+    }
+
+    /// Regression: deleting the last loose track of a plain group that still
+    /// holds a child rack must NOT drop the group. Its bus is the rack bus's
+    /// output, so dropping it orphans that bus in-session and — because the
+    /// load path keeps such a group alive (`projects.rs`, the group filter on
+    /// `!group.rack_members.is_empty()`) — the rack would silently reroute to
+    /// the master mix on reload, losing the parent's fader and FX.
+    #[test]
+    fn deleting_the_last_loose_track_keeps_a_group_that_still_holds_a_rack() {
+        let mut app = test_app(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        app.tracks = vec!["Bass".to_string(), "Kick".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        let parent_bus = BusId(70);
+        let rack_bus = BusId(71);
+        app.buses.push(crate::app::BusChannelState::new(parent_bus, "Group"));
+        app.buses.push({
+            let mut bus = crate::app::BusChannelState::new(rack_bus, "Rack");
+            bus.output = crate::project::BusOutput::Bus(parent_bus.0);
+            bus
+        });
+        // A plain group: one loose track (0) plus a child rack holding track 1.
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 80,
+            name: "Group".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![0],
+            bus_id: parent_bus.0,
+            rack: None,
+            rack_members: vec![81],
+        });
+        app.groups.push(crate::project::ProjectTrackGroup {
+            id: 81,
+            name: "Rack".to_string(),
+            color: [0.5; 3],
+            collapsed: false,
+            members: vec![1],
+            bus_id: rack_bus.0,
+            rack: Some(crate::project::ProjectRackConfig::default()),
+            rack_members: Vec::new(),
+        });
+
+        app.remap_groups_after_track_delete(0);
+
+        let parent = app
+            .groups
+            .iter()
+            .find(|group| group.id == 80)
+            .expect("a memberless plain group survives while it holds a rack");
+        assert!(parent.members.is_empty(), "the loose track is gone");
+        assert_eq!(parent.rack_members, vec![81], "the child rack remains");
+        assert_eq!(
+            app.buses
+                .iter()
+                .find(|bus| bus.id == rack_bus)
+                .expect("rack bus")
+                .output,
+            crate::project::BusOutput::Bus(parent_bus.0),
+            "the rack bus still chains into the surviving group bus",
+        );
+        let rack = app
+            .groups
+            .iter()
+            .find(|group| group.id == 81)
+            .expect("the rack itself survives");
+        assert_eq!(rack.members, vec![0], "the rack member reindexed down");
     }
 
     #[test]

@@ -126,7 +126,6 @@ enum CaptureTrackKind {
     Sampler,
     Instrument(String),
     Modulator,
-    DrumRack,
     LayerRack,
 }
 
@@ -292,7 +291,6 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
             CaptureTrackKind::Instrument(name.to_string())
         }
         "modulator" => CaptureTrackKind::Modulator,
-        "drum-rack" => CaptureTrackKind::DrumRack,
         "layer-rack" => CaptureTrackKind::LayerRack,
         other => return Err(format!("unsupported track kind {other:?}")),
     };
@@ -350,19 +348,8 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         cursor += 2;
     }
 
-    if !samples.is_empty()
-        && kind != CaptureTrackKind::LayerRack
-        && kind != CaptureTrackKind::DrumRack
-    {
-        return Err(":samples is only supported for :drum-rack and :layer-rack tracks".to_string());
-    }
-    if kind == CaptureTrackKind::DrumRack
-        && samples.len() > sequencer::sequencer::DRUM_RACK_TOTAL_PAD_NOTES
-    {
-        return Err(format!(
-            ":drum-rack supports at most {} sample pads",
-            sequencer::sequencer::DRUM_RACK_TOTAL_PAD_NOTES
-        ));
+    if !samples.is_empty() && kind != CaptureTrackKind::LayerRack {
+        return Err(":samples is only supported for :layer-rack tracks".to_string());
     }
 
     Ok(CaptureTrackSpec {
@@ -482,7 +469,6 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             CaptureTrackKind::Sampler => app.graph_controller().add_blank_sampler_track(),
             CaptureTrackKind::Instrument(name) => app.add_saved_instrument_track_sync(name),
             CaptureTrackKind::Modulator => app.graph_controller().add_modulator_track(),
-            CaptureTrackKind::DrumRack => app.graph_controller().add_empty_rack_track(),
             CaptureTrackKind::LayerRack => app.graph_controller().add_empty_layer_rack_track(),
         }
         .map_err(|error| format!("failed to create track {}: {error}", spec_index + 1))?;
@@ -498,17 +484,8 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             app.state.pattern.patterns[track].set_step_active(step, true);
             app.state.pattern.step_data[track].set(step, StepParam::Transpose, transpose);
         }
-        for (sample_idx, sample) in spec.samples.iter().enumerate() {
+        for sample in &spec.samples {
             let result = match spec.kind {
-                CaptureTrackKind::DrumRack => {
-                    let pad_note = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE
-                        + i32::try_from(sample_idx).expect("drum-rack sample index fits i32");
-                    app.graph_controller().add_sampler_slot_to_drum_rack_pad(
-                        track,
-                        Path::new(sample),
-                        pad_note,
-                    )
-                }
                 CaptureTrackKind::LayerRack => app
                     .graph_controller()
                     .add_sampler_slot_to_rack(track, Path::new(sample)),
@@ -911,6 +888,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let recording = Arc::new(AtomicBool::new(false));
     let master_recording = Arc::new(AtomicBool::new(false));
     let record_armed = Arc::new(Mutex::new(vec![false; app.tracks.len()]));
+    let armed_rack: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     let fx_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
@@ -925,7 +903,6 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         midi_fx_names: _,
         sample_browser: _,
         piano_roll_clipboard: _,
-        selected_drum_lane_steps: _,
     } = init_runtime(
         &app,
         Arc::clone(&state),
@@ -945,6 +922,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         master_recording,
         master_recorder,
         Arc::clone(&record_armed),
+        Arc::clone(&armed_rack),
         Arc::clone(&ui_epoch),
         fx_epoch,
         ui_invalidations,
@@ -1135,10 +1113,6 @@ mod tests {
         );
         assert!(parse_capture_source(
             "(capture-project (track :layer-rack :samples (\"kick.wav\")))"
-        )
-        .is_ok());
-        assert!(parse_capture_source(
-            "(capture-project (track :drum-rack :samples (\"kick.wav\")))"
         )
         .is_ok());
     }

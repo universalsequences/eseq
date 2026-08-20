@@ -335,7 +335,6 @@ impl SequencerState {
                 instrument_type,
                 instrument_run_mode,
                 instrument_base_note_offset: data.instrument_base_note_offset,
-                pad_note: None,
                 choke_group: None,
                 gain: 1.0,
                 pan: 0.0,
@@ -368,7 +367,6 @@ impl SequencerState {
                 let slot = make_slot(patch);
                 if Some(*patch_id) == effective_patch {
                     effective_rack = Some(RackTrackSnapshot {
-                        routing: RackRouting::Broadcast,
                         slots: vec![slot.clone()],
                         macros: default_rack_macros(),
                         runtime_macro_values: None,
@@ -380,7 +378,6 @@ impl SequencerState {
                     .map(|_| EffectSlotSnapshot::new_empty())
                     .collect();
                 patch.rack_track = Some(RackTrackSnapshot {
-                    routing: RackRouting::Broadcast,
                     slots: vec![slot],
                     macros: default_rack_macros(),
                     runtime_macro_values: None,
@@ -416,7 +413,6 @@ impl SequencerState {
     pub fn append_rack_slot_to_current_pattern(
         &self,
         track: usize,
-        routing: RackRouting,
         slot: RackSlotSnapshot,
     ) -> bool {
         if self
@@ -449,7 +445,6 @@ impl SequencerState {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
                 None => {
                     *live_rack_track = Some(RackTrackSnapshot {
-                        routing,
                         slots: vec![slot.clone()],
                         macros: default_rack_macros(),
                         runtime_macro_values: None,
@@ -475,7 +470,6 @@ impl SequencerState {
             Some(rack_track) => rack_track.slots.push(slot),
             None => {
                 patch.rack_track = Some(RackTrackSnapshot {
-                    routing,
                     slots: vec![slot],
                     macros: default_rack_macros(),
                     runtime_macro_values: None,
@@ -489,7 +483,6 @@ impl SequencerState {
     pub fn append_rack_slot_for_all_pattern_snapshots(
         &self,
         track: usize,
-        routing: RackRouting,
         slot: RackSlotSnapshot,
     ) {
         if let Some(live_rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
@@ -497,7 +490,6 @@ impl SequencerState {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
                 None => {
                     *live_rack_track = Some(RackTrackSnapshot {
-                        routing,
                         slots: vec![slot.clone()],
                         macros: default_rack_macros(),
                         runtime_macro_values: None,
@@ -516,7 +508,6 @@ impl SequencerState {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
                 None => {
                     patch.rack_track = Some(RackTrackSnapshot {
-                        routing,
                         slots: vec![slot.clone()],
                         macros: default_rack_macros(),
                         runtime_macro_values: None,

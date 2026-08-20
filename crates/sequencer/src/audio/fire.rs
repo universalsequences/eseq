@@ -96,6 +96,12 @@ pub(super) fn fire_resolved(
     if !track_accepts_scheduled_trigger(&data.state, track_idx) {
         return;
     }
+    // Drum rack v2 choke: a sequenced pad hit releases the other member tracks
+    // in its choke group before its own note goes out. Every sequenced trigger
+    // path (block events and countdown events alike) lands here.
+    let choke_release_sample =
+        data.rendered_samples.load(Ordering::Acquire) + frame_offset as u64;
+    release_rack_choke_group_track_voices(data, track_idx, choke_release_sample, frame_offset);
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),

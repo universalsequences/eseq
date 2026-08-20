@@ -315,7 +315,8 @@ fn biquad_sample(input: f32, coeffs: BiquadCoeffs, z1: &mut f32, z2: &mut f32) -
 }
 
 fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
-    let omega = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.49) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 20.0, 0.49) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin * std::f32::consts::FRAC_1_SQRT_2;
@@ -334,7 +335,7 @@ fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
 
 #[inline]
 fn one_pole_coef(freq: f32, sr: f32) -> f32 {
-    1.0 - (-std::f32::consts::TAU * freq / sr.max(1.0)).exp()
+    1.0 - (-std::f32::consts::TAU * freq / super::safe_sample_rate(sr)).exp()
 }
 
 // 4-point Hermite read — the read heads glide continuously, so linear
@@ -451,13 +452,18 @@ unsafe extern "C" fn space_echo_process(
     let out0 = *out.add(0);
     let out1 = *out.add(1);
 
-    if *s.add(STATE_ENABLED) <= 0.5 {
+    // A stored sample rate that is not a sample rate means this node's state was
+    // never initialised (or was clobbered by a stale param layout writing into
+    // the sample-rate slot). Every delay time and filter coefficient below is
+    // derived from it, so pass the input through untouched rather than run the
+    // whole echo on garbage.
+    if *s.add(STATE_ENABLED) <= 0.5 || !super::sample_rate_is_usable(*s.add(STATE_SAMPLE_RATE)) {
         std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
         std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
         return;
     }
 
-    let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
     let bpm = *s.add(STATE_BPM);
     let mode_idx = (*s.add(STATE_MODE)).round().clamp(0.0, 11.0) as usize;
     let (head_mask, reverb_on) = MODES[mode_idx];
@@ -1039,6 +1045,36 @@ mod tests {
         state[STATE_STEREO_WIDTH] = 0.0;
         state[STATE_SMOOTH_WIDTH] = 0.0;
         state
+    }
+
+    // eseq-ur4: a node whose sample-rate state slot was zeroed (or clobbered by
+    // a stale param layout writing a knob value into it) used to reach
+    // `freq.clamp(20.0, sr * 0.49)` with `max` below `min`, and f32::clamp
+    // panics on an inverted range. The process fn is `extern "C"`, so that
+    // panic aborted the whole app from an audio worker thread on Play.
+    #[test]
+    fn zeroed_sample_rate_state_passes_audio_through_instead_of_aborting() {
+        for bogus_sr in [0.0f32, 0.5, 1.0, -48_000.0, f32::NAN] {
+            let mut state = clean_state();
+            state[STATE_SAMPLE_RATE] = bogus_sr;
+            let left = impulse(256);
+            let right = impulse(256);
+            let (out_l, out_r) = render(&mut state, &left, &right);
+            assert_eq!(out_l, left, "sr={bogus_sr}");
+            assert_eq!(out_r, right, "sr={bogus_sr}");
+        }
+    }
+
+    // The coefficient helpers are shared by every read head, so harden them
+    // directly too: no inverted clamp, and a finite result for any input.
+    #[test]
+    fn lowpass_coeffs_stay_finite_for_unusable_sample_rates() {
+        for bogus_sr in [0.0f32, 0.5, 1.0, -48_000.0, f32::NAN, f32::INFINITY] {
+            let coeffs = lowpass_coeffs(8_000.0, bogus_sr);
+            for c in [coeffs.b0, coeffs.b1, coeffs.b2, coeffs.a1, coeffs.a2] {
+                assert!(c.is_finite(), "sr={bogus_sr} coeff={c}");
+            }
+        }
     }
 
     fn impulse(frames: usize) -> Vec<f32> {

@@ -323,13 +323,12 @@ members for subsequent operations — see Open Questions.
 
 ## Keybindings
 
-- Rebind `C-g`. It is currently `(bind-key "C-g" "agent-open")`
-  (`ui/agent.lisp:322`). Point it at `group-selected-tracks` (scoped to the
-  mixer mode, `seq-mixer-mode`, so it only groups when the mixer is focused).
-- Give agent-open a new binding/home. The agent is also reachable via UI
-  (`ui/agent.lisp:130`) and `agent-open-instrument`
-  (`src/ui/input.rs:659`), so it does not depend solely on `C-g`.
-  Suggested replacement is out of scope here; pick an unused chord.
+- `Ctrl+G` and `Cmd+G` both invoke the global `seq-ctrl-g` dispatcher. With at
+  least two selected tracks it enqueues `group-selected-tracks`; otherwise it
+  reports that two or more tracks are required.
+- Agent mode has no G-chord binding. Its panel opens on the `C-x a` chord,
+  matching the other panel chords (`C-x m` patch macros, `C-x p` sound
+  palette, `C-x s` sample browser).
 
 ## Implementation Phases
 

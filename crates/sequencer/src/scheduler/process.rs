@@ -184,11 +184,7 @@ pub(super) fn process_slot_param_identity(
     slot: &crate::effects::EffectSlotSnapshot,
     param_idx: usize,
 ) -> Option<ParamNodeId> {
-    let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
+    let raw_idx = slot.node_param_idx(param_idx)?;
     slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx)
 }
 
@@ -200,11 +196,7 @@ pub(super) fn process_scheduled_instrument_param(
     if param_idx >= slot.num_params as usize || !value.is_finite() {
         return None;
     }
-    let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
+    let raw_idx = slot.node_param_idx(param_idx)?;
     if raw_idx == u32::MAX {
         return None;
     }
