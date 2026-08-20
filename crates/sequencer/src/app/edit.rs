@@ -3283,6 +3283,56 @@ impl App {
         self.publish_rack_choke_runtime();
     }
 
+    /// Deletes several tracks as one atomic, undoable edit. Indices refer to
+    /// the topology at method entry and are removed in descending order so
+    /// each deletion continues to address the intended track.
+    pub fn delete_tracks_recorded(&mut self, mut tracks: Vec<usize>) -> Result<usize, String> {
+        finish_active_gesture(self);
+        tracks.sort_unstable();
+        tracks.dedup();
+        if tracks.is_empty() {
+            return Err("No tracks selected for deletion".to_string());
+        }
+        if tracks.last().is_some_and(|track| *track >= self.tracks.len()) {
+            return Err("The track selection contains a missing track".to_string());
+        }
+        if tracks.len() >= self.tracks.len() {
+            return Err("Cannot delete all remaining tracks".to_string());
+        }
+
+        let checkpoint = self.history.clone();
+        let checkpoint_len = self.history.undo_len();
+        let result = (|| {
+            let mut selected = self.tracks.len().saturating_sub(1);
+            for track in tracks.into_iter().rev() {
+                selected = self.delete_track_recorded(track)?;
+            }
+
+            // Plain groups represent at least two mixer units. Deleting
+            // several members at once can leave one track or rack behind, so
+            // dissolve those containers inside the same history transaction.
+            let undersized_groups: Vec<u64> = self.groups.iter()
+                .enumerate()
+                .filter(|(index, group)| !group.is_rack() && self.group_unit_count(*index) < 2)
+                .map(|(_, group)| group.id)
+                .collect();
+            for group_id in undersized_groups {
+                self.delete_group_recorded(group_id)?;
+            }
+            squash_history_since(self, checkpoint_len, "Delete tracks");
+            Ok(selected.min(self.tracks.len().saturating_sub(1)))
+        })();
+        match result {
+            Ok(selected) => Ok(selected),
+            Err(error) => match rollback_history_to(self, checkpoint) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Multi-track delete failed ({error}); rolling it back also failed ({rollback_error:?})"
+                )),
+            },
+        }
+    }
+
     pub fn delete_track_recorded(&mut self, track: usize) -> Result<usize, String> {
         finish_active_gesture(self);
         if track >= self.tracks.len() {

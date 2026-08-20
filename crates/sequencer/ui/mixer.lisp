@@ -160,7 +160,6 @@
 (def %toggle-track-select (i)
   (do
     (set! eseq.seq-core-state/selected-bus -1)
-    (%clear-delete-target)
     (seq-toggle-track-selected i)
     (host-command "reveal-sequencer-track" (dict :track i))))
 
@@ -171,7 +170,6 @@
     (do
       (set! %track-selection-anchor anchor)
       (set! eseq.seq-core-state/selected-bus -1)
-      (%clear-delete-target)
       (seq-select-track-range anchor i)
       (host-command "reveal-sequencer-track" (dict :track i)))))
 

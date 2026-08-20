@@ -5843,6 +5843,24 @@
                 "mixer-track:{}",
                 test_delete_target_number(payload, "track")?
             )),
+            "mixer-tracks" => {
+                let Value::Map(map) = payload else {
+                    return None;
+                };
+                let tracks = map.get("tracks")?;
+                let tracks = tracks.borrow();
+                let Value::List(tracks) = &*tracks else {
+                    return None;
+                };
+                let tracks = tracks
+                    .iter()
+                    .map(|track| match &*track.borrow() {
+                        Value::Number(track) if *track >= 0.0 => Some(*track as usize),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(format!("mixer-tracks:{tracks:?}"))
+            }
             "mixer-group" => Some(format!(
                 "mixer-group:{}",
                 test_delete_target_number(payload, "group-id")?
@@ -5888,7 +5906,10 @@
         }
     }
 
-    fn register_test_delete_target_natives(editor: &mut eseqlisp::Editor, track_count: usize) {
+    fn register_test_delete_target_natives(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+    ) -> Arc<Mutex<Option<(String, Value)>>> {
         let active = Arc::new(Mutex::new(None::<(String, Value)>));
         let version = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -5984,6 +6005,7 @@
                     let kind = key.split(':').next().unwrap_or_default();
                     let name = match (ctx.current_buffer_name().as_str(), kind) {
                         ("*mixer*", "mixer-group") => "delete-track-group",
+                        ("*mixer*", "mixer-tracks") => "delete-tracks",
                         ("*mixer*", "mixer-track") => {
                             let Value::Map(map) = &payload else {
                                 return Ok(Value::Bool(false));
@@ -6028,11 +6050,11 @@
                 });
         }
 
-        let active = Arc::clone(&active);
+        let clone_target = Arc::clone(&active);
         editor.runtime_mut().register_native(
             "seq-clone-active-track-pattern",
             move |_args, ctx| {
-                let Some((key, payload)) = active.lock().unwrap().clone() else {
+                let Some((key, payload)) = clone_target.lock().unwrap().clone() else {
                     return Ok(Value::Bool(false));
                 };
                 if ctx.current_buffer_name() != "*mixer*" || !key.starts_with("track-pattern:") {
@@ -6045,6 +6067,7 @@
                 Ok(Value::Bool(true))
             },
         );
+        active
     }
 
     fn value_contains_string(value: &Value, needle: &str) -> bool {
@@ -45772,7 +45795,7 @@
             .runtime_mut()
             .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
             .expect("install browser-owned loading-instrument state");
-        register_test_delete_target_natives(&mut editor, 2);
+        let active_delete_target = register_test_delete_target_natives(&mut editor, 2);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 1, true, true, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 2, false, false, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 1, 3, true, false, true, false);
@@ -45784,8 +45807,6 @@
             "seq-toggle-track-solo",
             "seq-toggle-rack-arm",
             "seq-set-track",
-            "seq-select-track-range",
-            "seq-toggle-track-selected",
             "seq-set-track-volume",
             "seq-set-track-pan",
             "seq-toggle-bus-mute",
@@ -45801,6 +45822,58 @@
                     calls.lock().unwrap().push(format!("{name}:{args:?}"));
                     Ok(Value::Bool(true))
                 });
+        }
+
+        let selected_tracks = Arc::new(Mutex::new(std::collections::HashSet::from([0usize])));
+        for (name, range) in [
+            ("seq-select-track-range", true),
+            ("seq-toggle-track-selected", false),
+        ] {
+            let calls = Arc::clone(&calls);
+            let selected_tracks = Arc::clone(&selected_tracks);
+            let active_delete_target = Arc::clone(&active_delete_target);
+            editor.runtime_mut().register_native(name, move |args, _ctx| {
+                calls.lock().unwrap().push(format!("{name}:{args:?}"));
+                let mut selected = selected_tracks.lock().unwrap();
+                if range {
+                    let (Some(Value::Number(anchor)), Some(Value::Number(target))) =
+                        (args.first(), args.get(1))
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    selected.clear();
+                    selected.extend(
+                        (*anchor as usize).min(*target as usize)
+                            ..=(*anchor as usize).max(*target as usize),
+                    );
+                } else if let Some(Value::Number(track)) = args.first() {
+                    let track = *track as usize;
+                    if !selected.remove(&track) {
+                        selected.insert(track);
+                    }
+                    if selected.is_empty() {
+                        selected.insert(track);
+                    }
+                }
+                let mut tracks: Vec<usize> = selected.iter().copied().collect();
+                tracks.sort_unstable();
+                *active_delete_target.lock().unwrap() = if tracks.len() >= 2 {
+                    let values = tracks
+                        .iter()
+                        .map(|track| Rc::new(RefCell::new(Value::Number(*track as f64))))
+                        .collect();
+                    Some((
+                        format!("mixer-tracks:{tracks:?}"),
+                        Value::Map(std::collections::HashMap::from([(
+                            "tracks".to_string(),
+                            Rc::new(RefCell::new(Value::List(values))),
+                        )])),
+                    ))
+                } else {
+                    None
+                };
+                Ok(Value::Bool(true))
+            });
         }
 
         // ui/track-collapse.lisp is a module now, and its compat aliases only
@@ -45874,11 +45947,19 @@
                 .runtime_mut()
                 .eval_str("(seq-active-delete-target-kind)")
                 .expect("read delete target after range click"),
-            Some(Value::Bool(false)),
-            "shift-clicking a label must clear its plain-click delete target"
+            Some(Value::String("mixer-tracks".to_string())),
+            "shift-clicking a label must arm the selected track range"
         );
-        let reveals = editor.drain_host_commands();
-        assert_eq!(reveals.len(), 7, "each selection gesture reveals once");
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/delete-selected-track)")
+            .expect("delete the armed track range");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 8, "selection reveals plus one mass delete");
+        assert!(matches!(
+            commands.last(),
+            Some(eseqlisp::host::HostCommand::Custom { name, .. }) if name == "delete-tracks"
+        ));
 
         editor
             .runtime_mut()

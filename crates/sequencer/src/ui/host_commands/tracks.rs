@@ -15,6 +15,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "add-track-instrument",
     "swap-track-instrument",
     "delete-track",
+    "delete-tracks",
     "delete-track-group",
     "load-sound-onto-track",
     "add-track-from-sound",
@@ -22,6 +23,28 @@ pub(super) const COMMANDS: &[&str] = &[
     "move-track-to-group",
     "remove-track-from-group",
 ];
+
+fn extract_track_indices(payload: &Value) -> Option<Vec<usize>> {
+    let Value::Map(fields) = payload else {
+        return None;
+    };
+    let tracks = fields.get("tracks")?;
+    let tracks = tracks.borrow();
+    let Value::List(tracks) = &*tracks else {
+        return None;
+    };
+    tracks
+        .iter()
+        .map(|track| {
+            let track = track.borrow();
+            let Value::Number(track) = &*track else {
+                return None;
+            };
+            (track.is_finite() && *track >= 0.0 && track.fract() == 0.0)
+                .then_some(*track as usize)
+        })
+        .collect()
+}
 
 pub(crate) fn apply_rename_group_host_command(
     app: &mut app::App,
@@ -108,6 +131,8 @@ pub(super) fn handle(
     let bus_state = ctx.shared.bus_state.clone();
     let bus_node_ids = ctx.shared.bus_node_ids.clone();
     let track_groups = ctx.shared.track_groups.clone();
+    let active_delete_target = ctx.shared.active_delete_target.clone();
+    let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
     let record_armed = ctx.shared.record_armed.clone();
     let accumulator_names = ctx.shared.accumulator_names.clone();
     match name {
@@ -859,6 +884,70 @@ pub(super) fn handle(
                 }
             }
         }
+        "delete-tracks" => {
+            let Some(mut tracks) = extract_track_indices(&payload) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "Delete tracks requires a list of track indices".to_string(),
+                ));
+                return;
+            };
+            tracks.sort_unstable();
+            tracks.dedup();
+            if tracks.len() < 2 {
+                editor.handle_host_event(HostEvent::Status(
+                    "Delete tracks requires at least two tracks".to_string(),
+                ));
+                return;
+            }
+            let boundary_track = tracks[0];
+            let request_id = if state.is_playing() {
+                let request_id = state.request_track_delete_boundary(boundary_track);
+                let wait_deadline = Instant::now() + Duration::from_millis(250);
+                while !state.topology_edit_ready(request_id)
+                    && Instant::now() < wait_deadline
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                if !state.topology_edit_ready(request_id) {
+                    state.complete_topology_edit(request_id);
+                    state.publish_scheduler_snapshot();
+                    editor.handle_host_event(HostEvent::Status(
+                        "Delete timed out waiting for playback boundary".to_string(),
+                    ));
+                    return;
+                }
+                Some(request_id)
+            } else {
+                None
+            };
+
+            match app.delete_tracks_recorded(tracks.clone()) {
+                Ok(new_idx) => {
+                    if let Some(request_id) = request_id {
+                        state.complete_topology_edit(request_id);
+                        state.publish_scheduler_snapshot();
+                    }
+                    selected_tracks.lock().unwrap().clear();
+                    if active_delete_target.lock().unwrap().take().is_some() {
+                        active_delete_target_version.fetch_add(1, Ordering::Relaxed);
+                    }
+                    sync_after_track_topology_delete(&mut app, &mut editor, ctx, new_idx);
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Deleted {} tracks",
+                        tracks.len()
+                    )));
+                }
+                Err(error) => {
+                    if let Some(request_id) = request_id {
+                        state.complete_topology_edit(request_id);
+                        state.publish_scheduler_snapshot();
+                    }
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Error deleting tracks: {error}"
+                    )));
+                }
+            }
+        }
         "delete-track-group" => {
             let Some(group_id) = extract_usize_from_payload(&payload, "group-id")
                 .map(|id| id as u64)
@@ -1064,6 +1153,9 @@ pub(super) fn handle(
                     .position(|candidate| candidate.id == bus)
                     .expect("new group backing bus must be present in app buses");
                 selected_tracks.lock().unwrap().clear();
+                if active_delete_target.lock().unwrap().take().is_some() {
+                    active_delete_target_version.fetch_add(1, Ordering::Relaxed);
+                }
                 *bus_state.lock().unwrap() = app.buses.clone();
                 *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                 *track_groups.lock().unwrap() = app.groups.clone();

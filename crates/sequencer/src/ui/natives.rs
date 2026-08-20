@@ -1768,6 +1768,38 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
                 .ok_or_else(|| "mixer-track delete target expects :track".to_string())?;
             Ok(ActiveDeleteTarget::MixerTrack { track })
         }
+        Some("mixer-tracks") | Some("tracks") => {
+            let Value::Map(fields) = payload else {
+                return Err("mixer-tracks delete target expects a :tracks list".to_string());
+            };
+            let tracks = fields
+                .get("tracks")
+                .ok_or_else(|| "mixer-tracks delete target expects :tracks".to_string())?;
+            let tracks = tracks.borrow();
+            let Value::List(tracks) = &*tracks else {
+                return Err("mixer-tracks delete target expects :tracks to be a list".to_string());
+            };
+            let mut parsed = Vec::with_capacity(tracks.len());
+            for track in tracks {
+                let track = track.borrow();
+                let Value::Number(track) = &*track else {
+                    return Err("mixer-tracks delete target indices must be numbers".to_string());
+                };
+                if !track.is_finite() || *track < 0.0 || track.fract() != 0.0 {
+                    return Err(
+                        "mixer-tracks delete target indices must be non-negative integers"
+                            .to_string(),
+                    );
+                }
+                parsed.push(*track as usize);
+            }
+            parsed.sort_unstable();
+            parsed.dedup();
+            if parsed.len() < 2 {
+                return Err("mixer-tracks delete target expects at least two tracks".to_string());
+            }
+            Ok(ActiveDeleteTarget::MixerTracks { tracks: parsed })
+        }
         Some("mixer-group") | Some("group") => {
             let group_id = value_number_field(payload, "group-id")
                 .ok_or_else(|| "mixer-group delete target expects :group-id".to_string())?;
@@ -1866,6 +1898,7 @@ fn effect_param_target(
 fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
     match target {
         Some(ActiveDeleteTarget::MixerTrack { .. }) => Value::String("mixer-track".to_string()),
+        Some(ActiveDeleteTarget::MixerTracks { .. }) => Value::String("mixer-tracks".to_string()),
         Some(ActiveDeleteTarget::MixerGroup { .. }) => Value::String("mixer-group".to_string()),
         Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
@@ -1907,6 +1940,28 @@ mod delete_target_tests {
             )
             .expect("mixer target"),
             ActiveDeleteTarget::MixerTrack { track: 2 }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("mixer-tracks".to_string()),
+                &map_value([(
+                    "tracks",
+                    Value::List(vec![
+                        Rc::new(RefCell::new(Value::Number(4.0))),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                        Rc::new(RefCell::new(Value::Number(4.0))),
+                    ]),
+                )]),
+            )
+            .expect("multiple mixer target"),
+            ActiveDeleteTarget::MixerTracks { tracks: vec![2, 4] }
+        );
+        assert_eq!(
+            active_delete_target_kind(Some(&ActiveDeleteTarget::MixerTracks {
+                tracks: vec![2, 4],
+            })),
+            Value::String("mixer-tracks".to_string())
         );
 
         assert_eq!(
@@ -1993,6 +2048,24 @@ mod delete_target_tests {
                 effect_slot: 1,
             }
         );
+    }
+
+    #[test]
+    fn selected_tracks_arm_and_clear_multiple_track_delete_target() {
+        let target = Arc::new(Mutex::new(Some(ActiveDeleteTarget::MixerTrack { track: 0 })));
+        let version = Arc::new(AtomicUsize::new(0));
+        let selected = HashSet::from([3, 1]);
+
+        arm_selected_tracks_delete_target(&selected, &target, &version);
+        assert_eq!(
+            *target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks { tracks: vec![1, 3] })
+        );
+        assert_eq!(version.load(Ordering::Relaxed), 1);
+
+        arm_selected_tracks_delete_target(&HashSet::from([3]), &target, &version);
+        assert_eq!(*target.lock().unwrap(), None);
+        assert_eq!(version.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -2110,11 +2183,28 @@ pub(crate) fn toggle_rack_pad_arm(
     armed
 }
 
+fn arm_selected_tracks_delete_target(
+    selected: &HashSet<usize>,
+    active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: &Arc<AtomicUsize>,
+) {
+    let mut tracks: Vec<usize> = selected.iter().copied().collect();
+    tracks.sort_unstable();
+    let target = (tracks.len() >= 2).then_some(ActiveDeleteTarget::MixerTracks { tracks });
+    let mut guard = active_delete_target.lock().unwrap();
+    if *guard != target {
+        *guard = target;
+        bump_delete_target_version(active_delete_target_version);
+    }
+}
+
 fn register_track_range_selection_native(
     runtime: &mut Runtime,
     state: Arc<SequencerState>,
     current_track: Arc<AtomicUsize>,
     selected_tracks: Arc<Mutex<HashSet<usize>>>,
+    active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: Arc<AtomicUsize>,
 ) {
     runtime.register_native("seq-select-track-range", move |args, _ctx| {
         fn track_arg(value: Option<&Value>, name: &str) -> Result<usize, String> {
@@ -2146,6 +2236,11 @@ fn register_track_range_selection_native(
             let mut selected = selected_tracks.lock().unwrap();
             selected.clear();
             selected.extend(start..=end);
+            arm_selected_tracks_delete_target(
+                &selected,
+                &active_delete_target,
+                &active_delete_target_version,
+            );
         }
         current_track.store(target, Ordering::Relaxed);
         Ok(Value::Number(target as f64))
@@ -3137,6 +3232,47 @@ pub(crate) fn init_runtime(
                     payload: Value::Map(map),
                 });
             }
+            ActiveDeleteTarget::MixerTracks { tracks } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                let track_count = st.active_track_count();
+                let armed_track_count = tracks.len();
+                let valid_tracks: Vec<usize> = tracks
+                    .into_iter()
+                    .filter(|track| *track < track_count)
+                    .collect();
+                if valid_tracks.len() < 2 {
+                    ctx.set_status("Cannot delete tracks because the selection is stale");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                if valid_tracks.len() == track_count {
+                    ctx.set_status("Cannot delete all remaining tracks");
+                    return Ok(Value::Bool(false));
+                }
+                if valid_tracks.len() != armed_track_count {
+                    *delete_target.lock().unwrap() = Some(ActiveDeleteTarget::MixerTracks {
+                        tracks: valid_tracks.clone(),
+                    });
+                    bump_delete_target_version(&delete_target_version);
+                }
+                let tracks = Value::List(
+                    valid_tracks
+                        .into_iter()
+                        .map(|track| Rc::new(RefCell::new(Value::Number(track as f64))))
+                        .collect(),
+                );
+                let mut map = std::collections::HashMap::new();
+                map.insert("tracks".to_string(), Rc::new(RefCell::new(tracks)));
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-tracks".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
             ActiveDeleteTarget::MixerGroup { group_id } => {
                 if current_buffer != "*mixer*" {
                     return Ok(Value::Bool(false));
@@ -4088,6 +4224,8 @@ pub(crate) fn init_runtime(
         state.clone(),
         current_track.clone(),
         selected_tracks.clone(),
+        active_delete_target.clone(),
+        active_delete_target_version.clone(),
     );
 
     // seq-toggle-track-selected — (seq-toggle-track-selected track-idx)
@@ -4097,6 +4235,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel_tracks = selected_tracks.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
     runtime.register_native("seq-toggle-track-selected", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-toggle-track-selected: expected track number".into());
@@ -4107,7 +4247,7 @@ pub(crate) fn init_runtime(
         }
         let selected = {
             let mut set = sel_tracks.lock().unwrap();
-            if set.contains(&track) {
+            let selected = if set.contains(&track) {
                 set.remove(&track);
                 if set.is_empty() {
                     set.insert(track);
@@ -4118,7 +4258,9 @@ pub(crate) fn init_runtime(
             } else {
                 set.insert(track);
                 true
-            }
+            };
+            arm_selected_tracks_delete_target(&set, &delete_target, &delete_target_version);
+            selected
         };
         ct.store(track, Ordering::Relaxed);
         Ok(Value::Bool(selected))
@@ -7116,12 +7258,16 @@ mod tests {
         let state = Arc::new(SequencerState::new(7, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_tracks = Arc::new(Mutex::new(HashSet::from([0, 6])));
+        let delete_target = Arc::new(Mutex::new(None));
+        let delete_target_version = Arc::new(AtomicUsize::new(0));
         let mut runtime = Runtime::new();
         register_track_range_selection_native(
             &mut runtime,
             Arc::clone(&state),
             Arc::clone(&current_track),
             Arc::clone(&selected_tracks),
+            Arc::clone(&delete_target),
+            Arc::clone(&delete_target_version),
         );
 
         runtime
@@ -7132,6 +7278,12 @@ mod tests {
             HashSet::from([2, 3, 4, 5, 6])
         );
         assert_eq!(current_track.load(Ordering::Relaxed), 6);
+        assert_eq!(
+            *delete_target.lock().unwrap(),
+            Some(ActiveDeleteTarget::MixerTracks {
+                tracks: vec![2, 3, 4, 5, 6],
+            })
+        );
 
         runtime
             .eval_str("(seq-select-track-range 6 2)")

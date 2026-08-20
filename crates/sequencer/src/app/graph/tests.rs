@@ -1378,6 +1378,70 @@
     }
 
     #[test]
+    fn recorded_multi_track_deletion_is_descending_atomic_and_restores_group() {
+        let graph = TestLiveGraph::new("multi-track-deletion-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for _ in 0..4 {
+            app.graph_controller().add_blank_sampler_track()
+                .expect("seed sampler track");
+        }
+        app.tracks = vec![
+            "First".to_string(),
+            "Second".to_string(),
+            "Third".to_string(),
+            "Fourth".to_string(),
+        ];
+        app.state.pattern.patterns[1].set_step_active(5, true);
+        app.state.pattern.patterns[3].set_step_active(11, true);
+        app.add_builtin_effect_sync(3, "OTT").expect("track effect");
+        let bus = app.group_tracks_recorded(vec![1, 2, 3]).expect("plain group");
+        let group_id = app.groups.iter().find(|group| group.bus_id == bus.0)
+            .expect("created group").id;
+        let ids = app.track_registry.ids().to_vec();
+        let history_before = app.history.undo_len();
+
+        app.delete_tracks_recorded(vec![3, 1]).expect("delete selected tracks");
+        assert_eq!(app.tracks, ["First", "Third"]);
+        assert_eq!(app.track_registry.ids(), &[ids[0], ids[2]]);
+        assert!(app.groups.iter().all(|group| group.id != group_id));
+        assert_eq!(app.history.undo_len(), history_before + 1);
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.tracks, ["First", "Second", "Third", "Fourth"]);
+        assert_eq!(app.track_registry.ids(), ids.as_slice());
+        assert!(app.state.pattern.patterns[1].is_active(5));
+        assert!(app.state.pattern.patterns[3].is_active(11));
+        assert_eq!(app.graph.effect_descriptors[3][0].name, "OTT");
+        assert_eq!(
+            app.groups.iter().find(|group| group.id == group_id)
+                .expect("group restored").members,
+            [1, 2, 3]
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_multi_track_deletion_refuses_every_track() {
+        let graph = TestLiveGraph::new("multi-track-last-track-guard-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        for _ in 0..3 {
+            app.graph_controller().add_blank_sampler_track()
+                .expect("seed sampler track");
+        }
+        let ids = app.track_registry.ids().to_vec();
+        let history_before = app.history.undo_len();
+
+        let error = app.delete_tracks_recorded(vec![0, 1, 2])
+            .expect_err("deleting every track must be refused");
+        assert!(error.contains("Cannot delete all remaining tracks"));
+        assert_eq!(app.track_registry.ids(), ids.as_slice());
+        assert_eq!(app.history.undo_len(), history_before);
+    }
+
+    #[test]
     fn recorded_rack_track_deletion_restores_slot_effect_graph() {
         let graph = TestLiveGraph::new("rack-track-deletion-history-test");
         let mut app = test_app_with_track_count(&graph, 0);

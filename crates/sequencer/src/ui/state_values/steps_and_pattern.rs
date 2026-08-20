@@ -384,6 +384,17 @@ pub(crate) fn sync_track_pattern_cell_selected_fields(
     }
 }
 
+fn mixer_track_delete_target_selected(
+    active_delete_target: Option<&ActiveDeleteTarget>,
+    track: usize,
+) -> bool {
+    match active_delete_target {
+        Some(ActiveDeleteTarget::MixerTrack { track: selected }) => *selected == track,
+        Some(ActiveDeleteTarget::MixerTracks { tracks }) => tracks.contains(&track),
+        _ => false,
+    }
+}
+
 pub(crate) fn sync_mixer_delete_target_binding_fields(
     rt: &mut Runtime,
     track_count: usize,
@@ -395,10 +406,7 @@ pub(crate) fn sync_mixer_delete_target_binding_fields(
         rt.set_reactive(
             "SEQ",
             &mixer_track_delete_target_field(track),
-            Value::Bool(matches!(
-                active_delete_target,
-                Some(ActiveDeleteTarget::MixerTrack { track: selected }) if *selected == track
-            )),
+            Value::Bool(mixer_track_delete_target_selected(active_delete_target, track)),
         );
         let rack_slot_count = rack_tracks
             .get(track)
@@ -428,6 +436,20 @@ pub(crate) fn sync_mixer_delete_target_binding_fields(
         "selected-mod-routes",
         selected_mod_routes_value(active_delete_target),
     );
+}
+
+#[cfg(test)]
+mod delete_target_binding_tests {
+    use super::*;
+
+    #[test]
+    fn multiple_mixer_track_target_selects_each_member_only() {
+        let target = ActiveDeleteTarget::MixerTracks { tracks: vec![1, 3] };
+        assert!(!mixer_track_delete_target_selected(Some(&target), 0));
+        assert!(mixer_track_delete_target_selected(Some(&target), 1));
+        assert!(!mixer_track_delete_target_selected(Some(&target), 2));
+        assert!(mixer_track_delete_target_selected(Some(&target), 3));
+    }
 }
 
 pub(crate) fn sync_track_selection_binding_fields(
