@@ -804,9 +804,9 @@
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
 ;; The header lives in its own subtree so name/mute/solo/arm changes rerun
 ;; only this header instead of the whole track row (incl. its step grid).
-(def track-header (i)
+(def track-header (i is-bare-track)
   (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
-    (%track-header-body i)))
+    (%track-header-body i is-bare-track)))
 
 (def %track-volume-control (i)
   (v-stack (box :height 0.13 )
@@ -823,7 +823,7 @@
       :on-drag (lambda (event) (%set-track-volume-from-event i event))))
   )
 
-(def %track-header-body (i)
+(def %track-header-body (i is-bare-track)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.1
@@ -843,6 +843,7 @@
           :key (str "arm-" i)
           :active (if (nth SEQ.record-armed i) 1 0)
           :on-click |x y r| (do (%activate-track-for-edit i) (seq-toggle-record-arm i)))
+        (if is-bare-track (box :width 1.55))
         (button (str (+ i 1))
           :key (str "mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
@@ -1630,7 +1631,7 @@
 ;; accumulator and expanded step editor all come along for free.
 ;; :muted is a binding (not a value read) so mute/solo changes update the row
 ;; chrome without rerunning the enclosing subtree.
-(def %track-row (i)
+(def %track-row (i is-bare-track)
   (box :width :fill
       :key (str "track-drop-" i)
       :selected (track-selected-binding i)
@@ -1653,14 +1654,14 @@
         (v-stack 
           :width :fill :gap 0.2
           (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-            (track-header i)
+            (track-header i is-bare-track)
             (%expanded-track-quick-controls i (nth SEQ.track-ids i))
             (box :flex 1 :width 0 :height 0.1 :bg :transparent)
             (%track-actions i))
           (%expanded-track-editor i (nth SEQ.track-ids i)))
         (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
           (v-stack (box :height 0.1)
-            (track-header i))
+            (track-header i is-bare-track))
           (%track-grid i)
           (box :flex 1 :width 0 :height 0.1 :bg :transparent)
           (%track-actions i)))))
@@ -1678,11 +1679,16 @@
   (str (%group-ui-kind gidx) "-" element "-" (eseq.drum-rack-v2/group-id gidx)))
 
 ;; Keep group fills opaque because the rounded-box renderer draws its border
-;; behind the inset fill. The old alpha-0.22 color let a selected border show
-;; through the whole container; pre-multiplying RGB preserves the intended dark
-;; tint while making selection strictly a border change.
+;; behind the inset fill. Reproduce the old alpha-0.22 track tint by compositing
+;; it over the active theme's buffer surface in Lisp; selection then changes
+;; only the border without changing the original fill appearance.
 (def %group-container-bg (c)
-  (rgba (* (nth c 0) 0.22) (* (nth c 1) 0.22) (* (nth c 2) 0.22) 1.0))
+  (let ((bg THEME.buffer_bg))
+    (rgba
+      (+ (* (nth c 0) 0.22) (* (nth bg 0) 0.78))
+      (+ (* (nth c 1) 0.22) (* (nth bg 1) 0.78))
+      (+ (* (nth c 2) 0.22) (* (nth bg 2) 0.78))
+      1.0)))
 
 (def %group-bus-volume-from-event (bus-idx event)
   (let ((sx (get event :sx)))
@@ -1759,7 +1765,7 @@
 (def %group-member-row (gidx i)
   (h-stack :width :fill :gap 0.15 :align :start
     (%group-member-chrome gidx i)
-    (box :width 0 :flex 1 (%track-row i))))
+    (box :width 0 :flex 1 (%track-row i false))))
 
 ;; ── Pad grid performance view ───────────────────────────────────────────
 ;; A 4x4 VIEW over the pad map — finger drumming and slot browsing only. It
@@ -2129,7 +2135,7 @@
             :on-click |x y r| (do
               (%select-group gidx)
               (eseq.drum-rack-v2/toggle-armed gidx)))
-          (box :width 0.0 :height 0.0 :bg :transparent))
+          (box :width 2.0 :height 0.0 :bg :transparent))
         (button "M"
           :key (%group-element-key gidx "mute")
           :width 1.55 :height 1.2 :padding 0 :font-size 10
@@ -2208,7 +2214,7 @@
         (%group-block gidx)))
     (let ((i (get item :track)))
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        (%track-row i)))))
+        (%track-row i true)))))
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0

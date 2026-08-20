@@ -1635,7 +1635,7 @@
         :selected (eseq.sequencer/track-selected-binding i)
         :background-color :buffer-bg
         :selected-background-color :mixer-strip-selected-bg
-        (eseq.sequencer/track-header i))
+        (eseq.sequencer/track-header i true))
       (%track-lane i))))
 
 ;; Rows stack with :gap 0 so the timeline instances are vertically flush —
