@@ -46601,10 +46601,9 @@
         let rack_name = find_node_by_stable_key_suffix(&rack_layout, "/group-name-label-7")
             .expect("drum rack mixer badge");
         assert_finite_nonzero_rect(rack_name, "drum rack mixer badge");
-        assert_eq!(
-            rack_name.props.get("icon"),
-            Some(&Value::Keyword("sampler".to_string())),
-            "drum rack mixer badges should reuse the Kits tab icon"
+        assert!(
+            !rack_name.props.contains_key("icon"),
+            "drum rack mixer badges should render without an icon"
         );
         assert_eq!(
             node_text(rack_arm).as_deref(),
