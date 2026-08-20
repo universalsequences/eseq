@@ -535,7 +535,13 @@ pub(super) fn handle(
                         }
                         *track_groups.lock().unwrap() = app.groups.clone();
                         register_waveform_sample(path);
-                        current_track.store(idx, Ordering::Relaxed);
+                        let selected = host_commands::selection_after_added_track(
+                            idx,
+                            rack_pad_note,
+                            &current_track,
+                            app.tracks.len(),
+                        );
+                        current_track.store(selected, Ordering::Relaxed);
                         let new_name = app.tracks[idx].clone();
                         ctx.track_names.push(new_name.clone());
                         // Update pan IDs for new track
@@ -554,7 +560,7 @@ pub(super) fn handle(
                             Value::Number(ctx.track_names.len() as f64),
                         );
                         rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
-                        set_current_track_reactive(rt, app.tracks.len(), idx);
+                        set_current_track_reactive(rt, app.tracks.len(), selected);
                         rt.set_reactive(
                             "SEQ",
                             "track-names",
@@ -564,11 +570,11 @@ pub(super) fn handle(
                             rt,
                             &state,
                             &app,
-                            idx,
+                            selected,
                             &selected_steps,
                         );
-                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
-                        sync_step_param_lists(rt, &state, idx);
+                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, selected));
+                        sync_step_param_lists(rt, &state, selected);
                         sync_track_mixer_state(rt, &app, &state);
                         sync_groups_bindings(rt, &app.groups);
                         sync_bus_mixer_state(rt, &app);
@@ -579,7 +585,7 @@ pub(super) fn handle(
                             "effects",
                             build_effects_value(
                                 &state,
-                                idx,
+                                selected,
                                 &app.graph.effect_descriptors,
                                 &selected_steps,
                             ),
@@ -587,12 +593,12 @@ pub(super) fn handle(
                         rt.set_reactive(
                             "SEQ",
                             "midi-effects",
-                            build_midi_effects_value(&state, idx, &selected_steps),
+                            build_midi_effects_value(&state, selected, &selected_steps),
                         );
                         rt.set_reactive(
                             "SEQ",
                             "instrument-panel",
-                            build_instrument_panel_value(&app, idx, &selected_steps),
+                            build_instrument_panel_value(&app, selected, &selected_steps),
                         );
                         *accumulator_names.lock().unwrap() =
                             build_accumulator_names(&app);
@@ -602,7 +608,7 @@ pub(super) fn handle(
                             rt,
                             &app,
                             &state,
-                            idx,
+                            selected,
                             &selected_steps,
                             Some(&selected_neural_snapshot),
                         );
@@ -610,7 +616,7 @@ pub(super) fn handle(
                             rt,
                             &app,
                             &state,
-                            idx,
+                            selected,
                             &selected_steps,
                             Some(&selected_neural_snapshot),
                         );
@@ -619,7 +625,7 @@ pub(super) fn handle(
                             "step-has-plocks",
                             build_step_has_plocks(
                                 &state,
-                                idx,
+                                selected,
                                 &app.graph.effect_descriptors,
                             ),
                         );

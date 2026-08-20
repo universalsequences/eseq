@@ -328,7 +328,8 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     }
     *track_groups.lock().unwrap() = app.groups.clone();
 
-    current_track.store(idx, Ordering::Relaxed);
+    let selected = selection_after_added_track(idx, pad_note, current_track, app.tracks.len());
+    current_track.store(selected, Ordering::Relaxed);
     let new_name = app.tracks[idx].clone();
     track_names.push(new_name.clone());
 
@@ -342,36 +343,41 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     let rt = editor.runtime_mut();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
-    set_current_track_reactive(rt, app.tracks.len(), idx);
+    set_current_track_reactive(rt, app.tracks.len(), selected);
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-    sync_all_track_sequencer_state(rt, state, app, idx, selected_steps);
-    rt.set_reactive("SEQ", "steps", build_steps_value(state, idx));
-    sync_step_param_lists(rt, state, idx);
+    sync_all_track_sequencer_state(rt, state, app, selected, selected_steps);
+    rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
+    sync_step_param_lists(rt, state, selected);
     sync_track_mixer_state(rt, app, state);
     sync_groups_bindings(rt, &app.groups);
     sync_track_peak_fields(rt, cached_track_peak_levels);
     rt.set_reactive(
         "SEQ",
         "effects",
-        build_effects_value(state, idx, &app.graph.effect_descriptors, selected_steps),
+        build_effects_value(
+            state,
+            selected,
+            &app.graph.effect_descriptors,
+            selected_steps,
+        ),
     );
     rt.set_reactive(
         "SEQ",
         "midi-effects",
-        build_midi_effects_value(state, idx, selected_steps),
+        build_midi_effects_value(state, selected, selected_steps),
     );
     rt.set_reactive(
         "SEQ",
         "instrument-panel",
-        build_instrument_panel_value(app, idx, selected_steps),
+        build_instrument_panel_value(app, selected, selected_steps),
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-    sync_track_params(rt, app, state, idx, selected_steps);
-    sync_fx_param_binding_fields(rt, app, state, idx, selected_steps);
+    sync_track_params(rt, app, state, selected, selected_steps);
+    sync_fx_param_binding_fields(rt, app, state, selected, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
-        build_step_has_plocks(state, idx, &app.graph.effect_descriptors),
+        build_step_has_plocks(state, selected, &app.graph.effect_descriptors),
     );
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -487,6 +493,29 @@ pub(crate) fn instrument_swap_status(
     }
 }
 
+/// Track the panel should follow once `new_track` has been added.
+///
+/// Filling an empty drum-rack pad is an in-place edit of the rack the user is
+/// already looking at, so the selection stays put. Every other add-track path
+/// (mixer drop, Add Track, loose sample drop, non-pad browser drop) follows
+/// the newly created track.
+pub(crate) fn selection_after_added_track(
+    new_track: usize,
+    pad_note: Option<i32>,
+    current_track: &AtomicUsize,
+    track_count: usize,
+) -> usize {
+    if pad_note.is_none() {
+        return new_track;
+    }
+    let current = current_track.load(Ordering::Relaxed);
+    if current < track_count {
+        current
+    } else {
+        new_track
+    }
+}
+
 /// Adds a freshly created track to `group_id`. With `pad_note`, the group must
 /// be a drum rack and the track becomes the member backing that pad — this is
 /// the lazy-pad path: a pad claims a track only when a sound lands on it.
@@ -545,6 +574,24 @@ mod tests {
             rack: None,
             rack_members: Vec::new(),
         }
+    }
+
+    #[test]
+    fn empty_pad_drop_keeps_the_current_track_selected() {
+        let current = AtomicUsize::new(1);
+        assert_eq!(selection_after_added_track(4, Some(36), &current, 5), 1);
+    }
+
+    #[test]
+    fn non_pad_add_selects_the_new_track() {
+        let current = AtomicUsize::new(1);
+        assert_eq!(selection_after_added_track(4, None, &current, 5), 4);
+    }
+
+    #[test]
+    fn empty_pad_drop_falls_back_when_the_current_track_is_out_of_range() {
+        let current = AtomicUsize::new(9);
+        assert_eq!(selection_after_added_track(4, Some(36), &current, 5), 4);
     }
 
     #[test]
