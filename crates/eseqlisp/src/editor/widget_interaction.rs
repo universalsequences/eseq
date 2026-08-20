@@ -892,16 +892,22 @@ impl Editor {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
-            if matches!(mouse.kind, MouseEventKind::Moved) {
-                widget_render::set_pointer_hover_widget(None);
+            if matches!(mouse.kind, MouseEventKind::Moved)
+                && widget_render::set_pointer_hover_widget(None)
+            {
+                self.mark_needs_redraw();
             }
             return false;
         };
-        if matches!(mouse.kind, MouseEventKind::Moved) {
-            widget_render::set_pointer_hover_widget(
+        if matches!(mouse.kind, MouseEventKind::Moved)
+            && widget_render::set_pointer_hover_widget(
                 self.hover_node_at_local(local_col, local_row)
                     .map(|node| node.widget_id),
-            );
+            )
+        {
+            // Pointer hover is render-only state: it invalidates scene caches,
+            // but unlike dispatched widget events it does not schedule a frame.
+            self.mark_needs_redraw();
         }
 
         let gen_before = widget_render::widget_state_generation();

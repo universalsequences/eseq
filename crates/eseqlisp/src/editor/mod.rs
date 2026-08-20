@@ -2610,9 +2610,10 @@ impl Editor {
             crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)
                 .map(|node| node.widget_id)
         });
-        crate::widget_render::set_pointer_hover_widget(hovered);
+        if crate::widget_render::set_pointer_hover_widget(hovered) {
+            self.mark_needs_redraw();
+        }
         self.widget_cursor = WidgetCursor::Default;
-        self.mark_needs_redraw();
     }
 
     pub fn handle_tiled_touchpad_magnify(
@@ -6630,7 +6631,9 @@ impl Editor {
                     );
                 } else {
                     self.widget_cursor = WidgetCursor::Default;
-                    crate::widget_render::set_pointer_hover_widget(None);
+                    if crate::widget_render::set_pointer_hover_widget(None) {
+                        self.mark_needs_redraw();
+                    }
                 }
             }
             MouseEventKind::ScrollUp => {

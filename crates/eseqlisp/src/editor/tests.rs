@@ -13841,6 +13841,38 @@ fn context_menu_flips_and_clamps_near_the_screen_edge() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn context_menu_item_hover_schedules_redraw_on_pointer_change() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    right_click_at(&mut editor, 6.0, 1.5);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, "Rename").expect("Rename item").clone();
+    let hover_col = item.rect.col + item.rect.width * 0.5;
+    let hover_row = item.rect.row + item.rect.height * 0.5;
+    crate::widget_render::set_pointer_hover_widget(None);
+    editor.clear_needs_redraw();
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            hover_col.floor() as u16,
+            hover_row.floor() as u16,
+        ),
+        hover_col,
+        hover_row,
+        0,
+    );
+
+    assert!(crate::widget_render::pointer_hovered(item.widget_id));
+    assert!(
+        editor.needs_redraw(),
+        "changing render-only pointer hover state must schedule the next frame"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn context_menu_item_click_fires_exactly_its_handler_and_closes() {
     let _overlay_guard = OverlayClearGuard;
     let mut editor = context_menu_two_tile_editor();

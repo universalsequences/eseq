@@ -109,14 +109,17 @@ pub(crate) fn with_render_text_measurer<R>(f: impl FnOnce(&dyn TextMeasurer) -> 
     RENDER_TEXT_MEASURER.with(|m| m.borrow().as_ref().map(|measurer| f(measurer.as_ref())))
 }
 
-pub fn set_pointer_hover_widget(widget_id: Option<u64>) {
+/// Updates the widget under the pointer, returning whether the visual state changed.
+pub fn set_pointer_hover_widget(widget_id: Option<u64>) -> bool {
     POINTER_HOVER_WIDGET_ID.with(|hovered| {
         let mut hovered = hovered.borrow_mut();
-        if *hovered != widget_id {
-            *hovered = widget_id;
-            bump_widget_state_generation();
+        if *hovered == widget_id {
+            return false;
         }
-    });
+        *hovered = widget_id;
+        bump_widget_state_generation();
+        true
+    })
 }
 
 pub fn pointer_hovered(widget_id: u64) -> bool {
