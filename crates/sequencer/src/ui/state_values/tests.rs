@@ -49157,6 +49157,19 @@
         let block = find_layout_node_by_stable_key_suffix(&layout, "sequencer-rack-7")
             .expect("rack block should render");
         assert!(
+            block.props.contains_key("on-click"),
+            "rack container chrome should select its backing bus"
+        );
+        assert_eq!(
+            block.props.get("selected-border-color"),
+            Some(&Value::Keyword("mixer-strip-selected-border".to_string())),
+            "selected rack containers should use the track selection border"
+        );
+        assert!(
+            !block.props.contains_key("selected-background-color"),
+            "rack selection must not brighten the container background"
+        );
+        assert!(
             find_layout_node_by_stable_key_suffix(block, "/rack-arm-7").is_some(),
             "the rack header belongs to the rack block"
         );
@@ -49221,6 +49234,37 @@
             .expect("regular group sequencer layout should build");
         let block = find_layout_node_by_stable_key_suffix(&expanded, "sequencer-group-8")
             .expect("regular group block should render");
+        assert!(
+            block.props.contains_key("on-click"),
+            "regular group container chrome should select its backing bus"
+        );
+        assert_eq!(
+            block.props.get("selected-border-color"),
+            Some(&Value::Keyword("mixer-strip-selected-border".to_string())),
+            "selected regular groups should use the track selection border"
+        );
+        assert!(
+            !block.props.contains_key("selected-background-color"),
+            "regular group selection must not brighten the container background"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/%select-group 0)")
+            .expect("select regular group container");
+        let selected = editor
+            .widget_layout()
+            .expect("selected regular group sequencer layout should build");
+        let selected_block = find_layout_node_by_stable_key_suffix(&selected, "sequencer-group-8")
+            .expect("selected regular group block should render");
+        assert_eq!(
+            selected_block.props.get("selected"),
+            Some(&Value::Bool(true)),
+            "selecting group chrome should select its backing bus and activate the border"
+        );
+        assert!(
+            !selected_block.props.contains_key("selected-background-color"),
+            "selected group layout should retain the normal background"
+        );
         for key in [
             "/group-collapse-8",
             "/group-mute-8",

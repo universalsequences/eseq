@@ -1710,6 +1710,10 @@
       (set! eseq.seq-core-state/selected-bus bus-idx)
       false)))
 
+(def %group-selected? (gidx)
+  (let ((bus-idx (eseq.drum-rack-v2/bus-index gidx)))
+    (and (>= bus-idx 0) (= eseq.seq-core-state/selected-bus bus-idx))))
+
 ;; ── Group member chrome ─────────────────────────────────────────────────
 ;; Every group member gets the same indented prefix used by drum racks. It
 ;; visually connects the ordinary track row to the containing group header.
@@ -2166,11 +2170,17 @@
   (let ((c (eseq.drum-rack-v2/color gidx)))
     (box :width :fill
       :key (%group-element-key gidx "block")
+      :selected (%group-selected? gidx)
       :background-color (rgba (nth c 0) (nth c 1) (nth c 2) 0.22)
       :border-width 2
       :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
       :corner-radius 10
       :padding 0.345
+      ;; Hit testing chooses the deepest clickable widget, so member-track
+      ;; clicks keep selecting the track; only exposed container chrome reaches
+      ;; this handler and selects the group's backing bus for the FX panel.
+      :on-click |x y r| (%select-group gidx)
       (v-stack :width :fill :gap 0.1
         (%group-header-row gidx)
         (if (eseq.drum-rack-v2/collapsed? gidx)
