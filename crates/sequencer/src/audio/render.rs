@@ -165,18 +165,11 @@ pub(super) unsafe fn dispatch_snapshot_effect_params_at_step(
         for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
             param_indices.push(param_idx);
         }
-        param_indices.sort_by_key(|param_idx| {
-            slot.param_node_indices
-                .get(*param_idx)
-                .copied()
-                .unwrap_or(*param_idx as u32)
-        });
+        param_indices.sort_by_key(|param_idx| slot.node_param_idx(*param_idx).unwrap_or(u32::MAX));
         for param_idx in param_indices {
-            let idx = slot
-                .param_node_indices
-                .get(param_idx)
-                .copied()
-                .unwrap_or(param_idx as u32);
+            let Some(idx) = slot.node_param_idx(param_idx) else {
+                continue;
+            };
             if idx == u32::MAX || param_idx >= slot.defaults.len() {
                 continue;
             }

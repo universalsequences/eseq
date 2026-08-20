@@ -493,7 +493,9 @@ pub(crate) fn svf_clocked_tick(
 ) -> (f32, f32, f32) {
     let f_clk = ratio * fc;
     if f_clk >= sr {
-        let g = (std::f32::consts::PI * fc.clamp(1.0, sr * 0.49) / sr).tan();
+        let g = (std::f32::consts::PI * super::nyquist_clamp(fc, sr, 1.0, 0.49)
+            / super::safe_sample_rate(sr))
+        .tan();
         let (lp, bp, hp) = svf_core(x, g, k, st);
         st[SVF_HOLD_LP] = lp;
         st[SVF_HOLD_BP] = bp;
@@ -587,7 +589,8 @@ fn biquad_sample(input: f32, c: BiquadCoeffs, z1: &mut f32, z2: &mut f32) -> f32
 }
 
 fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
-    let omega = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.49) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 20.0, 0.49) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin * std::f32::consts::FRAC_1_SQRT_2;
@@ -821,7 +824,7 @@ unsafe extern "C" fn filterbank_process(
         return;
     }
 
-    let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
 
     // ── Knob targets (clamped; smoothed per sample below) ──
     let t_input_gain = db_to_amp((*s.add(STATE_INPUT_DB)).clamp(-12.0, 30.0));
@@ -1169,15 +1172,25 @@ unsafe extern "C" fn filterbank_process(
 
         // ── Effective cutoffs / res / modes ──
         let f1_oct = env_value * sm_env_f1 * 4.0 + lfo_f1_oct + fm_oct + ext_f1_oct;
-        let f1_hz = (sm_f1_freq * (2.0_f32).powf(f1_oct.clamp(-8.0, 8.0))).clamp(20.0, sr * 0.45);
+        let f1_hz = super::nyquist_clamp(
+            sm_f1_freq * (2.0_f32).powf(f1_oct.clamp(-8.0, 8.0)),
+            sr,
+            20.0,
+            0.45,
+        );
         // Harmonics link (§3): F2 = modulated F1 ÷ ratio — mod applies
         // pre-link so linked sweeps stay harmonic. F2 freq knob + mods
         // are ignored while linked.
         let f2_hz = if harmonic_ratio > 0.0 {
-            (f1_hz / harmonic_ratio).clamp(20.0, sr * 0.45)
+            super::nyquist_clamp(f1_hz / harmonic_ratio, sr, 20.0, 0.45)
         } else {
             let f2_oct = env_value * sm_env_f2 * 4.0 + lfo_f2_oct + fm_oct + ext_f2_oct;
-            (sm_f2_freq * (2.0_f32).powf(f2_oct.clamp(-8.0, 8.0))).clamp(20.0, sr * 0.45)
+            super::nyquist_clamp(
+                sm_f2_freq * (2.0_f32).powf(f2_oct.clamp(-8.0, 8.0)),
+                sr,
+                20.0,
+                0.45,
+            )
         };
         let res_bleed_pct = env_value * sm_res_bleed * 100.0;
         let r1 = (sm_f1_res + res_bleed_pct + lag_f1_res * 110.0).clamp(0.0, 110.0);

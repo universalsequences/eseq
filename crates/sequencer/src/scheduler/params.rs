@@ -175,11 +175,9 @@ pub(super) fn resolved_slot_param_value(
     else {
         return default_value;
     };
-    let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
+    let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+        return default_value;
+    };
     let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
     if plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
         plock
@@ -193,13 +191,7 @@ pub(super) fn slot_param_index_by_node_idx(
     node_param_idx: u32,
 ) -> Option<usize> {
     let num_params = slot.num_params as usize;
-    (0..num_params).find(|&param_idx| {
-        slot.param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32)
-            == node_param_idx
-    })
+    (0..num_params).find(|&param_idx| slot.node_param_idx(param_idx) == Some(node_param_idx))
 }
 
 pub(super) fn resolved_slot_node_param_value(
@@ -245,11 +237,9 @@ pub(super) fn resolve_effect_params(
         }
         let num_params = slot.num_params as usize;
         for param_idx in 0..num_params {
-            let raw_idx = slot
-                .param_node_indices
-                .get(param_idx)
-                .copied()
-                .unwrap_or(param_idx as u32);
+            let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                continue;
+            };
             if raw_idx == u32::MAX {
                 continue;
             }
@@ -288,11 +278,9 @@ pub(super) fn resolve_instrument_params(
     let num_params = slot.num_params as usize;
     let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
         let span = slot
             .param_node_spans
             .get(param_idx)
@@ -333,11 +321,9 @@ pub(super) fn resolve_instrument_defaults(
     let num_params = slot.num_params as usize;
     let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
         let span = slot
             .param_node_spans
             .get(param_idx)
@@ -461,11 +447,9 @@ pub(super) fn resolve_effect_defaults(
         }
         let num_params = slot.num_params as usize;
         for param_idx in 0..num_params {
-            let raw_idx = slot
-                .param_node_indices
-                .get(param_idx)
-                .copied()
-                .unwrap_or(param_idx as u32);
+            let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                continue;
+            };
             if raw_idx == u32::MAX {
                 continue;
             }
@@ -513,11 +497,9 @@ pub(super) fn resolve_instrument_plocks(
         if !value.is_finite() {
             continue;
         }
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
         let span = slot
             .param_node_spans
             .get(param_idx)

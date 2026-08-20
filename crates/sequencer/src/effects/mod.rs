@@ -82,6 +82,49 @@ pub fn builtin_effect_names() -> Vec<&'static str> {
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
 
+/// Fallback sample rate used when a node's stored sample rate is unusable.
+pub const FALLBACK_SAMPLE_RATE: f32 = 48_000.0;
+
+/// Sanitise a sample rate read out of node state before deriving coefficients.
+///
+/// A node whose state slots were written by a stale/short param layout can hold
+/// junk (0.0, a knob-scale 0.5, NaN) where the host writes the sample rate. Any
+/// such value must never reach a coefficient formula: `sr * 0.49 < 20.0` makes
+/// `f32::clamp(20.0, sr * 0.49)` panic with `min > max`, and effect process
+/// functions are `extern "C"` (nounwind), so that panic aborts the process from
+/// an audio worker thread.
+#[inline]
+pub fn safe_sample_rate(sr: f32) -> f32 {
+    if sample_rate_is_usable(sr) {
+        sr
+    } else {
+        FALLBACK_SAMPLE_RATE
+    }
+}
+
+/// True when a stored sample rate is plainly not a sample rate — the signal that
+/// a node's state has not been initialised (or was clobbered by a stale layout).
+#[inline]
+pub fn sample_rate_is_usable(sr: f32) -> bool {
+    sr.is_finite() && sr >= 1_000.0
+}
+
+/// Clamp `freq` into `[lo, frac * sr]` without ever forming an inverted range.
+///
+/// `sr` is sanitised first, and the low bound is pulled down to the high bound
+/// if they ever cross, so the returned value is always finite and the clamp can
+/// never panic.
+#[inline]
+pub fn nyquist_clamp(freq: f32, sr: f32, lo: f32, frac: f32) -> f32 {
+    let hi = safe_sample_rate(sr) * frac;
+    let lo = lo.min(hi);
+    if freq.is_finite() {
+        freq.clamp(lo, hi)
+    } else {
+        lo
+    }
+}
+
 // ── ParamKind ──
 
 #[derive(Clone, Debug)]
@@ -716,6 +759,42 @@ mod tests {
         ));
         assert!(snapshot.bit_exact_eq(&snapshot.clone()));
         crate::effects::filter_table::clear_instance(424_243);
+    }
+
+    // eseq-ur4: restoring a stale/legacy snapshot that carries no param layout
+    // must leave the live slot's node param mapping alone. Zeroing it would
+    // reroute every param to node param 0, and a positional guess would write
+    // knob values into device state slots such as Space Echo's sample rate.
+    #[test]
+    fn restoring_a_snapshot_without_a_layout_keeps_the_live_node_param_mapping() {
+        let desc = EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "cutoff".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 20,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        let live = EffectSlotState::new(&desc, 42);
+
+        let mut stale = EffectSlotSnapshot::capture(&live);
+        stale.param_node_indices.clear();
+        stale.restore(&live);
+
+        assert_eq!(live.param_node_indices[0].load(Ordering::Relaxed), 20);
+        assert_eq!(EffectSlotSnapshot::capture(&live).node_param_idx(0), Some(20));
     }
 
     #[test]
@@ -9285,9 +9364,13 @@ impl EffectSlotSnapshot {
             if i < self.defaults.len() {
                 slot.defaults.set(i, self.defaults[i]);
             }
-            if i < slot.param_node_indices.len() {
-                let idx = self.param_node_indices.get(i).copied().unwrap_or(0);
-                slot.param_node_indices[i].store(idx, Ordering::Relaxed);
+            // A snapshot with no layout of its own (a stale or legacy copy)
+            // must not overwrite the live slot's node param mapping with
+            // zeros — that would reroute every param to node param 0.
+            if let Some(idx) = self.param_node_indices.get(i).copied() {
+                if i < slot.param_node_indices.len() {
+                    slot.param_node_indices[i].store(idx, Ordering::Relaxed);
+                }
             }
             if i < slot.param_node_spans.len() {
                 let span = self.param_node_spans.get(i).copied().unwrap_or(1).max(1);
@@ -9373,6 +9456,20 @@ impl EffectSlotSnapshot {
 
     pub fn clear(&mut self) {
         *self = Self::new_empty();
+    }
+
+    /// Node param index for `param_idx`, or `None` when this slot's layout is
+    /// unknown — a stale or legacy copy whose `param_node_indices` is missing
+    /// or shorter than `num_params`.
+    ///
+    /// There is deliberately no positional fallback. Descriptor param order
+    /// stops matching node state slots as soon as a device keeps non-param
+    /// state inline (Space Echo's sample rate is node param 16), so treating
+    /// `param_idx` as a node index silently writes knob-scale values into
+    /// unrelated state — which is how a zeroed sample rate reached the audio
+    /// worker and aborted the process.
+    pub fn node_param_idx(&self, param_idx: usize) -> Option<u32> {
+        self.param_node_indices.get(param_idx).copied()
     }
 
     fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {

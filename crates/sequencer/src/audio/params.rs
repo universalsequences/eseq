@@ -215,13 +215,7 @@ pub(super) fn snapshot_slot_param_index_by_node_idx(
     node_param_idx: u32,
 ) -> Option<usize> {
     let num_params = slot.num_params as usize;
-    (0..num_params).find(|&param_idx| {
-        slot.param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32)
-            == node_param_idx
-    })
+    (0..num_params).find(|&param_idx| slot.node_param_idx(param_idx) == Some(node_param_idx))
 }
 
 pub(super) fn resolved_slot_node_param_value(
@@ -353,11 +347,7 @@ pub(super) fn snapshot_param_route(
     slot: &EffectSlotSnapshot,
     param_idx: usize,
 ) -> Option<(ScheduledInstrumentParamTarget, u64, u32)> {
-    let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
+    let raw_idx = slot.node_param_idx(param_idx)?;
     if raw_idx == u32::MAX {
         return None;
     }
@@ -411,11 +401,9 @@ pub(super) fn snapshot_step_has_valid_plock(
     {
         return false;
     }
-    let raw_idx = slot
-        .param_node_indices
-        .get(param_idx)
-        .copied()
-        .unwrap_or(param_idx as u32);
+    let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+        return false;
+    };
     let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
     plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id)
 }
@@ -515,11 +503,9 @@ pub(super) fn key_locked_snapshot_instrument_params(
         if !value.is_finite() {
             continue;
         }
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
         let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
         if !key_lock_identity_matches(&slot.key_lock_param_ids, note, param_idx, expected_id) {
             continue;
@@ -660,11 +646,9 @@ pub(super) fn resolve_rack_slot_instrument_params(
     let num_params = slot.num_params as usize;
     let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
         if raw_idx == u32::MAX {
             continue;
         }
@@ -704,11 +688,9 @@ pub(super) fn resolve_rack_slot_instrument_defaults(slot: &EffectSlotSnapshot) -
     let num_params = slot.num_params as usize;
     let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
-        let raw_idx = slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+            continue;
+        };
         if raw_idx == u32::MAX {
             continue;
         }

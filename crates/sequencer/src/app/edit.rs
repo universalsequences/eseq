@@ -10004,6 +10004,68 @@ mod tests {
         }
     }
 
+    // eseq-ur4: the effect-slot twin of
+    // `sampler_range_edit_survives_stale_pattern_pool_descriptor`. An older
+    // project's pool copy of an effect slot can hold fewer params than the live
+    // descriptor. Device-value edits used to fail forever with "device scalar
+    // descriptor changed while replaying history", leaving the stale layout in
+    // the pool to misroute params into device state slots later.
+    #[test]
+    fn effect_param_edit_survives_stale_pattern_pool_descriptor() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let descriptor = crate::effects::EffectDescriptor::builtin_filter();
+        state.pattern.effect_chains[0][0].apply_descriptor(&descriptor, 7);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        ));
+        let mut app = test_app(state);
+        app.graph.effect_descriptors = vec![vec![descriptor]];
+        let pattern = app.state.effective_track_pattern_id(0).unwrap();
+
+        // Simulate the old-project pool copy: fewer params and no layout.
+        app.state.with_scenes_mut(|scenes| {
+            assert!(scenes.track_pools[0].edit(pattern, |data| {
+                let stale_params = (data.effect_slots[0].num_params as usize).saturating_sub(2);
+                data.effect_slots[0].num_params = stale_params as u32;
+                data.effect_slots[0].defaults.truncate(stale_params);
+                data.effect_slots[0].param_node_indices.clear();
+            }));
+        });
+        app.state.publish_scheduler_snapshot();
+
+        let outcome = apply_coalesced_device_value_batch(
+            &mut app,
+            &[AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 900.0,
+            }],
+            "effect-cutoff",
+            "Set effect cutoff",
+        );
+        assert!(matches!(outcome, Ok(EditOutcome::Applied(_))), "{outcome:?}");
+        finish_active_gesture(&mut app);
+
+        // The pool copy must be healed back to the live layout.
+        let live_num_params = app.state.pattern.effect_chains[0][0]
+            .num_params
+            .load(Ordering::Relaxed);
+        app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0].get(pattern).unwrap();
+            assert_eq!(data.effect_slots[0].num_params, live_num_params);
+            assert_eq!(
+                data.effect_slots[0].param_node_indices.len(),
+                live_num_params as usize
+            );
+            assert_eq!(data.effect_slots[0].defaults.get(2).copied(), Some(900.0));
+        });
+    }
+
     #[test]
     fn effect_parameter_batch_drag_coalesces_and_round_trips() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);

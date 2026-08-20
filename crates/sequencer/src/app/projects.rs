@@ -55,11 +55,7 @@ pub(super) fn resolve_live_macro_target(
             .iter()
             .position(|descriptor| descriptor.has_tag_or_name(param))?;
         let live_slot = bus.effect_slots.get(*slot)?;
-        let raw_idx = live_slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
-            .unwrap_or(param_idx as u32);
+        let raw_idx = live_slot.node_param_idx(param_idx)?;
         let param_id =
             ParamNodeId::from_slot_param(live_slot.node_id, live_slot.modulator_node_id, raw_idx);
         if previous_param_id.is_some() && param_id.is_none() {
@@ -4246,18 +4242,16 @@ impl App {
                                             None;
                                         continue;
                                     }
-                                    let raw_idx = slot
+                                    slot.instrument_slot.plock_param_ids[step][param_idx] = slot
                                         .instrument_slot
-                                        .param_node_indices
-                                        .get(param_idx)
-                                        .copied()
-                                        .unwrap_or(param_idx as u32);
-                                    slot.instrument_slot.plock_param_ids[step][param_idx] =
-                                        ParamNodeId::from_slot_param(
-                                            slot.instrument_slot.node_id,
-                                            slot.instrument_slot.modulator_node_id,
-                                            raw_idx,
-                                        );
+                                        .node_param_idx(param_idx)
+                                        .and_then(|raw_idx| {
+                                            ParamNodeId::from_slot_param(
+                                                slot.instrument_slot.node_id,
+                                                slot.instrument_slot.modulator_node_id,
+                                                raw_idx,
+                                            )
+                                        });
                                 }
                             }
                         }

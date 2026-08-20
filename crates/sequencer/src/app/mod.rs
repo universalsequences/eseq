@@ -2240,11 +2240,9 @@ impl App {
                 for (slot_idx, slot) in effect_slots.iter_mut().enumerate() {
                     let count = (slot.num_params as usize).min(slot.defaults.len());
                     for param_idx in 0..count {
-                        let raw_idx = slot
-                            .param_node_indices
-                            .get(param_idx)
-                            .copied()
-                            .unwrap_or(param_idx as u32);
+                        let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+                            continue;
+                        };
                         let param_id = crate::neural::ParamNodeId::from_slot_param(
                             slot.node_id,
                             slot.modulator_node_id,

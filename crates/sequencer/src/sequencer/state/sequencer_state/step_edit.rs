@@ -1214,6 +1214,17 @@ impl SequencerState {
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
+        let live_slot = if midi_fx {
+            self.pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+        } else {
+            self.pattern
+                .effect_chains
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+        };
         let stored = scenes
             .track_pools
             .get_mut(track)
@@ -1231,20 +1242,23 @@ impl SequencerState {
                 .ok_or_else(|| "stored device target no longer exists".to_string())
             })?;
         let mut stored_next = stored.clone();
-        stored_next.apply_authoring_values(values)?;
-        let live = if is_effective {
-            let slot = if midi_fx {
-                self.pattern
-                    .midi_fx_slots
-                    .get(track)
-                    .and_then(|slots| slots.get(slot_idx))
-            } else {
-                self.pattern
-                    .effect_chains
-                    .get(track)
-                    .and_then(|slots| slots.get(slot_idx))
+        if let Err(error) = stored_next.apply_authoring_values(values) {
+            if !is_effective {
+                return Err(error);
             }
-            .ok_or_else(|| "live device target no longer exists".to_string())?;
+            // The pool copy can predate the current descriptor — an older
+            // saved project, or a legacy pool copy carrying no param layout at
+            // all. The values being applied were captured from the live slot,
+            // so reseed the stored layout from it instead of failing the edit
+            // forever and leaving a layout behind that misroutes params.
+            let slot =
+                live_slot.ok_or_else(|| "live device target no longer exists".to_string())?;
+            stored_next = EffectSlotSnapshot::capture(slot);
+            stored_next.apply_authoring_values(values)?;
+        }
+        let live = if is_effective {
+            let slot =
+                live_slot.ok_or_else(|| "live device target no longer exists".to_string())?;
             let mut snapshot = EffectSlotSnapshot::capture(slot);
             snapshot.apply_authoring_values(values)?;
             Some((slot, snapshot))

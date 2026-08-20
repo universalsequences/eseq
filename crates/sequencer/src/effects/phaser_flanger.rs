@@ -344,14 +344,14 @@ unsafe fn line_read(buf: *const f32, wpos: usize, delay: f32) -> f32 {
 /// is dual-maintained with the `phaser-notch` UI widget.
 pub fn notch_frequencies(notches: usize, center: f32, spread: f32, sr: f32) -> Vec<f32> {
     let n = notches.clamp(1, MAX_NOTCHES);
-    let center = center.clamp(20.0, sr * 0.45);
+    let center = super::nyquist_clamp(center, sr, 20.0, 0.45);
     let spread = spread.clamp(0.0, 1.0);
     let mid = (n as f32 - 1.0) * 0.5;
     (0..n)
         .map(|k| {
             let off = k as f32 - mid;
             let f = center * (spread * off * SPREAD_OCT_PER_NOTCH).exp2();
-            f.clamp(20.0, sr * 0.45)
+            super::nyquist_clamp(f, sr, 20.0, 0.45)
         })
         .collect()
 }
@@ -366,7 +366,7 @@ fn stack_notch_frequencies(
     sr: f32,
 ) -> Vec<f32> {
     let n = notches.clamp(1, MAX_NOTCHES);
-    let center = center.clamp(20.0, sr * 0.45);
+    let center = super::nyquist_clamp(center, sr, 20.0, 0.45);
     let spread = spread.clamp(0.0, 1.0);
     let blend = blend.clamp(0.0, 1.0);
     let mid = (n as f32 - 1.0) * 0.5;
@@ -376,7 +376,7 @@ fn stack_notch_frequencies(
             let exp_f = center * (spread * off * SPREAD_OCT_PER_NOTCH).exp2();
             let lin_f = center * (1.0 + spread * off * STACK_SPREAD_LIN_PER_NOTCH).max(0.1);
             let f = exp_f.powf(1.0 - blend) * lin_f.powf(blend);
-            f.clamp(20.0, sr * 0.45)
+            super::nyquist_clamp(f, sr, 20.0, 0.45)
         })
         .collect()
 }

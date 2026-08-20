@@ -159,7 +159,8 @@ fn biquad_sample(input: f32, coeffs: BiquadCoeffs, z1: &mut f32, z2: &mut f32) -
 
 #[inline]
 fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
-    let omega = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.45) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 20.0, 0.45) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
@@ -178,7 +179,8 @@ fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
 
 #[inline]
 fn highpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
-    let omega = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.45) / sr.max(1.0);
+    let sr = super::safe_sample_rate(sr);
+    let omega = std::f32::consts::TAU * super::nyquist_clamp(freq, sr, 20.0, 0.45) / sr;
     let sin = omega.sin();
     let cos = omega.cos();
     let alpha = sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
@@ -197,9 +199,10 @@ fn highpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
 
 #[inline]
 fn filter_edges(center: f32, width_octaves: f32, sr: f32) -> (f32, f32) {
+    let sr = super::safe_sample_rate(sr);
     let center = center.clamp(20.0, 20_000.0);
     let spread = 2.0_f32.powf(width_octaves.clamp(0.25, 6.0) * 0.5);
-    let low = (center / spread).clamp(20.0, sr * 0.42);
+    let low = super::nyquist_clamp(center / spread, sr, 20.0, 0.42);
     let high = (center * spread).clamp((low * 1.05).max(21.0), sr * 0.45);
     (low, high)
 }
@@ -302,7 +305,7 @@ unsafe extern "C" fn str8_delay_process(
         return;
     }
 
-    let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
     let bpm = *s.add(STATE_BPM);
     let target_wet = (*s.add(STATE_WET)).clamp(0.0, 1.0);
     let target_feedback = (*s.add(STATE_FEEDBACK)).clamp(0.0, 0.95);
