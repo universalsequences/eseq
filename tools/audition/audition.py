@@ -39,7 +39,15 @@ LISP_HOST = os.path.join(
 DGEN_ROOT = os.environ.get("DGEN_ROOT", os.path.expanduser("~/code/swift/dgen"))
 CACHE_ROOT = os.environ.get(
     "AUDITION_CACHE", os.path.expanduser("~/.cache/eseq-audition"))
-EXPECTED_ABI = "dgen-c-v2-host-sample-rate"
+EXPECTED_ABI = "dgen-host-abi-v1"
+
+
+class DGenProcessContextV1(ctypes.Structure):
+    # Mirrors audiograph/dgen_abi_v1.h / dgen_ffi.rs DGenProcessContextV1.
+    _fields_ = [("abi_version", ctypes.c_uint32),
+                ("struct_size", ctypes.c_uint32),
+                ("sample_rate", ctypes.c_float),
+                ("reserved", ctypes.c_uint32)]
 
 NOTE_OFFSETS = {"c": -9, "d": -7, "e": -5, "f": -4, "g": -2, "a": 0, "b": 2}
 
@@ -136,9 +144,17 @@ class Instrument:
         self.n_in = len(self.manifest["inputs"])
         self.n_out = len(self.manifest["outputs"])
         self.lib = ctypes.CDLL(os.path.join(self.build_dir, "patch.dylib"))
-        self.lib.process.argtypes = (
+        self.process_fn = self.lib.dgen_process_v1
+        self.process_fn.argtypes = (
             [ctypes.POINTER(ctypes.POINTER(ctypes.c_float))] * 2
-            + [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_float])
+            + [ctypes.c_uint32, ctypes.c_void_p,
+               ctypes.POINTER(DGenProcessContextV1), ctypes.c_void_p])
+        # host-services table is only needed by FFT patches; NULL otherwise.
+        self.context = DGenProcessContextV1(
+            abi_version=1,
+            struct_size=ctypes.sizeof(DGenProcessContextV1),
+            sample_rate=float(self.sample_rate),
+            reserved=0)
 
     def fresh_memory(self):
         """State array with tensor init data and every param at its default."""
@@ -224,9 +240,9 @@ class Instrument:
                 else:
                     raise KeyError(f"ramp target {name!r} is neither a param "
                                    f"nor an input channel")
-            self.lib.process(inptrs, outptrs, frames,
-                             mem.ctypes.data_as(ctypes.c_void_p),
-                             None, ctypes.c_float(sr))
+            self.process_fn(inptrs, outptrs, frames,
+                            mem.ctypes.data_as(ctypes.c_void_p),
+                            ctypes.byref(self.context), None)
             for ch in range(self.n_out):
                 y[b:b + frames, ch] = outs[ch][:frames]
         return (y[:, 0], mem) if self.n_out == 1 else (y, mem)
