@@ -397,11 +397,7 @@
           (host-command "add-track-from-sound" (dict :path path))
           (status "Drop a Sound item, not a folder"))
         (if (= (get event :drag-type) "instrument")
-          (if name
-            (do
-              (set! sbrowser-loading-instrument-name name)
-              (host-command "add-track-instrument" (dict :name name)))
-            (status "Drop an instrument, not a folder"))
+          (eseq.browser/drop-instrument-new-track payload)
           (if path
             (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
             (status "Drop a sample file, not a folder")))))))
@@ -1851,12 +1847,17 @@
     (let ((path (get payload :path))
         (name (get payload :name)))
       (if (= (get event :drag-type) "instrument")
-        (if name
-          (do
-            (set! sbrowser-loading-instrument-name name)
-            (host-command "add-track-instrument"
-              (dict :name name :group-id group-id :pad-note note)))
-          (status "Drop an instrument, not a folder"))
+        ;; A pad needs a member track in this rack's group on a specific pad
+        ;; note; the builtin add-track host commands take neither, so builtins
+        ;; are refused instead of landing as a loose track (eseq-mj8).
+        (if (= (get payload :kind) "builtin-instrument")
+          (status "Drop a sample or saved instrument onto a pad")
+          (if name
+            (do
+              (set! sbrowser-loading-instrument-name name)
+              (host-command "add-track-instrument"
+                (dict :name name :group-id group-id :pad-note note)))
+            (status "Drop an instrument, not a folder")))
         (if path
           (host-command "add-track-sample"
             (dict :path path :group-id group-id :pad-note note

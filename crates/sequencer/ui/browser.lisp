@@ -227,12 +227,32 @@
       (status "Saved instruments can replace sampler or custom instrument tracks"))))
 
 (def %swap-track-builtin-instrument (track name)
+  ;; Only the sampler has an in-place conversion. A modulator rewrite would be a
+  ;; different engine on a track that may already carry pattern data, and the
+  ;; racks are group/slot entities with no single track to become — so a drop
+  ;; that visually landed adds the builtin as a new track instead of dead-ending
+  ;; (eseq-mj8).
   (if (and (= name "sampler") (eseq.track-collapse/replaceable-instrument? track))
     (do
       (host-command "swap-track-builtin-instrument" (dict :track track :name name))
       (set! sbrowser-tab "samples")
       (status "Loading sampler"))
-    (status "Only sampler conversion is supported")))
+    (add-builtin-instrument-track name)))
+
+;; Every "drop onto the new-track / empty zone" site routes through here so the
+;; builtin rows never fall into add-track-instrument, which resolves SAVED
+;; instruments by name and would look for a file literally called "modulator".
+;; Builtins also skip the loading spinner, which is keyed to saved-instrument
+;; loads (eseq-mj8).
+(def drop-instrument-new-track (payload)
+  (let ((name (get payload :name)))
+    (if name
+      (if (= (get payload :kind) "builtin-instrument")
+        (add-builtin-instrument-track name)
+        (do
+          (set! sbrowser-loading-instrument-name name)
+          (host-command "add-track-instrument" (dict :name name))))
+      (status "Drop an instrument, not a folder"))))
 
 (def drop-instrument-on-track (event)
   (let ((payload (get event :payload))
@@ -834,7 +854,7 @@
   (set! sbrowser-editor-name "")
   (host-command "enter-new-instrument-editor" (dict)))
 
-(def %add-builtin-instrument-track (name)
+(def add-builtin-instrument-track (name)
   (if (= name "sampler")
     (add-sampler-track)
     (if (= name "modulator")
@@ -853,7 +873,7 @@
            (< (%selected-drum-rack-id) 0)
            (eseq.track-collapse/replaceable-instrument? SEQ.current-track))
     (%swap-track-builtin-instrument SEQ.current-track name)
-    (%add-builtin-instrument-track name)))
+    (add-builtin-instrument-track name)))
 
 (def select-create-item (item)
   (let ((kind (get item :kind)))
@@ -899,7 +919,10 @@
         (do
           (host-command "move-saved-instrument" (dict :name name :folder folder))
           (status (str "Move instrument to " (get target :label))))
-        (status "Drop instruments onto a folder")))))
+        ;; Builtins are not files on disk, so there is nothing to move.
+        (if (= (get payload :kind) "builtin-instrument")
+          (status "Builtin instruments cannot be moved into a folder")
+          (status "Drop instruments onto a folder"))))))
 
 (def %loading-instrument? ()
   (not (= sbrowser-loading-instrument-name "")))

@@ -603,7 +603,10 @@ fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
         ("name", Value::String(item.name.to_string())),
         ("kind", Value::String("builtin-instrument".to_string())),
         ("icon", Value::Keyword(item.icon.to_string())),
-        ("draggable", Value::Bool(item.name == "sampler")),
+        // Every builtin row drags, not just Sampler: the drop zones dispatch on
+        // the "builtin-instrument" kind, so Modulator/Drum Rack/Instrument Rack
+        // reach their own add-track host commands (eseq-mj8).
+        ("draggable", Value::Bool(true)),
         ("drop-target", Value::Bool(false)),
     ])
 }
@@ -1118,6 +1121,29 @@ mod tests {
             format_project_recency_at(now, Some(UNIX_EPOCH)),
             "1970-01-01"
         );
+    }
+
+    /// eseq-mj8: Modulator / Drum Rack / Instrument Rack drag like Sampler and
+    /// every saved instrument does.
+    #[test]
+    fn every_builtin_instrument_row_is_draggable() {
+        for item in BUILTIN_INSTRUMENTS {
+            let Value::Map(leaf) = builtin_instrument_leaf(item) else {
+                panic!("builtin leaf should be a map");
+            };
+            assert_eq!(
+                leaf.get("draggable").map(|value| value.borrow().clone()),
+                Some(Value::Bool(true)),
+                "{} should be draggable",
+                item.name
+            );
+            assert_eq!(
+                leaf.get("kind").map(|value| value.borrow().clone()),
+                Some(Value::String("builtin-instrument".to_string())),
+                "{} must carry the kind the drop handlers dispatch on",
+                item.name
+            );
+        }
     }
 
     fn sample_browser_db() -> Rc<SampleDb> {

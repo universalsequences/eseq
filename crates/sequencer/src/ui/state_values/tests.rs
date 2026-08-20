@@ -2975,11 +2975,11 @@
             &[
                 Some(false),
                 Some(true),
-                Some(false),
-                Some(false),
-                Some(false)
+                Some(true),
+                Some(true),
+                Some(true)
             ],
-            "sampler should be the only draggable builtin instrument"
+            "every builtin instrument row drags; only the header does not (eseq-mj8)"
         );
     }
 
@@ -4892,6 +4892,146 @@
                 );
             }
             other => panic!("expected add-track-layer-rack host command, got {other:?}"),
+        }
+    }
+
+    /// eseq-mj8: every builtin instrument row drags, so the shared new-track
+    /// drop must dispatch on `:kind` — `add-track-instrument` resolves SAVED
+    /// instruments by name and would hunt for a file called "modulator".
+    #[test]
+    fn metal_seq_browser_builtin_drop_on_new_track_zone_uses_builtin_add_commands() {
+        for (builtin, expected) in [
+            ("sampler", "add-track-sampler"),
+            ("modulator", "add-track-modulator"),
+            ("rack", "add-track-rack"),
+            ("layer-rack", "add-track-layer-rack"),
+        ] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    r#"(eseq.browser/drop-instrument-new-track
+                        (dict :kind "builtin-instrument" :name "{builtin}" :label "x"))"#
+                ))
+                .expect("drop builtin on the new-track zone");
+
+            let commands = editor.drain_host_commands();
+            assert_eq!(commands.len(), 1, "{builtin} should queue one command");
+            match &commands[0] {
+                eseqlisp::host::HostCommand::Custom { name, .. } => {
+                    assert_eq!(name, expected, "routing for builtin {builtin}");
+                }
+                other => panic!("expected {expected} host command, got {other:?}"),
+            }
+            // The spinner is keyed to saved-instrument loads; builtins land
+            // synchronously and would leave it stuck.
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str("sbrowser-loading-instrument-name")
+                    .expect("read loading name"),
+                Some(Value::String(String::new()))
+            );
+        }
+    }
+
+    /// The saved-instrument half of the same drop is unchanged.
+    #[test]
+    fn metal_seq_browser_saved_instrument_drop_on_new_track_zone_loads_by_name() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-instrument-new-track
+                    (dict :kind "instrument" :name "emulations/digitone"))"#,
+            )
+            .expect("drop saved instrument on the new-track zone");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("instrument add payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+            }
+            other => panic!("expected add-track-instrument host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-loading-instrument-name")
+                .expect("read loading name"),
+            Some(Value::String("emulations/digitone".to_string()))
+        );
+    }
+
+    /// A builtin dropped on an existing track that cannot host it adds a track
+    /// instead of dead-ending on "Only sampler conversion is supported".
+    #[test]
+    fn metal_seq_browser_builtin_drop_on_track_falls_back_to_adding_a_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-instrument-on-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "builtin-instrument" :name "rack")
+                          :target (dict :track 0)))"#,
+            )
+            .expect("drop drum rack on an existing track");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            matches!(&commands[0],
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "add-track-rack"),
+            "expected add-track-rack, got {:?}",
+            commands[0]
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Add drum rack")
+        );
+    }
+
+    /// Builtins are not files on disk, so a folder drop must not emit
+    /// move-saved-instrument.
+    #[test]
+    fn metal_seq_browser_builtin_drop_on_folder_is_rejected() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-instrument-on-folder
+                    (dict :payload (dict :kind "builtin-instrument" :name "modulator")
+                          :target (dict :folder "emulations" :label "emulations")))"#,
+            )
+            .expect("drop builtin on a folder");
+
+        assert!(editor.drain_host_commands().is_empty());
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Builtin instruments cannot be moved into a folder")
+        );
+    }
+
+    /// The mixer and sequencer new-track zones must keep delegating to the
+    /// shared router; open-coding add-track-instrument there is the exact
+    /// regression eseq-mj8 fixed.
+    #[test]
+    fn metal_seq_new_track_drop_zones_delegate_builtin_routing_to_the_browser() {
+        for path in ["ui/mixer.lisp", "ui/sequencer.lisp"] {
+            let src = std::fs::read_to_string(path).expect("read drop-zone lisp");
+            assert!(
+                src.contains("(eseq.browser/drop-instrument-new-track payload)"),
+                "{path} should route instrument drops through the shared router"
+            );
         }
     }
 
@@ -19125,6 +19265,26 @@
             }
             other => panic!("expected add-track-instrument host command, got {other:?}"),
         }
+
+        // eseq-mj8: a builtin row carries the same "instrument" drag type, so
+        // the zone must dispatch on :kind instead of asking for a saved
+        // instrument named "modulator".
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.sequencer/drop-new-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "builtin-instrument" :name "modulator")))"#,
+            )
+            .expect("drop builtin modulator on sequencer empty space");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            matches!(&commands[0],
+                eseqlisp::host::HostCommand::Custom { name, .. } if name == "add-track-modulator"),
+            "expected add-track-modulator host command, got {:?}",
+            commands[0]
+        );
 
         editor
             .runtime_mut()
@@ -45814,6 +45974,7 @@
             "seq-set-bus-volume",
             "seq-clear-selection",
             "eseq.browser/drop-sample-on-track",
+            "eseq.browser/drop-instrument-new-track",
         ] {
             let calls = Arc::clone(&calls);
             editor
@@ -46351,6 +46512,11 @@
             other => panic!("expected add-track-sample host command, got {other:?}"),
         }
 
+        // Instrument drops (saved AND builtin) delegate to the shared browser
+        // router, which is what keeps builtin rows off the saved-instrument
+        // lookup (eseq-mj8). The routing itself is covered by the browser
+        // tests; here we prove the mixer hands the whole payload over.
+        calls.lock().unwrap().clear();
         editor
             .runtime_mut()
             .eval_str(
@@ -46361,28 +46527,17 @@
                                          :label "digitone")))"#,
             )
             .expect("drop instrument on new-track zone");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "add-track-instrument");
-                let Value::Map(payload) = payload else {
-                    panic!("add-track-instrument payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("name").map(|value| value.borrow().clone()),
-                    Some(Value::String("emulations/digitone".to_string()))
-                );
-            }
-            other => panic!("expected add-track-instrument host command, got {other:?}"),
-        }
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-loading-instrument-name")
-                .expect("read loading instrument"),
-            Some(Value::String("emulations/digitone".to_string()))
+        assert!(editor.drain_host_commands().is_empty());
+        let instrument_drop_calls = calls.lock().unwrap();
+        assert_eq!(instrument_drop_calls.len(), 1);
+        assert!(
+            instrument_drop_calls[0]
+                .starts_with("eseq.browser/drop-instrument-new-track:")
+                && instrument_drop_calls[0].contains("emulations/digitone"),
+            "mixer instrument drops should delegate the payload to the browser router: \
+             {instrument_drop_calls:?}"
         );
+        drop(instrument_drop_calls);
 
         editor
             .runtime_mut()

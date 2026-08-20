@@ -221,11 +221,7 @@
               (host-command "add-track-from-sound" (dict :path path))
               (status "Drop a Sound item, not a folder"))
             (if (= (get event :drag-type) "instrument")
-              (if name
-                (do
-                  (set! sbrowser-loading-instrument-name name)
-                  (host-command "add-track-instrument" (dict :name name)))
-                (status "Drop an instrument, not a folder"))
+              (eseq.browser/drop-instrument-new-track payload)
               (if path
                 (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
                 (status "Drop a sample file, not a folder")))))))))
@@ -1480,11 +1476,16 @@
       (do
         (%select-group gidx)
         (if (= (get event :drag-type) "instrument")
-          (if name
-            (do
-              (set! sbrowser-loading-instrument-name name)
-              (host-command "add-track-instrument" (dict :name name :group-id group-id)))
-            (status "Drop an instrument, not a folder"))
+          ;; The builtin add-track host commands take no :group-id (a rack even
+          ;; creates its own group), so a builtin dropped on a group header is
+          ;; refused rather than silently landing outside the group (eseq-mj8).
+          (if (= (get payload :kind) "builtin-instrument")
+            (status "Builtin instruments cannot be added inside a group")
+            (if name
+              (do
+                (set! sbrowser-loading-instrument-name name)
+                (host-command "add-track-instrument" (dict :name name :group-id group-id)))
+              (status "Drop an instrument, not a folder")))
           (if path
             (host-command "add-track-sample"
               (dict :path path :group-id group-id :preserve-browser-context true))
