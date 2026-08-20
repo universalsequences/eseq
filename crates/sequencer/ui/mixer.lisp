@@ -1666,7 +1666,7 @@
     (%group-selected)
     (status "Select 2+ tracks to group")))
 
-(define-mode "seq-mixer-mode" :read-only true :on-key "handle-key")
+(define-mode "seq-mixer-mode" :read-only true :live-keys true :on-key "handle-key")
 (mode-bind-key "seq-mixer-mode" "LEFT" "select-prev-channel")
 (mode-bind-key "seq-mixer-mode" "RIGHT" "select-next-channel")
 (set-buffer-mode-for "*mixer*" "seq-mixer-mode")

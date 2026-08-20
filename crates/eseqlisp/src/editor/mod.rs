@@ -505,6 +505,9 @@ struct TextUndoSnapshot {
 pub struct MajorMode {
     pub name: String,
     pub read_only: bool,
+    /// Whether a host may interpret otherwise-unhandled bare keys as live
+    /// performance input while this mode owns the active buffer.
+    pub live_keys: bool,
     pub keybindings: HashMap<String, String>,
     pub on_enter: Option<String>,
     pub on_key: Option<String>,
@@ -5482,6 +5485,18 @@ impl Editor {
         self.mode_keybinding(&buffer.mode, key)
     }
 
+    /// Whether the active major mode explicitly permits host live-keyboard
+    /// shortcuts. Modes opt in so ordinary source and special text modes keep
+    /// ownership of their bare keys by default.
+    pub fn active_mode_accepts_live_keys(&self) -> bool {
+        let BufferMode::Named(mode_name) = &self.active_buffer().mode else {
+            return false;
+        };
+        self.mode_registry
+            .get(mode_name)
+            .is_some_and(|mode| mode.live_keys)
+    }
+
     fn mode_keybinding(&self, mode: &BufferMode, key: KeyEvent) -> Option<&str> {
         let BufferMode::Named(mode_name) = mode else {
             return None;
@@ -8002,15 +8017,16 @@ impl Editor {
         }
 
         // Process mode definitions
-        for (name, read_only, on_enter, on_key) in self.runtime.take_pending_mode_defs() {
+        for definition in self.runtime.take_pending_mode_defs() {
             self.mode_registry.insert(
-                name.clone(),
+                definition.name.clone(),
                 MajorMode {
-                    name,
-                    read_only,
+                    name: definition.name,
+                    read_only: definition.read_only,
+                    live_keys: definition.live_keys,
                     keybindings: HashMap::new(),
-                    on_enter,
-                    on_key,
+                    on_enter: definition.on_enter,
+                    on_key: definition.on_key,
                 },
             );
         }

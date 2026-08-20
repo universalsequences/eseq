@@ -749,6 +749,15 @@ where
         .collect()
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingModeDefinition {
+    pub name: String,
+    pub read_only: bool,
+    pub live_keys: bool,
+    pub on_enter: Option<String>,
+    pub on_key: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeBridgeState {
     /// The module of the chunk executing the current native call (None =
@@ -771,7 +780,7 @@ pub(crate) struct RuntimeBridgeState {
     pub current_buffer_read_only: bool,
     pub pending_set_read_only: Option<bool>,
     pub current_buffer_mode: String,
-    pub pending_mode_defs: Vec<(String, bool, Option<String>, Option<String>)>, // (name, read_only, on_enter, on_key)
+    pub pending_mode_defs: Vec<PendingModeDefinition>,
     pub pending_mode_bindings: Vec<(String, String, String)>, // (mode, key, handler)
     pub pending_set_mode: Option<String>,
     pub pending_set_mode_for: Vec<(String, String)>, // (buffer_name, mode_name)
@@ -905,6 +914,7 @@ impl NativeContext {
         &mut self,
         name: String,
         read_only: bool,
+        live_keys: bool,
         on_enter: Option<String>,
         on_key: Option<String>,
     ) {
@@ -917,7 +927,13 @@ impl NativeContext {
         self.shared
             .borrow_mut()
             .pending_mode_defs
-            .push((name, read_only, on_enter, on_key));
+            .push(PendingModeDefinition {
+                name,
+                read_only,
+                live_keys,
+                on_enter,
+                on_key,
+            });
     }
 
     pub fn mode_bind_key(&mut self, mode: String, key: String, handler: String) {
@@ -2993,9 +3009,7 @@ impl Runtime {
         self.shared.borrow_mut().pending_set_buffer_styles.take()
     }
 
-    pub(crate) fn take_pending_mode_defs(
-        &mut self,
-    ) -> Vec<(String, bool, Option<String>, Option<String>)> {
+    pub(crate) fn take_pending_mode_defs(&mut self) -> Vec<PendingModeDefinition> {
         std::mem::take(&mut self.shared.borrow_mut().pending_mode_defs)
     }
 

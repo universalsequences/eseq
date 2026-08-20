@@ -77,7 +77,7 @@
     (eseq.step-grid-interactions/set-track-cursor-step (min (core/current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
-(define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
+(define-mode "eseq.seq-grid-mode/seq-grid-mode" :read-only true :live-keys true :on-key "seq-grid-handle-key")
 ;; Named hold command: Rust recognizes this semantic binding on both key-down
 ;; and key-up, while the ordinary mode keymap remains the customization seam.
 ;; Rebind this command (and replace the old binding) in user lisp to move the

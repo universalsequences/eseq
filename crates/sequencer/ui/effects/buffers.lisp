@@ -261,7 +261,7 @@
         (%track-selection-panel))
       (%track-selection-panel))))))
 
-(define-mode "seq-fx-mode" :read-only true)
+(define-mode "seq-fx-mode" :read-only true :live-keys true)
 ;; Handler strings qualify against THIS module; the two below live in other
 ;; converted modules, so they are written pre-qualified (dispatch resolves an
 ;; already-qualified name directly, resolve_handler_name).
@@ -277,7 +277,7 @@
       true)
     false))
 
-(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true)
+(define-mode "eseq.effects.buffers/seq-plock-panel-mode" :read-only true :live-keys true)
 (mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "BS" "delete-selected-plock-row-key")
 (mode-bind-key "eseq.effects.buffers/seq-plock-panel-mode" "Delete" "delete-selected-plock-row-key")
 (set-buffer-mode-for "*track*" "eseq.effects.buffers/seq-plock-panel-mode")

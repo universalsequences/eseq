@@ -822,8 +822,8 @@ pub(crate) fn run_event_loop(
                     let sequence_roll_binding = editor.buffer_mode_keybinding("*sequencer*", key)
                         == Some("eseq.seq-grid-mode/sequence-roll-hold");
                     // Sequence roll and its rate keys are transport-wide:
-                    // neither requires an armed track. Text/value widget focus
-                    // still wins in `should_route_to_live_keyboard` below.
+                    // neither requires an armed track. The active mode must opt
+                    // in, and editor focus still wins, through the gate below.
                     let roll_rate_key = is_active_roll_rate_key(&shared.state, &key);
                     // An armed drum rack is an arm target too: with only the
                     // rack armed the keys must still reach the live keyboard,

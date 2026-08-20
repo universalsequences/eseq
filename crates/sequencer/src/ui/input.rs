@@ -88,6 +88,25 @@ fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
         || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
 }
 
+fn focused_number_picker_is_editing(editor: &Editor) -> bool {
+    editor.focused_widget_node().is_some_and(|node| {
+        node.widget_type == "number-picker"
+            && number_picker_edit_state(node.widget_id).editing
+    })
+}
+
+/// Whether the editor currently permits sequencer live-keyboard shortcuts.
+///
+/// Major modes opt in explicitly. Even in an opted-in mode, focus supersedes
+/// mode: prompts and focused text or numeric editors retain ownership of keys.
+fn editor_accepts_live_keyboard_input(editor: &Editor) -> bool {
+    editor.active_mode_accepts_live_keys()
+        && editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && !focused_number_picker_is_editing(editor)
+}
+
 /// A focused patcher owns Cmd+Z/Cmd+Shift+Z for its graph-level undo history,
 /// so the app-level sequencer history shortcut must let the key fall through
 /// to the widget key path.
@@ -407,9 +426,9 @@ pub(crate) fn held_note_for_key(
     })
 }
 
-/// Rate keys are transport-level roll controls, not armed-track input. They
-/// remain available whenever roll mode is enabled; focused text/value editors
-/// still take precedence through `should_route_to_live_keyboard`.
+/// Identify transport-level roll-rate key candidates independently of track
+/// arming. `should_route_to_live_keyboard` applies the active-mode and editor
+/// focus gate before a candidate can change the roll rate.
 pub(crate) fn is_active_roll_rate_key(
     state: &SequencerState,
     key: &crossterm::event::KeyEvent,
@@ -449,7 +468,7 @@ pub(crate) fn should_route_to_live_keyboard(
         return false;
     }
 
-    if focused_widget_captures_text_input(editor) {
+    if !editor_accepts_live_keyboard_input(editor) {
         return false;
     }
 
@@ -1963,8 +1982,10 @@ mod live_keyboard_tests {
         armed_rack_pad_track, build_selection_value, current_step_param_number_picker_id,
         handle_metal_command_shortcut, handle_metal_soft_step_param_key,
         handle_number_picker_edit_key_for_widget, handle_recording_key, held_note_for_key,
-        is_active_roll_rate_key, note_from_key, quantized_record_position,
-        sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
+        is_active_roll_rate_key, note_from_key, number_picker_edit_state,
+        quantized_record_position,
+        sequencer_history_shortcut, should_route_to_live_keyboard,
+        ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
         SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
     };
@@ -1985,6 +2006,19 @@ mod live_keyboard_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    fn live_keyboard_routing_editor(live_keys: bool) -> Editor {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(do (define-mode \"routing-mode\" :live-keys {}) (set-buffer-mode \"routing-mode\"))",
+                if live_keys { "true" } else { "false" },
+            ))
+            .expect("define routing mode");
+        editor.refresh_runtime_side_effects();
+        editor
+    }
 
     fn soft_edit_test_app(state: Arc<SequencerState>) -> sequencer::app::App {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
@@ -2077,6 +2111,107 @@ mod live_keyboard_tests {
         assert!(!is_active_roll_rate_key(
             &state,
             &KeyEvent::new(KeyCode::Char('7'), KeyModifiers::CONTROL),
+        ));
+    }
+
+    #[test]
+    fn live_keyboard_routing_requires_an_opted_in_major_mode() {
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let note_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let roll_hold_key = KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE);
+
+        let source_editor = Editor::new(Runtime::new(), EditorConfig::default());
+        assert!(!should_route_to_live_keyboard(
+            &source_editor,
+            &note_key,
+            &held,
+            false,
+        ));
+        assert!(!should_route_to_live_keyboard(
+            &source_editor,
+            &roll_hold_key,
+            &held,
+            true,
+        ));
+
+        let special_text_mode = live_keyboard_routing_editor(false);
+        assert!(!should_route_to_live_keyboard(
+            &special_text_mode,
+            &note_key,
+            &held,
+            false,
+        ));
+
+        let sequencer_mode = live_keyboard_routing_editor(true);
+        assert!(should_route_to_live_keyboard(
+            &sequencer_mode,
+            &note_key,
+            &held,
+            false,
+        ));
+        assert!(should_route_to_live_keyboard(
+            &sequencer_mode,
+            &roll_hold_key,
+            &held,
+            true,
+        ));
+    }
+
+    #[test]
+    fn focused_number_picker_edit_suppresses_live_and_roll_keys() {
+        let mut editor = live_keyboard_routing_editor(true);
+        editor.set_layout_viewport(30, 8);
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "routing-picker" :value 12 :min 0 :max 99
+                     :decimals 0 :width 8 :height 1.4)"#,
+            )
+            .expect("build number picker")
+            .expect("number picker widget tree");
+        editor.active_buffer_mut().set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let _ = editor.widget_layout().expect("number picker layout");
+        assert!(editor.focus_widget_by_stable_key("routing-picker", Some("number-picker")));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        let picker_id = editor.focused_widget_id().expect("focused picker");
+        assert!(number_picker_edit_state(picker_id).editing);
+
+        let held = Arc::new(Mutex::new(Vec::new()));
+        assert!(!should_route_to_live_keyboard(
+            &editor,
+            &KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+            &held,
+            false,
+        ));
+        assert!(!should_route_to_live_keyboard(
+            &editor,
+            &KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE),
+            &held,
+            true,
+        ));
+    }
+
+    #[test]
+    fn held_note_release_bypasses_live_key_mode_gate() {
+        let editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            key: 'a',
+            sequence_roll_code: None,
+            transpose: 0.0,
+            press_time: Instant::now(),
+            targets: Vec::new(),
+        }]));
+        let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+
+        assert!(should_route_to_live_keyboard(
+            &editor,
+            &release,
+            &held,
+            false,
         ));
     }
 

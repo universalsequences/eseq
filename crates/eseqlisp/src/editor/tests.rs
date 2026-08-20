@@ -13217,6 +13217,30 @@ fn module_define_mode_qualifies_name_and_on_key_handler() {
     );
 }
 
+#[test]
+fn major_modes_must_explicitly_opt_into_host_live_keys() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+(define-mode "text-mode")
+(define-mode "performance-mode" :live-keys true)
+(set-buffer-mode "text-mode")
+"#,
+        )
+        .expect("define modes");
+    editor.refresh_runtime_side_effects();
+    assert!(!editor.active_mode_accepts_live_keys());
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-buffer-mode "performance-mode")"#)
+        .expect("select performance mode");
+    editor.refresh_runtime_side_effects();
+    assert!(editor.active_mode_accepts_live_keys());
+}
+
 /// A declared module's mode
 /// reference is qualified against the *caller*, and must still fall back to
 /// a vanilla mode the module never defined.
