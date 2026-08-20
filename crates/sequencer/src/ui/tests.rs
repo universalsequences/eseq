@@ -2351,6 +2351,25 @@
             .expect("project 92 full-layout group/track selection probe should pass");
     }
 
+    /// NOT ignored: the functional half of the owner-switch probe runs in the
+    /// normal suite. Same fixture, same real clicks and tick replay, same
+    /// correctness assertions (selection state, *sel-sync* projection fields,
+    /// fx-owner panel markers, retained-run integrity) — but 1 warmup + 2
+    /// samples and no timing ceilings, so it is a behavior regression test,
+    /// not a benchmark. Timing stays in the ignored release probe above.
+    #[test]
+    fn project_92_full_layout_group_track_selection_owner_switch_smoke() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-owner-switch-smoke".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::GroupTrackSelectionSmoke)
+            })
+            .expect("spawn project 92 owner-switch smoke test")
+            .join()
+            .expect("project 92 owner-switch smoke test should pass");
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         SceneSwitch,
@@ -2429,6 +2448,10 @@
         /// rebuild branch and the fx-epoch resync that `seq-set-track`
         /// triggers.
         GroupTrackSelection,
+        /// The always-run functional variant of `GroupTrackSelection`: same
+        /// fixture, clicks, tick replay, and correctness assertions, but 1
+        /// warmup + 2 samples and no timing ceilings (debug-safe).
+        GroupTrackSelectionSmoke,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -2461,6 +2484,7 @@
                 | Project92UiProbe::StepBufferParamDrag
                 | Project92UiProbe::SceneAndClipLaunch
                 | Project92UiProbe::GroupTrackSelection
+                | Project92UiProbe::GroupTrackSelectionSmoke
         );
         // The production layout packs seven tiles; 180x70 leaves the smaller
         // step-panel tile too short to keep all 64 step cells on screen, so
@@ -2710,7 +2734,10 @@
             );
         }
 
-        if probe == Project92UiProbe::GroupTrackSelection {
+        if matches!(
+            probe,
+            Project92UiProbe::GroupTrackSelection | Project92UiProbe::GroupTrackSelectionSmoke
+        ) {
             // eseq-4jv reported topology, built on project 92 through the
             // real App primitives: 14 tracks total — an 8-member group whose
             // members include a 1-slot instrument-rack track and a plain
@@ -7186,9 +7213,19 @@
             return;
         }
 
-        if probe == Project92UiProbe::GroupTrackSelection {
-            const WARMUPS: usize = 5;
-            const SAMPLES: usize = 20;
+        if matches!(
+            probe,
+            Project92UiProbe::GroupTrackSelection | Project92UiProbe::GroupTrackSelectionSmoke
+        ) {
+            // Smoke mode is the always-run functional variant: same fixture,
+            // clicks, and assertions, minimal iterations, no ceilings.
+            let smoke = probe == Project92UiProbe::GroupTrackSelectionSmoke;
+            // Smoke budget: one iteration per transition (every correctness
+            // assertion runs on iteration 0) keeps the always-run variant
+            // inside a ~10s debug budget; the ignored release probe keeps the
+            // statistical 5+20 configuration.
+            let warmups: usize = if smoke { 0 } else { 5 };
+            let sample_count: usize = if smoke { 1 } else { 20 };
             let probe_prefix = "project-92-fullayout-owner-switch";
             // Fixture indices (see the GroupTrackSelection fixture block):
             // the group holds tracks {0,2..=7,10}; 10 is the 1-slot rack.
@@ -8086,7 +8123,7 @@
                 let median = percentile(&mut samples.total, 0.50);
                 let p95 = percentile(&mut samples.total, 0.95);
                 eprintln!(
-                    "[{probe_prefix}-{label}] samples={SAMPLES} median_ms={:.3} p95_ms={:.3} input_ms={:.3} host_ms={:.3} track_switch_updates={}/{SAMPLES} ui_epoch_updates={}/{SAMPLES} fx_epoch_updates={}/{SAMPLES}",
+                    "[{probe_prefix}-{label}] samples={sample_count} median_ms={:.3} p95_ms={:.3} input_ms={:.3} host_ms={:.3} track_switch_updates={}/{sample_count} ui_epoch_updates={}/{sample_count} fx_epoch_updates={}/{sample_count}",
                     median,
                     p95,
                     percentile(&mut samples.dispatch, 0.50),
@@ -8207,7 +8244,7 @@
                  tile_retained: &mut Vec<TileRetained>,
                  reports: &mut Vec<ScenarioReport>| {
                     let mut samples = OwnerSamples::default();
-                    for iteration in 0..(WARMUPS + SAMPLES) {
+                    for iteration in 0..(warmups + sample_count) {
                         // Untimed: establish the "from" state. A transition
                         // that starts "group selected" first parks the
                         // current track on a plain track, so the timed click
@@ -8325,7 +8362,7 @@
                                 }
                             }
                         }
-                        if iteration >= WARMUPS {
+                        if iteration >= warmups {
                             samples.record(
                                 total_ms,
                                 duration_ms(dispatch_done - started),
@@ -8424,8 +8461,14 @@
             // ~1.5x headroom for machine load and still sit far below every
             // pre-tuning median, so a regression back to the defstate
             // fan-out trips them immediately.
-            if baseline_mode {
-                eprintln!("[{probe_prefix}-baseline-mode] ceilings skipped");
+            if baseline_mode || smoke {
+                // Smoke runs in the normal (often debug) suite: it keeps
+                // every correctness assertion but must never assert timing —
+                // debug numbers are 5-20x release and CI load is unbounded.
+                eprintln!(
+                    "[{probe_prefix}-{}] ceilings skipped",
+                    if smoke { "smoke-mode" } else { "baseline-mode" }
+                );
                 return;
             }
             for report in &scenario_reports {
