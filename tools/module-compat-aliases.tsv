@@ -2,7 +2,6 @@ old	new	source
 active-macro-mapping-table-macros	eseq.macros/active-macro-mapping-table-macros	crates/sequencer/ui/macros.lisp
 agent-current-conv	eseq.agent/agent-current-conv	crates/sequencer/ui/agent.lisp
 agent-open	eseq.agent/agent-open	crates/sequencer/ui/agent.lisp
-agent-open-instrument	eseq.agent/agent-open-instrument	crates/sequencer/ui/agent.lisp
 agent-submit-current	eseq.agent/agent-submit-current	crates/sequencer/ui/agent.lisp
 aqua-color	eseq.materials/color	crates/sequencer/ui/materials.lisp
 aqua-slider-material	eseq.materials/slider-material	crates/sequencer/ui/materials.lisp

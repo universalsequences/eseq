@@ -10,8 +10,8 @@
 ;; callers still spell flat.  Five are lisp-side (effects/track-panels.lisp
 ;; paints the track-panel header with the mixer's colour/mute helpers);
 ;; thirteen are `mixer-v2-*` entry points driven by name from Rust
-;; state_values tests; `seq-ctrl-g` is the global C-g dispatcher that
-;; src/ui/input.rs evals by name.  Deleted as each consumer converts.
+;; state_values tests; `seq-ctrl-g` is the global Ctrl+G / Cmd+G dispatcher
+;; that src/ui/input.rs evals by name.  Deleted as each consumer converts.
 
 (import eseq.track-collapse)
 
@@ -1636,18 +1636,18 @@
             (%bus-strip i)))))
     (%track-context-menu)))
 
-;; C-g — fold the multi-selected tracks into a new group.
+;; Ctrl+G / Cmd+G — fold the multi-selected tracks into a new group.
 (def %group-selected ()
   (do
     (host-command "group-selected-tracks" (dict))
     true))
 
-;; Global C-g dispatcher: a 2+ track multi-selection only exists via mixer
-;; cmd-click, so group when one is present; otherwise open the agent.
+;; Global grouping dispatcher. Multi-selection is shared across the sequencer
+;; UI, so both shortcuts work from any tile that accepts global UI shortcuts.
 (def seq-ctrl-g ()
   (if (>= (len SEQ.selected-tracks) 2)
     (%group-selected)
-    (eseq.agent/agent-open-instrument)))
+    (status "Select 2+ tracks to group")))
 
 (define-mode "seq-mixer-mode" :read-only true :on-key "handle-key")
 (mode-bind-key "seq-mixer-mode" "LEFT" "select-prev-channel")

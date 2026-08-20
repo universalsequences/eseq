@@ -5587,6 +5587,57 @@
     }
 
     #[test]
+    fn metal_seq_track_group_dispatcher_groups_only_multi_selection() {
+        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let start = src
+            .find("(def %group-selected ()")
+            .expect("mixer should define the group action");
+        let end = src
+            .find("(define-mode \"seq-mixer-mode\"")
+            .expect("group dispatcher should precede mixer mode setup");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![(
+                "selected-tracks",
+                test_list(vec![Value::Number(0.0), Value::Number(1.0)]),
+            )],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&format!("(module eseq.mixer)\n{}", &src[start..end]))
+            .expect("load track group dispatcher");
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/seq-ctrl-g)")
+            .expect("dispatch group for multi-selection");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }]
+                if name == "group-selected-tracks"
+        ));
+        assert_eq!(editor.runtime_mut().take_status_message(), None);
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-tracks",
+            test_list(vec![Value::Number(0.0)]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/seq-ctrl-g)")
+            .expect("reject group for single selection");
+        assert!(editor.drain_host_commands().is_empty());
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Select 2+ tracks to group")
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_parses() {
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
         let tokens = Parser::new(src).parse().expect("tokenize ui/effects.lisp");

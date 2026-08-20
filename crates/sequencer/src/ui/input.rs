@@ -1377,12 +1377,12 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         }
     }
 
-    if key.modifiers.contains(KeyModifiers::CONTROL)
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
     {
-        // A 2+ track multi-selection only exists via mixer cmd-click, so C-g
-        // groups when one is present; otherwise it opens the agent. The Lisp
-        // dispatcher (seq-ctrl-g) decides.
+        // Ctrl+G and Cmd+G share the same global track-group dispatcher.
         let _ = editor.runtime_mut().eval_str("(eseq.mixer/seq-ctrl-g)");
         editor.refresh_runtime_side_effects();
         return true;
@@ -3514,6 +3514,40 @@ mod live_keyboard_tests {
             (0..16).collect::<HashSet<_>>(),
             "Cmd+A should select every current-track step; the native's UI invalidation owns the reactive projection",
         );
+    }
+
+    #[test]
+    fn command_and_control_g_share_track_group_dispatcher() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.mixer/seq-ctrl-g ()
+                  (host-command "group-selected-tracks" (dict)))
+                "#,
+            )
+            .expect("install track group dispatcher");
+        let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
+
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+            assert!(handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Char('g'), modifiers),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ));
+        }
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|command| matches!(
+            command,
+            HostCommand::Custom { name, .. } if name == "group-selected-tracks"
+        )));
     }
 
     #[test]

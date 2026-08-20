@@ -2,11 +2,9 @@
 ;; *agent-artifacts* side panel. Loaded by ui/main.lisp.
 ;;
 ;; MODULE NOTE (spec §10, S3b): this file is a RENDER ROOT — it registers two
-;; effect-buffers and a global key binding at top level. `import` EVALUATES its
-;; target, so NEVER import this module from a library file; that would drag a
-;; UI root into every VM that loads the importer. eseq.mixer's C-g dispatcher
-;; reaches `agent-open-instrument` bare through the identity compat alias
-;; below for exactly that reason.
+;; effect-buffers at top level. `import` EVALUATES its target, so NEVER import
+;; this module from a library file; that would drag a UI root into every VM that
+;; loads the importer.
 ;;
 ;; It adds NO imports of its own, and must not grow any: five Rust tests in
 ;; src/ui/state_values/tests.rs eval this whole file into a bare
@@ -30,20 +28,14 @@
 ;; outside this file. Nothing is renamed: every one of these is spelled flat
 ;; from somewhere that cannot import a render root.
 ;;
-;; `agent-open-instrument` — eseq.mixer's `seq-ctrl-g` calls it bare; mixer is
-;;   a converted module, but the pair are two UI roots, so the alias rung is
-;;   the route rather than an import.
-;; `agent-open` — the Rust agent tests eval `(agent-open)` by flat name (it is
-;;   also this file's own `bind-key` handler, which needs no alias: bind-key
-;;   qualifies the handler string against the binding module and finds it
-;;   exactly here).
+;; `agent-open` — the Rust agent tests eval `(agent-open)` by flat name.
 ;; `agent-submit-current` — the busy/cancel test evals it by flat name.
 ;; `agent-current-conv` — the same tests seed it with a flat
 ;;   `(set! agent-current-conv 1)`. It is a `defstate`, so the write lands in
 ;;   `state_bindings`, whose lookup ladder honours this alias too (hazard b);
 ;;   the writers are `#[cfg(test)]` only, so no `eseq.vanilla` pin is needed.
 ;;
-;; All four are functions or a `defstate`, i.e. the two shapes immune to
+;; All three are functions or a `defstate`, i.e. the two shapes immune to
 ;; hazard (m). This file has no mutable plain `def` and no outbound `set!` —
 ;; every `set!` below targets one of its own `defstate`s (hazard j clear).
 
@@ -85,9 +77,6 @@
       nil)
     (set-window-buffer-for "*track*" "*agent-artifacts*")
     (switch-to-buffer "*agent*")))
-
-(def agent-open-instrument ()
-  (agent-open))
 
 (def %close-panel ()
   (do
@@ -366,5 +355,3 @@
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))
     (%artifact-panel)))
-
-(bind-key "C-g" "agent-open")
