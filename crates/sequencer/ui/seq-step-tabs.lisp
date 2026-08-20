@@ -28,6 +28,34 @@
 ;; neither the fragment-eval nor the standalone-eval restriction applies.
 (module eseq.seq-step-tabs)
 
+(export piano-roll-placement
+        seq-main-view
+        step-panel-buffer
+        remembered-step-panel-buffer
+        lower-panel-buffer
+        seq-layout-mode
+        seq-patcher-buffer
+        seq-patcher-source-buffer
+        seq-patcher-learn-buffer
+        seq-registered-step-tabs
+        piano-roll-default-pane-height
+        lower-fx-layout-height
+        seq-step-tab-buffer
+        seq-step-tab-sequencer-name
+        seq-step-tab-source-path
+        seq-step-tab-matches-buffer?
+        seq-main-step-tabs
+        seq-main-step-tab-buffer?
+        seq-sanitized-step-buffer
+        seq-arrangement-view?
+        seq-visible-main-panel-buffer
+        seq-main-step-tile-layout-spec
+        seq-register-step-sequencer-tab
+        seq-register-script-step-sequencer-tab
+        seq-unregister-step-sequencer-tab
+        seq-clear-project-script-tabs
+        seq-select-main-step-tab-by-index)
+
 ;; Identity aliases — one per name with a caller outside this file (verified by
 ;; a whole-file sweep of crates/sequencer/ui, crates/sequencer/src and
 ;; crates/eseqlisp/src). Names with no external caller are `%`-private below.
@@ -49,7 +77,7 @@
 (def piano-roll-default-pane-height 11.5)
 (def lower-fx-layout-height piano-roll-default-pane-height)
 
-(def %seq-step-tab-label (tab)
+(def seq-step-tab-label (tab)
   (nth tab 0))
 
 (def seq-step-tab-buffer (tab)
@@ -61,37 +89,37 @@
 (def seq-step-tab-source-path (tab)
   (if (> (len tab) 3) (nth tab 3) ""))
 
-(def %seq-script-step-tab? (tab)
+(def seq-script-step-tab? (tab)
   (> (len tab) 2))
 
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
 
-(def %seq-render-step-tab (tab)
+(def seq-render-step-tab (tab)
   (let ((buffer (seq-step-tab-buffer tab)))
-    (if (%seq-script-step-tab? tab)
-      (list (%seq-step-tab-label tab)
+    (if (seq-script-step-tab? tab)
+      (list (seq-step-tab-label tab)
         buffer
         :on-close
         (lambda (closed-buffer tab-index)
           (eseq.seq-script-picker/seq-delete-script-sequencer-by-buffer closed-buffer)))
-      (list (%seq-step-tab-label tab) buffer))))
+      (list (seq-step-tab-label tab) buffer))))
 
 (def seq-main-step-tabs ()
   (append (list (list "Seq" "*sequencer*"))
-    (map %seq-render-step-tab seq-registered-step-tabs)))
+    (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)
   (> (len (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
             (seq-main-step-tabs))) 0))
 
-(def %seq-step-buffer? (buffer)
+(def seq-step-buffer? (buffer)
   (or (= buffer "*metal*") (seq-main-step-tab-buffer? buffer)))
 
 (def seq-sanitized-step-buffer (buffer)
-  (if (%seq-step-buffer? buffer) buffer "*sequencer*"))
+  (if (seq-step-buffer? buffer) buffer "*sequencer*"))
 
-(def %seq-visible-step-panel-buffer ()
+(def seq-visible-step-panel-buffer ()
   (seq-sanitized-step-buffer step-panel-buffer))
 
 (def seq-arrangement-view? ()
@@ -100,10 +128,10 @@
 (def seq-visible-main-panel-buffer ()
   (if (seq-arrangement-view?)
     "*arrangement*"
-    (%seq-visible-step-panel-buffer)))
+    (seq-visible-step-panel-buffer)))
 
 (def seq-main-step-tile-layout-spec ()
-  (let ((buffer (%seq-visible-step-panel-buffer))
+  (let ((buffer (seq-visible-step-panel-buffer))
         (tabs (seq-main-step-tabs)))
     (if (and (> (len tabs) 1) (seq-main-step-tab-buffer? buffer))
       (list :buf buffer
@@ -111,7 +139,7 @@
         :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
       (list :buf buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25))))
 
-(def %seq-refresh-step-tabs-if-present ()
+(def seq-refresh-step-tabs-if-present ()
   (let ((tabs (seq-main-step-tabs)))
     (do
       (if (> (len tabs) 1)
@@ -130,7 +158,7 @@
         (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
           seq-registered-step-tabs)
         (list (list label buffer))))
-    (%seq-refresh-step-tabs-if-present)))
+    (seq-refresh-step-tabs-if-present)))
 
 (def seq-register-script-step-sequencer-tab (label buffer sequencer-name source-path)
   (let ((project-source-path
@@ -141,7 +169,7 @@
           (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
             seq-registered-step-tabs)
           (list (list label buffer sequencer-name project-source-path))))
-      (%seq-refresh-step-tabs-if-present))))
+      (seq-refresh-step-tabs-if-present))))
 
 (def seq-unregister-step-sequencer-tab (buffer)
   (do
@@ -153,10 +181,10 @@
     (set-window-buffer-for buffer "*sequencer*")
     ;; The static Seq tab remains, so a refresh selects the tabless layout
     ;; automatically when the final custom sequencer is removed.
-    (%seq-refresh-step-tabs-if-present)))
+    (seq-refresh-step-tabs-if-present)))
 
 (def seq-clear-project-script-tabs ()
-  (let ((script-tabs (filter %seq-script-step-tab? seq-registered-step-tabs)))
+  (let ((script-tabs (filter seq-script-step-tab? seq-registered-step-tabs)))
     (do
       (for-each
         (lambda (tab) (seq-unregister-step-sequencer-tab (seq-step-tab-buffer tab)))
@@ -174,6 +202,6 @@
           (set! seq-main-view :session)
           (set-window-buffer buffer)
           (eseq.seq-layout/refresh-current-layout)
-          (%seq-refresh-step-tabs-if-present)
+          (seq-refresh-step-tabs-if-present)
           true))
       false)))

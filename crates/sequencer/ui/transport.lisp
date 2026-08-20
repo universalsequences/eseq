@@ -54,6 +54,20 @@
 ;; state/accessor hub with no `effect-buffer`, not one of the four UI roots.
 (import eseq.seq-step-tabs :as tabs)
 
+(export transport-stop
+        seq-set-scene-launch-quantize
+        seq-set-record-quantize
+        seq-switch-pattern
+        seq-clone-pattern
+        seq-delete-pattern
+        seq-reorder-scene-drop
+        scene-push-target
+        scene-push-value
+        scene-push-begin
+        scene-push-drag
+        scene-push-end
+        pattern-control-style)
+
 ;; Identity compat aliases (spec §10 slice 3). Each covers a flat caller that
 ;; cannot see a qualified name; every one is a function or a `defstate`, both
 ;; immune to hazard (m):
@@ -612,9 +626,9 @@
       (sdf/fill (sdf/circle 0.4)
         (material :color fg-col)))))
 
-(def %scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+(def scene-launch-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
 
-(def %record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
+(def record-quantize-options '("off" "1/16" "1/8" "1/4" "1/2" "1 bar"))
 
 (def seq-set-scene-launch-quantize (value)
   (host-command "set-scene-launch-quantize" value))
@@ -644,26 +658,26 @@
 ;; mouse cannot turn the gesture into a reorder operation.
 (def scene-push-target (state -1))
 (def scene-push-value (state 1.0))
-(def %scene-push-start-y (state 0.0))
-(def %scene-push-from-source (state false))
+(def scene-push-start-y (state 0.0))
+(def scene-push-from-source (state false))
 
 (def scene-push-begin (scene event)
   (let ((from-source (or (get event :cmd) (get event :meta) (get event :super))))
   (if (or (get event :shift) from-source)
     (do
       (set! scene-push-target scene)
-      (set! %scene-push-from-source from-source)
+      (set! scene-push-from-source from-source)
       (set! scene-push-value (if from-source 0.0 1.0))
-      (set! %scene-push-start-y (get event :y))
+      (set! scene-push-start-y (get event :y))
       (host-command "scene-push-begin"
         (dict :target-scene scene :value (if from-source 0.0 1.0))))
     (seq-switch-pattern scene))))
 
 (def scene-push-drag (scene event)
   (if (= scene-push-target scene)
-    (let ((value (if %scene-push-from-source
-          (clamp (* 0.14 (- (get event :y) %scene-push-start-y)) 0.0 1.0)
-          (clamp (+ 1.0 (* 0.14 (- %scene-push-start-y (get event :y)))) 0.0 1.0))))
+    (let ((value (if scene-push-from-source
+          (clamp (* 0.14 (- (get event :y) scene-push-start-y)) 0.0 1.0)
+          (clamp (+ 1.0 (* 0.14 (- scene-push-start-y (get event :y)))) 0.0 1.0))))
       (set! scene-push-value value)
       (host-command "scene-push-set-value" (dict :value value)))
     nil))
@@ -673,11 +687,11 @@
     (do
       (host-command "scene-push-end" (dict))
       (set! scene-push-target -1)
-      (set! %scene-push-from-source false)
+      (set! scene-push-from-source false)
       (set! scene-push-value 1.0))
     nil))
 
-(def %transport-icon-style
+(def transport-icon-style
   (ui/style
     :pressed (dict
       :scale 1.08
@@ -703,25 +717,25 @@
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
         :on-click |x y r| (eseq.seq-panels/seq-toggle-samples-sidebar)
-        :style %transport-icon-style
+        :style transport-icon-style
         :active (if eseq.seq-core-state/samples-sidebar-visible 1 0)))
     
     (subtree :key "transport-mixer-panel-button"
       (mix-panel-icon
         :on-click |x y r| (eseq.seq-panels/seq-toggle-mixer-panel)
-        :style %transport-icon-style
+        :style transport-icon-style
         :active (if eseq.seq-core-state/mixer-panel-visible 1 0)))
     
     (subtree :key "transport-fx-panel-button"
       (fx-panel-icon
         :on-click |x y r| (eseq.seq-panels/seq-toggle-fx-panel)
-        :style %transport-icon-style
+        :style transport-icon-style
         :active (if eseq.seq-core-state/lower-panel-visible 1 0)))
     
     (subtree :key "transport-save-button"
       (save-icon
         :on-click |x y r| (eseq.browser/open-project-save)
-        :style %transport-icon-style
+        :style transport-icon-style
         :active (if (eseq.browser/project-save-mode?) 1 0)))
     
     ;; Transport buttons in a shared rounded-rect container
@@ -742,7 +756,7 @@
             :width 4.2 :height 1.1
             :background "pattern-pill-bg"
             :active (if SEQ.master-recording 1 0)
-            :style %transport-icon-style
+            :style transport-icon-style
             :on-click |x y r| (seq-toggle-master-recording)
             (v-stack :align :center
               (label "WAV"
@@ -760,7 +774,7 @@
         (subtree :key "transport-back-to-arrangement"
           (box :debug-name "transport-back-to-arrangement"
             :width 2.5 :height 1.4
-            :style %transport-icon-style
+            :style transport-icon-style
             :on-click |x y r| (if SEQ.song-manual-latch (seq-song-back-to-song) nil)
             (back-to-arrangement-icon
               :active (if SEQ.song-manual-latch 1 0))))))
@@ -798,7 +812,7 @@
                 :key "transport-scene-launch-quantize-dropdown"
                 :debug-name "transport-scene-launch-quantize"
                 :value (or SEQ.scene-launch-quantize "off")
-                :options %scene-launch-quantize-options
+                :options scene-launch-quantize-options
                 :on-change seq-set-scene-launch-quantize
                 :width 5.2 :height 1.15 :font-size 9))
             (box :width 1.0)
@@ -810,7 +824,7 @@
                 :key "transport-record-quantize-dropdown"
                 :debug-name "transport-record-quantize"
                 :value (or SEQ.record-quantize "1/16")
-                :options %record-quantize-options
+                :options record-quantize-options
                 :on-change seq-set-record-quantize
                 :width 5.2 :height 1.15 :font-size 9))
             (box :width 0.5)
@@ -960,10 +974,10 @@
     (subtree :key "transport-session-view-button"
       (session-view-icon
         :on-click |x y r| (eseq.seq-panels/seq-show-sequencer-main)
-        :style %transport-icon-style
+        :style transport-icon-style
         :active (if (tabs/seq-arrangement-view?) 0 1)))
     (subtree :key "transport-arrangement-view-button"
       (arrangement-view-icon
         :on-click |x y r| (eseq.seq-panels/seq-open-arrangement)
-        :style %transport-icon-style
+        :style transport-icon-style
         :active (if (tabs/seq-arrangement-view?) 1 0)))))

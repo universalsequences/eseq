@@ -25,6 +25,16 @@
 ;; render two panels off one flag; scope the state per buffer first if so.
 (module eseq.choose-model)
 
+(export open?
+        generation
+        current
+        current-label
+        open
+        close
+        choose-model
+        select
+        panel)
+
 ;; Compat aliases (module-system spec §10 slice 3) for every name with callers
 ;; outside this file: the Rust buffer templates, and tests that drive the
 ;; picker by name. `choose-model` itself keeps its spelling — it is the M-x
@@ -39,14 +49,14 @@
 
 ;; The sentinel row standing in for "no explicit choice" — the bubbles then
 ;; fall back to their built-in provider preference.
-(def %default-label () "Default (auto)")
+(def default-label () "Default (auto)")
 
-(def %options ()
-  (cons (%default-label) (agent/models)))
+(def options ()
+  (cons (default-label) (agent/models)))
 
 (def current ()
   (let ((chosen (agent/patch-model)))
-    (if (= chosen "") (%default-label) chosen)))
+    (if (= chosen "") (default-label) chosen)))
 
 ;; The label the patcher's bubbles show on their header chip. Reads the
 ;; generation so the chip re-renders after a pick: `agent/patch-model` is a
@@ -71,7 +81,7 @@
 (def select (value)
   (do
     (agent/set-patch-model
-      (if (= value (%default-label)) "" value))
+      (if (= value (default-label)) "" value))
     (set! generation (+ generation 1))
     (status (str "Patch agent model: " value))
     (close)))
@@ -80,7 +90,7 @@
 ;; as `eseq.choose-model/title`, `…/dropdown`, and so on. Nothing serializes
 ;; them — they are layout/focus identity only — but tests that look a node up
 ;; by stable key have to spell the qualified form.
-(def %body ()
+(def body ()
   ;; Reading the generation here is what re-renders the row after a write.
   (let ((epoch generation))
     (v-stack :width :fill :gap 0.45
@@ -106,7 +116,7 @@
         (dropdown
           :key "dropdown"
           :value (current)
-          :options (%options)
+          :options (options)
           :width 22.0
           :height 1.35
           :font-size 11
@@ -124,4 +134,4 @@
          :width-px 620 :height-px 300
     (box :debug-name "choose-model-panel"
       :width :fill :height :fill :bg :transparent :padding 0.5
-      (%body))))
+      (body))))

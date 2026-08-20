@@ -40,6 +40,29 @@
 ;; compile-time half this had to be ordered by main.lisp (hazard (p)).
 (import eseq.seq-step-tabs)
 
+(export seq-script-reset-contract
+        seq-register-script-source-tab
+        seq-script-default-dir
+        seq-script-entry-visible?
+        seq-script-picker-refresh
+        seq-script-picker-up
+        seq-script-scratch-entry
+        seq-script-append-to-scratch
+        seq-script-remove-from-scratch
+        seq-script-register-loaded-tab
+        seq-script-register-loaded-tab-from-path
+        seq-script-register-source-tab-from-path
+        seq-delete-step-sequencer-tab
+        seq-delete-script-sequencer-by-buffer
+        seq-delete-script-sequencer
+        seq-delete-script-sequencer-with-buffer
+        seq-script-remember-source-buffer
+        seq-script-return-to-source-buffer
+        seq-script-load-file
+        seq-script-picker-open-at-point
+        seq-script-picker-quit
+        seq-script-picker)
+
 ;; Identity aliases (hazard-free: every one is a function).  Why each:
 ;;   seq-register-script-source-tab  — called by 11 headerless user scripts in
 ;;       crates/sequencer/scripts/**, by the new-script template Rust emits
@@ -115,9 +138,9 @@
 (def eseq.vanilla/seq-script-picker-source-buffer "")
 
 ;; Module-private: no reference anywhere outside this file.
-(def %picker-entries '())
+(def picker-entries '())
 
-(def %switch-or-create-buffer (name)
+(def switch-or-create-buffer (name)
   (let ((bufs (buffer-list))
         (exists (reduce |acc b| (if (= b name) true acc) false bufs)))
     (if exists
@@ -134,27 +157,27 @@
   (or (get entry :directory)
     (string-ends-with? (get entry :name) ".lisp")))
 
-(def %picker-styles ()
+(def picker-styles ()
   (append
     (list
       (style-bg-current-line :widget-focus-bg)
       (style-bold-fg 0 0 8 :status-accent)
       (style-bold-fg 0 9 200 :blue))
     (dired-row-styles 2 true)
-    (dired-entry-styles %picker-entries 3)))
+    (dired-entry-styles picker-entries 3)))
 
-(def %picker-current-entry ()
+(def picker-current-entry ()
   (let ((line (current-line-number)))
     (if (= line 3)
       :parent
       (if (>= line 4)
-        (nth %picker-entries (- line 4))
+        (nth picker-entries (- line 4))
         nil))))
 
 (def seq-script-picker-refresh ()
   (if (not (directory? eseq.vanilla/seq-script-picker-current-dir))
     (do
-      (set! %picker-entries '())
+      (set! picker-entries '())
       (render-widget nil)
       (set-buffer-lines
         (list (str "Scripts > " eseq.vanilla/seq-script-picker-current-dir)
@@ -164,15 +187,15 @@
     (let ((entries (filter (lambda (entry) (seq-script-entry-visible? entry)) (list-directory eseq.vanilla/seq-script-picker-current-dir)))
           (dirs (filter |e| (get e :directory) entries))
           (files (filter |e| (not (get e :directory)) entries)))
-      (set! %picker-entries (append dirs files))
+      (set! picker-entries (append dirs files))
       (render-widget nil)
       (set-buffer-lines
         (append
           (list (str "Scripts > " eseq.vanilla/seq-script-picker-current-dir)
             ""
             "drwxr-xr-x  1      0            .. ../")
-          (map dired-format-entry %picker-entries)))
-      (set-buffer-styles (%picker-styles))
+          (map dired-format-entry picker-entries)))
+      (set-buffer-styles (picker-styles))
       (goto-line 3)
       (status (fmt "{} scripts" (len files))))))
 
@@ -184,7 +207,7 @@
         (set! eseq.vanilla/seq-script-picker-current-dir parent)
         (seq-script-picker-refresh)))))
 
-(def %scratch-path (path)
+(def scratch-path (path)
   (if (string-starts-with? path "crates/sequencer/")
     path
     (if (string-starts-with? path "scripts/")
@@ -194,7 +217,7 @@
         (str "crates/sequencer/" path)))))
 
 (def seq-script-scratch-entry (path)
-  (list (source (list 'load (%scratch-path path)))))
+  (list (source (list 'load (scratch-path path)))))
 
 (def seq-script-append-to-scratch (path)
   (append-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
@@ -243,11 +266,11 @@
                  eseq.vanilla/script-source-tab-label)))
     false))
 
-(def %tab-matches-sequencer? (tab name)
+(def tab-matches-sequencer? (tab name)
   (= (eseq.seq-step-tabs/seq-step-tab-sequencer-name tab) name))
 
-(def %tab-for-sequencer (name)
-  (let ((hits (filter (lambda (tab) (%tab-matches-sequencer? tab name))
+(def tab-for-sequencer (name)
+  (let ((hits (filter (lambda (tab) (tab-matches-sequencer? tab name))
                 eseq.seq-step-tabs/seq-registered-step-tabs)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
@@ -270,7 +293,7 @@
       false)))
 
 (def seq-delete-script-sequencer (name)
-  (let ((tab (%tab-for-sequencer name)))
+  (let ((tab (tab-for-sequencer name)))
     (do
       (seq-unpublish-sequencer name)
       (if tab
@@ -324,7 +347,7 @@
           (seq-script-return-to-source-buffer)
           (status (fmt "Loaded script {}" (path-filename path))))))))
 
-(def %picker-open-entry (entry)
+(def picker-open-entry (entry)
   (let ((name (get entry :name))
         (is-dir (get entry :directory)))
     (if is-dir
@@ -335,11 +358,11 @@
       (seq-script-load-file (path-join eseq.vanilla/seq-script-picker-current-dir name)))))
 
 (def seq-script-picker-open-at-point ()
-  (let ((entry (%picker-current-entry)))
+  (let ((entry (picker-current-entry)))
     (if (= entry :parent)
       (seq-script-picker-up)
       (if entry
-        (%picker-open-entry entry)
+        (picker-open-entry entry)
         (status "No script on this line")))))
 
 (def seq-script-picker-quit ()
@@ -351,7 +374,7 @@
   (do
     (set! eseq.vanilla/seq-script-picker-source-buffer (current-buffer-name))
     (set! eseq.vanilla/seq-script-picker-current-dir (seq-script-default-dir))
-    (%switch-or-create-buffer "*scripts*")
+    (switch-or-create-buffer "*scripts*")
     (set-view-mode "text")
     (set-buffer-mode "seq-script-picker-mode")
     (seq-script-picker-refresh)))

@@ -29,6 +29,35 @@
 
 (import eseq.seq-core-state :as core)
 
+(export seq-grid-handle-key
+        goto-page
+        double-track-pattern
+        halve-track-pattern
+        sequence-roll-hold
+        roll-mode-toggle
+        set-vel-mode
+        set-dur-mode
+        set-aux-mode
+        set-transpose-mode
+        set-pan-mode
+        set-sync-mode
+        set-delay-mode
+        set-process-lane-mode
+        param-values
+        param-min
+        param-max
+        param-slider-min
+        param-slider-max
+        param-slider-value
+        param-haptic-pivot-position
+        param-haptic-pivot-value
+        param-haptic-exponent
+        param-keyword
+        param-color
+        param-name
+        param-origin
+        sync-current-label)
+
 ;; The mode name itself. Both callers are listed in rung 1 above.
 
 ;; src/ui/input.rs:1232 evals "(double-track-pattern)" / "(halve-track-pattern)"

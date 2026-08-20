@@ -8,6 +8,18 @@
 (import eseq.effects.panel-frame :as pf)
 (import eseq.effects.panel-bodies :as pb)
 
+(export enabled-param
+        visible-params
+        enabled-toggle
+        fx-panel
+        midi-fx-panel
+        instrument-synth-button
+        instrument-toggle-mods-view
+        instrument-mods-toggle-button
+        instrument-sound-binding-badge
+        instrument-keys-button
+        effect-mods-toggle-button)
+
 ;; Migration aliases (module spec §10). Callers are still-unconverted lisp
 ;; files — effects/panel-frame.lisp,
 ;; effects/instrument-panel.lisp, effects/sampler-panel.lisp,
@@ -126,7 +138,7 @@
     :selected (if selected 1 0)
     :padding 0)))
 
-(def %instrument-tab-button (text idx width)
+(def instrument-tab-button (text idx width)
   (box :width width :height 1.2 :align :center
     :bg (if (= st/instrument-panel-tab idx) :dark-gray :transparent)
     :on-click |x y r| (set! st/instrument-panel-tab idx)
@@ -134,7 +146,7 @@
       :color (if (= st/instrument-panel-tab idx) :white :dim)
       :bg :transparent)))
 
-(def %instrument-header-button (text active width click)
+(def instrument-header-button (text active width click)
   (box :width width :height 1.2 :align :center
     :bg (if active :dark-gray :transparent)
     :on-click click
@@ -142,7 +154,7 @@
       :color (if active :white :dim)
       :bg :transparent)))
 
-(def %instrument-header-tab-button (text active width click)
+(def instrument-header-tab-button (text active width click)
   (v-stack :height 0.9 :gap 0
     (box :height 0.1)
     (button text
@@ -160,7 +172,7 @@
       :on-click click)))
 
 (def instrument-synth-button ()
-  (%instrument-header-tab-button "synth" (and (= st/instrument-panel-tab 0) (not st/instrument-mods-open)) 4.5
+  (instrument-header-tab-button "synth" (and (= st/instrument-panel-tab 0) (not st/instrument-mods-open)) 4.5
     (lambda (info) (do (set! st/instrument-panel-tab 0) (set! st/instrument-mods-open false)))))
 
 ;; src/ui/state_values/tests.rs slices the next def out of this file by its
@@ -183,7 +195,7 @@
     (set! eseq.effects.state/instrument-mods-open (not eseq.effects.state/instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
-  (%instrument-header-tab-button "mods" (and (= st/instrument-panel-tab 0) st/instrument-mods-open) 4.0
+  (instrument-header-tab-button "mods" (and (= st/instrument-panel-tab 0) st/instrument-mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
 
 ;; Sound-binding badge (takes spec 16.6): which source the panel below is
@@ -205,10 +217,10 @@
           :font-size 9 :color :dim :bg :transparent)))))
 
 (def instrument-keys-button ()
-  (%instrument-header-tab-button "keys" (= st/instrument-panel-tab 1) 4.0
+  (instrument-header-tab-button "keys" (= st/instrument-panel-tab 1) 4.0
     (lambda (info) (do (set! st/instrument-panel-tab 1) (set! st/instrument-mods-open false)))))
 
-(def %effect-toggle-mods-view (fx)
+(def effect-toggle-mods-view (fx)
   (let ((chain (pf/fx-effect-chain-kind fx))
         (track (if (get fx :bus-fx) -1 (get fx :track-idx)))
         (slot (get fx :slot-idx))
@@ -233,5 +245,5 @@
         (set! st/effect-mods-bus bus)))))
 
 (def effect-mods-toggle-button (fx)
-  (%instrument-header-tab-button "mods" (pc/effect-mods-active? fx) 4.0
-    (lambda (info) (%effect-toggle-mods-view fx))))
+  (instrument-header-tab-button "mods" (pc/effect-mods-active? fx) 4.0
+    (lambda (info) (effect-toggle-mods-view fx))))

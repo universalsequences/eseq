@@ -33,8 +33,39 @@
 
 (import eseq.step-grid-interactions :as sgi)
 
+(export seqv-process-lane-mode-offset
+        seqv-process-lane-mode?
+        seqv-process-lane-index
+        seqv-track-process-lanes
+        seqv-track-process-lane
+        seqv-current-param-values
+        seqv-track-param-values
+        seqv-param-value-at
+        seqv-param-min
+        seqv-param-max
+        seqv-param-haptic-pivot-position
+        seqv-param-haptic-exponent
+        seqv-param-keyword
+        seqv-param-color
+        seqv-param-name
+        seqv-range-origin
+        seqv-param-origin
+        seqv-param-decimals
+        seqv-track-param-min
+        seqv-track-param-max
+        seqv-track-param-name
+        seqv-track-param-origin
+        seqv-track-param-decimals
+        seqv-track-param-slider-min
+        seqv-track-param-slider-max
+        seqv-track-param-haptic-pivot-value
+        seqv-step-param-value
+        seqv-step-slider-param-value
+        seqv-track-step-param-value
+        seqv-track-step-slider-param-value)
 
-(def %seqv-track-list (lists track)
+
+(def seqv-track-list (lists track)
   (if (< track (len lists))
     (nth lists track)
     '()))
@@ -47,7 +78,7 @@
 (def seqv-process-lane-index (mode)
   (- mode seqv-process-lane-mode-offset))
 
-(def %seqv-empty-process-lane ()
+(def seqv-empty-process-lane ()
   (dict
     :values '()
     :min 0
@@ -59,32 +90,32 @@
     :instance-id 0
     :inlet ""))
 
-(def %seqv-list-ref (items idx fallback)
+(def seqv-list-ref (items idx fallback)
   (if (and (>= idx 0) (< idx (len items)))
     (nth items idx)
     fallback))
 
 (def seqv-track-process-lanes (track)
-  (%seqv-list-ref SEQ.track-process-lanes track '()))
+  (seqv-list-ref SEQ.track-process-lanes track '()))
 
-(def %seqv-track-process-slots (track)
-  (%seqv-list-ref SEQ.track-process-slots track '()))
+(def seqv-track-process-slots (track)
+  (seqv-list-ref SEQ.track-process-slots track '()))
 
-(def %seqv-current-process-lane (mode)
-  (%seqv-list-ref
+(def seqv-current-process-lane (mode)
+  (seqv-list-ref
     SEQ.process-lanes
     (seqv-process-lane-index mode)
-    (%seqv-empty-process-lane)))
+    (seqv-empty-process-lane)))
 
 (def seqv-track-process-lane (track mode)
-  (%seqv-list-ref
+  (seqv-list-ref
     (seqv-track-process-lanes track)
     (seqv-process-lane-index mode)
-    (%seqv-empty-process-lane)))
+    (seqv-empty-process-lane)))
 
 (def seqv-current-param-values (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (%seqv-current-process-lane mode) :values)
+    (get (seqv-current-process-lane mode) :values)
     (if (= mode 0) SEQ.velocities
       (if (= mode 1) SEQ.durations
         (if (= mode 2) SEQ.auxas
@@ -96,28 +127,28 @@
 (def seqv-track-param-values (track mode)
   (if (seqv-process-lane-mode? mode)
     (get (seqv-track-process-lane track mode) :values)
-    (if (= mode 0) (%seqv-track-list SEQ.track-velocities track)
-      (if (= mode 1) (%seqv-track-list SEQ.track-durations track)
-        (if (= mode 2) (%seqv-track-list SEQ.track-auxas track)
-          (if (= mode 3) (%seqv-track-list SEQ.track-transposes track)
-            (if (= mode 4) (%seqv-track-list SEQ.track-pans track)
-              (if (= mode 5) (%seqv-track-list SEQ.track-syncs track)
-                (%seqv-track-list SEQ.track-delays track)))))))))
+    (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
+      (if (= mode 1) (seqv-track-list SEQ.track-durations track)
+        (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
+          (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
+            (if (= mode 4) (seqv-track-list SEQ.track-pans track)
+              (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
+                (seqv-track-list SEQ.track-delays track)))))))))
 
-(def %seqv-param-values (track mode)
+(def seqv-param-values (track mode)
   (if (= track SEQ.current-track)
     (seqv-current-param-values mode)
     (seqv-track-param-values track mode)))
 
 (def seqv-param-value-at (track mode step)
-  (let ((values (%seqv-param-values track mode)))
+  (let ((values (seqv-param-values track mode)))
     (if (< step (len values))
       (nth values step)
       0)))
 
 (def seqv-param-min (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (%seqv-current-process-lane mode) :min)
+    (get (seqv-current-process-lane mode) :min)
     (if (= mode 0) 0
       (if (= mode 1) 0
         (if (= mode 2) 0
@@ -127,7 +158,7 @@
 
 (def seqv-param-max (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (%seqv-current-process-lane mode) :max)
+    (get (seqv-current-process-lane mode) :max)
     (if (= mode 0) 1
       (if (= mode 1) 32
         (if (= mode 2) 16
@@ -136,13 +167,13 @@
               (if (= mode 5) (- (len SEQ.sync-labels) 1)
                 1))))))))
 
-(def %seqv-param-slider-min (mode)
+(def seqv-param-slider-min (mode)
   (if (= mode 1) 0 (seqv-param-min mode)))
 
-(def %seqv-param-slider-max (mode)
+(def seqv-param-slider-max (mode)
   (if (= mode 1) 1 (seqv-param-max mode)))
 
-(def %seqv-param-slider-value (track mode step)
+(def seqv-param-slider-value (track mode step)
   (if (= mode 1)
     (sgi/duration-slider-position (seqv-param-value-at track mode step))
     (seqv-param-value-at track mode step)))
@@ -150,7 +181,7 @@
 (def seqv-param-haptic-pivot-position (mode)
   (if (= mode 1) 0.5 1))
 
-(def %seqv-param-haptic-pivot-value (mode)
+(def seqv-param-haptic-pivot-value (mode)
   (if (= mode 1) 2 (seqv-param-max mode)))
 
 (def seqv-param-haptic-exponent (mode)
@@ -178,7 +209,7 @@
 
 (def seqv-param-name (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (%seqv-current-process-lane mode) :label)
+    (get (seqv-current-process-lane mode) :label)
     (if (= mode 0) "Velocity"
       (if (= mode 1) "Duration"
         (if (= mode 2) "Aux A"
@@ -202,7 +233,7 @@
 
 (def seqv-param-decimals (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (%seqv-current-process-lane mode) :decimals)
+    (get (seqv-current-process-lane mode) :decimals)
     (if (= mode 3) 0 2)))
 
 (def seqv-track-param-min (track mode)

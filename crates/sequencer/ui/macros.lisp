@@ -32,6 +32,38 @@
 ;; of reaching the flat hook keyspace.
 (module eseq.macros)
 
+(export macro-key-string
+        macro-by-key
+        macro-by-id
+        macro-id-for-key
+        macro-ensure
+        macro-set-key-value
+        macro-release-key
+        macro-mapping-active-for-key?
+        macro-toggle-mapping-arm
+        macro-set-mapping-display-range
+        macro-set-mapping-curve
+        macro-unmap-row
+        rack-macro-mapping-table-macro
+        active-macro-mapping-table-macros
+        macro-mapping-editor-header
+        macro-mapping-editor-row
+        macro-mapping-editor-row-count
+        macro-mapping-editor-rows-for-macro
+        macro-mapping-editor-rows
+        macro-mapping-editor-row-list
+        macro-mapping-editor-empty
+        macro-mapping-editor
+        macro-mapping-table
+        macro-knob
+        macro-momentary
+        macro-map-button
+        scene-macro-options
+        scene-macro-option-index
+        scene-macro-track-mask-with
+        scene-macro-config
+        scene-macro-controls)
+
 ;; Identity compat aliases — see note 1 above. Order matches the definitions.
 
 ;; Script keys are written in canonical lowercase. `str` preserves strings and

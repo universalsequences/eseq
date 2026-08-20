@@ -24,6 +24,42 @@
 (import eseq.track-collapse)
 (import eseq.sound-palette)
 
+(export view-start
+        view-duration
+        cursor-time
+        cursor-track
+        selection
+        track-selection
+        selected-track
+        ghost
+        track-drag
+        region-ghost
+        channel
+        track-row-pitch
+        scroll-extent
+        set-view-start
+        set-cursor
+        lane-cursor-time
+        scene-name
+        scene-items
+        content-length
+        content-length-min
+        clip-color
+        track-clips
+        lane-pattern-events
+        pattern-dots
+        clip-cycle
+        clip-sound-dot
+        track-items
+        lane-selection
+        visible-ordinal
+        region-other-track
+        scene-action
+        lane-region-rect
+        track-drag-kind
+        track-action
+        drop-scene)
+
 (defstate view-start 0)
 (defstate view-duration 64)
 (defstate cursor-time 0)
@@ -32,7 +68,7 @@
 ;; edits ("paste clip at cursor") get both a time and a target track.
 (defstate cursor-track -1)
 (defstate selection '())
-(defstate %selection-rect nil)
+(defstate selection-rect nil)
 ;; Track-clip selection (spec 9.2 extension): ids are the first row-id of a
 ;; merged clip, valid only within the owning track's lane. Selecting in any
 ;; lane clears the other kind so Backspace is never ambiguous.
@@ -68,21 +104,21 @@
 ;; 5 region-move.
 (def channel (name i) (str "arr-" name "-" i))
 
-(def %publish-view ()
+(def publish-view ()
   (do
     (reactive-set "SEQV" "arr-view-start" view-start)
     (reactive-set "SEQV" "arr-view-duration" view-duration)))
 
-(def %clear-lane-ghost (i)
+(def clear-lane-ghost (i)
   (reactive-set "SEQV" (channel "ghost-kind" i) 0))
 
-(def %publish-lane-ghost (i kind clip-id time)
+(def publish-lane-ghost (i kind clip-id time)
   (do
     (reactive-set "SEQV" (channel "ghost-id" i) clip-id)
     (reactive-set "SEQV" (channel "ghost-time" i) time)
     (reactive-set "SEQV" (channel "ghost-kind" i) kind)))
 
-(def %publish-lane-region-ghost (i kind time-a time-b delta)
+(def publish-lane-region-ghost (i kind time-a time-b delta)
   (do
     (reactive-set "SEQV" (channel "ghost-region-a" i) time-a)
     (reactive-set "SEQV" (channel "ghost-region-b" i) time-b)
@@ -92,28 +128,28 @@
 ;; Publish a region ghost rect to every visible lane: kind over the covered
 ;; span, cleared elsewhere. `kind` is 4 for a marquee sweep, 5 for a region
 ;; move (delta shifts the covered clips too).
-(def %publish-region-ghost (region kind delta)
+(def publish-region-ghost (region kind delta)
   (map
     (lambda (i)
       (if (and (not (= region nil))
             (>= i (min (get region :track-a) (get region :track-b)))
             (<= i (max (get region :track-a) (get region :track-b))))
-        (%publish-lane-region-ghost i kind
+        (publish-lane-region-ghost i kind
           (get region :start) (get region :end) delta)
-        (%clear-lane-ghost i)))
+        (clear-lane-ghost i)))
     (eseq.track-collapse/visible-track-indices)))
 
-(def %clear-region-ghost ()
-  (%publish-region-ghost nil 0 0))
+(def clear-region-ghost ()
+  (publish-region-ghost nil 0 0))
 
-(def %publish-selection (track clip-id)
+(def publish-selection (track clip-id)
   (map
     (lambda (i)
       (reactive-set "SEQV" (channel "selected-clip" i)
         (if (= i track) clip-id -1)))
     (eseq.track-collapse/visible-track-indices)))
 
-(def %publish-cursor (time track)
+(def publish-cursor (time track)
   (map
     (lambda (i)
       (reactive-set "SEQV" (channel "cursor" i)
@@ -141,17 +177,17 @@
 (reactive-set "SEQV" "arr-view-duration" 64)
 (reactive-set "SEQV" "arr-content-length" 64)
 
-(def %min-view-duration 4)
-(def %max-view-duration 1024)
-(def %view-padding 8)
-(def %beats-per-bar 4)
-(def %snap %beats-per-bar)
-(def %header-height 2.6)
+(def min-view-duration 4)
+(def max-view-duration 1024)
+(def view-padding 8)
+(def beats-per-bar 4)
+(def snap beats-per-bar)
+(def header-height 2.6)
 ;; One cell (~20 px at the default scale) between ruler/loop chrome and the
 ;; scene lane. The transport-start triangle lives in this gutter.
-(def %cursor-gutter-height 1)
-(def %scene-lane-height 4.6)
-(def %track-lane-height 2.85)
+(def cursor-gutter-height 1)
+(def scene-lane-height 4.6)
+(def track-lane-height 2.85)
 ;; Vertical distance in CELLS between one track row's top and the next.
 ;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
 ;; the pitch is exactly the lane height — no gap and no per-row chrome to add.
@@ -159,31 +195,31 @@
 ;; count of tracks by dividing by this, so it MUST track the lane height and
 ;; the v-stack gap; metal_seq_arrangement_region_row_pitch_matches_layout
 ;; measures the rendered rows and fails if they ever drift apart.
-(def track-row-pitch %track-lane-height)
+(def track-row-pitch track-lane-height)
 ;; Clip title-bar height in cells (region spec 3.1): the move/resize strip
 ;; above each clip's body. Fixed rather than proportional so clips read the
 ;; same at any lane height; tune by eye against the Ableton reference.
-(def %clip-title-bar-height 0.9)
-(def %clip-label-font-size 9)
-(def %clip-label-color '(rgba 0.2 0.2 0.2 1))
-(def %timeline-background-color :buffer-bg)
-(def %cursor-color '(rgba 0.32 0.78 0.94 1))
+(def clip-title-bar-height 0.9)
+(def clip-label-font-size 9)
+(def clip-label-color '(rgba 0.2 0.2 0.2 1))
+(def timeline-background-color :buffer-bg)
+(def cursor-color '(rgba 0.32 0.78 0.94 1))
 ;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
-(def %clip-corner-radius 0.22)
+(def clip-corner-radius 0.22)
 ;; Requests one finer candidate from the timeline's zoom-adaptive grid. The
 ;; widget promotes crowded candidates to a readable aligned interval, and that
 ;; one resolved interval drives lines, labels, cursor placement, marquee, and
 ;; resize snapping. Every arrangement lane passes the same value or the ruler
 ;; and lanes would quantize differently; the piano roll uses the stock density.
-(def %grid-density 2)
+(def grid-density 2)
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
-(def %header-width 27.4)
+(def header-width 27.4)
 
-(def %event-num (event key fallback)
+(def event-num (event key fallback)
   (let ((value (get event key)))
     (if (= value nil) fallback value)))
 
@@ -197,28 +233,28 @@
 ;; no capture is running, so nothing else changes.
 (def scroll-extent ()
   (max SEQ.song-end-beat
-    (max (%pending-head)
+    (max (pending-head)
       ;; Open-ended playback runs PAST the end (jam room, unified-transport
       ;; spec 4.2); the playhead is the honest extent out there. Reads 0
       ;; while stopped, so the parked view is unchanged.
       (if (= SEQ.song-mode "stopped") 0 SEQ.song-position-beats))))
 
-(def %max-view-start (duration)
-  (max 0 (- (+ (scroll-extent) %view-padding) duration)))
+(def max-view-start (duration)
+  (max 0 (- (+ (scroll-extent) view-padding) duration)))
 
 (def set-view-start (start duration)
   (do
     (set! view-start
-      (max 0 (min (%max-view-start duration) start)))
-    (%publish-view)))
+      (max 0 (min (max-view-start duration) start)))
+    (publish-view)))
 
-(def %set-zoom (event)
+(def set-zoom (event)
   (let ((cur-duration view-duration)
-        (factor (%event-num event :factor 1)))
-    (let ((next-duration (max %min-view-duration
-                           (min %max-view-duration
+        (factor (event-num event :factor 1)))
+    (let ((next-duration (max min-view-duration
+                           (min max-view-duration
                              (/ view-duration factor)))))
-      (let ((anchor (%event-num event :anchor-time view-start)))
+      (let ((anchor (event-num event :anchor-time view-start)))
         (let ((anchor-ratio
                 (if (<= cur-duration 0)
                   0.5
@@ -238,7 +274,7 @@
       (set! cursor-track track)
       ;; Track lanes render the cursor through their bound channel; only the
       ;; owning lane repaints.
-      (%publish-cursor (max 0 time) track)
+      (publish-cursor (max 0 time) track)
       ;; Mirror into Rust (region spec 5.3): Cmd-V is handled Rust-side and
       ;; pastes at the cursor, so the paste target cannot live only here.
       (seq-song-set-arr-cursor (max 0 time) track))))
@@ -251,7 +287,7 @@
 ;; into the one shared time axis, regardless of which lane the pointer is
 ;; over. `:lane-scroll`/`:delta-lanes` are ignored per spec 4.2 — vertical
 ;; navigation belongs to the track scroll container.
-(def %view-action (event)
+(def view-action (event)
   (match event.type
     :scroll-view
     ;; `event-start` is deliberately NOT spelled `view-start`: dropping the
@@ -260,13 +296,13 @@
     (let ((event-start (get event :view-start)))
       (set-view-start
         (if (= event-start nil)
-          (+ view-start (%event-num event :delta-time 0))
+          (+ view-start (event-num event :delta-time 0))
           event-start)
         view-duration))
     :zoom-view
-    (%set-zoom event)))
+    (set-zoom event)))
 
-(def %view-action? (event)
+(def view-action? (event)
   (or (= event.type :scroll-view)
       (= event.type :zoom-view)))
 
@@ -277,32 +313,32 @@
     (nth SEQ.scene-names scene)
     (str "Scene " (+ scene 1))))
 
-(def %ghost-kind ()
+(def ghost-kind ()
   (if (= ghost nil) nil (get ghost :kind)))
 
 ;; Scene-lane gestures address a scene EVENT, whose identity is its start
 ;; beat (lane spec 12: every span IS a scene event, so there is no ambiguity
 ;; left to resolve).
-(def %ghost-event? (kind beat)
-  (and (= (%ghost-kind) kind)
+(def ghost-event? (kind beat)
+  (and (= (ghost-kind) kind)
     (= (get ghost :beat) beat)))
 
 ;; Ghost overlay for one scene span (spec 9.1 live preview): a move ghost
 ;; shifts its event's span; a resize ghost moves the boundary shared by the
 ;; resized span's end and the next event's start.
-(def %scene-span-start (index start)
-  (if (%ghost-event? :move start)
+(def scene-span-start (index start)
+  (if (ghost-event? :move start)
     (get ghost :start)
     (if (and (> index 0)
-          (%ghost-event? :resize
+          (ghost-event? :resize
             (get (nth SEQ.scene-spans (- index 1)) :start-beat)))
       (get ghost :end)
       start)))
 
-(def %scene-span-end (start end)
-  (if (%ghost-event? :move start)
+(def scene-span-end (start end)
+  (if (ghost-event? :move start)
     (+ (get ghost :start) (- end start))
-    (if (%ghost-event? :resize start)
+    (if (ghost-event? :resize start)
       (get ghost :end)
       end)))
 
@@ -311,7 +347,7 @@
 ;; no longer split this lane, so every span is labeled — the old
 ;; dedup-the-repeated-label hack that made a fragmented lane readable is gone
 ;; with the fragmentation.
-(def %scene-row-items ()
+(def scene-row-items ()
   (map
     (lambda (index)
       (let ((span (nth SEQ.scene-spans index)))
@@ -320,22 +356,22 @@
           (dict
             :id start
             :lane 0
-            :start (%scene-span-start index start)
-            :end (%scene-span-end start end)
+            :start (scene-span-start index start)
+            :end (scene-span-end start end)
             :label (scene-name (get span :scene))
             :kind :scene
-            :selected (%row-selected? start)
+            :selected (row-selected? start)
             ;; The scene identity is the performer's while scene-latched:
             ;; dim the lane like any overridden track (rev 4).
             :color (if SEQ.song-scene-latched
-                     (%override-dim (list 0.52 0.56 0.62))
+                     (override-dim (list 0.52 0.56 0.62))
                      (list 0.52 0.56 0.62))))))
     (range 0 (len SEQ.scene-spans))))
 
 (def scene-items ()
   (append
-    (if (= (%ghost-kind) :create)
-      (append (%scene-row-items)
+    (if (= (ghost-kind) :create)
+      (append (scene-row-items)
         (list (dict
                 :id :ghost-create
                 :lane 0
@@ -344,11 +380,11 @@
                 :kind :scene
                 :label (scene-name (or SEQ.current-pattern 0))
                 :color (list 0.72 0.76 0.82))))
-      (%scene-row-items))
+      (scene-row-items))
     ;; Launches captured so far, filling in the scene lane as you perform
     ;; (realtime feedback spec 3.1). Defined below with the rest of the
     ;; provisional surface.
-    (%pending-scene-items)))
+    (pending-scene-items)))
 
 ;; Song end, with the content-length drag ghost applied so the end marker
 ;; previews in every lane while dragging (spec 9.3).
@@ -357,13 +393,13 @@
 ;; extends `end_beat` to the Stop beat), so leaving it behind would draw the
 ;; recording as if it fell outside the song.
 (def content-length ()
-  (if (= (%ghost-kind) :end)
+  (if (= (ghost-kind) :end)
     (get ghost :length)
     (scroll-extent)))
 
 
 ;; The furthest beat any stored clip runs to (0 when the lanes are empty).
-(def %last-clip-end ()
+(def last-clip-end ()
   (reduce |acc lane|
     (reduce |lane-acc clip| (max lane-acc (get clip :end-beat)) acc lane)
     0
@@ -376,16 +412,16 @@
 ;; drag comes back as an error banner instead of a clamp.
 (def content-length-min ()
   (let ((count (len SEQ.scene-spans))
-        (clip-floor (%last-clip-end)))
+        (clip-floor (last-clip-end)))
     (max 1 clip-floor
       (if (= count 0)
         0
         (+ (get (nth SEQ.scene-spans (- count 1)) :start-beat) 1)))))
 
-(def %row-selected? (id)
+(def row-selected? (id)
   (> (len (filter (lambda (candidate) (= candidate id)) selection)) 0))
 
-(def %track-color (i)
+(def track-color (i)
   (if (and (>= i 0) (< i (len SEQ.track-colors)))
     (nth SEQ.track-colors i)
     (list 0.34 0.48 0.98)))
@@ -396,7 +432,7 @@
 ;; pastel, so arrangement clips no longer read as the same color the session
 ;; grid and piano roll use for the track.
 (def clip-color (i)
-  (let ((color (%track-color i)))
+  (let ((color (track-color i)))
     (list
       (min 1 (* 1.15 (nth color 0)))
       (min 1 (* 1.15 (nth color 1)))
@@ -410,7 +446,7 @@
     (nth SEQ.song-lanes i)
     '()))
 
-(def %find-track-clip (i clip-id)
+(def find-track-clip (i clip-id)
   (let ((matches (filter (lambda (clip) (= (get clip :clip-id) clip-id))
                    (track-clips i))))
     (if (> (len matches) 0) (nth matches 0) nil)))
@@ -419,11 +455,11 @@
 ;; items (realtime feedback spec 3.4) carry no id, so selecting one selects
 ;; nothing — and every other gesture already resolves through
 ;; %find-track-clip, which cannot match them either.
-(def %real-clip-ids (i ids)
-  (filter (lambda (id) (not (= (%find-track-clip i id) nil))) ids))
+(def real-clip-ids (i ids)
+  (filter (lambda (id) (not (= (find-track-clip i id) nil))) ids))
 
 ;; Same guard for the scene lane, whose item ids are scene-event start beats.
-(def %real-scene-ids (ids)
+(def real-scene-ids (ids)
   (filter (lambda (id)
             (> (len (filter (lambda (span) (= (get span :start-beat) id))
                       SEQ.scene-spans))
@@ -436,7 +472,7 @@
 ;; flattens one pattern cycle into normalized (offset, value) dots — a
 ;; snapshot-time preview, deliberately impressionistic at arrangement zoom.
 
-(def %dot-cap 256)
+(def dot-cap 256)
 
 (def lane-pattern-events (track pattern-id)
   (let ((entries (if (< track (len SEQ.song-lane-events))
@@ -448,7 +484,7 @@
 
 ;; Aggregated take content (takes spec 11.3): one entry per take, event
 ;; times continuous across chunk boundaries, :num-steps = take length.
-(def %lane-take-events (track take-id)
+(def lane-take-events (track take-id)
   (let ((entries (if (< track (len SEQ.song-lane-events))
                    (nth SEQ.song-lane-events track)
                    '())))
@@ -458,14 +494,14 @@
 
 ;; Vertical placement: spread the pattern's own transpose range across the
 ;; item rect (single-pitch patterns sit mid-rect).
-(def %dot-value (note lo hi)
+(def dot-value (note lo hi)
   (if (= hi lo)
     0.5
     (+ 0.15 (* 0.7 (/ (- note lo) (- hi lo))))))
 
 ;; Note length in steps (4th event element, region spec 3.2). Older/short
 ;; event rows degrade to a point dot rather than erroring.
-(def %event-duration (event)
+(def event-duration (event)
   (if (< (len event) 4)
     0
     (let ((duration (nth event 3)))
@@ -477,7 +513,7 @@
 ;; from the read surface. Only events inside the step window
 ;; [from, from + span) are shown, normalized to the window — a re-anchored
 ;; take clip (nonzero offset-steps) renders the slice it actually plays.
-(def %windowed-dots (entry from span)
+(def windowed-dots (entry from span)
   (let ((events (filter (lambda (event)
                           (and (>= (nth event 0) from)
                             (< (nth event 0) (+ from span))))
@@ -495,18 +531,18 @@
           (get
             (reduce |acc event|
               (let ((offset (max 0 (min 0.999 (/ (- (nth event 0) from) span)))))
-                (let ((bucket (floor (* offset %dot-cap))))
+                (let ((bucket (floor (* offset dot-cap))))
                   (if (= bucket (get acc :last))
                     acc
                     (dict :last bucket
                       :dots (cons (dict :offset offset
-                                    :value (%dot-value (nth event 1) lo hi)
+                                    :value (dot-value (nth event 1) lo hi)
                                     ;; Real note length normalized to the
                                     ;; drawn window, clamped so a note never
                                     ;; paints past the item's end.
                                     :width (max 0
                                              (min (- 1 offset)
-                                               (/ (%event-duration event)
+                                               (/ (event-duration event)
                                                  span))))
                               (get acc :dots))))))
               (dict :last -1 :dots '())
@@ -514,14 +550,14 @@
             :dots))))))
 
 (def pattern-dots (entry)
-  (%windowed-dots entry 0 (max 1 (get entry :num-steps))))
+  (windowed-dots entry 0 (max 1 (get entry :num-steps))))
 
 ;; True drawn window of a take clip (takes spec 11.3): a take is finite and
 ;; never loops, so the item ends at min(row-span end, start + remaining
 ;; take length at this clip's offset). A row extending past the take's end
 ;; is the silent tail — it renders as empty lane, matching what plays.
-(def %take-clip-window (i clip)
-  (let ((entry (%lane-take-events i (get clip :take-id))))
+(def take-clip-window (i clip)
+  (let ((entry (lane-take-events i (get clip :take-id))))
     (if (or (= entry nil)
           (<= (get entry :length-beats) 0)
           (<= (get entry :num-steps) 0))
@@ -552,7 +588,7 @@
       (/ length-beats span)
       1)))
 
-(def %clip-phase (entry clip)
+(def clip-phase (entry clip)
   (if (= (get clip :take-id) nil)
     (if (<= (get entry :num-steps) 0)
       0
@@ -561,10 +597,10 @@
     ;; range below, so they start at phase zero and never repeat.
     0))
 
-(def %clip-content (i clip)
+(def clip-content (i clip)
   (let ((entry (if (= (get clip :take-id) nil)
                  (lane-pattern-events i (get clip :pattern-id))
-                 (%lane-take-events i (get clip :take-id)))))
+                 (lane-take-events i (get clip :take-id)))))
     (if (= entry nil)
       nil
       (let ((dots
@@ -573,10 +609,10 @@
                 ;; Take dots render the exact step window the clip plays
                 ;; (offset..offset+span), normalized to the drawn item —
                 ;; so timeline dots line up with the take's actual notes.
-                (let ((window (%take-clip-window i clip)))
+                (let ((window (take-clip-window i clip)))
                   (if (= window nil)
                     (pattern-dots entry)
-                    (%windowed-dots entry
+                    (windowed-dots entry
                       (get window :offset-steps)
                       (get window :window-steps)))))))
         (if (= (len dots) 0)
@@ -586,14 +622,14 @@
             :cycle (if (= (get clip :take-id) nil)
                      (clip-cycle entry clip)
                      1)
-            :phase (%clip-phase entry clip)
+            :phase (clip-phase entry clip)
             ;; The widget's live start-edge ghost wraps a pattern's phase and
             ;; clamps a take's at zero (takes spec 8).
             :wrap (= (get clip :take-id) nil)))))))
 
 ;; Track-lane items (lane spec 12): the stored clips, and nothing else. A gap
 ;; between clips produces NO item — the lane really is silent there.
-(def %track-clip-label (clip)
+(def track-clip-label (clip)
   (if (= (get clip :take-id) nil)
     (str "Pattern " (get clip :pattern-id))
     ;; Take ids are zero-based internally; their default user-facing names
@@ -624,8 +660,8 @@
               (let ((color (list (get entry :color-r)
                                  (get entry :color-g)
                                  (get entry :color-b))))
-                (if (%lane-latched? i)
-                  (%override-dim color)
+                (if (lane-latched? i)
+                  (override-dim color)
                   color)))
             nil))))))
 
@@ -633,18 +669,18 @@
 ;; A latched lane's committed clips darken: the arrangement is NOT what you
 ;; hear on that lane until Back to Arrangement. Per-track, not global —
 ;; un-latched lanes keep playing (and showing) the arrangement at full color.
-(def %lane-latched? (i)
+(def lane-latched? (i)
   (= true (nth SEQ.song-track-latched i)))
 
-(def %override-dim (color)
+(def override-dim (color)
   (list (* 0.35 (nth color 0)) (* 0.35 (nth color 1)) (* 0.35 (nth color 2))))
 
-(def %lane-clip-color (i)
-  (if (%lane-latched? i)
-    (%override-dim (clip-color i))
+(def lane-clip-color (i)
+  (if (lane-latched? i)
+    (override-dim (clip-color i))
     (clip-color i)))
 
-(def %track-clip-items (i)
+(def track-clip-items (i)
   (map
     (lambda (clip)
       (let ((clip clip))
@@ -657,14 +693,14 @@
           ;; tail is silent and draws as empty lane.
           :end (if (= (get clip :take-id) nil)
                  (get clip :end-beat)
-                 (let ((window (%take-clip-window i clip)))
+                 (let ((window (take-clip-window i clip)))
                    (if (= window nil)
                      (get clip :end-beat)
                      (get window :end-beat))))
           :kind :midi
-          :label (%track-clip-label clip)
-          :content (%clip-content i clip)
-          :color (%lane-clip-color i)
+          :label (track-clip-label clip)
+          :content (clip-content i clip)
+          :color (lane-clip-color i)
           :sound-dot (clip-sound-dot i (get clip :clip-id)))))
     (track-clips i)))
 
@@ -683,14 +719,14 @@
 ;; for it. What marks them as in-flight is that they are growing under the
 ;; playhead, not a paint job.
 
-(def %pending-lanes ()
+(def pending-lanes ()
   (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :lanes)))
 
-(def %pending-scene-events ()
+(def pending-scene-events ()
   (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :scene-events)))
 
 ;; The record head, which every provisional span grows toward.
-(def %pending-head ()
+(def pending-head ()
   (if (= SEQ.song-pending nil) 0 (get SEQ.song-pending :head-beat)))
 
 ;; Provisional lanes carry RAW events in the same shape SEQ.song-lane-events
@@ -702,7 +738,7 @@
 ;; would snap back on every new note and creep apart again in between). A take
 ;; never loops, so this is one cycle at phase 0 and the span past the last
 ;; note is honestly empty.
-(def %pending-span-steps (lane)
+(def pending-span-steps (lane)
   (let ((num-steps (max 1 (get lane :num-steps)))
         (length-beats (get lane :length-beats)))
     (if (<= length-beats 0)
@@ -711,9 +747,9 @@
         (max 1
           (/ (- (get lane :end-beat) (get lane :start-beat)) step-beats))))))
 
-(def %pending-content (lane)
-  (let ((dots (%windowed-dots lane 0
-                (%pending-span-steps lane))))
+(def pending-content (lane)
+  (let ((dots (windowed-dots lane 0
+                (pending-span-steps lane))))
     (if (= (len dots) 0)
       nil
       (dict :dots dots :cycle 1 :phase 0))))
@@ -721,7 +757,7 @@
 ;; No :id — the one thing that would make a provisional item addressable.
 ;; The take has no TakeId until the stop-commit registers it, so the label
 ;; cannot name a number yet.
-(def %pending-track-items (i)
+(def pending-track-items (i)
   (map
     (lambda (lane)
       (dict
@@ -730,10 +766,10 @@
         :end (get lane :end-beat)
         :kind :midi
         :label "Take"
-        :content (%pending-content lane)
+        :content (pending-content lane)
         :color (clip-color i)))
     (filter (lambda (lane) (= (get lane :track) i))
-      (%pending-lanes))))
+      (pending-lanes))))
 
 ;; ── Provisional launch clips ──────────────────────────────────────────────
 ;; What each captured launch put on a TRACK lane: a clip-launched pattern, or
@@ -741,11 +777,11 @@
 ;; These are the clips the stop-commit will write, so they preview the same
 ;; way — a looping pattern tiled over its span.
 
-(def %pending-track-events (i)
+(def pending-track-events (i)
   (filter (lambda (event) (= (get event :track) i))
     (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :track-events))))
 
-(def %pending-launch-content (event span)
+(def pending-launch-content (event span)
   (let ((dots (pattern-dots event))
         (length-beats (get event :length-beats)))
     (if (= (len dots) 0)
@@ -758,12 +794,12 @@
 
 ;; The span runs to the next launch on this lane, or to the record head while
 ;; it is still the last one.
-(def %pending-launch-item (i index events)
+(def pending-launch-item (i index events)
   (let ((event (nth events index)))
     (let ((start (get event :start-beat))
           (end (if (< (+ index 1) (len events))
                  (get (nth events (+ index 1)) :start-beat)
-                 (%pending-head))))
+                 (pending-head))))
       (if (<= end start)
         nil
         (dict
@@ -772,24 +808,24 @@
           :end end
           :kind :midi
           :label (str "Pattern " (get event :pattern-id))
-          :content (%pending-launch-content event (- end start))
+          :content (pending-launch-content event (- end start))
           :color (clip-color i))))))
 
-(def %pending-launch-items (i)
-  (let ((events (%pending-track-events i)))
+(def pending-launch-items (i)
+  (let ((events (pending-track-events i)))
     (filter (lambda (item) (not (= item nil)))
-      (map (lambda (index) (%pending-launch-item i index events))
+      (map (lambda (index) (pending-launch-item i index events))
         (range 0 (len events))))))
 
 ;; A captured launch's provisional span runs to the next captured launch, or
 ;; to the record head while it is still the last one. A launch the head has
 ;; not passed yet has nothing to draw.
-(def %pending-scene-item (index events)
+(def pending-scene-item (index events)
   (let ((event (nth events index)))
     (let ((start (get event :start-beat))
           (end (if (< (+ index 1) (len events))
                  (get (nth events (+ index 1)) :start-beat)
-                 (%pending-head))))
+                 (pending-head))))
       (if (<= end start)
         nil
         (dict
@@ -800,19 +836,19 @@
           :label (scene-name (get event :scene))
           :color (list 0.52 0.56 0.62))))))
 
-(def %pending-scene-items ()
-  (let ((events (%pending-scene-events)))
+(def pending-scene-items ()
+  (let ((events (pending-scene-events)))
     (filter (lambda (item) (not (= item nil)))
-      (map (lambda (index) (%pending-scene-item index events))
+      (map (lambda (index) (pending-scene-item index events))
         (range 0 (len events))))))
 
 ;; Committed clips first, provisional content on top (spec 3.4). Recorded
 ;; takes last of all: the stop-commit paints them OVER whatever the launches
 ;; put on the lane, so the preview stacks the same way.
 (def track-items (i)
-  (append (%track-clip-items i)
-    (append (%pending-launch-items i)
-      (%pending-track-items i))))
+  (append (track-clip-items i)
+    (append (pending-launch-items i)
+      (pending-track-items i))))
 
 ;; Selection prop for one track lane: only the owning track shows its ids.
 ;; The bound clip (takes spec 16.6) is Rust-side persistent timeline state,
@@ -849,7 +885,7 @@
 
 ;; Ordinal -> model track index, clamped to the visible range so a drag that
 ;; runs off the top or bottom of the arrangement selects out to the edge.
-(def %track-at-ordinal (visible ordinal)
+(def track-at-ordinal (visible ordinal)
   (nth visible (max 0 (min (- (len visible) 1) ordinal))))
 
 ;; The far end of a region drag that started in track `i`: convert the
@@ -862,10 +898,10 @@
       (let ((ordinal (visible-ordinal visible i)))
         (if (< ordinal 0)
           i
-          (%track-at-ordinal visible
+          (track-at-ordinal visible
             (+ ordinal (round (/ (or row-delta 0) track-row-pitch)))))))))
 
-(def %region-from-event (i event)
+(def region-from-event (i event)
   (dict
     :track-a i
     :track-b (region-other-track i (get event :row-delta))
@@ -875,7 +911,7 @@
 ;; Scene-lane marquees select the time span across EVERY visible track
 ;; (spec 4.2): the scene lane spans the whole arrangement, so its vertical
 ;; travel carries no track information.
-(def %region-all-tracks (event)
+(def region-all-tracks (event)
   (let ((visible (eseq.track-collapse/visible-track-indices)))
     (if (= (len visible) 0)
       nil
@@ -890,10 +926,10 @@
 ;; the scene lane copies/pastes/deletes the scene EVENTS inside it as well as
 ;; the clips, which a track-lane marquee covering the same rectangle never
 ;; does.
-(def %region-commit (region)
+(def region-commit (region)
   (do
     (set! region-ghost nil)
-    (%clear-region-ghost)
+    (clear-region-ghost)
     (if (= region nil)
       (seq-song-clear-region)
       (seq-song-set-region
@@ -907,8 +943,8 @@
 ;; (Ableton). A free marquee, which names no single clip, still releases the
 ;; binding — and so does a click on a BACKDROP ghost (negative id, lane spec
 ;; 12): a gap is not a clip, so there is nothing to bind or select.
-(def %select-clip (i clip-id)
-  (let ((clip (%find-track-clip i clip-id)))
+(def select-clip (i clip-id)
+  (let ((clip (find-track-clip i clip-id)))
     (if (= clip nil)
       (do (seq-song-deselect-clip) (seq-song-clear-region))
       (seq-song-select-clip i clip-id
@@ -917,18 +953,18 @@
 ;; Any other selection gesture drops the region: the two are mutually
 ;; exclusive (spec 4.1). Clip selection additionally clears it Rust-side, so
 ;; this is really about the in-flight ghost and the scene-row path.
-(def %region-clear ()
+(def region-clear ()
   (do
     (set! region-ghost nil)
-    (%clear-region-ghost)
+    (clear-region-ghost)
     (seq-song-clear-region)))
 
 ;; The scene lane draws its own marquee echo while a drag is live, then keeps
 ;; the committed rect lit for a SCENE-LANE region (region spec 4.4) — the
 ;; visible sign that the region carries the scene events, not just the clips.
-(def %scene-region-rect ()
-  (if (not (= %selection-rect nil))
-    %selection-rect
+(def scene-region-rect ()
+  (if (not (= selection-rect nil))
+    selection-rect
     (if (and (not (= SEQ.song-region nil))
           (= (nth SEQ.song-region 4) true))
       (dict :time-a (nth SEQ.song-region 2) :time-b (nth SEQ.song-region 3)
@@ -940,7 +976,7 @@
 ;; Lower one finished gesture to song primitives through the Rust translator
 ;; (spec 9.1): exactly one primitive per gesture, validation/undo/rejection
 ;; reporting owned by the song host commands.
-(def %edit-finish (payload)
+(def edit-finish (payload)
   (do
     (set! ghost nil)
     (seq-arrangement-action payload)))
@@ -949,29 +985,29 @@
 ;; shared axis; live edit actions update the ghost preview only; terminal
 ;; actions commit through %edit-finish.
 (def scene-action (event)
-  (if (%view-action? event)
-    (%view-action event)
+  (if (view-action? event)
+    (view-action event)
     (match event.type
       :select
       (do
-        (set! %selection-rect nil)
+        (set! selection-rect nil)
         (set! track-selection '())
         (set! selected-track -1)
-        (%publish-selection -1 -1)
+        (publish-selection -1 -1)
         ;; Provisional captured launches carry no id (realtime feedback spec
         ;; 3.4), so only real scene events can enter the selection.
-        (set! selection (%real-scene-ids (get event :ids)))
+        (set! selection (real-scene-ids (get event :ids)))
         ;; A scene span covers every track and names no single clip, so it
         ;; releases the sound binding (takes spec 16.6 cause 2) — and, for the
         ;; same reason, drops the region (region spec 4.1).
-        (%region-clear)
+        (region-clear)
         (seq-song-deselect-clip)
         (set-cursor (get event :time) -1))
       :clear-selection
       (do
-        (set! %selection-rect nil)
+        (set! selection-rect nil)
         (set! selection '())
-        (%region-clear)
+        (region-clear)
         (seq-song-deselect-clip)
         (set-cursor (get event :time) -1))
       :set-cursor
@@ -981,13 +1017,13 @@
       ;; scene lane keeps its own dashed marquee echo while the drag is live.
       :marquee-select
       (do
-        (set! %selection-rect event)
-        (set! region-ghost (%region-all-tracks event))
-        (%publish-region-ghost region-ghost 4 0))
+        (set! selection-rect event)
+        (set! region-ghost (region-all-tracks event))
+        (publish-region-ghost region-ghost 4 0))
       :finish-marquee-select
       (do
-        (set! %selection-rect nil)
-        (%region-commit (%region-all-tracks event)))
+        (set! selection-rect nil)
+        (region-commit (region-all-tracks event)))
       ;; Live drags: ghost only, never a primitive (spec 9.1). A scene-lane
       ;; item's id IS its scene event's start beat (lane spec 12).
       :move-items-absolute
@@ -1019,34 +1055,34 @@
       ;; Terminal actions: one primitive each, from the ghost's final values
       ;; (the widget's finish actions carry ids, not times).
       :finish-move-items
-      (if (= (%ghost-kind) :move)
-        (%edit-finish
+      (if (= (ghost-kind) :move)
+        (edit-finish
           (dict :type :finish-move-items
             :from-beat (get ghost :beat)
             :start (get ghost :start)))
         (set! ghost nil))
       :finish-resize-items
-      (if (= (%ghost-kind) :resize)
-        (%edit-finish
+      (if (= (ghost-kind) :resize)
+        (edit-finish
           (dict :type :finish-resize-items
             :from-beat (get ghost :beat)
             :end (get ghost :end)))
         ;; Start-edge drag: the ghost is a move (see above), so it commits as
         ;; one.
-        (if (= (%ghost-kind) :move)
-          (%edit-finish
+        (if (= (ghost-kind) :move)
+          (edit-finish
             (dict :type :finish-move-items
               :from-beat (get ghost :beat)
               :start (get ghost :start)))
           (set! ghost nil)))
       :finish-create-item
-      (%edit-finish
+      (edit-finish
         (dict :type :finish-create-item
           :start (get event :start)
           :end (get event :end)
           :scene (or SEQ.current-pattern 0)))
       :finish-resize-content-length
-      (%edit-finish
+      (edit-finish
         (dict :type :finish-resize-content-length
           :length (get event :length)))
       :delete-items
@@ -1055,13 +1091,13 @@
         ;; scene change can never touch a clip, but the selection/region were
         ;; measured against the old lane — drop them with it.
         (set! selection '())
-        (%region-clear)
+        (region-clear)
         ;; A provisional captured launch has no id, so a delete aimed at one
         ;; resolves to nothing and never reaches a primitive.
-        (let ((ids (%real-scene-ids (get event :ids))))
+        (let ((ids (real-scene-ids (get event :ids))))
           (if (= (len ids) 0)
             nil
-            (%edit-finish (dict :type :delete-items :ids ids)))))
+            (edit-finish (dict :type :delete-items :ids ids)))))
       ;; A scene-lane marquee selects the span across every track, so its
       ;; clipboard keys drive the same region commands (region spec 5.3).
       :copy-items
@@ -1077,20 +1113,20 @@
 ;;
 ;; The view speaks STORED clip ids (lane spec 12), so each gesture names the
 ;; object it edits — no span-to-clip resolution anywhere.
-(def %clip-edit (i clip payload)
-  (%edit-finish
+(def clip-edit (i clip payload)
+  (edit-finish
     (merge payload
       :track i
       :clip-id (get clip :clip-id))))
 
-(def %track-resize-end-finish (i clip time)
+(def track-resize-end-finish (i clip time)
   (let ((new-end (max 0 (min SEQ.song-end-beat time))))
     (if (= new-end (get clip :end-beat))
       nil
       (if (<= new-end (get clip :start-beat))
         ;; Dragged past its own start: the clip is gone.
-        (%clip-edit i clip (dict :type :clip-delete))
-        (%clip-edit i clip
+        (clip-edit i clip (dict :type :clip-delete))
+        (clip-edit i clip
           (dict :type :clip-resize
             :start (get clip :start-beat)
             :end new-end))))))
@@ -1100,36 +1136,36 @@
 ;; 8 / takes spec 8 — `arrangement-clip-resize` re-stamps `offset-steps` by
 ;; the split rule, in both directions). Same primitive as the end edge, only
 ;; the other coordinate changes.
-(def %track-resize-start-finish (i clip time)
+(def track-resize-start-finish (i clip time)
   (let ((new-start (max 0 time)))
     (if (= new-start (get clip :start-beat))
       nil
       (if (>= new-start (get clip :end-beat))
         ;; Dragged past its own end: the clip is gone.
-        (%clip-edit i clip (dict :type :clip-delete))
-        (%clip-edit i clip
+        (clip-edit i clip (dict :type :clip-delete))
+        (clip-edit i clip
           (dict :type :clip-resize
             :start new-start
             :end (get clip :end-beat)))))))
 
-(def %track-resize-finish (i)
+(def track-resize-finish (i)
   (let ((clip-id (get track-drag :clip-id))
         (edge (get track-drag :edge))
         (time (get track-drag :time)))
-    (let ((clip (%find-track-clip i clip-id)))
+    (let ((clip (find-track-clip i clip-id)))
       (do
         (set! track-drag nil)
-        (%clear-lane-ghost i)
+        (clear-lane-ghost i)
         (if (= clip nil)
           nil
           (if (= edge :start)
-            (%track-resize-start-finish i clip time)
-            (%track-resize-end-finish i clip time)))))))
+            (track-resize-start-finish i clip time)
+            (track-resize-end-finish i clip time)))))))
 
 ;; ── Clip / region move (region spec 6) ─────────────────────────────────────
 
 ;; Does the committed region cover this clip?
-(def %clip-in-region? (i clip)
+(def clip-in-region? (i clip)
   (if (or (= SEQ.song-region nil) (= clip nil))
     false
     (and (>= i (nth SEQ.song-region 0))
@@ -1145,7 +1181,7 @@
 ;; testing only that would turn every move into a region move, previewed as a
 ;; bare rectangle instead of the clip itself. A rectangle that is exactly the
 ;; dragged clip IS the clip, so it moves as one.
-(def %region-beyond-clip? (i clip)
+(def region-beyond-clip? (i clip)
   (if (or (= SEQ.song-region nil) (= clip nil))
     false
     (or (< (nth SEQ.song-region 0) i)
@@ -1153,19 +1189,19 @@
       (< (nth SEQ.song-region 2) (get clip :start-beat))
       (> (nth SEQ.song-region 3) (get clip :end-beat)))))
 
-(def %clip-drags-region? (i clip)
-  (and (%clip-in-region? i clip)
-    (%region-beyond-clip? i clip)))
+(def clip-drags-region? (i clip)
+  (and (clip-in-region? i clip)
+    (region-beyond-clip? i clip)))
 
 ;; Live title-bar drag: ghost only, never a primitive (spec 9.1). Vertical
 ;; travel is ignored — cross-track moves are invalid for the same per-track
 ;; pattern-pool reason as cross-track paste (region spec 8), so the widget's
 ;; :lane is dropped here.
-(def %track-move-ghost (i event)
-  (let ((clip (%find-track-clip i (get event :anchor-id))))
+(def track-move-ghost (i event)
+  (let ((clip (find-track-clip i (get event :anchor-id))))
     (if (= clip nil)
       (set! track-drag nil)
-      (if (%clip-drags-region? i clip)
+      (if (clip-drags-region? i clip)
         ;; Region move: the widget shifts every covered clip and the region
         ;; rect by the published delta, clamped so the rectangle can never
         ;; run before beat 0 (the primitive rejects that rather than
@@ -1185,7 +1221,7 @@
                 :start (+ (nth SEQ.song-region 2) delta)
                 :end (+ (nth SEQ.song-region 3) delta)
                 :scene-lane (nth SEQ.song-region 4)))
-            (%publish-region-ghost
+            (publish-region-ghost
               (dict :track-a (nth SEQ.song-region 0)
                 :track-b (nth SEQ.song-region 1)
                 :start (nth SEQ.song-region 2)
@@ -1196,7 +1232,7 @@
             (dict :kind :track-move :track i
               :clip-id (get clip :clip-id)
               :start (max 0 (get event :start))))
-          (%publish-lane-ghost i 1
+          (publish-lane-ghost i 1
             (get clip :clip-id) (max 0 (get event :start))))))))
 
 ;; Release: one primitive from the ghost's final values, and never a stale
@@ -1222,7 +1258,7 @@
 (def track-drag-kind ()
   (if (= track-drag nil) nil (get track-drag :kind)))
 
-(def %track-move-finish (i)
+(def track-move-finish (i)
   (let ((kind (track-drag-kind))
         (track (get track-drag :track)))
     (if (and (= kind :region-move) (= track i))
@@ -1230,66 +1266,66 @@
         (do
           (set! region-ghost nil)
           (set! track-drag nil)
-          (%clear-region-ghost)
+          (clear-region-ghost)
           (if (= delta 0)
             nil
-            (%edit-finish (dict :type :region-move :delta delta)))))
+            (edit-finish (dict :type :region-move :delta delta)))))
       (if (and (= kind :track-move) (= track i))
-        (let ((clip (%find-track-clip i (get track-drag :clip-id)))
+        (let ((clip (find-track-clip i (get track-drag :clip-id)))
               (start (get track-drag :start)))
           (do
             (set! track-drag nil)
-            (%clear-lane-ghost i)
+            (clear-lane-ghost i)
             (if (or (= clip nil) (= start (get clip :start-beat)))
               nil
-              (%clip-edit i clip
+              (clip-edit i clip
                 (dict :type :clip-move :start start)))))
         (do
           (set! region-ghost nil)
           (set! track-drag nil)
-          (%clear-region-ghost)
-          (%clear-lane-ghost i))))))
+          (clear-region-ghost)
+          (clear-lane-ghost i))))))
 
-(def %track-delete (i ids)
+(def track-delete (i ids)
   (do
     (set! track-selection '())
-    (%publish-selection -1 -1)
+    (publish-selection -1 -1)
     ;; Deleting the clip deletes what the selection pointed at: the region
     ;; goes with it, or the highlight would stay lit over empty lane (region
     ;; spec 4.1 — a clip selection IS its region).
-    (%region-clear)
+    (region-clear)
     (seq-song-deselect-clip)
     (map
       (lambda (clip-id)
-        (let ((clip (%find-track-clip i clip-id)))
+        (let ((clip (find-track-clip i clip-id)))
           (if (= clip nil)
             nil
-            (%clip-edit i clip (dict :type :clip-delete)))))
+            (clip-edit i clip (dict :type :clip-delete)))))
       ids)))
 
 ;; The single-click select body, shared with :double-click-item (clip-edit
 ;; target spec 4.2: a double-click is "bind + ensure the editor is open", so
 ;; it must run the exact same bind/region/track-select path first).
-(def %track-select (i event)
+(def track-select (i event)
   ;; Only ids that name a stored clip survive: a provisional recording
   ;; item has none, so clicking one selects nothing (realtime feedback
   ;; spec 3.4).
-  (let ((ids (%real-clip-ids i (get event :ids))))
+  (let ((ids (real-clip-ids i (get event :ids))))
     (let ((clip (if (= (len ids) 0)
                   nil
-                  (%find-track-clip i (nth ids 0)))))
+                  (find-track-clip i (nth ids 0)))))
       (do
         (eseq.sequencer/select-track-for-edit i)
         (set! selection '())
-        (set! %selection-rect nil)
+        (set! selection-rect nil)
         ;; A clip and a region are mutually exclusive (region spec 4.1);
         ;; the Rust side drops the region too, this clears the in-flight
         ;; ghost.
         (set! region-ghost nil)
-        (%clear-region-ghost)
+        (clear-region-ghost)
         (set! selected-track i)
         (set! track-selection ids)
-        (%publish-selection i
+        (publish-selection i
           (if (= (len ids) 0) -1 (nth ids 0)))
         ;; Selecting a clip is the explicit sound-binding gesture (takes
         ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
@@ -1297,7 +1333,7 @@
         ;; it survives view switches and transport.
         (if (= clip nil)
           (do (seq-song-deselect-clip) (seq-song-clear-region))
-          (%select-clip i (nth ids 0)))
+          (select-clip i (nth ids 0)))
         ;; A clip click also parks the transport start at the clip's
         ;; beginning, independent of where in its title bar was hit.
         (set-cursor
@@ -1305,27 +1341,27 @@
           i)
         clip))))
 
-(def %track-clear-selection (i event)
+(def track-clear-selection (i event)
   (do
     (eseq.sequencer/select-track-for-edit i)
     (set! track-selection '())
-    (%publish-selection -1 -1)
-    (%region-clear)
+    (publish-selection -1 -1)
+    (region-clear)
     (seq-song-deselect-clip)
     (set-cursor (get event :time) i)))
 
 (def track-action (i event)
-  (if (%view-action? event)
-    (%view-action event)
+  (if (view-action? event)
+    (view-action event)
     (match event.type
       :select
-      (%track-select i event)
+      (track-select i event)
       ;; Title-bar double-click (clip-edit-target spec 4): bind exactly like a
       ;; single click, then open the piano roll on the bound source. The
       ;; piano-roll targeting comes from the binding itself, so the open call
       ;; stays track-shaped.
       :double-click-item
-      (let ((clip (%track-select i event)))
+      (let ((clip (track-select i event)))
         (if (= clip nil)
           nil
           (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track i)))
@@ -1337,7 +1373,7 @@
       (let ((start (get event :start))
             (end (get event :end)))
         (do
-          (%track-select i (dict :ids '() :time start))
+          (track-select i (dict :ids '() :time start))
           (seq-arrangement-empty-take-create i start end)
           (eseq.seq-panels/seq-open-arrangement-piano-roll-bottom-for-track i)))
       ;; Degenerate zero-movement release, or a click on empty lane space:
@@ -1347,12 +1383,12 @@
       ;; click carries no real id, so it clears focus and the piano roll shows
       ;; "No clip selected".
       :clear-selection
-      (let ((ids (%real-clip-ids i (or (get event :ids) '()))))
+      (let ((ids (real-clip-ids i (or (get event :ids) '()))))
         (if (and (eseq.piano-roll/piano-roll-arrangement-mode?)
               (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
               (> (len ids) 0))
-          (%track-select i event)
-          (%track-clear-selection i event)))
+          (track-select i event)
+          (track-clear-selection i event)))
       :set-cursor
       (do
         (eseq.sequencer/select-track-for-edit i)
@@ -1361,10 +1397,10 @@
       ;; the ghost only; the release commits the Rust-owned region.
       :marquee-select
       (do
-        (set! region-ghost (%region-from-event i event))
-        (%publish-region-ghost region-ghost 4 0))
+        (set! region-ghost (region-from-event i event))
+        (publish-region-ghost region-ghost 4 0))
       :finish-marquee-select
-      (%region-commit (%region-from-event i event))
+      (region-commit (region-from-event i event))
       ;; Live edge drag: ghost preview only (spec 9.1). Either edge; the
       ;; ghost carries which one so the preview and the commit agree.
       :resize-item-absolute
@@ -1374,18 +1410,18 @@
             :clip-id (get event :id)
             :edge (if (= (get event :edge) :start) :start :end)
             :time (get event :time)))
-        (%publish-lane-ghost i
+        (publish-lane-ghost i
           (if (= (get event :edge) :start) 2 3)
           (get event :id) (get event :time)))
       :finish-resize-items
       (if (and (= (track-drag-kind) :track-resize)
             (= (get track-drag :track) i))
-        (%track-resize-finish i)
+        (track-resize-finish i)
         (do
           (set! track-drag nil)
-          (%clear-lane-ghost i)))
+          (clear-lane-ghost i)))
       :delete-items
-      (%track-delete i (get event :ids))
+      (track-delete i (get event :ids))
       ;; Clipboard (region spec 5.3): the widget emits these when a lane has
       ;; keyboard focus; the ui/input.rs seam emits the same commands when it
       ;; does not. Both converge on the region primitives, which read the
@@ -1397,9 +1433,9 @@
       ;; Title-bar drag (region spec 6): one rigid clip move, or a move of the
       ;; whole region when the dragged clip lies inside it.
       :move-items-absolute
-      (%track-move-ghost i event)
+      (track-move-ghost i event)
       :finish-move-items
-      (%track-move-finish i))))
+      (track-move-finish i))))
 
 ;; ── Scene drag-and-drop (Ableton-style, replaces the draw tool) ────────────
 ;; The transport scene pills are drag sources (:drag-type "transport-scene");
@@ -1407,22 +1443,22 @@
 ;; beat, snapped to the bar grid. The drop event's :sx is the normalized
 ;; (-1..1) position within the lane, which maps straight onto the shared view
 ;; span because lanes have no sidebar.
-(def %drop-time (event)
-  (let ((ratio (max 0 (min 1 (/ (+ (%event-num event :sx -1) 1) 2)))))
+(def drop-time (event)
+  (let ((ratio (max 0 (min 1 (/ (+ (event-num event :sx -1) 1) 2)))))
     (let ((time (+ view-start (* ratio view-duration))))
-      (max 0 (* %snap (floor (/ time %snap)))))))
+      (max 0 (* snap (floor (/ time snap)))))))
 
 (def drop-scene (event)
   (let ((scene (get (get event :payload) :scene)))
     (if (= scene nil)
       nil
-      (let ((start (%drop-time event)))
-        (%edit-finish
+      (let ((start (drop-time event)))
+        (edit-finish
           (dict :type :finish-create-item
             :start start
             ;; Dropping at/past the song end extends it by four bars from
             ;; the drop point (the translator only uses :end in that case).
-            :end (+ start (* %beats-per-bar 4))
+            :end (+ start (* beats-per-bar 4))
             :scene scene))))))
 
 ;; ── Lane instances (spec 4.1/4.2) ──────────────────────────────────────────
@@ -1432,22 +1468,22 @@
 ;; Every lane is a flex child (:width 0 :flex 1) of its row: it absorbs
 ;; exactly the width remaining after the fixed header column, so no row can
 ;; overflow the pane and drag the buffer viewport into horizontal scrolling.
-(def %scene-lane ()
+(def scene-lane ()
   (timeline
     :key "scene-lane"
     :width 0 :flex 1
-    :height %scene-lane-height
+    :height scene-lane-height
     :focusable true
     :sidebar-width 0
-    :header-height %header-height
-    :header-bottom-gutter %cursor-gutter-height
-    :time-ruler (dict :mode :bars-beats :beats-per-bar %beats-per-bar)
-    :grid-density %grid-density
-    :background-color %timeline-background-color
-    :title-bar-height %clip-title-bar-height
-    :item-label-font-size %clip-label-font-size
-    :item-label-color %clip-label-color
-    :item-corner-radius %clip-corner-radius
+    :header-height header-height
+    :header-bottom-gutter cursor-gutter-height
+    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+    :grid-density grid-density
+    :background-color timeline-background-color
+    :title-bar-height clip-title-bar-height
+    :item-label-font-size clip-label-font-size
+    :item-label-color clip-label-color
+    :item-corner-radius clip-corner-radius
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
     :playhead-time (bind-seq "song-position-beats")
@@ -1459,23 +1495,23 @@
     :cursor-marker-width-scale 1.5
     :cursor-marker-height-scale 0.7
     :cursor-line-visible false
-    :cursor-color %cursor-color
+    :cursor-color cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (drop-scene event))
     :items (scene-items)
     :selection selection
-    :selection-rect (%scene-region-rect)
+    :selection-rect (scene-region-rect)
     :view-start (bind "SEQV" "arr-view-start")
     :view-duration (bind "SEQV" "arr-view-duration")
-    :zoom-min-duration %min-view-duration
-    :zoom-max-duration %max-view-duration
+    :zoom-min-duration min-view-duration
+    :zoom-max-duration max-view-duration
     :content-length (bind "SEQV" "arr-content-length")
     :content-length-min (content-length-min)
     :content-length-max 8192
     :lane-scroll 0
-    :snap %snap
+    :snap snap
     :min-duration 1
-    :create-duration (* %beats-per-bar 4)
+    :create-duration (* beats-per-bar 4)
     :move-snap-mode :alignment-helper
     :resize-snap :grid
     ;; Region drags quantize to the zoom-adaptive grid, min down / max up
@@ -1487,7 +1523,7 @@
     :on-action |event| (scene-action event)))
 
 
-(def %bottom-lane ()
+(def bottom-lane ()
   (timeline
     :key "scene-lane"
     :width 0 :flex 1
@@ -1495,14 +1531,14 @@
     :focusable true
     :sidebar-width 0
     :header-height 1
-    :header-bottom-gutter %cursor-gutter-height
-    :time-ruler (dict :mode :bars-beats :beats-per-bar %beats-per-bar)
-    :grid-density %grid-density
-    :background-color %timeline-background-color
-    :title-bar-height %clip-title-bar-height
-    :item-label-font-size %clip-label-font-size
-    :item-label-color %clip-label-color
-    :item-corner-radius %clip-corner-radius
+    :header-bottom-gutter cursor-gutter-height
+    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+    :grid-density grid-density
+    :background-color timeline-background-color
+    :title-bar-height clip-title-bar-height
+    :item-label-font-size clip-label-font-size
+    :item-label-color clip-label-color
+    :item-corner-radius clip-corner-radius
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
     :playhead-time (bind-seq "song-position-beats")
@@ -1514,23 +1550,23 @@
     :cursor-marker-width-scale 1.5
     :cursor-marker-height-scale 0.7
     :cursor-line-visible false
-    :cursor-color %cursor-color
+    :cursor-color cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (drop-scene event))
     :items '()
     :selection selection
-    :selection-rect (%scene-region-rect)
+    :selection-rect (scene-region-rect)
     :view-start (bind "SEQV" "arr-view-start")
     :view-duration (bind "SEQV" "arr-view-duration")
-    :zoom-min-duration %min-view-duration
-    :zoom-max-duration %max-view-duration
+    :zoom-min-duration min-view-duration
+    :zoom-max-duration max-view-duration
     ;:content-length (bind "SEQV" "arr-content-length")
     ;:content-length-min (content-length-min)
     :content-length-max 8192
     :lane-scroll 0
-    :snap %snap
+    :snap snap
     :min-duration 1
-    :create-duration (* %beats-per-bar 4)
+    :create-duration (* beats-per-bar 4)
     :move-snap-mode :alignment-helper
     :resize-snap :grid
     ;; Region drags quantize to the zoom-adaptive grid, min down / max up
@@ -1542,24 +1578,24 @@
     :on-action |event| (scene-action event)))
 ;; Headerless, sidebar-less, single-lane track instance (spec 4.2). Lane
 ;; scrolling is inert; the outer buffer viewport owns vertical navigation.
-(def %track-lane (i)
+(def track-lane (i)
   (timeline
     :key (str "track-lane-" i)
     :width 0 :flex 1
-    :height %track-lane-height
+    :height track-lane-height
     ;; Vertical scrolling belongs to the enclosing track scroll container;
     ;; horizontal deltas still pan the shared time axis.
     :scroll-passthrough :vertical
-    :background-color %timeline-background-color
-    :title-bar-height %clip-title-bar-height
+    :background-color timeline-background-color
+    :title-bar-height clip-title-bar-height
     ;; Title-bar double-click opens an existing clip; background double-click
     ;; uses the timeline's standard :finish-create-item action to create an
     ;; empty take clip. The scene lane deliberately does NOT opt into item
     ;; double-clicks.
     :double-click-items true
-    :item-label-font-size %clip-label-font-size
-    :item-label-color %clip-label-color
-    :item-corner-radius %clip-corner-radius
+    :item-label-font-size clip-label-font-size
+    :item-label-color clip-label-color
+    :item-corner-radius clip-corner-radius
     :sidebar-width 0
     :header-height 0
     ;; Track lanes draw NO ruler (:header-height 0 gates every bit of ruler
@@ -1569,8 +1605,8 @@
     ;; lane falls back to the SECONDS ladder — steps like 5 or 10 beats — so
     ;; its grid lines miss bar lines the ruler above is labelling, and a
     ;; region drag snaps to those same wrong positions.
-    :time-ruler (dict :mode :bars-beats :beats-per-bar %beats-per-bar)
-    :grid-density %grid-density
+    :time-ruler (dict :mode :bars-beats :beats-per-bar beats-per-bar)
+    :grid-density grid-density
     :focusable true
     :playhead-time (bind-seq "song-position-beats")
     ;; Every fast-changing surface below is a BOUND channel: the cursor, the
@@ -1580,7 +1616,7 @@
     :cursor-time (bind "SEQV" (channel "cursor" i))
     :cursor-marker-visible false
     :cursor-line-visible true
-    :cursor-color %cursor-color
+    :cursor-color cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (drop-scene event))
     :items (track-items i)
@@ -1600,16 +1636,16 @@
     :selection-rect-style :region
     :view-start (bind "SEQV" "arr-view-start")
     :view-duration (bind "SEQV" "arr-view-duration")
-    :zoom-min-duration %min-view-duration
-    :zoom-max-duration %max-view-duration
+    :zoom-min-duration min-view-duration
+    :zoom-max-duration max-view-duration
     :content-length (bind "SEQV" "arr-content-length")
     :lane-scroll 0
-    :snap %snap
+    :snap snap
     :min-duration 1
     ;; A background double-click creates an editable take clip. Give that
     ;; discrete gesture a musically useful span instead of falling back to
     ;; the timeline's one-beat resize minimum.
-    :create-duration %beats-per-bar
+    :create-duration beats-per-bar
     :resize-snap :grid
     :marquee-snap :grid
     :snap-mode :floor
@@ -1626,17 +1662,17 @@
 ;; idiom): the box stretches to the pane, which gives the inner h-stack a
 ;; bounded width for flex distribution — without it the row collapses to its
 ;; fixed content and the flexed lane measures ~zero wide.
-(def %track-row (i)
+(def track-row (i)
   (box :width :fill :border-color :bg :border-width 2
     (h-stack :width :fill :align :start
       (box
         :key (str "track-header-" i)
-        :height :fill :width %header-width
+        :height :fill :width header-width
         :selected (eseq.sequencer/track-selected-binding i)
         :background-color :buffer-bg
         :selected-background-color :mixer-strip-selected-bg
         (eseq.sequencer/track-header i true))
-      (%track-lane i))))
+      (track-lane i))))
 
 ;; Rows stack with :gap 0 so the timeline instances are vertically flush —
 ;; the pointer is always over a lane, keeping scroll/zoom gestures captured
@@ -1649,7 +1685,7 @@
 ;; The step tile hides the global status line, so song-primitive rejections
 ;; (including "song editing is unavailable during arrangement capture")
 ;; surface here; the strip disappears on the next successful edit.
-(def %error-banner ()
+(def error-banner ()
   (if (= SEQ.song-edit-error nil)
     (box :width 0 :height 0 :bg :transparent)
     (box :width :fill :height 1.5 :padding 0.3
@@ -1666,7 +1702,7 @@
 ;; as an invisible subtree INSIDE the buffer (not a bare top-level effect):
 ;; subtree reruns ride the widget-flush machinery and cannot disturb the
 ;; active buffer's layout.
-(def %publish-bridge ()
+(def publish-bridge ()
   (do
     (let ((bound SEQ.song-bound-clip))
       (map
@@ -1700,12 +1736,12 @@
     ;; defeat the per-track index-aware invalidation of the lane subtrees.
     (subtree :key "arr-channel-bridge"
       (do
-        (%publish-bridge)
+        (publish-bridge)
         (box :width 0 :height 0 :bg :transparent)))
     ;; The "No song yet" banner is gone (empty-arrangement spec 8): the
     ;; arrangement always exists, so there is no mode to explain.
     (subtree :key "arr-error-banner"
-      (%error-banner))
+      (error-banner))
     ;; Sound palette overlay (takes spec 17.6): opened from a clip via the
     ;; toolbar/badge gestures; renders as a centered modal over the whole
     ;; frame (modal spec §4) with zero footprint here while closed.
@@ -1715,21 +1751,21 @@
       (box :width :fill
         (h-stack :width :fill :align :start
           (box :key "scene-header-spacer"
-            :width %header-width :height %scene-lane-height
+            :width header-width :height scene-lane-height
             )
-          (%scene-lane))))
+          (scene-lane))))
     (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "track-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.0
         (each (eseq.track-collapse/visible-track-indices) |i|
           (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
-            (%track-row i)))))
+            (track-row i)))))
     
       (subtree :key "bottom-arr-ucene-row"
       (box :width :fill :height 1
         (h-stack :width :fill :align :start
           (box :key "bottom-scene-header-spacer"
-            :width %header-width :height %scene-lane-height
+            :width header-width :height scene-lane-height
             )
-          (%bottom-lane))))    
+          (bottom-lane))))
     ))

@@ -17,6 +17,18 @@
 
 (module eseq.sound-palette)
 
+(export renaming
+        rename-draft
+        open?
+        track-index
+        entries
+        close
+        apply-entry
+        apply-with-mix
+        open-for-clip
+        toggle-open
+        panel)
+
 ;; Migration aliases (module spec §10) for the three names unconverted
 ;; callers still spell flat: the two mount sites (arrangement.lisp,
 ;; effects/step-buffer.lisp), the `C-x p` bind-key handler string in
@@ -39,7 +51,7 @@
 ;; The gesture target the overlay's Apply/Fork act on (17.6): the override
 ;; pattern's entity under an active launch — what you hear — surfaced here
 ;; so the deliberate target is visible.
-(def %target-label ()
+(def target-label ()
   (let ((kind (get SEQ.sound-palette :target-kind)))
     (if (= kind "take")
       (str "Take " (+ (get SEQ.sound-palette :target-id) 1))
@@ -47,14 +59,14 @@
         (str "Pattern " (get SEQ.sound-palette :target-id))
         "scene cell"))))
 
-(def %entry-color (entry)
+(def entry-color (entry)
   (if (= (get entry :color) nil)
     (rgba 0.62 0.62 0.66 1.0)
     (rgba (get entry :color-r) (get entry :color-g) (get entry :color-b) 1.0)))
 
 ;; The :current row's faint fill, matching the variant chip's 0.11-alpha
 ;; treatment; gray for name-only entries (17.11 fallback).
-(def %entry-tint (entry)
+(def entry-tint (entry)
   (if (= (get entry :color) nil)
     (rgba 0.62 0.62 0.66 0.11)
     (rgba (get entry :color-r) (get entry :color-g) (get entry :color-b) 0.11)))
@@ -74,12 +86,12 @@
     (seq-sound-apply-with-mix (track-index)
       (get entry :patch-id) (get entry :mix-id))))
 
-(def %begin-rename (entry)
+(def begin-rename (entry)
   (do
     (set! renaming (get entry :patch-id))
     (set! rename-draft (get entry :name))))
 
-(def %commit-rename (entry)
+(def commit-rename (entry)
   (do
     (seq-sound-rename (track-index) "patch" (get entry :patch-id)
       rename-draft)
@@ -89,13 +101,13 @@
 ;; What the patch was loaded from: the sample name for a sampler patch, the
 ;; preset name otherwise (the host suffixes `*` when edited since). Empty
 ;; when neither is known.
-(def %entry-source (entry)
+(def entry-source (entry)
   (let ((sample (get entry :sample))
       (preset (get entry :preset)))
     (if (not (= sample nil)) sample
       (if (not (= preset nil)) preset ""))))
 
-(def %action-button (key-suffix entry text on-press)
+(def action-button (key-suffix entry text on-press)
   (button text
     :key (str key-suffix "-" (get entry :patch-id))
     :width 2.4 :height 0.85 :font-size 7.5
@@ -105,8 +117,8 @@
 
 ;; The preset/sample name as a chip badge (same visual family as the diff
 ;; badges); collapses to nothing when the patch has no known source.
-(def %source-badge (entry current)
-  (let ((source (%entry-source entry)))
+(def source-badge (entry current)
+  (let ((source (entry-source entry)))
     (if (= source "")
       (box :bg :transparent)
       (box :key (str "source-" (get entry :patch-id))
@@ -119,7 +131,7 @@
 ;; Git-diff-style summary vs the current sound (17.6 amendment): "+n" params
 ;; higher, "-m" params lower. Empty labels when there is nothing to say (the
 ;; current entry itself, an identical patch, or an incompatible one).
-(def %diff-badges (entry)
+(def diff-badges (entry)
   (let ((up (get entry :diff-up))
       (down (get entry :diff-down)))
     (h-stack :gap 0.18 :align :center
@@ -137,8 +149,8 @@
 ;; scene-effective sound: outlined swatch, not filled — exactly the p-lock
 ;; "def" chip treatment. Boxes tile in a responsive grid (see `panel`
 ;; at the bottom of this file).
-(def %entry-row (entry)
-  (let ((c (%entry-color entry))
+(def entry-row (entry)
+  (let ((c (entry-color entry))
       (base (get entry :base))
       (current (get entry :current)))
     (box :key (str "entry-" (get entry :patch-id))
@@ -149,7 +161,7 @@
       :corner-radius 12
       :border-width 1
       :background-color (if current
-        (%entry-tint entry)
+        (entry-tint entry)
         (rgba 1 1 1 0.025))
       :border-width (if current 0.75 0.35)
       :border-color (if current c (rgba 1 1 1 0.10))
@@ -165,15 +177,15 @@
                 :width 4.6 :height 0.85 :font-size 8
                 :value rename-draft
                 :on-change |name| (set! rename-draft name))
-              (%action-button "rename-ok" entry "ok"
-                (lambda (entry) (%commit-rename entry))))
+              (action-button "rename-ok" entry "ok"
+                (lambda (entry) (commit-rename entry))))
             (box :key (str "name-" (get entry :patch-id))
               :bg :transparent
-              :on-click |x y r| (%begin-rename entry)
+              :on-click |x y r| (begin-rename entry)
               (label (substring (str (get entry :name) (if base " (scene)" "")) 0 15)
                 :font-size 8.5 :color (if current :black :dim) :bg :transparent))
             )
-          (%diff-badges entry)
+          (diff-badges entry)
           ;; TRK chip: this Patch/Mix pair IS the track's own sound
           ;; (track-sound spec 2.1; takes may SHARE the pair, 2.4.1). The
           ;; carrier pattern is hidden from pattern listings, so this chip
@@ -185,7 +197,7 @@
             (label "TRK"
               :key (str "trk-" (get entry :patch-id))
               :font-size 6.5
-              :color (if current :black (%entry-color entry))
+              :color (if current :black (entry-color entry))
               :bg :transparent)
             (box :bg :transparent))
           (box :flex 1 :bg :transparent)
@@ -212,7 +224,7 @@
           )
         ;; What the sound is (preset / sample name), below the glyph.
         (h-stack :gap 0.24 :align :center
-          (%source-badge entry current)
+          (source-badge entry current)
           (box :flex 1 :bg :transparent)
           )
         )
@@ -224,18 +236,18 @@
 ;; and its instrument so the overlay is never ambiguous about what it edits.
 ;; The closed guard matters: the modal's children still evaluate while
 ;; closed, and arithmetic on a nil track would kill the whole re-render.
-(def %header-title ()
+(def header-title ()
   (if (open?)
     (let ((inst (get SEQ.sound-palette :instrument-name)))
       (str "Sound Pool - Track " (+ (track-index) 1)
         (if (or (= inst nil) (= inst "")) "" (str " (" inst ")"))
-        " - " (%target-label)))
+        " - " (target-label)))
     "Sound Pool"))
 
-(def %header ()
+(def header ()
   (box :width :fill :bg :transparent
     (h-stack :gap 0.3 :align :baseline
-      (label (%header-title)
+      (label (header-title)
         :key "header-label"
         :font-size 12 :color :dim :bg :transparent)
       (box :flex 1 :bg :transparent)
@@ -297,7 +309,7 @@
     (box :debug-name "sound-palette-panel"
       :width :fill :height :fill :bg :transparent
       (v-stack :width :fill :gap 0.22
-        (%header)
+        (header)
         (scroll :width :fill :flex 1
           ;; Grid of §4 boxes (not a row list): each cell gets enough area
           ;; for a legible plant glyph; the grid reflows with the panel.
@@ -307,4 +319,4 @@
             ;; slot-width * row-aspect and cells balloon to near-square.
             :row-height 9.0
             (each (entries) |entry idx|
-              (%entry-row entry))))))))
+              (entry-row entry))))))))

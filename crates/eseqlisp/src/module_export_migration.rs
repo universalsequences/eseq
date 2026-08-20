@@ -62,10 +62,18 @@ struct Definition {
 }
 
 #[derive(Debug, Clone)]
+struct ReferEntry {
+    module: String,
+    name: String,
+    span: (usize, usize),
+}
+
+#[derive(Debug, Clone)]
 struct SourceAnalysis {
     module: Option<String>,
     definitions: Vec<Definition>,
     aliases: HashMap<String, String>,
+    refers: Vec<ReferEntry>,
     insertion_anchor: Option<usize>,
     has_export: bool,
 }
@@ -91,6 +99,7 @@ fn analyze(source: &str) -> Result<SourceAnalysis, String> {
     let mut module = None;
     let mut definitions = Vec::new();
     let mut aliases = HashMap::new();
+    let mut refers = Vec::new();
     let mut insertion_anchor = None;
     let mut has_export = false;
 
@@ -122,6 +131,21 @@ fn analyze(source: &str) -> Result<SourceAnalysis, String> {
                             aliases.insert(alias.clone(), imported.to_string());
                             index += 2;
                         }
+                        (ExprKind::Keyword(keyword), ExprKind::List(names))
+                            if keyword == "refer" =>
+                        {
+                            for name in names {
+                                if let ExprKind::Symbol(symbol) = &name.kind {
+                                    let span = &name.origin.primary_span;
+                                    refers.push(ReferEntry {
+                                        module: imported.to_string(),
+                                        name: symbol.clone(),
+                                        span: (span.start_byte, span.end_byte),
+                                    });
+                                }
+                            }
+                            index += 2;
+                        }
                         _ => index += 1,
                     }
                 }
@@ -138,7 +162,13 @@ fn analyze(source: &str) -> Result<SourceAnalysis, String> {
                     }
                     _ => None,
                 };
-                if let Some(name) = name {
+                if let Some(name) = name
+                    // An explicitly qualified definition belongs to the named
+                    // namespace, not to the module containing this source.
+                    // In particular, compatibility pins into eseq.vanilla
+                    // must not become invalid qualified export entries.
+                    && !name.contains('/')
+                {
                     definitions.push(Definition {
                         name,
                         string_span: None,
@@ -167,6 +197,7 @@ fn analyze(source: &str) -> Result<SourceAnalysis, String> {
         module,
         definitions,
         aliases,
+        refers,
         insertion_anchor,
         has_export,
     })
@@ -530,6 +561,41 @@ pub fn plan_migration(selector: &str, paths: &[PathBuf]) -> io::Result<Migration
             }
         }
 
+        // Older module conversion output used fully-qualified spellings in
+        // :refer lists. The export contract requires bare names there: the
+        // import already names the owner, and visibility validation operates
+        // on that owner's base-name export set. Normalize only this syntax
+        // position; ordinary qualified call sites must stay qualified.
+        let mut refer_spans = HashSet::new();
+        if let Some(analysis) = &analysis {
+            for refer in &analysis.refers {
+                let Some(plan) = module_plans.get(&refer.module) else {
+                    continue;
+                };
+                let base = match crate::modules::split_qualified(&refer.name) {
+                    Some((namespace, base)) if namespace == refer.module => base,
+                    None => refer.name.as_str(),
+                    Some(_) => continue,
+                };
+                if plan.private.contains_key(base) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "{}: cannot preserve private :refer entry '{}'; {} does not export it",
+                            path.display(),
+                            refer.name,
+                            refer.module,
+                        ),
+                    ));
+                }
+                let replacement = base.to_string();
+                if replacement != refer.name {
+                    replacements.push((refer.span.0, refer.span.1, replacement));
+                    refer_spans.insert(refer.span);
+                }
+            }
+        }
+
         let tokens = if kind == SourceKind::Lisp {
             scan_tokens(&original)
         } else {
@@ -552,6 +618,9 @@ pub fn plan_migration(selector: &str, paths: &[PathBuf]) -> io::Result<Migration
         })? {
             match token.kind {
                 TokenKind::Symbol => {
+                    if refer_spans.contains(&(token.start, token.end)) {
+                        continue;
+                    }
                     let text = &original[token.start..token.end];
                     let replacement = own
                         .and_then(|plan| plan.private.get(text))
@@ -781,7 +850,7 @@ mod tests {
         ).unwrap();
         fs::write(
             &consumer,
-            "(module test.consumer)\n(import test.owner :as own)\n(def use () (list (own/%hidden 1) test.owner/%cell foreign/%hidden))\n(def names () \"test.owner/%hidden\")\n",
+            "(module test.consumer)\n(import test.owner :as own)\n(import test.owner :refer (test.owner/public))\n(def use () (list (own/%hidden 1) test.owner/%cell foreign/%hidden))\n(def names () \"test.owner/%hidden\")\n",
         ).unwrap();
         let rust_consumer = dir.join("consumer.rs");
         fs::write(
@@ -807,6 +876,9 @@ mod tests {
             .iter()
             .find(|file| file.path == consumer)
             .unwrap();
+        assert!(consumer
+            .rewritten
+            .contains("(import test.owner :refer (public))"));
         assert!(consumer.rewritten.contains("own/hidden"));
         assert!(consumer.rewritten.contains("test.owner/cell"));
         assert!(consumer.rewritten.contains("foreign/%hidden"));
@@ -819,6 +891,44 @@ mod tests {
         assert_eq!(rust_consumer.manual.len(), 3);
         assert_eq!(rust_consumer.rewritten, rust_consumer.original);
         assert!(unified_diff(owner).contains("+        published-hook)"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn private_refer_refuses_the_plan_instead_of_creating_an_invalid_import() {
+        let dir = temp_dir("private-refer");
+        fs::write(
+            dir.join("owner.lisp"),
+            "(module test.owner)\n(def %hidden 1)\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("consumer.lisp"),
+            "(module test.consumer)\n(import test.owner :refer (test.owner/%hidden))\n",
+        )
+        .unwrap();
+
+        let error = plan_migration("test.owner", &[dir.clone()]).unwrap_err();
+        assert!(error.to_string().contains("cannot preserve private :refer"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn qualified_definitions_are_not_exported_or_rewritten_as_module_members() {
+        let dir = temp_dir("qualified-definition");
+        let path = dir.join("owner.lisp");
+        fs::write(
+            &path,
+            "(module test.owner)\n(def public 1)\n(def eseq.vanilla/pinned 2)\n(def eseq.vanilla/%legacy 3)\n",
+        )
+        .unwrap();
+
+        let result = plan_migration("test.owner", &[dir.clone()]).unwrap();
+        let file = result.files.iter().find(|file| file.path == path).unwrap();
+        assert!(file.rewritten.contains("(export public)"));
+        assert!(file.rewritten.contains("(def eseq.vanilla/pinned 2)"));
+        assert!(file.rewritten.contains("(def eseq.vanilla/%legacy 3)"));
+        assert!(!file.rewritten.contains("export eseq.vanilla/"));
         fs::remove_dir_all(dir).unwrap();
     }
 

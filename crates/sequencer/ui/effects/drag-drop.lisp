@@ -1,8 +1,11 @@
 ;; Drag/drop handlers for adding, inserting, and moving effects.
 (module eseq.effects.drag-drop)
 
+(export drop-existing-effect
+        drop-on-effect)
 
-(def %drop-library-effect (payload target)
+
+(def drop-library-effect (payload target)
   (let ((kind (get payload :kind))
         (name (get payload :name))
         (chain (get target :chain))
@@ -92,4 +95,4 @@
               (= kind "bus-effect-instance")
               (= kind "rack-effect-instance"))
         (drop-existing-effect payload target)
-        (%drop-library-effect payload target)))))
+        (drop-library-effect payload target)))))

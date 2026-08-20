@@ -24,6 +24,10 @@
 ;; name are flat keyspaces and stay byte-identical (hazard e).
 (module eseq.agent)
 
+(export agent-current-conv
+        agent-open
+        agent-submit-current)
+
 ;; Compat aliases (spec §10 step 2) — identity, one per name with a caller
 ;; outside this file. Nothing is renamed: every one of these is spelled flat
 ;; from somewhere that cannot import a render root.
@@ -43,8 +47,8 @@
 ;; every `set!` below targets one of its own `defstate`s (hazard j clear).
 
 (defstate agent-current-conv 0)
-(defstate %prompt "")
-(defstate %finalize-name "")
+(defstate prompt "")
+(defstate finalize-name "")
 
 (defwidget agent-submit-icon
   :width 3.2 :height 3.2
@@ -81,37 +85,37 @@
     (set-window-buffer-for "*track*" "*agent-artifacts*")
     (switch-to-buffer "*agent*")))
 
-(def %close-panel ()
+(def close-panel ()
   (do
     (set-window-buffer-for "*agent-artifacts*" "*track*")
     ;; *metal* (legacy step grid) is no longer loaded; land on the live view.
     (switch-to-buffer "*sequencer*")))
 
-(def %new-conversation ()
+(def new-conversation ()
   (do
     (set! agent-current-conv (agent/new :kind 'general))
-    (set! %finalize-name "")))
+    (set! finalize-name "")))
 
-(def %send-current ()
-  (if (and (> agent-current-conv 0) (not (= %prompt "")))
+(def send-current ()
+  (if (and (> agent-current-conv 0) (not (= prompt "")))
     (do
-      (agent/send agent-current-conv %prompt)
-      (set! %prompt ""))
+      (agent/send agent-current-conv prompt)
+      (set! prompt ""))
     nil))
 
 (def agent-submit-current ()
-  (if (%busy?)
+  (if (busy?)
     (if (> agent-current-conv 0)
       (agent/cancel agent-current-conv)
       nil)
-    (%send-current)))
+    (send-current)))
 
-(def %status-label ()
+(def status-label ()
   (if (> agent-current-conv 0)
     (str (agent/status agent-current-conv))
     "idle"))
 
-(def %busy? ()
+(def busy? ()
   (if (> agent-current-conv 0)
     (let ((status (agent/status agent-current-conv)))
       (or (= status 'streaming)
@@ -119,17 +123,17 @@
           (= status 'auditioning)))
     false))
 
-(def %current-model ()
+(def current-model ()
   (if (> agent-current-conv 0)
     (agent/model agent-current-conv)
     (nth (agent/models) 0)))
 
-(def %set-current-model (model)
+(def set-current-model (model)
   (if (> agent-current-conv 0)
     (agent/set-model agent-current-conv model)
     nil))
 
-(def %message-card (m i)
+(def message-card (m i)
   (let ((role (get m :role))
         (text (get m :display-text))
         (has-code (get m :has-code-blocks)))
@@ -161,7 +165,7 @@
             :bg :transparent)
           (box :height 0.0))))))
 
-(def %message-list ()
+(def message-list ()
   (if (= agent-current-conv 0)
     (box :width :fill :flex 1 :align :center
       (button "Ask agent"
@@ -178,7 +182,7 @@
               :bg :transparent)
             (button "tape delay effect"
               :variant :ghost
-              :on-click |x y r| (set! %prompt "create a tape delay effect"))))
+              :on-click |x y r| (set! prompt "create a tape delay effect"))))
         (scroll :key (str "scroll-" agent-current-conv)
                 :width :fill
                 :flex 1
@@ -191,9 +195,9 @@
             :estimated-item-height 4.0
             :overscan 6
             (each (range 0 (len messages)) |i|
-              (%message-card (nth messages i) i))))))))
+              (message-card (nth messages i) i))))))))
 
-(def %draft-actions ()
+(def draft-actions ()
   (if (> agent-current-conv 0)
     (let ((artifact (agent/artifact agent-current-conv)))
       (if (get artifact :can-apply)
@@ -209,17 +213,17 @@
         (box :height 0.1)))
     (box :height 0.1)))
 
-(def %artifact-finalize-name (artifact)
-  (if (= %finalize-name "")
+(def artifact-finalize-name (artifact)
+  (if (= finalize-name "")
     (str (get artifact :display-name))
-    %finalize-name))
+    finalize-name))
 
-(def %finalize-current (artifact)
+(def finalize-current (artifact)
   (if (and (> agent-current-conv 0) (get artifact :can-finalize))
-    (agent/finalize agent-current-conv (%artifact-finalize-name artifact))
+    (agent/finalize agent-current-conv (artifact-finalize-name artifact))
     nil))
 
-(def %artifact-panel ()
+(def artifact-panel ()
   (if (= agent-current-conv 0)
     (box :width :fill :height :fill :padding 0.8
       (label "No artifact" :color :gray :bg :transparent))
@@ -258,17 +262,17 @@
               :color :gray
               :bg :transparent)
             (text-input
-              :value %finalize-name
+              :value finalize-name
               :placeholder (str (get artifact :display-name))
               :width :fill
               :height 1.35
-              :on-change (lambda (v) (set! %finalize-name v)))
+              :on-change (lambda (v) (set! finalize-name v)))
             (if (get artifact :can-finalize)
               (button "Finalize"
                 :variant :primary
                 :width :fill
                 :height 1.35
-                :on-click |x y r| (%finalize-current artifact))
+                :on-click |x y r| (finalize-current artifact))
               (button "Finalized"
                 :variant :ghost
                 :width :fill
@@ -295,7 +299,7 @@
           :font-size 15
           :color :white
           :bg :transparent)
-        (label (%status-label)
+        (label (status-label)
           :font-size 10
           :color :blue
           :bg :transparent)
@@ -303,13 +307,13 @@
         (button "New"
           :variant :ghost
           :height 1.2
-          :on-click |x y r| (%new-conversation))
+          :on-click |x y r| (new-conversation))
         (button "Back"
           :variant :ghost
           :height 1.2
-          :on-click |x y r| (%close-panel)))
-      (%message-list)
-      (%draft-actions)
+          :on-click |x y r| (close-panel)))
+      (message-list)
+      (draft-actions)
       (box :key "composer"
         :width :fill
         :padding 0.65
@@ -321,14 +325,14 @@
         (v-stack :width :fill :gap 0.25
           (textbox
             :key "prompt-input"
-            :value %prompt
+            :value prompt
             :placeholder "Describe an instrument, effect, or change..."
             :width :fill
             :min-lines 2
             :max-lines 7
             :font-size 13
             :bg :transparent
-            :on-change (lambda (v) (set! %prompt v)))
+            :on-change (lambda (v) (set! prompt v)))
           (box :flex 1)
           (h-stack :key "composer-actions"
             :padding 0.5
@@ -337,12 +341,12 @@
             :align :end
             (dropdown
               :key "model-select"
-              :value (%current-model)
+              :value (current-model)
               :options (agent/models)
               :width 14.0
               :height 1.35
               :font-size 11
-              :on-change (lambda (v) (%set-current-model v)))
+              :on-change (lambda (v) (set-current-model v)))
             (box :flex 1)
             (box :key "submit"
               :width 3.4
@@ -352,12 +356,12 @@
               :on-click |x y r| (agent-submit-current)
               (agent-submit-icon
                 :on-click |x y r| (agent-submit-current)
-                :active (if (or (%busy?) (not (= %prompt ""))) 1 0)
-                :canceling (if (%busy?) 1 0)))))))))
+                :active (if (or (busy?) (not (= prompt ""))) 1 0)
+                :canceling (if (busy?) 1 0)))))))))
 
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))
-    (%artifact-panel)))
+    (artifact-panel)))
 
 ;; Entry point. `C-g` used to open this panel, but Cmd/Ctrl+G is now the
 ;; track-group shortcut (eseq.mixer/seq-ctrl-g), so Agent Mode moves to the

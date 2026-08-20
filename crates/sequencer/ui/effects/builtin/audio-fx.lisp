@@ -18,6 +18,8 @@
 (import eseq.effects.builtin.filter-table :as ft)
 (import eseq.effects.builtin.filterbank :as fb)
 
+(export builtin-audio-fx-ui)
+
 ;; Migration alias (module spec §10). builtin-audio-fx-ui keeps its spelling —
 ;; the prefix is the host-facing entry-point name, and the Rust harnesses in
 ;; src/ui/state_values/tests.rs eval it bare (reads only, so the alias covers

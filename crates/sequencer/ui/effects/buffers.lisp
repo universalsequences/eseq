@@ -14,8 +14,11 @@
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
-(import eseq.effects.state :as st :refer (eseq.effects.state/rack-panel-selected-chain-open))
+(import eseq.effects.state :as st :refer (rack-panel-selected-chain-open))
 (import eseq.effects.track-panels :as tp)
+
+(export empty-track-fallback
+        delete-selected-plock-row-key)
 
 ;; Flat callers: step-buffer.lisp calls fx-empty-track-fallback and binds
 ;; "*step*" to seq-plock-panel-mode; state_values/tests.rs evals
@@ -35,12 +38,12 @@
         :active (if SEQ.compiling 1 0)
         :width 12 :height 0.3))))
 
-(def %selected-bus-effects ()
+(def selected-bus-effects ()
   (if (pw/has-selected-bus?)
     (nth SEQ.bus-effects eseq.seq-core-state/selected-bus)
     '()))
 
-(def %drop-placeholder-panel ()
+(def drop-placeholder-panel ()
   (box :debug-name "fx-drop-placeholder-panel"
        :background-color :buffer-bg
        :corner-radius 10
@@ -69,7 +72,7 @@
       :color :dim
       :bg :transparent)))
 
-(def %track-drop-placeholder-panel ()
+(def track-drop-placeholder-panel ()
   (box :debug-name "fx-track-drop-placeholder-panel"
        :background-color :buffer-bg
        :corner-radius 10
@@ -114,12 +117,12 @@
 ;; module over SEQ.groups — no view, no top-level registrations — that answers
 ;; -1 when no groups state exists.
 
-(def %selected-rack ()
+(def selected-rack ()
   (if (pw/has-selected-bus?)
     (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)
     -1))
 
-(def %rack-pad-member-name (gidx pad)
+(def rack-pad-member-name (gidx pad)
   (let ((track (if (= pad nil) -1 (get pad :track))))
     (if (and (>= track 0) (< track SEQ.num-tracks))
       (nth SEQ.track-names track)
@@ -127,13 +130,13 @@
 
 ;; Pad focus controls stay beside the grid; rack identity and persistence live
 ;; in the instrument-style header above it.
-(def %rack-panel-controls (gidx)
+(def rack-panel-controls (gidx)
   (let ((pad (eseq.sequencer/selected-pad gidx)))
     (v-stack :debug-name "rack-fx-panel-controls"
       :width 8.8 :height :fill :gap 0.3 :align :start :padding 0.1
       (label (if (= pad nil) "No pad selected" (str "Pad " (get pad :label)))
         :font-size 8 :color :dim :bg :transparent)
-      (label (substring (%rack-pad-member-name gidx pad) 0 14)
+      (label (substring (rack-pad-member-name gidx pad) 0 14)
         :font-size 8 :color :white :bg :transparent)
       (button "OPEN PAD TRACK"
         :key (str "rack-fx-open-pad-" (eseq.drum-rack-v2/group-id gidx))
@@ -148,7 +151,7 @@
       (label "Drop a sample or instrument on a pad"
         :width 8.4 :font-size 6.8 :color :dim :bg :transparent))))
 
-(def %rack-selection-panel (gidx)
+(def rack-selection-panel (gidx)
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1 :align :start
       (box :debug-name "rack-fx-pads-panel"
@@ -189,23 +192,23 @@
               ))))
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
-      (each (filter |fx| (> (len (get fx :params)) 0) (%selected-bus-effects)) |fx slot-idx|
+      (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
         (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
           (ep/fx-panel (get fx :name) (get fx :params) fx)))
-      (%drop-placeholder-panel))))
+      (drop-placeholder-panel))))
 
-(def %bus-selection-panel ()
+(def bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
-      (each (filter |fx| (> (len (get fx :params)) 0) (%selected-bus-effects)) |fx slot-idx|
+      (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
         (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
           (ep/fx-panel (get fx :name) (get fx :params) fx)))
-      (%drop-placeholder-panel))))
+      (drop-placeholder-panel))))
 
 ;; Keep this as a macro rather than a normal function. Custom instrument/effect
 ;; UI establishes render-local scope while this tree is evaluated, so the FX
 ;; strip must remain inline at the effect-buffer callsite.
-(defmacro %track-selection-panel ()
+(defmacro track-selection-panel ()
   `(v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
       (if (> (len SEQ.process-slots) 0)
@@ -227,7 +230,7 @@
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
         (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
           (ep/fx-panel (get fx :name) (get fx :params) fx)))
-      (%track-drop-placeholder-panel))))
+      (track-drop-placeholder-panel))))
 
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)
@@ -243,10 +246,10 @@
 
 (effect-buffer "*fx*"
   (if (pw/has-selected-bus?)
-    (let ((gidx (%selected-rack)))
+    (let ((gidx (selected-rack)))
       (if (>= gidx 0)
-        (%rack-selection-panel gidx)
-        (%bus-selection-panel)))
+        (rack-selection-panel gidx)
+        (bus-selection-panel)))
     (if (= SEQ.num-tracks 0)
     (empty-track-fallback)
     ;; Mapping changes the wrapper structure of every compatible parameter.
@@ -255,11 +258,11 @@
     (if (pc/param-macro-mapping-active?)
       (box :debug-name "fx-param-map-active-root" :padding 0
         (subtree :key (pc/param-macro-structure-key)
-          (%track-selection-panel)))
+          (track-selection-panel)))
     (if (pc/process-map-active?)
       (box :debug-name "fx-param-map-active-root" :padding 0
-        (%track-selection-panel))
-      (%track-selection-panel))))))
+        (track-selection-panel))
+      (track-selection-panel))))))
 
 (define-mode "seq-fx-mode" :read-only true :live-keys true)
 ;; Handler strings qualify against THIS module; the two below live in other

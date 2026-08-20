@@ -4,6 +4,30 @@
 
 (module eseq.effects.state)
 
+(export instrument-panel-tab
+        instrument-source-tab
+        instrument-mods-open
+        instrument-selected-mod-slot
+        instrument-key-lock-octave
+        instrument-key-lock-selected-notes
+        instrument-key-lock-audition
+        rack-panel-slot-list-open
+        rack-panel-selected-chain-open
+        rack-panel-macros-open
+        effect-mods-open
+        effect-mods-chain
+        effect-mods-track
+        effect-mods-slot
+        effect-mods-rack-slot
+        effect-mods-bus
+        effect-selected-mod-slot
+        process-panel-selected-track
+        process-panel-selected-instance-id
+        seq-timebase-options
+        fx-fixed-panel-height
+        fx-panel-header-height
+        fx-panel-body-content-height)
+
 ;; Migration aliases (module spec §10). Every name below keeps its spelling —
 ;; this file is a shared state hub for six unrelated prefix families
 ;; (`instrument-`, `rack-panel-`, `effect-mods-`, `process-panel-`, the
@@ -63,7 +87,7 @@
 ;; Matches a standard built-in FX panel with four parameter rows.
 (def fx-fixed-panel-height 10.8)
 (def fx-panel-header-height 1.0)
-(def %fx-panel-body-padding 0.25)
-(def %fx-panel-body-top-spacer-height 0.16)
+(def fx-panel-body-padding 0.25)
+(def fx-panel-body-top-spacer-height 0.16)
 (def fx-panel-body-content-height 
-  (- fx-fixed-panel-height fx-panel-header-height (* 2 %fx-panel-body-padding) %fx-panel-body-top-spacer-height))
+  (- fx-fixed-panel-height fx-panel-header-height (* 2 fx-panel-body-padding) fx-panel-body-top-spacer-height))

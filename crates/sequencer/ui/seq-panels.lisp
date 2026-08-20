@@ -52,6 +52,33 @@
 ;; aliases must exist before this unit's readers compile.
 (import eseq.seq-core-state)
 
+(export seq-hide-samples-sidebar
+        seq-hide-mixer-panel
+        seq-hide-fx-panel
+        seq-hide-patch-macros-panel
+        seq-toggle-patch-macros-panel
+        seq-toggle-samples-sidebar
+        seq-toggle-mixer-panel
+        seq-toggle-fx-panel
+        seq-restore-instrument-patcher-layout
+        seq-current-step-buffer
+        seq-close-piano-roll
+        seq-open-piano-roll-bottom-for-track
+        seq-open-arrangement-piano-roll-bottom-for-track
+        seq-open-piano-roll-bottom
+        seq-open-piano-roll-main
+        seq-open-piano-roll-preferred
+        seq-show-sequencer-main
+        seq-open-arrangement
+        seq-toggle-arrangement
+        seq-toggle-current-track-expanded-main
+        seq-toggle-piano-roll-main
+        seq-toggle-piano-roll-placement
+        seq-toggle-fx-piano-roll
+        seq-toggle-main-or-piano-roll
+        seq-show-fx-lower-panel
+        seq-toggle-current-track-mods-view)
+
 ;; Identity aliases. Grouped by what forces each:
 ;;   [rust]     production Rust invokes/evals the flat name
 ;;   [key]      also a `bind-key` handler string — NOT itself a reason to alias:
@@ -75,7 +102,7 @@
 (def seq-hide-mixer-panel ()
   (if eseq.seq-core-state/mixer-panel-visible
     (do
-      (%sync-step-panel-buffer-from-current-window)
+      (sync-step-panel-buffer-from-current-window)
       (set! eseq.seq-core-state/mixer-panel-visible false)
       (eseq.seq-layout/refresh-current-layout))
     nil))
@@ -111,7 +138,7 @@
 
 (def seq-toggle-mixer-panel ()
   (do
-    (%sync-step-panel-buffer-from-current-window)
+    (sync-step-panel-buffer-from-current-window)
     (set! eseq.seq-core-state/mixer-panel-visible (not eseq.seq-core-state/mixer-panel-visible))
     (eseq.seq-layout/refresh-current-layout)))
 
@@ -133,7 +160,7 @@
       eseq.seq-step-tabs/remembered-step-panel-buffer
       eseq.seq-step-tabs/step-panel-buffer)))
 
-(def %sync-step-panel-buffer-from-current-window ()
+(def sync-step-panel-buffer-from-current-window ()
   (let ((buffer (current-buffer-name)))
     (if (eseq.seq-step-tabs/seq-main-step-tab-buffer? buffer)
       (do
@@ -141,7 +168,7 @@
         (set! eseq.seq-step-tabs/remembered-step-panel-buffer buffer))
       nil)))
 
-(def %piano-roll-open? ()
+(def piano-roll-open? ()
   (or (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
     (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")))
 
@@ -157,7 +184,7 @@
         (set-window-buffer-for "*piano-roll*" "*fx*"))
       (eseq.seq-layout/apply-fx-layout))))
 
-(def %open-piano-roll-bottom-for-track-core (track)
+(def open-piano-roll-bottom-for-track-core (track)
   (do
     (set! eseq.seq-core-state/lower-panel-visible true)
     (if (= eseq.seq-step-tabs/step-panel-buffer "*piano-roll*")
@@ -172,12 +199,12 @@
 (def seq-open-piano-roll-bottom-for-track (track)
   (do
     (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
-    (%open-piano-roll-bottom-for-track-core track)))
+    (open-piano-roll-bottom-for-track-core track)))
 
 (def seq-open-arrangement-piano-roll-bottom-for-track (track)
   (do
     (reactive-set "SEQV" "piano-roll-arrangement-mode" 1)
-    (%open-piano-roll-bottom-for-track-core track)))
+    (open-piano-roll-bottom-for-track-core track)))
 
 (def seq-open-piano-roll-bottom ()
   (seq-open-piano-roll-bottom-for-track SEQ.current-track))
@@ -188,7 +215,7 @@
 (def seq-open-piano-roll-preferred ()
   (seq-open-piano-roll-bottom))
 
-(def %switch-main-view (view)
+(def switch-main-view (view)
   (let ((old-buffer (eseq.seq-step-tabs/seq-visible-main-panel-buffer)))
     (do
       (set! eseq.seq-step-tabs/seq-main-view view)
@@ -210,12 +237,12 @@
     (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
     (set! eseq.seq-step-tabs/remembered-step-panel-buffer "*sequencer*")
     (set! eseq.seq-step-tabs/step-panel-buffer "*sequencer*")
-    (%switch-main-view :session)))
+    (switch-main-view :session)))
 
 ;; Arrangement is an app view, not a sequencer tile tab. It owns a wider main
 ;; layout without the step and track context panes.
 (def seq-open-arrangement ()
-  (%switch-main-view :arrangement))
+  (switch-main-view :arrangement))
 
 (def seq-toggle-arrangement ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)
@@ -268,7 +295,7 @@
           (= SEQ.editor-mode "new-effect")
           (= SEQ.editor-mode "edit-effect"))
     (host-command "toggle-instrument-patcher-source" (dict))
-    (if (%piano-roll-open?)
+    (if (piano-roll-open?)
       (seq-close-piano-roll)
       (seq-open-piano-roll-bottom))))
 

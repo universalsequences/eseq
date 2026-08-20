@@ -37,17 +37,54 @@
 
 (import eseq.seq-core-state :as core)
 
+(export page-button-width
+        page-slot-width
+        step-index
+        step-visible?
+        cursor-left
+        cursor-right
+        cursor-select-left
+        cursor-select-right
+        cursor-toggle
+        selection-click?
+        cmd-click?
+        set-track-cursor-step
+        step-clear-drag-state
+        step-shift-anchor
+        step-hold-select-maybe-engage
+        step-selected?
+        step-select-drag-start
+        step-select-drag-over-for-track
+        step-select-drag-over-for-track-no-cursor
+        step-select-drag-over
+        step-pointer-down-for-track
+        step-pointer-down
+        step-pointer-up
+        step-double-click-for-track
+        step-double-click
+        seq-set-step-param-from-step
+        seq-set-process-lane-from-step
+        select-all-steps
+        seq-global-select-all-steps
+        seq-global-toggle-record
+        delete-selected-steps
+        duration-slider-position
+        duration-slider-value
+        step-param-value
+        step-slider-param-value
+        param-decimals)
+
 
 (def page-button-width 2.8)
 
-(def %page-button-gap 0.4)
+(def page-button-gap 0.4)
 
 (def page-slot-width ()
-  (+ page-button-width %page-button-gap))
+  (+ page-button-width page-button-gap))
 
 ;; Private: no caller anywhere in the app; kept as the track-grid page-width
 ;; helper.
-(def %page-panel-width ()
+(def page-panel-width ()
   (+ 0.4 (* (eseq.seq-core-state/page-count) (page-slot-width))))
 
 (def step-index (i)
@@ -89,10 +126,10 @@
 ;; PINNED (hazard m): vanilla callers `set!` this flat. See the file header.
 (def eseq.vanilla/step-key-select-anchor nil)
 
-(def %cursor-select-step-range (start end)
+(def cursor-select-step-range (start end)
   (seq-select-step-range start end))
 
-(def %cursor-select-move (direction)
+(def cursor-select-move (direction)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (let ((num-steps (max 1 (eseq.seq-core-state/cursor-num-steps)))
@@ -104,13 +141,13 @@
         (do
           (set! eseq.vanilla/step-key-select-anchor anchor)
           (set-track-cursor-step next)
-          (%cursor-select-step-range anchor next))))))
+          (cursor-select-step-range anchor next))))))
 
 (def cursor-select-left ()
-  (%cursor-select-move -1))
+  (cursor-select-move -1))
 
 (def cursor-select-right ()
-  (%cursor-select-move 1))
+  (cursor-select-move 1))
 
 (def cursor-toggle ()
   (do
@@ -176,7 +213,7 @@
     eseq.vanilla/step-key-select-anchor
     (if (seq-has-selection?) eseq.vanilla/cursor-step step)))
 
-(def %step-hold-select-ms 300)
+(def step-hold-select-ms 300)
 
 ; Press-and-hold (~300ms) before dragging turns the drag into a selection
 ; sweep instead of a move/paint. Once a move or paint has already advanced
@@ -186,7 +223,7 @@
         (not (selection-click? evt))
         (not eseq.vanilla/step-drag-progressed)
         (not (= eseq.vanilla/step-press-ms nil))
-        (>= (- (now-ms) eseq.vanilla/step-press-ms) %step-hold-select-ms))
+        (>= (- (now-ms) eseq.vanilla/step-press-ms) step-hold-select-ms))
     (do
       (set! eseq.vanilla/step-hold-select true)
       (set! eseq.vanilla/step-click-pending nil)
@@ -221,12 +258,12 @@
           (set! eseq.vanilla/step-cmd-drag-last nil)
           (seq-select-step-range anchor step))))))
 
-(def %step-set-cursor-if (update-cursor step)
+(def step-set-cursor-if (update-cursor step)
   (if update-cursor
     (set-track-cursor-step step)
     nil))
 
-(def %step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
+(def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
   (do
     (step-hold-select-maybe-engage step evt)
     (if (or (selection-click? evt) eseq.vanilla/step-hold-select)
@@ -235,7 +272,7 @@
         (set! eseq.vanilla/step-move-last nil)
         (set! eseq.vanilla/step-toggle-drag-value nil)
         (eseq.seq-core-state/cool-off-follow)
-        (%step-set-cursor-if update-cursor step)
+        (step-set-cursor-if update-cursor step)
         (if (and (cmd-click? evt) (not eseq.vanilla/step-hold-select))
           (if (= step eseq.vanilla/step-cmd-drag-last)
             nil
@@ -251,7 +288,7 @@
           (do
             (set! eseq.vanilla/step-click-pending nil)
             (eseq.seq-core-state/cool-off-follow)
-            (%step-set-cursor-if update-cursor step)
+            (step-set-cursor-if update-cursor step)
             (if (= (seq-track-step-active? track step) eseq.vanilla/step-toggle-drag-value)
               nil
               (seq-toggle-step step)))
@@ -264,13 +301,13 @@
                 (eseq.seq-core-state/cool-off-follow)
                 (seq-move-step-drag eseq.vanilla/step-move-last step)
                 (set! eseq.vanilla/step-move-last step)
-                (%step-set-cursor-if update-cursor step)))))))))
+                (step-set-cursor-if update-cursor step)))))))))
 
 (def step-select-drag-over-for-track (track step evt)
-  (%step-select-drag-over-for-track-with-cursor track step evt true))
+  (step-select-drag-over-for-track-with-cursor track step evt true))
 
 (def step-select-drag-over-for-track-no-cursor (track step evt)
-  (%step-select-drag-over-for-track-with-cursor track step evt false))
+  (step-select-drag-over-for-track-with-cursor track step evt false))
 
 (def step-select-drag-over (step evt)
   (step-select-drag-over-for-track SEQ.current-track step evt))
@@ -334,10 +371,10 @@
       (if (seq-has-selection?) (seq-clear-selection) nil)
       (seq-set-step-param step param value))))
 
-(def %seq-selected-step-indexes ()
+(def seq-selected-step-indexes ()
   (seq-selected-step-indexes-native))
 
-(def %seq-set-process-lane-step-value (track lane step value)
+(def seq-set-process-lane-step-value (track lane step value)
   (seq-set-process-lane-step
     track
     (get lane :instance-id)
@@ -350,11 +387,11 @@
     (if (step-selected? step)
       (for-each
         (lambda (selected-step)
-          (%seq-set-process-lane-step-value track lane selected-step value))
-        (%seq-selected-step-indexes))
+          (seq-set-process-lane-step-value track lane selected-step value))
+        (seq-selected-step-indexes))
       (do
         (if (seq-has-selection?) (seq-clear-selection) nil)
-        (%seq-set-process-lane-step-value track lane step value)))))
+        (seq-set-process-lane-step-value track lane step value)))))
 
 (def select-all-steps ()
   (do

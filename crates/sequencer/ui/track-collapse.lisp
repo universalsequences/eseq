@@ -2,6 +2,15 @@
 
 (module eseq.track-collapse)
 
+(export collapsed?
+        visible-track-indices
+        custom-instrument?
+        replaceable-instrument?
+        sound-replaceable?
+        type-icon
+        group-type-icon
+        toggle-collapsed-ui)
+
 ;; Migration compat aliases (spec §10 slice 3): browser.lisp, mixer.lisp,
 ;; sequencer.lisp and arrangement.lisp all call these bare and are still
 ;; unconverted. `toggle-collapsed-ui` has no caller today, but it is
