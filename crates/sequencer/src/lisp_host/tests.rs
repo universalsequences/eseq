@@ -8631,6 +8631,83 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    #[ignore = "timing probe, run manually"]
+    fn jaki_perf_probe() {
+        let mut rt = jaki_runtime();
+        // production-shaped runtime: full midi-fx + process libraries resident
+        let midi_fx = super::load_midi_fx_library_source();
+        if !midi_fx.trim().is_empty() {
+            rt.eval(&midi_fx).expect("midi-fx library");
+        }
+        let processes = super::load_process_library_source();
+        if !processes.trim().is_empty() {
+            rt.eval(&processes).expect("process library");
+        }
+        rt.eval(r#"(jak "hit" :16 . . - -> 0 left -> 1 right)"#)
+            .expect("jaki surface macro");
+        // simulate a session's worth of stale renamed sequencers still registered
+        let stale: usize = std::env::var("JAKI_PROBE_STALE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        for i in 0..stale {
+            rt.eval(&format!(r#"(jak "stale-{i}" :16 . . - . -> 0)"#))
+                .expect("stale def");
+        }
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        let mut invocations: usize;
+        // warm-up cycle
+        generators.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        let mut pos = 4.0f64;
+        for window in 0..24 {
+            let started = std::time::Instant::now();
+            invocations = 0;
+            let end = pos + 256.0;
+            while pos < end {
+                generators.process_block(
+                    pos,
+                    pos + 0.5,
+                    0,
+                    48_000.0,
+                    |input| {
+                        invocations += 1;
+                        rt.invoke_sequencer_tick(input.generator_index, input).expect("tick")
+                    },
+                    &mut out,
+                );
+                pos += 0.5;
+            }
+            let elapsed = started.elapsed();
+            eprintln!(
+                "window {window}: {} ticks in {:?} => {:.3} ms/tick",
+                invocations,
+                elapsed,
+                elapsed.as_secs_f64() * 1_000.0 / invocations.max(1) as f64,
+            );
+            if window % 6 == 3 {
+                // simulate the user re-evaluating the buffer a few times mid-run
+                for _ in 0..5 {
+                    rt.eval(r#"(jak "hit" :16 . . - -> 0 left -> 1 right)"#)
+                        .expect("re-eval");
+                }
+                generators.sync_definitions(&rt.sequencer_defs(), pos);
+                eprintln!("-- re-evaluated buffer 5x --");
+            }
+            out.clear();
+        }
+    }
+
+    #[test]
     fn jaki_library_gate_prepends_only_when_referenced() {
         let plain = super::jaki_library_source_with_user_source("(def x 1)");
         assert_eq!(plain, "(def x 1)");
