@@ -119,6 +119,15 @@ The single index gains a provenance dimension instead (§6).
 
 ## 5. What a package ships
 
+A package has one distribution identity everywhere: the `name` in
+`manifest.json` is the author-scoped form `author/name`. The package loader
+validates that identity once and derives the dot-separated module prefix
+`author.name`. The same derived prefix names the installed directory and the
+sample provenance origin `pkg:author.name`. A manifest must never use the
+dotted form, and provenance/source ids must never contain the slash form.
+For example, `alec/acid-tools` owns Lisp modules beneath `alec.acid-tools` and
+its package source ids begin with `pkg:alec.acid-tools/`.
+
 **A package never ships a `.db` file.** Packages are git repos (content
 tiers §4.0); a binary SQLite blob in git is a merge-conflict disaster and is
 opaque to review. Packages ship text.

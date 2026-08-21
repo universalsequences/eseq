@@ -2,18 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use eseqlisp::package::InstalledPackage;
 
 use crate::sample_db::SampleDb;
 use crate::sample_import::{decode_audio_file, transcode_to_store};
 use crate::sample_manifest::{
     read_manifest, verify_payload, verify_source_asset, SampleManifestLine,
 };
-
-#[derive(Debug, Deserialize)]
-struct PackageIdentity {
-    name: String,
-}
 
 pub fn ingest_installed_packages(
     packages_dir: &Path,
@@ -37,14 +32,8 @@ pub fn ingest_package_samples(
     sample_dir: &Path,
     db: &mut SampleDb,
 ) -> Result<String, String> {
-    let identity_path = package_dir.join("manifest.json");
-    let identity: PackageIdentity = serde_json::from_slice(
-        &fs::read(&identity_path)
-            .map_err(|error| format!("failed to read {}: {error}", identity_path.display()))?,
-    )
-    .map_err(|error| format!("invalid {}: {error}", identity_path.display()))?;
-    validate_package_name(&identity.name)?;
-    let origin = format!("pkg:{}", identity.name);
+    let package = InstalledPackage::load(package_dir).map_err(|error| error.to_string())?;
+    let origin = format!("pkg:{}", package.module_prefix);
     let manifest_path = package_dir.join("samples.jsonl");
     let lines = read_manifest(&manifest_path)?;
 
@@ -114,26 +103,14 @@ pub fn ingest_package_samples(
 }
 
 pub fn uninstall_package_samples(
-    package_name: &str,
+    package_identity: &str,
     sample_dir: &Path,
     db: &mut SampleDb,
 ) -> Result<(), String> {
-    validate_package_name(package_name)?;
-    let origin = format!("pkg:{package_name}");
+    let module_prefix = eseqlisp::package::validate_package_name(package_identity)?;
+    let origin = format!("pkg:{module_prefix}");
     db.remove_origin(&origin, sample_dir)
         .map_err(|error| format!("failed to uninstall {origin}: {error}"))
-}
-
-fn validate_package_name(name: &str) -> Result<(), String> {
-    if !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        Ok(())
-    } else {
-        Err(format!("invalid package name {name:?}"))
-    }
 }
 
 fn validate_source_id(origin: &str, id: &str) -> Result<(), String> {
@@ -173,24 +150,32 @@ mod tests {
         writer.finalize().unwrap();
     }
 
-    fn make_package(root: &Path, name: &str) -> String {
-        fs::create_dir_all(root).unwrap();
+    fn make_package(root: &Path, identity: &str) -> String {
+        let module_prefix = eseqlisp::package::validate_package_name(identity).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/main.lisp"),
+            format!("(module {module_prefix}.main)"),
+        )
+        .unwrap();
         fs::write(
             root.join("manifest.json"),
-            format!(r#"{{"name":"{name}"}}"#),
+            format!(
+                r#"{{"name":"{identity}","version":"1","entry":"{module_prefix}.main"}}"#
+            ),
         )
         .unwrap();
         write_wav(&root.join("samples/drums/kick.wav"));
         index_package(root).unwrap();
         let manifest_path = root.join("samples.jsonl");
         let mut lines = read_manifest(&manifest_path).unwrap();
-        let source_id = format!("pkg:{name}/record");
+        let source_id = format!("pkg:{module_prefix}/record");
         let SampleManifestLine::Sample(sample) = &mut lines[0] else {
             unreachable!()
         };
         sample.source = Some(source_id.clone());
         lines.push(SampleManifestLine::Sample(PackageSample {
-            hash: if name == "one.pack" {
+            hash: if identity == "test/one" {
                 "1".repeat(64)
             } else {
                 "2".repeat(64)
@@ -231,25 +216,25 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let hash = make_package(&root.join("one"), "one.pack");
-        assert_eq!(hash, make_package(&root.join("two"), "two.pack"));
+        let hash = make_package(&root.join("one"), "test/one");
+        assert_eq!(hash, make_package(&root.join("two"), "test/two"));
         let store = root.join("store/samples");
         fs::create_dir_all(store.parent().unwrap()).unwrap();
         let mut db = SampleDb::open(&root.join("store/samples.db")).unwrap();
         ingest_package_samples(&root.join("one"), &store, &mut db).unwrap();
         ingest_package_samples(&root.join("two"), &store, &mut db).unwrap();
         let rows = db
-            .query(&[], &[], None, false, &["pkg:one.pack", "pkg:two.pack"])
+            .query(&[], &[], None, false, &["pkg:test.one", "pkg:test.two"])
             .unwrap();
         assert_eq!(rows.len(), 1);
         let package_one_rows = db
-            .query_samples_for_browser_with_origins(&[], &["pkg:one.pack"], None, 16)
+            .query_samples_for_browser_with_origins(&[], &["pkg:test.one"], None, 16)
             .unwrap();
         assert!(package_one_rows
             .iter()
             .any(|row| row.title.as_deref() == Some("Metadata only") && !row.available));
         let facets = db
-            .adjacent_tags_with_origins(&[], &["pkg:one.pack"], None, 16)
+            .adjacent_tags_with_origins(&[], &["pkg:test.one"], None, 16)
             .unwrap();
         assert!(facets
             .iter()
@@ -263,9 +248,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ref_count, 1);
-        uninstall_package_samples("one.pack", &store, &mut db).unwrap();
+        uninstall_package_samples("test/one", &store, &mut db).unwrap();
         assert!(store.join(format!("{hash}.wav")).is_file());
-        uninstall_package_samples("two.pack", &store, &mut db).unwrap();
+        uninstall_package_samples("test/two", &store, &mut db).unwrap();
         assert!(!store.join(format!("{hash}.wav")).exists());
         let source_count: i64 = db
             .connection()
