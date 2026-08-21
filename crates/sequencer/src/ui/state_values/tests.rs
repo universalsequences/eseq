@@ -17852,7 +17852,7 @@
     }
 
     #[test]
-    fn metal_seq_script_picker_load_syncs_hidden_scratch_into_project_state() {
+    fn metal_seq_script_picker_load_updates_scratch_draft_without_publishing() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
@@ -17907,11 +17907,15 @@
             app.editor.scratch_buffer, expected_scratch,
             "saving after picker load should persist the picker-generated scratch load form"
         );
-        assert_eq!(state.scratch_source(), expected_scratch);
+        assert_eq!(
+            state.scratch_source(),
+            "",
+            "picker-written scratch text must wait for an explicit eval-buffer"
+        );
     }
 
     #[test]
-    fn metal_seq_project_scratch_sync_reads_hidden_named_scratch_buffer() {
+    fn metal_seq_project_scratch_draft_waits_for_successful_eval_buffer() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = app::App::new(
@@ -17943,6 +17947,7 @@
         editor.buffers[scratch_idx].set_text(scratch_source);
         editor.open_scratch_buffer_with_mode("*sequencer*", "", eseqlisp::BufferMode::ESeqLisp);
         assert_eq!(editor.active_buffer().name, "*sequencer*");
+        let scratch_id = editor.buffers[scratch_idx].id as u64;
 
         pull_named_scratch_buffer_into_project(&editor, &mut app);
 
@@ -17950,6 +17955,24 @@
             app.editor.scratch_buffer, scratch_source,
             "project save sync should capture hidden *scratch* contents"
         );
+        assert_eq!(
+            state.scratch_source(),
+            "",
+            "editing the scratch draft must not publish scheduler source"
+        );
+        assert!(!publish_evaluated_project_scratch(
+            &editor,
+            &mut app,
+            scratch_id,
+            false,
+        ));
+        assert_eq!(state.scratch_source(), "", "failed eval must not publish");
+        assert!(publish_evaluated_project_scratch(
+            &editor,
+            &mut app,
+            scratch_id,
+            true,
+        ));
         assert_eq!(state.scratch_source(), scratch_source);
     }
 

@@ -1055,6 +1055,7 @@ pub(crate) fn run_event_loop(
                             )));
                         }
                     }
+                    publish_evaluated_project_scratch(&editor, &mut app, id, success);
                     continue;
                 }
                 HostCommand::Custom { name, payload } => {

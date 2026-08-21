@@ -233,7 +233,7 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
     editor: &mut Editor,
     app: &app::App,
 ) -> Result<(), String> {
-    let scratch_text = app.editor.scratch_buffer.clone();
+    let scratch_text = app.state.scratch_source();
     if scratch_text.trim().is_empty() {
         return Ok(());
     }
@@ -273,11 +273,31 @@ pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut 
     let text = buffer.text();
     let cursor = buffer.cursor;
     if app.editor.scratch_buffer != text || app.editor.scratch_cursor != cursor {
-        app.editor.scratch_buffer = text.clone();
+        // Keep the draft current for project persistence, but do not publish it to
+        // the scheduler. Editing *scratch* must have no execution side effects.
+        app.editor.scratch_buffer = text;
         app.editor.scratch_cursor = cursor;
-        app.state.set_scratch_source(text);
-        app.editor.scratch_runtime = None;
     }
+}
+
+pub(crate) fn publish_evaluated_project_scratch(
+    editor: &Editor,
+    app: &mut app::App,
+    transaction_id: u64,
+    success: bool,
+) -> bool {
+    if !success {
+        return false;
+    }
+    let Some(buffer) = editor.buffers.iter().find(|buffer| {
+        buffer.id as u64 == transaction_id && buffer.name == PROJECT_SCRATCH_BUFFER_NAME
+    }) else {
+        return false;
+    };
+
+    app.state.set_scratch_source(buffer.text());
+    app.editor.scratch_runtime = None;
+    true
 }
 
 pub(crate) fn current_custom_instrument_name(app: &app::App, track: usize) -> Option<String> {

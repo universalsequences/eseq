@@ -355,6 +355,9 @@ impl<'de> Deserialize<'de> for ProjectFile {
         let tracks = migrate_project_tracks(wire.version, wire.tracks).map_err(D::Error::custom)?;
         let mut scratch = wire.scratch;
         migrate_factory_content_paths(&mut scratch.buffer);
+        if let Some(source) = scratch.evaluated_buffer.as_mut() {
+            migrate_factory_content_paths(source);
+        }
         let mut project = Self {
             version: wire.version,
             name: wire.name,
@@ -1262,6 +1265,10 @@ impl ProjectRackConfig {
 pub struct ProjectScratchState {
     #[serde(default)]
     pub buffer: String,
+    /// Last source explicitly evaluated by the user. `None` denotes a legacy
+    /// project where `buffer` was necessarily the evaluated source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated_buffer: Option<String>,
     #[serde(default)]
     pub cursor_row: usize,
     #[serde(default)]
@@ -3513,6 +3520,7 @@ mod tests {
             device_instances: ProjectDeviceInstances::default(),
             scratch: ProjectScratchState {
                 buffer: "(+ 1 2)".to_string(),
+                evaluated_buffer: Some("(+ 1 1)".to_string()),
                 cursor_row: 3,
                 cursor_col: 7,
             },
@@ -4585,6 +4593,10 @@ mod tests {
             project.patterns[0].project_process_lane_overrides
         );
         assert_eq!(restored.scratch.buffer, project.scratch.buffer);
+        assert_eq!(
+            restored.scratch.evaluated_buffer,
+            project.scratch.evaluated_buffer
+        );
         assert_eq!(restored.scratch.cursor_row, project.scratch.cursor_row);
         assert_eq!(restored.scratch.cursor_col, project.scratch.cursor_col);
         assert_eq!(

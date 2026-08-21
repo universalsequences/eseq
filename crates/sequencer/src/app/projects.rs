@@ -2530,6 +2530,7 @@ impl App {
             device_instances,
             scratch: ProjectScratchState {
                 buffer: self.editor.scratch_buffer.clone(),
+                evaluated_buffer: Some(self.state.scratch_source()),
                 cursor_row: self.editor.scratch_cursor.0,
                 cursor_col: self.editor.scratch_cursor.1,
             },
@@ -4170,11 +4171,13 @@ impl App {
         }
 
         self.current_project_name = Some(pending.name.clone());
+        let evaluated_scratch = scratch
+            .evaluated_buffer
+            .unwrap_or_else(|| scratch.buffer.clone());
         self.editor.scratch_buffer = scratch.buffer;
         self.editor.scratch_cursor = (scratch.cursor_row, scratch.cursor_col);
         self.editor.scratch_runtime = None;
-        self.state
-            .set_scratch_source(self.editor.scratch_buffer.clone());
+        self.state.set_scratch_source(evaluated_scratch);
         self.clear_control_hooks();
         let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
@@ -4869,6 +4872,7 @@ impl App {
         project.current_pattern = 0;
         project.current_track = None;
         project.scratch.buffer.clear();
+        project.scratch.evaluated_buffer = None;
         project.scratch.cursor_row = 0;
         project.scratch.cursor_col = 0;
         serde_json::to_vec(&project)
