@@ -2108,8 +2108,15 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             tensor_params: value.tensor_params.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
-            ir: value.ir.clone(),
-            table: value.table.clone(),
+            // Bus-backed effect slots are already snapshots, rather than live
+            // EffectSlotState values recaptured during project save. Refresh
+            // host-managed references from the live node registries here so
+            // their latest IR/table selections reach every persistence path.
+            // Keep the snapshot value as a fallback for decoded/offline data.
+            ir: crate::effects::conv_reverb::ir_ref_for(value.node_id as i32)
+                .or_else(|| value.ir.clone()),
+            table: crate::effects::filter_table::persisted_table_ref_for(value.node_id as i32)
+                .or_else(|| value.table.clone()),
         }
     }
 }

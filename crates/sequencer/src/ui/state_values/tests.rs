@@ -44029,6 +44029,120 @@
     }
 
     #[test]
+    fn bus_backed_filter_table_effects_expose_engine_dropdown_state() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        // Ordinary buses, group buses, and drum-rack buses all publish their
+        // panel through this shared value builder. Proving the engine field is
+        // present here covers all three owner routes; filter-table.lisp binds
+        // this field to the Spectral/Min Phase dropdown.
+        let mut desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        desc.name = sequencer::effects::filter_table::NAME.to_string();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let bus = app
+            .buses
+            .first_mut()
+            .expect("test app should start with the mix bus");
+        bus.effect_descriptors = vec![desc.clone()];
+        bus.effect_slots = vec![sequencer::effects::EffectSlotSnapshot::new_default(
+            &desc, 104,
+        )];
+
+        let bus_effects = build_bus_effects_value_for_selection(&app, None);
+        let Value::List(buses) = bus_effects else {
+            panic!("bus effects should be a list");
+        };
+        let mix_bus = buses.first().expect("mix bus should be present").borrow();
+        let Value::List(slots) = &*mix_bus else {
+            panic!("mix bus effects should be a slot list: {mix_bus:?}");
+        };
+        let filter_table = slots
+            .first()
+            .expect("bus Filter Table slot should be present")
+            .borrow();
+
+        assert_eq!(
+            map_get(&filter_table, "table-engine").map(|value| value.clone()),
+            Some(Value::String("Spectral".to_string())),
+            "bus-backed Filter Table panels need engine state for the dropdown",
+        );
+        assert_eq!(
+            map_get(&filter_table, "bus-fx").map(|value| value.clone()),
+            Some(Value::Bool(true)),
+        );
+        drop(filter_table);
+        drop(mix_bus);
+
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter Table".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![Value::String("Mix".to_string())])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
+                ("bus-effects", Value::List(buses)),
+            ],
+            true,
+        );
+        editor.runtime_mut().eval_str(
+            r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-instrument-synth-ui (inst) false)
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus 0)
+            "#,
+        ).expect("install bus Filter Table test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor.buffers.iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 28);
+        let layout = editor.widget_layout().expect("bus Filter Table layout");
+        assert_finite_layout_tree(&layout);
+        let engine = find_layout_node_by_stable_key(&layout, "filter-table-engine-dd-0")
+            .and_then(|node| find_layout_node_by_widget_type(node, "dropdown"))
+            .expect("bus Spectral/Min Phase dropdown");
+        assert_finite_nonzero_rect(engine, "bus Spectral/Min Phase dropdown");
+        assert_eq!(engine.props.get("value"), Some(&Value::String("Spectral".to_string())));
+        let on_change = engine.props.get("on-change").cloned()
+            .expect("bus engine dropdown should be editable");
+        editor.runtime_mut()
+            .invoke(on_change, vec![Value::String("Min Phase".to_string())])
+            .expect("select bus Filter Table engine");
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("expected one bus Filter Table command, got {commands:?}");
+        };
+        assert_eq!(name, "set-filter-table-engine");
+        assert_eq!(extract_usize_from_payload(payload, "bus"), Some(0));
+        assert_eq!(extract_usize_from_payload(payload, "slot"), Some(0));
+        assert_eq!(extract_string_from_payload(payload, "engine").as_deref(), Some("causal"));
+    }
+
+    #[test]
     fn bus_effects_value_exposes_mod_sources_for_group_headers() {
         fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
             let Value::Map(map) = value else {

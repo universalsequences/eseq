@@ -5239,6 +5239,44 @@ mod tests {
     }
 
     #[test]
+    fn bus_backed_filter_table_preset_survives_project_roundtrip() {
+        let _registry = crate::effects::filter_table::tests::registry_lock();
+        let node_id = 843_001;
+        let reference = "fltab:vowel-drift";
+        crate::effects::filter_table::record_prepared_table(
+            node_id,
+            reference,
+            "vowel-drift",
+            std::sync::Arc::new(crate::effects::filter_table::default_table()),
+        );
+
+        let mut descriptor = EffectDescriptor::builtin_filter();
+        descriptor.name = crate::effects::filter_table::NAME.to_string();
+        let mut bus = BusChannelState::new(BusId::DEFAULT_A, "Group / rack bus".to_string());
+        bus.effect_descriptors = vec![descriptor.clone()];
+        bus.effect_slots = vec![crate::effects::EffectSlotSnapshot::new_default(
+            &descriptor,
+            node_id as u32,
+        )];
+        bus.custom_effect_names[0] = Some(crate::effects::filter_table::NAME.to_string());
+
+        // Bus, group, and drum-rack owners all serialize their effects through
+        // ProjectBusChannel. The live table reference is registry-owned and is
+        // intentionally absent from the long-lived bus slot snapshot here.
+        assert_eq!(bus.effect_slots[0].table, None);
+        let saved = ProjectBusChannel::from(bus);
+        assert_eq!(saved.effect_slots[0].table.as_deref(), Some(reference));
+
+        let json = serde_json::to_string(&saved).expect("serialize bus-backed Filter Table");
+        let decoded: ProjectBusChannel =
+            serde_json::from_str(&json).expect("deserialize bus-backed Filter Table");
+        let restored = BusChannelState::from(decoded);
+        assert_eq!(restored.effect_slots[0].table.as_deref(), Some(reference));
+
+        crate::effects::filter_table::clear_instance(node_id);
+    }
+
+    #[test]
     fn dgen_builtin_project_names_are_treated_as_builtin() {
         for name in [
             crate::effects::conv_reverb::NAME,
