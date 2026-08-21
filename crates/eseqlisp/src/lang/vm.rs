@@ -1365,6 +1365,16 @@ fn convert_source_expr(
             macro_names,
             annotate_widgets,
         ))),
+        ExprKind::UnquoteSplicing(inner) => {
+            Expression::UnquoteSplicing(Box::new(convert_source_expr(
+                inner,
+                source_revision,
+                local_defwidgets,
+                shadowed_widget_names,
+                macro_names,
+                annotate_widgets,
+            )))
+        }
         ExprKind::List(items) => {
             let mut converted = Vec::with_capacity(items.len() + 6);
             let head_name = expr_head_symbol(expr);
@@ -8446,6 +8456,86 @@ counter
     }
 
     #[test]
+    fn variadic_macro_splices_rest_arguments() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro collect (head &rest tail) `(list ,head ,@tail))")
+            .expect("variadic macro definition");
+
+        let result = vm
+            .eval_str("(collect 1 2 (list 3 4))")
+            .expect("variadic macro call")
+            .expect("macro result");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(1.0))),
+                Rc::new(RefCell::new(Value::Number(2.0))),
+                Rc::new(RefCell::new(Value::List(vec![
+                    Rc::new(RefCell::new(Value::Number(3.0))),
+                    Rc::new(RefCell::new(Value::Number(4.0))),
+                ]))),
+            ])
+        );
+
+        let result = vm
+            .eval_str("(collect 5)")
+            .expect("empty rest macro call");
+        assert_eq!(
+            result,
+            Some(Value::List(vec![Rc::new(RefCell::new(Value::Number(5.0)))]))
+        );
+    }
+
+    #[test]
+    fn variadic_macro_can_splice_syntax_into_quoted_data() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro syntax-list (&rest forms) `'(,@forms))")
+            .expect("macro definition");
+
+        let result = vm
+            .eval_str("(syntax-list alpha (beta 2))")
+            .expect("quoted splicing macro call");
+        assert_eq!(
+            result,
+            Some(Value::List(vec![
+                Rc::new(RefCell::new(Value::Symbol("alpha".to_string()))),
+                Rc::new(RefCell::new(Value::List(vec![
+                    Rc::new(RefCell::new(Value::Symbol("beta".to_string()))),
+                    Rc::new(RefCell::new(Value::Number(2.0))),
+                ]))),
+            ]))
+        );
+    }
+
+    #[test]
+    fn macro_can_splice_a_quoted_list_parameter() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro unwrap (items) `(list ,@items))")
+            .expect("macro definition");
+
+        let result = vm
+            .eval_str("(unwrap '(1 2 3))")
+            .expect("splicing macro call");
+        assert_eq!(
+            result,
+            Some(Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(1.0))),
+                Rc::new(RefCell::new(Value::Number(2.0))),
+                Rc::new(RefCell::new(Value::Number(3.0))),
+            ]))
+        );
+    }
+
+    #[test]
+    fn malformed_rest_parameter_list_is_rejected() {
+        let mut vm = VM::new(Vec::new());
+
+        assert!(vm.eval_str("(defmacro missing (&rest) `(list))").is_err());
+        assert!(vm.eval_str("(defmacro trailing (&rest xs y) `(list ,@xs))").is_err());
+        assert!(vm.eval_str("(defmacro duplicate (x &rest x) `(list ,@x))").is_err());
+    }
+
+    #[test]
     fn wrong_arity_macro_call_returns_error_instead_of_recursing() {
         let mut vm = VM::new(Vec::new());
         vm.eval_str("(defmacro demo (x) `(+ ,x 1))")
@@ -8453,6 +8543,10 @@ counter
 
         assert!(vm.eval_str("(demo)").is_err());
         assert!(vm.eval_str("(demo 1 2)").is_err());
+
+        vm.eval_str("(defmacro variadic (x &rest xs) `(list ,x ,@xs))")
+            .expect("variadic macro definition");
+        assert!(vm.eval_str("(variadic)").is_err());
     }
 
     #[test]

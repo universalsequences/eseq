@@ -678,6 +678,7 @@ fn validate_expr(
         }
         Expression::Quasiquote(_)
         | Expression::Unquote(_)
+        | Expression::UnquoteSplicing(_)
         | Expression::QuoteList(_)
         | Expression::QuoteSymbol(_) => Err("quoted generated code is not allowed".to_string()),
         Expression::Keyword(keyword) => Err(format!(

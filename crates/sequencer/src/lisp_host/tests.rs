@@ -8032,13 +8032,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // (. . - .) → hits L R L L R at unit offsets 0..4 (spec §6.1)
         let hands = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - .)) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . - .) 0 :left jaki/default-state)))
                  (map (lambda (e) (if (= (get e :hand) :left) 0 1)) (get r :events)))"#,
         );
         assert_eq!(hands, vec![0.0, 1.0, 0.0, 0.0, 1.0]);
         let offs = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - .)) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . - .) 0 :left jaki/default-state)))
                  (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
                       (get r :events)))"#,
         );
@@ -8052,13 +8052,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // (- . .) → dash L,L then R, L
         let hands = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - (rev))) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . - (rev)) 0 :left jaki/default-state)))
                  (map (lambda (e) (if (= (get e :hand) :left) 0 1)) (get r :events)))"#,
         );
         assert_eq!(hands, vec![0.0, 0.0, 1.0, 0.0]);
         let vels = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - (rev))) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . - (rev)) 0 :left jaki/default-state)))
                  (map (lambda (e) (get e :vel)) (get r :events)))"#,
         );
         // dash base, dash-decay, post-dash accent, then dot decay from the accent
@@ -8070,7 +8070,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let vels = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat '(. . . .))))
+            r#"(let ((p (jaki/pat . . . .)))
                  (let ((r0 (jaki/eval-at p 0 :left jaki/default-state)))
                    (let ((r1 (jaki/eval-at p 1 (get r0 :end-hand) (get r0 :end-st))))
                      (append (map (lambda (e) (get e :vel)) (get r0 :events))
@@ -8098,7 +8098,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let hands = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat '(. . (every 2 swap)))))
+            r#"(let ((p (jaki/pat . . (every 2 swap))))
                  (append
                    (map (lambda (e) (if (= (get e :hand) :left) 0 1))
                         (get (jaki/eval-at p 0 :left jaki/default-state) :events))
@@ -8116,7 +8116,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // exact (num den) pairs, no float rounding
         let pairs = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . . - (% 4))) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . . - (% 4)) 0 :left jaki/default-state)))
                  (reduce (lambda (acc e)
                            (append acc (list (nth (get e :off) 0) (nth (get e :off) 1))))
                          (list) (get r :events)))"#,
@@ -8124,7 +8124,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(pairs, vec![0.0, 1.0, 4.0, 5.0, 8.0, 5.0, 12.0, 5.0, 16.0, 5.0]);
         let len = jaki_eval_nums(
             &mut rt,
-            r#"(get (jaki/eval-at (jaki/pat '(. . . - (% 4))) 0 :left jaki/default-state) :len)"#,
+            r#"(get (jaki/eval-at (jaki/pat . . . - (% 4)) 0 :left jaki/default-state) :len)"#,
         );
         assert_eq!(len, vec![4.0, 1.0]);
     }
@@ -8134,7 +8134,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let offs = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat '(. . (* (cyc 1 2))))))
+            r#"(let ((p (jaki/pat . . (* (cyc 1 2)))))
                  (append
                    (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
                         (get (jaki/eval-at p 0 :left jaki/default-state) :events))
@@ -8151,7 +8151,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let nums = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/filter (jaki/pat '(. . - .)) '(:hand :left))
+            r#"(let ((r (jaki/eval-at (jaki/filter (jaki/pat . . - .) '(:hand :left))
                                       0 :left jaki/default-state)))
                  (reduce (lambda (acc e)
                            (append acc (list (/ (nth (get e :off) 0) (nth (get e :off) 1))
@@ -8168,7 +8168,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let nums = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/filter (jaki/pat '(- .)) '(:accent true))
+            r#"(let ((r (jaki/eval-at (jaki/filter (jaki/pat - .) '(:accent true))
                                       0 :left jaki/default-state)))
                  (reduce (lambda (acc e)
                            (append acc (list (/ (nth (get e :off) 0) (nth (get e :off) 1))
@@ -8185,7 +8185,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let nums = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . . (align 4 :pad))) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . . (align 4 :pad)) 0 :left jaki/default-state)))
                  (append
                    (map (lambda (e) (if (= (get e :hand) :left) 0 1)) (get r :events))
                    (map (lambda (e) (get e :vel)) (get r :events))
@@ -8210,7 +8210,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let gates = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(. . (stac))) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat . . (stac)) 0 :left jaki/default-state)))
                  (reduce (lambda (acc e)
                            (append acc (list (nth (get e :gate) 0) (nth (get e :gate) 1))))
                          (list) (get r :events)))"#,
@@ -8218,7 +8218,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(gates, vec![1.0, 4.0, 1.0, 4.0]);
         let nums = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/pat '(- . (ghost))) 0 :left jaki/default-state)))
+            r#"(let ((r (jaki/eval-at (jaki/pat - . (ghost)) 0 :left jaki/default-state)))
                  (reduce (lambda (acc e)
                            (append acc (list (/ (nth (get e :off) 0) (nth (get e :off) 1))
                                              (get e :vel))))
@@ -8234,7 +8234,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let vels = jaki_eval_nums(
             &mut rt,
-            r#"(let ((r (jaki/eval-at (jaki/shift (jaki/pat '(. . . .)) 1)
+            r#"(let ((r (jaki/eval-at (jaki/shift (jaki/pat . . . .) 1)
                                       0 :left jaki/default-state)))
                  (map (lambda (e) (get e :vel)) (get r :events)))"#,
         );
@@ -8247,14 +8247,14 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let cycles = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat '(. . . . (% (cyc 4 6))))))
+            r#"(let ((p (jaki/pat . . . . (% (cyc 4 6)))))
                  (map (lambda (pos) (jaki/cycle-index p pos)) (list 0 3 4 9 10 23)))"#,
         );
         // lengths alternate 4, 6 (super-cycle 10): closed form, no state
         assert_eq!(cycles, vec![0.0, 0.0, 1.0, 1.0, 2.0, 4.0]);
         let starts = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat '(. . . . (% (cyc 4 6))))))
+            r#"(let ((p (jaki/pat . . . . (% (cyc 4 6)))))
                  (map (lambda (pos) (nth (jaki/locate p pos) 1)) (list 0 3 4 9 10 23)))"#,
         );
         assert_eq!(starts, vec![0.0, 0.0, 4.0, 4.0, 10.0, 20.0]);
@@ -8265,7 +8265,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut rt = jaki_runtime();
         let nums = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat '(. . - .))))
+            r#"(let ((p (jaki/pat . . - .)))
                  (do
                    (map (lambda (k) (jaki/eval-cycle p k :left jaki/default-state))
                         (range 0 20))
@@ -8287,7 +8287,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                  :resolution :16
                  :tick (do
                    (jaki/init :16)
-                   (jaki/emit (jaki/pat '(. . . .)) 0)))"#,
+                   (jaki/emit (jaki/pat . . . .) 0)))"#,
         )
         .expect("def-sequencer");
 
@@ -8334,7 +8334,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                  :resolution :16
                  :tick (do
                    (jaki/init :16)
-                   (jaki/emit (jaki/pat '(. - (* 2))) 0)))"#,
+                   (jaki/emit (jaki/pat . - (* 2)) 0)))"#,
         )
         .expect("def-sequencer");
 
@@ -8370,7 +8370,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                  :resolution :16
                  :tick (do
                    (jaki/init :16)
-                   (let ((base (jaki/pat '(. . - .))))
+                   (let ((base (jaki/pat . . - .)))
                      (do
                        (jaki/emit base 0)
                        (jaki/emit (jaki/shift base 1) 1)

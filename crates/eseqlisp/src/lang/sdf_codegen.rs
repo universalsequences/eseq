@@ -233,9 +233,11 @@ impl MetalEmitter {
             }
 
             // Quasiquote/Unquote should be expanded before codegen
-            Expression::Quasiquote(_) | Expression::Unquote(_) => Err(
-                CodegenError::UnsupportedExpression("unexpanded quasiquote/unquote".into()),
-            ),
+            Expression::Quasiquote(_)
+            | Expression::Unquote(_)
+            | Expression::UnquoteSplicing(_) => Err(CodegenError::UnsupportedExpression(
+                "unexpanded quasiquote/unquote".into(),
+            )),
 
             Expression::String(s) => Err(CodegenError::UnsupportedExpression(format!(
                 "string literal: \"{}\"",

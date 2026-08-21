@@ -378,7 +378,9 @@ fn collect_value_symbol_refs(expr: &Expression, refs: &mut Vec<String>) {
         Expression::Symbol(symbol) => refs.push(symbol.clone()),
         Expression::List(items) => collect_list_value_symbol_refs(items, refs),
         Expression::Quasiquote(_) | Expression::QuoteList(_) | Expression::QuoteSymbol(_) => {}
-        Expression::Unquote(expr) => collect_value_symbol_refs(expr, refs),
+        Expression::Unquote(expr) | Expression::UnquoteSplicing(expr) => {
+            collect_value_symbol_refs(expr, refs)
+        }
         Expression::Keyword(_) | Expression::String(_) | Expression::Number(_) => {}
     }
 }
@@ -503,7 +505,9 @@ fn collect_mod_accessor_params(expr: &Expression, params: &mut Vec<String>) {
                 collect_mod_accessor_params(item, params);
             }
         }
-        Expression::Quasiquote(expr) | Expression::Unquote(expr) => {
+        Expression::Quasiquote(expr)
+        | Expression::Unquote(expr)
+        | Expression::UnquoteSplicing(expr) => {
             collect_mod_accessor_params(expr, params);
         }
         _ => {}

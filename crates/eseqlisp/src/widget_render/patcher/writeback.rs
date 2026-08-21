@@ -2188,7 +2188,9 @@ fn collect_generated_symbol_dependencies(
                 collect_generated_symbol_dependencies(item, generated_name_to_order, out);
             }
         }
-        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => {
             collect_generated_symbol_dependencies(inner, generated_name_to_order, out);
         }
         _ => {}
@@ -2492,9 +2494,9 @@ fn expression_requires_host_modulation(expr: &Expression) -> bool {
             }
             items.iter().any(expression_requires_host_modulation)
         }
-        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
-            expression_requires_host_modulation(inner)
-        }
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => expression_requires_host_modulation(inner),
         _ => false,
     }
 }
@@ -7628,7 +7630,9 @@ fn collect_history_suffixes(expr: &Expression, max_suffix: &mut usize) {
                 collect_history_suffixes(item, max_suffix);
             }
         }
-        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => {
             collect_history_suffixes(inner, max_suffix);
         }
         _ => {}
@@ -7751,7 +7755,9 @@ fn collect_scope_value_references(expr: &Expression, references: &mut HashSet<St
                 collect_scope_value_references(item, references);
             }
         }
-        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => {
             collect_scope_value_references(inner, references);
         }
         _ => {}
@@ -7789,7 +7795,9 @@ fn collect_macro_call_references(
                 collect_macro_call_references(item, macro_names, references);
             }
         }
-        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => {
             collect_macro_call_references(inner, macro_names, references);
         }
         _ => {}

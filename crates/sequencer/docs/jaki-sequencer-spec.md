@@ -416,12 +416,10 @@ via def-sequencer's quoted-source shipping — the library must never be
 captured as UI-VM closures. Deviations from the surface sketched above, all
 forced by measured eseqlisp semantics:
 
-- **`jaki/pat` is a function over quoted data, not a macro.** eseqlisp
-  `defmacro` is a fixed-arity template engine (no `&rest`, no `,@`, no
-  expansion-time eval), so the variadic `(jaki/pat . . -)` spelling is
-  impossible today: write `(jaki/pat '(. . - (every 2 swap)))`. Filed as a
-  package-expressiveness gap (variadic + splicing macros); the library is
-  unchanged if that lands — only the entry point gains sugar.
+- **`jaki/pat` is variadic macro sugar over `jaki/from-list`.** eseqlisp
+  `defmacro` supports `&rest` parameters and `,@` splicing, so the authored
+  spelling is `(jaki/pat . . - (every 2 swap))`. Code that constructs pattern
+  forms dynamically can call `(jaki/from-list forms)` directly.
 - **Quotes inside `:tick` now survive.** def-sequencer's captured tick data is
   re-serialized with `format_lisp_source` for the scheduler VM, which used to
   erase `'`. The compiler now captures inner quotes as `(quote x)` data (tick/

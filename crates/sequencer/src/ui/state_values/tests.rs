@@ -670,7 +670,8 @@
                     | Some(Token::String(_))
                     | Some(Token::Keyword(_))
                     | Some(Token::Backtick)
-                    | Some(Token::Comma) => Err(ParserError::InvalidQuote),
+                    | Some(Token::Comma)
+                    | Some(Token::CommaAt) => Err(ParserError::InvalidQuote),
                     None => Err(ParserError::UnexpectedEOF),
                 }
             }
@@ -691,7 +692,7 @@
                 }
                 parse_expression_at(tokens, pos)
             }
-            Some(Token::Backtick) | Some(Token::Comma) => {
+            Some(Token::Backtick) | Some(Token::Comma) | Some(Token::CommaAt) => {
                 *pos += 1;
                 parse_expression_at(tokens, pos)
             }

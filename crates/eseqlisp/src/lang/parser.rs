@@ -105,6 +105,9 @@ impl Expr {
             ExprKind::List(items) => Expression::List(items.iter().map(Expr::to_legacy).collect()),
             ExprKind::Quasiquote(inner) => Expression::Quasiquote(Box::new(inner.to_legacy())),
             ExprKind::Unquote(inner) => Expression::Unquote(Box::new(inner.to_legacy())),
+            ExprKind::UnquoteSplicing(inner) => {
+                Expression::UnquoteSplicing(Box::new(inner.to_legacy()))
+            }
         }
     }
 
@@ -138,6 +141,9 @@ impl Expr {
             Expression::Unquote(inner) => {
                 ExprKind::Unquote(Box::new(Expr::from_legacy_with_origin(*inner, origin)))
             }
+            Expression::UnquoteSplicing(inner) => ExprKind::UnquoteSplicing(Box::new(
+                Expr::from_legacy_with_origin(*inner, origin),
+            ))
         };
         Expr::with_origin_from(kind, origin)
     }
@@ -154,6 +160,7 @@ pub enum ExprKind {
     List(Vec<Expr>),
     Quasiquote(Box<Expr>),
     Unquote(Box<Expr>),
+    UnquoteSplicing(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,6 +186,7 @@ pub enum Token {
     Quote,
     Backtick, // ` (quasiquote)
     Comma,    // , (unquote)
+    CommaAt,  // ,@ (unquote-splicing)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,7 +396,13 @@ impl Parser {
                     }
                     b',' => {
                         self.next();
-                        tokens.push(SpannedToken::new(Token::Comma, start, self.pos));
+                        let token = if matches!(self.peek(), Some(b'@')) {
+                            self.next();
+                            Token::CommaAt
+                        } else {
+                            Token::Comma
+                        };
+                        tokens.push(SpannedToken::new(token, start, self.pos));
                     }
                     b'"' => {
                         self.next();
@@ -468,6 +482,7 @@ pub enum Expression {
     List(Vec<Expression>),
     Quasiquote(Box<Expression>), // `expr
     Unquote(Box<Expression>),    // ,expr
+    UnquoteSplicing(Box<Expression>), // ,@expr
 }
 
 impl Clone for Expression {
@@ -477,6 +492,7 @@ impl Clone for Expression {
             BuildList { len: usize, quoted: bool },
             BuildQuasiquote,
             BuildUnquote,
+            BuildUnquoteSplicing,
         }
 
         let mut tasks = vec![Task::Visit(self)];
@@ -520,6 +536,10 @@ impl Clone for Expression {
                     tasks.push(Task::BuildUnquote);
                     tasks.push(Task::Visit(value));
                 }
+                Task::Visit(Expression::UnquoteSplicing(value)) => {
+                    tasks.push(Task::BuildUnquoteSplicing);
+                    tasks.push(Task::Visit(value));
+                }
                 Task::BuildList { len, quoted } => {
                     let items = values.split_off(values.len() - len);
                     values.push(if quoted {
@@ -535,6 +555,10 @@ impl Clone for Expression {
                 Task::BuildUnquote => {
                     let value = values.pop().expect("unquote clone operand");
                     values.push(Expression::Unquote(Box::new(value)));
+                }
+                Task::BuildUnquoteSplicing => {
+                    let value = values.pop().expect("unquote-splicing clone operand");
+                    values.push(Expression::UnquoteSplicing(Box::new(value)));
                 }
             }
         }
@@ -588,7 +612,7 @@ impl ASTParser {
             Some(Token::String(_)) => Err(ParserError::InvalidQuote),
             Some(Token::Keyword(_)) => Err(ParserError::InvalidQuote),
             Some(Token::Backtick) => Err(ParserError::InvalidQuote),
-            Some(Token::Comma) => Err(ParserError::InvalidQuote),
+            Some(Token::Comma | Token::CommaAt) => Err(ParserError::InvalidQuote),
             Some(Token::Symbol(s)) => {
                 let expression = Expression::QuoteSymbol(s.to_string());
                 self.next();
@@ -668,6 +692,11 @@ impl ASTParser {
                 self.next(); // consume comma
                 let expr = self.parse_expression()?;
                 Ok(Expression::Unquote(Box::new(expr)))
+            }
+            Some(Token::CommaAt) => {
+                self.next(); // consume ,@
+                let expr = self.parse_expression()?;
+                Ok(Expression::UnquoteSplicing(Box::new(expr)))
             }
             Some(Token::RightParen) => Err(ParserError::ExpectedLeftParen),
             None => Err(ParserError::UnexpectedEOF),
@@ -751,6 +780,7 @@ impl SpannedASTParser {
                         | Token::Keyword(_)
                         | Token::Backtick
                         | Token::Comma
+                        | Token::CommaAt
                 ) =>
             {
                 Err(ParserError::InvalidQuote)
@@ -860,6 +890,14 @@ impl SpannedASTParser {
                     SourceSpan::new(token.span.start_byte, expr.origin.primary_span.end_byte),
                 ))
             }
+            Token::CommaAt => {
+                self.next();
+                let expr = self.parse_expression()?;
+                Ok(self.expr(
+                    ExprKind::UnquoteSplicing(Box::new(expr.clone())),
+                    SourceSpan::new(token.span.start_byte, expr.origin.primary_span.end_byte),
+                ))
+            }
             Token::RightParen => Err(ParserError::ExpectedLeftParen),
         }
     }
@@ -918,6 +956,7 @@ pub fn format_expression(expr: &Expression) -> String {
         }
         Expression::Quasiquote(inner) => format!("`{}", format_expression(inner)),
         Expression::Unquote(inner) => format!(",{}", format_expression(inner)),
+        Expression::UnquoteSplicing(inner) => format!(",@{}", format_expression(inner)),
     }
 }
 
@@ -1038,7 +1077,7 @@ mod tests {
 
     #[test]
     fn spanned_parser_tracks_quote_quasiquote_and_unquote_spans() {
-        let source = "'(a b) `(box ,x)";
+        let source = "'(a b) `(box ,x ,@children)";
         let exprs = parse_spanned_str(source);
         assert_eq!(exprs.len(), 2);
         assert_eq!(exprs[0].origin.primary_span, SourceSpan::new(0, 6));
@@ -1060,6 +1099,12 @@ mod tests {
             SourceSpan::new(unquote_start, unquote_start + 2)
         );
         assert!(matches!(items[1].kind, ExprKind::Unquote(_)));
+        let splice_start = source.find(",@children").unwrap();
+        assert_eq!(
+            items[2].origin.primary_span,
+            SourceSpan::new(splice_start, splice_start + ",@children".len())
+        );
+        assert!(matches!(items[2].kind, ExprKind::UnquoteSplicing(_)));
     }
 
     #[test]

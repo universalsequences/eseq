@@ -545,6 +545,7 @@ fn expr_to_source(expr: &crate::parser::Expression) -> String {
         }
         Expression::Quasiquote(inner) => format!("`{}", expr_to_source(inner)),
         Expression::Unquote(inner) => format!(",{}", expr_to_source(inner)),
+        Expression::UnquoteSplicing(inner) => format!(",@{}", expr_to_source(inner)),
     }
 }
 

@@ -41,6 +41,7 @@ fn expr_to_lisp(expr: &eseqlisp::parser::Expression) -> String {
         ),
         Expression::Quasiquote(inner) => format!("`{}", expr_to_lisp(inner)),
         Expression::Unquote(inner) => format!(",{}", expr_to_lisp(inner)),
+        Expression::UnquoteSplicing(inner) => format!(",@{}", expr_to_lisp(inner)),
     }
 }
 
@@ -280,6 +281,9 @@ fn namespace_local_helpers(
         Expression::Unquote(inner) => {
             Expression::Unquote(Box::new(namespace_local_helpers(inner, helpers, prefix)))
         }
+        Expression::UnquoteSplicing(inner) => Expression::UnquoteSplicing(Box::new(
+            namespace_local_helpers(inner, helpers, prefix),
+        )),
         Expression::List(items) => Expression::List(
             items
                 .iter()

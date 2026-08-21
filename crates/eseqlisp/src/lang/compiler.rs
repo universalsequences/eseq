@@ -102,6 +102,7 @@ pub enum OpCode {
 #[derive(Debug, Clone)]
 pub struct MacroDef {
     pub params: Vec<String>,
+    pub rest_param: Option<String>,
     pub body: Expression,
 }
 
@@ -442,14 +443,31 @@ impl Compiler {
             Expression::List(items) if !items.is_empty() => {
                 if let Expression::Symbol(name) = &items[0] {
                     if let Some(mac) = self.lookup_macro(name) {
-                        if items.len() - 1 == mac.params.len() {
-                            // Build parameter bindings: expand macro args first
+                        let args = &items[1..];
+                        let arity_matches = match &mac.rest_param {
+                            Some(_) => args.len() >= mac.params.len(),
+                            None => args.len() == mac.params.len(),
+                        };
+                        if arity_matches {
+                            // Build parameter bindings: expand macro args first.
                             let mut bindings = HashMap::new();
-                            for (param, arg) in mac.params.iter().zip(items.iter().skip(1)) {
+                            for (param, arg) in mac.params.iter().zip(args) {
                                 bindings.insert(param.clone(), self.expand_macros(arg, depth + 1));
                             }
-                            let expanded = Self::expand_quasiquote(&mac.body, &bindings);
-                            return self.expand_macros(&expanded, depth + 1);
+                            if let Some(rest_param) = &mac.rest_param {
+                                bindings.insert(
+                                    rest_param.clone(),
+                                    Expression::List(
+                                        args[mac.params.len()..]
+                                            .iter()
+                                            .map(|arg| self.expand_macros(arg, depth + 1))
+                                            .collect(),
+                                    ),
+                                );
+                            }
+                            if let Some(expanded) = Self::expand_quasiquote(&mac.body, &bindings) {
+                                return self.expand_macros(&expanded, depth + 1);
+                            }
                         }
                     }
                 }
@@ -465,37 +483,61 @@ impl Compiler {
         }
     }
 
-    fn expand_quasiquote(expr: &Expression, bindings: &HashMap<String, Expression>) -> Expression {
+    fn expand_quasiquote(
+        expr: &Expression,
+        bindings: &HashMap<String, Expression>,
+    ) -> Option<Expression> {
         match expr {
             Expression::Quasiquote(inner) => Self::expand_quasiquote_inner(inner, bindings),
-            // If the macro body isn't quasiquoted, just return it as-is
-            _ => expr.clone(),
+            // If the macro body isn't quasiquoted, just return it as-is.
+            _ => Some(expr.clone()),
         }
     }
 
     fn expand_quasiquote_inner(
         expr: &Expression,
         bindings: &HashMap<String, Expression>,
-    ) -> Expression {
+    ) -> Option<Expression> {
         match expr {
             Expression::Unquote(inner) => {
-                // Substitute if the unquoted expression is a bound parameter
+                // Substitute if the unquoted expression is a bound parameter.
                 if let Expression::Symbol(name) = inner.as_ref() {
                     if let Some(replacement) = bindings.get(name) {
-                        return replacement.clone();
+                        return Some(replacement.clone());
                     }
                 }
-                // Not a bound parameter — return inner as-is
-                *inner.clone()
+                // Not a bound parameter — return inner as-is.
+                Some(*inner.clone())
             }
-            Expression::List(items) => Expression::List(
-                items
-                    .iter()
-                    .map(|item| Self::expand_quasiquote_inner(item, bindings))
-                    .collect(),
-            ),
-            // Everything else inside quasiquote is literal
-            _ => expr.clone(),
+            Expression::UnquoteSplicing(_) => None,
+            Expression::List(items) | Expression::QuoteList(items) => {
+                let mut expanded = Vec::with_capacity(items.len());
+                for item in items {
+                    if let Expression::UnquoteSplicing(inner) = item {
+                        let Expression::Symbol(name) = inner.as_ref() else {
+                            return None;
+                        };
+                        let Some(replacement) = bindings.get(name) else {
+                            return None;
+                        };
+                        match replacement {
+                            Expression::List(values) | Expression::QuoteList(values) => {
+                                expanded.extend(values.iter().cloned());
+                            }
+                            _ => return None,
+                        }
+                    } else {
+                        expanded.push(Self::expand_quasiquote_inner(item, bindings)?);
+                    }
+                }
+                Some(if matches!(expr, Expression::QuoteList(_)) {
+                    Expression::QuoteList(expanded)
+                } else {
+                    Expression::List(expanded)
+                })
+            }
+            // Everything else inside quasiquote is literal.
+            _ => Some(expr.clone()),
         }
     }
 
@@ -646,7 +688,7 @@ impl Compiler {
             Expression::Quasiquote(inner) => {
                 self.compile_quoted_expression(inner)?;
             }
-            Expression::Unquote(inner) => {
+            Expression::Unquote(inner) | Expression::UnquoteSplicing(inner) => {
                 self.compile_quoted_expression(inner)?;
             }
         }
@@ -923,7 +965,9 @@ impl Compiler {
                 Err(CompilerError::InvalidArg)
             }
             Expression::QuoteSymbol(_) | Expression::QuoteList(_) => Err(CompilerError::InvalidArg),
-            Expression::Quasiquote(_) | Expression::Unquote(_) => Err(CompilerError::InvalidArg),
+            Expression::Quasiquote(_)
+            | Expression::Unquote(_)
+            | Expression::UnquoteSplicing(_) => Err(CompilerError::InvalidArg),
         }?;
 
         Ok(())
@@ -1847,7 +1891,12 @@ impl Compiler {
         // Macro expansion: if the head is a macro name, expand and compile the result
         if let Some(Expression::Symbol(name)) = list.first() {
             if let Some(mac) = self.lookup_macro(name) {
-                if list.len() - 1 != mac.params.len() {
+                let arg_count = list.len() - 1;
+                let arity_matches = match &mac.rest_param {
+                    Some(_) => arg_count >= mac.params.len(),
+                    None => arg_count == mac.params.len(),
+                };
+                if !arity_matches {
                     return Err(CompilerError::InvalidArg);
                 }
                 let call_expr = Expression::List(list.to_vec());
@@ -2245,13 +2294,33 @@ impl Compiler {
                 let Expression::List(params_expr) = &list[2] else {
                     return Err(CompilerError::InvalidArg);
                 };
-                let params: Vec<String> = params_expr
-                    .iter()
-                    .map(|p| match p {
-                        Expression::Symbol(s) => Ok(s.clone()),
-                        _ => Err(CompilerError::InvalidArg),
-                    })
-                    .collect::<Result<_, _>>()?;
+                let mut params = Vec::new();
+                let mut param_names = HashSet::new();
+                let mut rest_param = None;
+                let mut index = 0;
+                while index < params_expr.len() {
+                    let Expression::Symbol(param) = &params_expr[index] else {
+                        return Err(CompilerError::InvalidArg);
+                    };
+                    if param == "&rest" {
+                        let Some(Expression::Symbol(rest)) = params_expr.get(index + 1) else {
+                            return Err(CompilerError::InvalidArg);
+                        };
+                        if index + 2 != params_expr.len()
+                            || rest == "&rest"
+                            || !param_names.insert(rest.clone())
+                        {
+                            return Err(CompilerError::InvalidArg);
+                        }
+                        rest_param = Some(rest.clone());
+                        break;
+                    }
+                    if !param_names.insert(param.clone()) {
+                        return Err(CompilerError::InvalidArg);
+                    }
+                    params.push(param.clone());
+                    index += 1;
+                }
                 // Inside a declared module, bare macro names intern
                 // qualified (`sdf/circle`); headerless (eseq.vanilla)
                 // files keep flat keys until slice 3 so the patcher's
@@ -2267,6 +2336,7 @@ impl Compiler {
                     key,
                     MacroDef {
                         params,
+                        rest_param,
                         body: list[3].clone(),
                     },
                 );
@@ -2494,7 +2564,9 @@ impl Compiler {
                         }
                         self.emit(OpCode::MakeList(items.len()));
                     }
-                    Expression::Quasiquote(_) | Expression::Unquote(_) => {
+                    Expression::Quasiquote(_)
+                    | Expression::Unquote(_)
+                    | Expression::UnquoteSplicing(_) => {
                         self.compile_expression(elem)?;
                     }
                 }
@@ -2604,8 +2676,8 @@ impl Compiler {
                 // Outside of macro context, quasiquote behaves like quote
                 self.compile_quoted_expression(inner)?;
             }
-            Expression::Unquote(_) => {
-                // Unquote outside quasiquote is an error
+            Expression::Unquote(_) | Expression::UnquoteSplicing(_) => {
+                // Unquote outside quasiquote is an error.
                 return Err(CompilerError::InvalidArg);
             }
         }

@@ -9910,7 +9910,8 @@ fn expression_matches_source_identity(expr: &crate::parser::Expression, expected
         crate::parser::Expression::QuoteList(_)
         | crate::parser::Expression::List(_)
         | crate::parser::Expression::Quasiquote(_)
-        | crate::parser::Expression::Unquote(_) => false,
+        | crate::parser::Expression::Unquote(_)
+        | crate::parser::Expression::UnquoteSplicing(_) => false,
     }
 }
 

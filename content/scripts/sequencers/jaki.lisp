@@ -1,17 +1,15 @@
 ;; Jaki sequencer library — pure-Lisp evaluator core, pattern surface, and
 ;; generator wiring (docs/jaki-sequencer-spec.md §11 phases 1-3, bead eseq-5k5).
 ;;
-;; Patterns are quoted s-expr data handed to `jaki/pat`:
+;; Patterns use the variadic `jaki/pat` macro:
 ;;
-;;   (jaki/pat '(. . - (every 2 swap) (* (cyc 1 2))))
-;;   (jaki/pat '((fig (. . -) (* 2)) (fig (. -) (/ 3))))
+;;   (jaki/pat . . - (every 2 swap) (* (cyc 1 2)))
+;;   (jaki/pat (fig (. . -) (* 2)) (fig (. -) (/ 3)))
 ;;
 ;; The tick body that builds patterns is authored on the UI VM but runs on the
 ;; scheduler VM: def-sequencer auto-quotes the body and re-serializes it as
-;; source, so quotes inside a tick survive via the (quote x) capture added to
-;; the eseqlisp compiler alongside this library. eseqlisp macros are
-;; fixed-arity templates without splicing, so `jaki/pat` is a function over
-;; quoted data rather than the spec's variadic macro spelling.
+;; source, so the macro call is expanded in the scheduler VM that owns the Jaki
+;; runtime.
 ;;
 ;; Offsets and gates are exact rationals — normalized (numerator denominator)
 ;; 2-lists — so tuplet window membership never needs an epsilon (spec §8.3).
@@ -24,7 +22,7 @@
 
 (module jaki)
 
-(export pat xform rev rot trunc every stac ghost swap
+(export pat from-list xform rev rot trunc every stac ghost swap
         shift filter for-hand
         eval-at eval-cycle cycle-length locate cycle-index
         default-state mk-state
@@ -153,12 +151,15 @@
 
 (def fig-form? (x) (= (raw-head x) 'fig))
 
-(def pat (body)
+(def from-list (body)
   (dict :id (source body)
         :figs (if (fig-form? (first body))
                   (map (lambda (f) (parse-fig (rest f))) body)
                   (list (parse-fig body)))
         :post (list)))
+
+(defmacro pat (&rest body)
+  `(jaki/from-list '(,@body)))
 
 ;; ── whole-pattern transform functions (spec §4.6) ───────────────────────────
 
