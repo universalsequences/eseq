@@ -8412,6 +8412,154 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_surface_flat_route_grammar_fans_out() {
+        // tier-2 surface: same routing as the plumbed fan-out test above, but
+        // authored through the bare `jaki` macro and the `->` route grammar
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(jaki "kit" :16
+                 . . - .
+                 -> 0
+                 -> 1 (shift 1)
+                 -> 2 left)"#,
+        )
+        .expect("jaki surface macro");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.25,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        let track = |t: usize| -> Vec<&crate::generator::GeneratorEmission> {
+            out.iter().filter(|e| e.event.track == Some(t)).collect()
+        };
+        assert_eq!(track(0).len(), 5);
+        assert_eq!(track(1).len(), 5);
+        let left = track(2);
+        assert_eq!(left.len(), 3);
+        let durations: Vec<f64> = left
+            .iter()
+            .map(|e| e.event.resolved.duration as f64)
+            .collect();
+        assert_close(&durations, &[0.5, 0.25, 0.5]);
+        let base_vels: Vec<f64> = track(0)
+            .iter()
+            .map(|e| e.event.resolved.velocity as f64)
+            .collect();
+        assert_close(&base_vels, &[0.8, 0.68, 0.8, 0.72, 0.92]);
+    }
+
+    #[test]
+    fn jaki_surface_no_routes_defaults_to_track_zero() {
+        let mut rt = jaki_runtime();
+        rt.eval(r#"(jaki "kick" :16 . . . .)"#).expect("jaki surface macro");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            2.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        assert_eq!(out.len(), 8);
+        assert!(out.iter().all(|e| e.event.track == Some(0)));
+        let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
+        assert_close(
+            &vels,
+            &[
+                0.8,
+                0.68,
+                0.578,
+                0.49130000000000007,
+                0.417605,
+                0.35496425,
+                0.30171961249999996,
+                0.3,
+            ],
+        );
+    }
+
+    #[test]
+    fn jaki_surface_vel_route_word_scales_velocity() {
+        let mut rt = jaki_runtime();
+        rt.eval(r#"(jaki "soft" :16 . . . . -> 0 (vel 0.5))"#)
+            .expect("jaki surface macro");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // :vel-scale applies at emission, on top of the threaded velocities
+        let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
+        assert_close(&vels, &[0.4, 0.34, 0.289, 0.24565000000000003]);
+    }
+
+    #[test]
+    fn jaki_surface_multi_voice_lines_each_carry_their_own_routes() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(jaki "kit" :16
+                 (. . - . -> 0)
+                 (. . - . -> 1 (shift 1) -> 2 left))"#,
+        )
+        .expect("jaki surface macro");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.25,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        let track = |t: usize| -> Vec<&crate::generator::GeneratorEmission> {
+            out.iter().filter(|e| e.event.track == Some(t)).collect()
+        };
+        assert_eq!(track(0).len(), 5);
+        assert_eq!(track(1).len(), 5);
+        let left = track(2);
+        assert_eq!(left.len(), 3);
+        let durations: Vec<f64> = left
+            .iter()
+            .map(|e| e.event.resolved.duration as f64)
+            .collect();
+        assert_close(&durations, &[0.5, 0.25, 0.5]);
+    }
+
+    #[test]
+    fn jaki_library_gate_prepends_only_when_referenced() {
+        let plain = super::jaki_library_source_with_user_source("(def x 1)");
+        assert_eq!(plain, "(def x 1)");
+        let gated = super::jaki_library_source_with_user_source(r#"(jaki "kit" :16 . .)"#);
+        assert!(gated.contains("jaki.lisp") || gated.contains("(module jaki)"));
+        assert!(gated.ends_with(r#"(jaki "kit" :16 . .)"#));
+    }
+
+    #[test]
     fn def_sequencer_state_cells_persist_across_ticks() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(

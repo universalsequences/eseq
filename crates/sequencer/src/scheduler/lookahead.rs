@@ -113,7 +113,8 @@ pub(super) fn build_scheduler_scratch_runtime(
     // tick bodies run on this scheduler VM, so the library must be resident
     // here. Gated on actual use until `import jaki` lands with the package
     // system (eseq-jo7).
-    if user_source.contains("jaki/") {
+    // bare `(jaki …)` macro calls count too, hence "jaki" not "jaki/"
+    if user_source.contains("jaki") {
         let jaki_source = lisp_host::load_jaki_library_source();
         if !jaki_source.trim().is_empty() {
             if let Err(err) = runtime.eval(&jaki_source) {

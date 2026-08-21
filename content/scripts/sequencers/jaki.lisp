@@ -26,7 +26,8 @@
         shift filter for-hand
         eval-at eval-cycle cycle-length locate cycle-index
         default-state mk-state
-        init emit emit* reset)
+        init emit emit* reset
+        run)
 
 ;; ── exact rationals: normalized (num den) 2-lists, den > 0 ──────────────────
 
@@ -778,3 +779,63 @@
               (emit-window (get r :events) (- tick cstart) track opts)))))))
 
 (def emit (p track) (emit* p track (dict)))
+
+;; ── tier-2 route surface: (jaki "name" :res events… -> track words…) ────────
+;;
+;; The bare `jaki` macro (jaki-surface.lisp, headerless so the name stays
+;; unqualified) expands to a def-sequencer whose tick calls (jaki/run body).
+;; `run` interprets the body data: segments split at `->` symbols — segment
+;; zero is the pattern (same grammar as jaki/pat), each later segment is
+;; `track word…`. Route words:
+;;   left right accent rev stac ghost swap
+;;   (shift n) (rot n) (trunc n) (every n t) (for-hand h t)
+;;   (vel s) (note n)
+;; Multi-voice: when the first body element is a list containing a top-level
+;; `->`, every element is one voice line with its own pattern and routes.
+
+(def split-arrows (l cur acc)
+  (if (empty? l)
+      (append acc (list cur))
+      (if (= (first l) '->)
+          (split-arrows (rest l) (list) (append acc (list cur)))
+          (split-arrows (rest l) (append cur (list (first l))) acc))))
+
+;; acc = (dict :p pattern :opts emit-opts); w is one route word (data)
+(def route-step (acc w)
+  (let ((h (raw-head w)) (args (raw-args w)))
+    (match h
+      'left   (merge acc :p (filter (get acc :p) '(:hand :left)))
+      'right  (merge acc :p (filter (get acc :p) '(:hand :right)))
+      'accent (merge acc :p (filter (get acc :p) '(:accent true)))
+      'rev    (merge acc :p (rev (get acc :p)))
+      'stac   (merge acc :p (stac (get acc :p)))
+      'ghost  (merge acc :p (ghost (get acc :p)))
+      'swap   (merge acc :p (swap (get acc :p)))
+      'rot    (merge acc :p (rot (get acc :p) (nth args 0)))
+      'trunc  (merge acc :p (trunc (get acc :p) (nth args 0)))
+      'shift  (merge acc :p (shift (get acc :p) (nth args 0)))
+      'every  (merge acc :p (every (get acc :p) (nth args 0) (nth args 1)))
+      'for-hand (merge acc :p (for-hand (get acc :p) (nth args 0) (nth args 1)))
+      'vel    (merge acc :opts (merge (get acc :opts) :vel-scale (nth args 0)))
+      'note   (merge acc :opts (merge (get acc :opts) :note (nth args 0)))
+      _ acc)))
+
+(def run-route (p seg)
+  (let ((r (reduce route-step (dict :p p :opts (dict)) (rest seg))))
+    (emit* (get r :p) (first seg) (get r :opts))))
+
+(def run-voice (l)
+  (let ((segs (split-arrows l (list) (list))))
+    (let ((p (from-list (first segs))))
+      (if (empty? (rest segs))
+          (emit p 0)
+          (sum* (map (lambda (seg) (run-route p seg)) (rest segs)))))))
+
+;; a voice line is a list whose own top level contains a `->`
+(def voice-line? (x)
+  (if (= (nth x 0) nil) false (member? '-> x)))
+
+(def run (body)
+  (if (voice-line? (first body))
+      (sum* (map run-voice body))
+      (run-voice body)))

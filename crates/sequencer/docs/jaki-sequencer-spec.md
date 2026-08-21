@@ -452,6 +452,42 @@ forced by measured eseqlisp semantics:
   cycle advances roll the ending state forward, transport jumps restart from
   defaults while the closed-form cycle index (§8.1) stays exact.
 
+## 11.2 Tier-2 route surface (`jaki` macro)
+
+The def-sequencer skeleton is now machine-written. `jaki-surface.lisp` (a
+headerless file, so the name stays unqualified) defines the bare `jaki`
+macro; `jaki/run` in the library interprets the body:
+
+```lisp
+(jaki "kit" :16
+  . . - . (every 2 swap)
+  -> 0
+  -> 1 left
+  -> 2 (shift 1) stac
+  -> 3 accent (vel 0.7))
+```
+
+- The body is split at top-level `->` symbols (`->` is an ordinary eseqlisp
+  symbol). Segment zero is the pattern — the exact `jaki/pat` grammar — and
+  each later segment is `track word…`. No routes ⇒ the pattern plays on
+  track 0.
+- Route words map onto the existing pattern functions: `left`/`right`
+  (hand filter), `accent` (accent filter), `rev`/`stac`/`ghost`/`swap`,
+  `(shift n)`, `(rot n)`, `(trunc n)`, `(every n t)`, `(for-hand h t)`,
+  and emission options `(vel s)` (`:vel-scale`) and `(note n)`. Unknown
+  words are ignored.
+- Multi-voice: when the first body element is a list containing a top-level
+  `->`, every element is one voice line with its own pattern and routes:
+  `(jaki "kit" :16 (. . - . -> 0) (- . . . -> 1 stac))`.
+- The macro expands (authoring VM and scheduler VM both load the surface
+  file) to the plain skeleton `(def-sequencer name :resolution res :tick (do
+  (jaki/init res) (jaki/run '(body…))))`, so the VM split is unchanged: the
+  body ships as quoted source and is interpreted scheduler-side each tick.
+- Library residency: `load_jaki_library_source` now ships both files; the
+  scheduler gate widened from `"jaki/"` to `"jaki"`, and the authoring
+  scratch runtime prepends the library through
+  `jaki_library_source_with_user_source` under the same gate.
+
 ## 12. Open Questions
 
 - **`fig` transform scope**: whether a whole-pattern transform after `fig`
