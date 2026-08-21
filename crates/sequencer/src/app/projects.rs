@@ -1148,7 +1148,25 @@ impl App {
 
     pub fn queue_project_load_named(&mut self, name: &str) -> Result<(), String> {
         eprintln!("project-load: queue requested name={name}");
-        let mut project = project::load_project(name).map_err(|error| error.to_string())?;
+        let project = project::load_project(name).map_err(|error| error.to_string())?;
+        self.queue_loaded_project(name, project)
+    }
+
+    pub fn queue_project_load_from_path(&mut self, name: &str, path: &Path) -> Result<(), String> {
+        eprintln!(
+            "project-load: queue requested name={name} path={}",
+            path.display()
+        );
+        let project = project::load_project_from_path(path)
+            .map_err(|error| format!("Failed to load project '{}': {error}", path.display()))?;
+        self.queue_loaded_project(name, project)
+    }
+
+    fn queue_loaded_project(
+        &mut self,
+        name: &str,
+        mut project: project::ProjectFile,
+    ) -> Result<(), String> {
         eprintln!(
             "project-load: file loaded name={} version={} tracks={} patterns={} custom_effect_tracks={}",
             name,

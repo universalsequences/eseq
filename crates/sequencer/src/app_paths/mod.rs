@@ -173,6 +173,19 @@ impl AppPaths {
         self.dgen_toolchain_root().join("abi")
     }
 
+    /// Checked-in project fixtures used by the end-to-end performance probes.
+    /// These are deliberately separate from the user's mutable project library.
+    pub fn perf_probe_projects_dir(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { sequencer_dir, .. } => {
+                sequencer_dir.join("tests/fixtures/projects")
+            }
+            AppPaths::Release {
+                contents_resources, ..
+            } => contents_resources.join("test-fixtures/projects"),
+        }
+    }
+
     /// Saved effect sources ("effects" tree; the user-visible/serialized
     /// names stay relative to this root).
     pub fn effects_dir(&self) -> PathBuf {
@@ -320,6 +333,10 @@ mod tests {
             PathBuf::from("/ws/crates/sequencer/tools/dgen-toolchain/abi")
         );
         assert_eq!(
+            paths.perf_probe_projects_dir(),
+            PathBuf::from("/ws/crates/sequencer/tests/fixtures/projects")
+        );
+        assert_eq!(
             paths.effects_dir(),
             PathBuf::from("/ws/crates/sequencer/effects")
         );
@@ -346,6 +363,39 @@ mod tests {
         assert_eq!(
             paths.ir_prep_dir(),
             std::env::temp_dir().join("sequencer_ir_prep")
+        );
+    }
+
+    #[test]
+    fn perf_probe_project_fixtures_are_present_and_parse() {
+        let fixture_dir = app_paths().perf_probe_projects_dir();
+        for name in ["92", "pianohold", "arrtest3"] {
+            let path = fixture_dir.join(format!("{name}.json"));
+            assert!(
+                path.is_file(),
+                "perf probe fixture not found: {}",
+                path.display()
+            );
+            crate::project::load_project_from_path(&path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to load perf probe fixture '{}': {error}",
+                    path.display()
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn release_perf_probe_projects_resolve_from_resources() {
+        let paths = AppPaths::release(
+            PathBuf::from("/App/Contents/MacOS"),
+            PathBuf::from("/App/Contents/Resources"),
+            PathBuf::from("/Support"),
+            PathBuf::from("/Caches"),
+        );
+        assert_eq!(
+            paths.perf_probe_projects_dir(),
+            PathBuf::from("/App/Contents/Resources/test-fixtures/projects")
         );
     }
 

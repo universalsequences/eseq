@@ -2500,7 +2500,11 @@ pub fn save_project(name: &str, project: &ProjectFile) -> std::io::Result<PathBu
 
 pub fn load_project(name: &str) -> std::io::Result<ProjectFile> {
     let path = projects_dir().join(format!("{}.json", sanitize_project_name(name)));
-    let src = std::fs::read_to_string(&path)?;
+    load_project_from_path(&path)
+}
+
+pub fn load_project_from_path(path: &Path) -> std::io::Result<ProjectFile> {
+    let src = std::fs::read_to_string(path)?;
     serde_json::from_str(&src).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

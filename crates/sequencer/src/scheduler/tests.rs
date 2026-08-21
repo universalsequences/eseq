@@ -6376,7 +6376,7 @@
                 offset_steps,
             };
             // Row starts and drone offsets lifted verbatim from
-            // projects/arrtest3.json (track 6), through beat 28.
+            // tests/fixtures/projects/arrtest3.json (track 6), through beat 28.
             let rows = vec![
                 song_mode_row(437, 0.0, 0, Vec::new()),
                 {
