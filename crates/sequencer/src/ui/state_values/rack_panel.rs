@@ -493,22 +493,16 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             .cloned()
             .or_else(|| app.sample_path_registry.get(&sample_name).cloned());
         let registered_sample = sampler_path.as_ref().and_then(|path| {
-            let key = path.display().to_string();
-            eseqlisp::audio::sample::get_registered_sample(&key).or_else(|| {
-                match eseqlisp::audio::sample::SampleBuffer::load_wav(path) {
-                    Ok(sample) => {
-                        sample.register();
-                        eseqlisp::audio::sample::get_registered_sample(&key)
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "rack waveform: failed to register sample {}: {error}",
-                            path.display()
-                        );
-                        None
-                    }
+            match load_waveform_sample(path) {
+                Ok(sample) => Some(sample),
+                Err(error) => {
+                    eprintln!(
+                        "rack waveform: failed to register sample {}: {error}",
+                        path.display()
+                    );
+                    None
                 }
-            })
+            }
         });
         let sample_duration = registered_sample
             .as_ref()

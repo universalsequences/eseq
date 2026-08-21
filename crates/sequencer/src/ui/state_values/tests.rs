@@ -11402,6 +11402,92 @@
     }
 
     #[test]
+    fn rack_sampler_waveform_resolves_content_store_reference_into_ui_buffer() {
+        struct RemoveFile(std::path::PathBuf);
+        impl Drop for RemoveFile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let file_name = format!(
+            "rack-waveform-content-ref-{}-{unique}.wav",
+            std::process::id()
+        );
+        let sample_path = sequencer::app_paths::app_paths()
+            .samples_dir()
+            .join(&file_name);
+        std::fs::create_dir_all(sample_path.parent().expect("sample store parent"))
+            .expect("create sample store");
+        let _sample_guard = RemoveFile(sample_path.clone());
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&sample_path, spec)
+            .expect("create content-addressed waveform fixture");
+        for sample in [0i16, 8_000, -8_000, 0] {
+            writer.write_sample(sample).expect("write waveform sample");
+        }
+        writer.finalize().expect("finalize waveform fixture");
+
+        let logical_ref = std::path::PathBuf::from("samples").join(&file_name);
+        assert!(!logical_ref.exists(), "fixture must exercise sample-store resolution");
+        let mut app = test_app_with_rack_panel();
+        app.register_loaded_sample_path("Layer Alpha", 42, logical_ref.clone());
+
+        let panel = build_instrument_panel_value(
+            &app,
+            0,
+            &Arc::new(Mutex::new(HashSet::new())),
+        );
+        let Value::List(racks) = &panel else {
+            panic!("rack panel should be a list");
+        };
+        let Value::Map(rack) = &*racks[0].borrow() else {
+            panic!("rack panel entry should be a map");
+        };
+        let Value::Map(instrument) = &*rack
+            .get("selected-instrument")
+            .expect("rack panel should expose its selected sampler")
+            .borrow()
+        else {
+            panic!("selected rack instrument should be a map");
+        };
+        let Value::Map(buffer) = &*instrument
+            .get("buffer")
+            .expect("resolved rack sample should reach the waveform UI")
+            .borrow()
+        else {
+            panic!("rack sampler buffer should be a map");
+        };
+        assert_eq!(
+            buffer
+                .get("registry-key")
+                .map(|value| value.borrow().clone()),
+            Some(Value::String(logical_ref.display().to_string())),
+            "the UI must retain the persisted content reference as its registry key"
+        );
+        assert_eq!(
+            buffer.get("frames").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+        let registered = eseqlisp::audio::sample::get_registered_sample(
+            &logical_ref.display().to_string(),
+        ).expect("waveform sample should be registered under the model reference");
+        assert!(
+            registered.levels().iter().any(|level| !level.buckets.is_empty()),
+            "registered rack sample should carry waveform peak data"
+        );
+    }
+
+    #[test]
     fn rack_sampler_waveform_selection_tracks_live_start_and_end_values() {
         let app = test_app_with_rack_panel();
         assert!(

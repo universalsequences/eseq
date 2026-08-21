@@ -57,20 +57,17 @@ pub(crate) fn build_sampler_panel_value(
     // Look up the pre-registered SampleBuffer and pass its Value map directly
     // to the Lisp side, so the waveform widget can use it without re-loading.
     let sampler_path = app.sampler_path_for_track(track);
-    let registered_sample = sampler_path.as_ref().and_then(|p| {
-        let key = p.display().to_string();
-        eseqlisp::audio::sample::get_registered_sample(&key).or_else(|| {
-            match eseqlisp::audio::sample::SampleBuffer::load_wav(p) {
-                Ok(sample) => {
-                    sample.register();
-                    eseqlisp::audio::sample::get_registered_sample(&key)
-                }
-                Err(e) => {
-                    eprintln!("waveform: failed to register sample {}: {e}", p.display());
-                    None
-                }
+    let registered_sample = sampler_path.as_ref().and_then(|path| {
+        match load_waveform_sample(path) {
+            Ok(sample) => Some(sample),
+            Err(error) => {
+                eprintln!(
+                    "waveform: failed to register sample {}: {error}",
+                    path.display()
+                );
+                None
             }
-        })
+        }
     });
     let buffer_value = registered_sample.as_ref().map(|s| s.to_value());
     let sample_duration = registered_sample

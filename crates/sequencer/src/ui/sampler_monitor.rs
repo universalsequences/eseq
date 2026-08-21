@@ -171,22 +171,32 @@ pub(crate) fn sync_watched_sampler_voices(
     *watched_voice_ids = desired_voice_ids;
 }
 
+/// Return the waveform sample registered under the persisted sample reference.
+///
+/// Content-addressed references are resolved through the sample store for I/O,
+/// while the registry key remains the reference carried by the project model.
+/// Both standalone samplers and rack samplers must cross this boundary through
+/// the same function so their UI behavior cannot diverge from playback.
+pub(crate) fn load_waveform_sample(
+    path: &Path,
+) -> Result<std::sync::Arc<eseqlisp::audio::sample::SampleBuffer>, String> {
+    let key = path.display().to_string();
+    if let Some(sample) = eseqlisp::audio::sample::get_registered_sample(&key) {
+        return Ok(sample);
+    }
+
+    let resolved = sequencer::app_paths::resolve_sample_ref(path);
+    let mut sample = eseqlisp::audio::sample::SampleBuffer::load_wav(&resolved)?;
+    sample.path = path.to_path_buf();
+    Ok(sample.register())
+}
+
 /// Register a WAV file with eseqlisp's sample registry so the waveform widget can display it.
 pub(crate) fn register_waveform_sample(path: &Path) {
-    // Read from the sample store when the reference is content-addressed, but
-    // register under the caller's path: registry lookups key off the same
-    // string the track carries (see `sampler_path_for_track` lookups above).
-    let resolved = sequencer::app_paths::resolve_sample_ref(path);
-    match eseqlisp::audio::sample::SampleBuffer::load_wav(&resolved) {
-        Ok(mut sample) => {
-            sample.path = path.to_path_buf();
-            sample.register();
-        }
-        Err(e) => {
-            eprintln!(
-                "waveform: failed to register sample {}: {e}",
-                path.display()
-            );
-        }
+    if let Err(error) = load_waveform_sample(path) {
+        eprintln!(
+            "waveform: failed to register sample {}: {error}",
+            path.display()
+        );
     }
 }
