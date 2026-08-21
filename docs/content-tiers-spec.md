@@ -70,13 +70,13 @@ Three distinct kinds of content, three different fates:
 
 ## 3. Repo layout (target)
 
-Pull content out of the crates into a top-level `assets/` that is exactly
-the factory tier — packaging becomes "copy `assets/` into
+Pull content out of the crates into a top-level `content/` that is exactly
+the factory tier — packaging becomes "copy `content/` into
 `Contents/Resources/`":
 
 ```
 eseq/
-  assets/                      ;; == factory tier, ships verbatim in the bundle
+  content/                     ;; == factory tier, ships verbatim in the bundle
     core/                      ;; eseqlisp runtime lisp: init, themes, sdf-stdlib, shaders
     ui/                        ;; the sequencer UI modules (today crates/sequencer/ui/)
     instruments/               ;; curated factory instruments
@@ -84,7 +84,9 @@ eseq/
     defmacros/
     midi-fx/
     presets/
-    sample-assets/
+    kits/                      ;; 3 tracked files, today crates/sequencer/kits/
+    processes/                 ;; 1 tracked file
+    impulses/                  ;; IRs — see the two-homes note below
     dgen-toolchain.lock        ;; (stage itself remains gitignored / bundle-time)
   crates/
     eseqlisp/                  ;; code + tests + examples/ (demos move here)
@@ -92,18 +94,62 @@ eseq/
   docs/
 ```
 
+The name is `content/`, not `assets/` — see §7 question 4;
+`crates/sequencer/assets/` already exists with a narrower meaning.
+
 Explicitly **not** in the repo after the split: `projects/`,
 `recordings/`, `samples.db`, `sounds/` — these move to the dev-mode user
 dir (§4) and out of version control. (`crates/sequencer/scripts/` needs a
-per-file triage: sequencer demo scripts are factory content; build/tool
-scripts stay with the crate.)
+per-file triage: sequencer demo scripts are factory content — 27 `.lisp`
+files under `processes/`, `sequencers/`, `ui/`; build/tool scripts stay
+with the crate.)
+
+### 3.1 Inventory corrections (measured 2026-08-20)
+
+The layout above was written before the tree was measured. Corrections:
+
+- **`sample-assets/` is NOT factory content.** It is gitignored in both the
+  root and crate `.gitignore` — 3.1 MB of untracked local artwork backing
+  `source_assets` (see `docs/sample-store-spec.md` §7.1). It moves to the
+  user tier with `samples/`, not into `content/`. An earlier draft of §3
+  listed it under `assets/`; that was wrong.
+- **IRs have two homes**: top-level `impulses/` (10 MB, 25 tracked) and
+  `crates/sequencer/assets/ir/`. T2 must consolidate them into one
+  `content/impulses/` and pick a single lookup.
+- **`crates/sequencer/assets/`** (7.1 MB, 26 tracked — filter-tables + IRs)
+  needs its own destination; it is not the same thing as the new top-level
+  `content/`.
+- **`crates/sequencer/filter-tables/` is empty** (generated output). It
+  does not move; confirm it is gitignored rather than migrated.
+- **`crates/sequencer/ui/capture-fixtures/` is 61 `.lisp` test fixtures**,
+  not content. It stays with the crate even though it sits under `ui/`,
+  which otherwise moves wholesale.
+- **`projects/` carries 18 tracked files** (`brokenriddim.json`,
+  `garage.json`, `plocka.json`, …) committed before the ignore rule landed;
+  gitignore does not retroactively untrack. T2 must `git rm --cached`
+  them. They are personal music, and notably **not** the fixtures the
+  tests use — see the fixture problem in §3.2.
+
+### 3.2 Test fixtures are untracked and must be resolved before T2
+
+`crates/sequencer/src` references `projects/92.json`,
+`projects/pianohold.json`, and `projects/arrtest3.json`. **None of the
+three is tracked in git** — `projects/` is gitignored, so every documented
+perf probe (project-92 step interactions, pianohold selection, arrangement
+interactions) can only run on one developer's machine and fails on a fresh
+clone.
+
+This is a defect independent of the split, but T2 forces the decision:
+these three are **test fixtures, not user data**, and must become tracked
+files under the crate (e.g. `crates/sequencer/tests/fixtures/`) with the
+probes reading them through `AppPaths`. Tracked under `eseq-4tl`.
 
 ## 4. Installed + user layout
 
 ```
 ESeq.app/Contents/
   MacOS/        metal_seq, DGenLisp, dgen-clang, ld64.lld      ;; Phase 5
-  Resources/    <assets/ copied verbatim> + dgen-toolchain/
+  Resources/    <content/ copied verbatim> + dgen-toolchain/
 
 ~/Library/Application Support/eseq/       ;; user tier: big/binary/machine-managed
   projects/  recordings/  samples/  samples.db  sounds/
@@ -127,7 +173,7 @@ shadowing; `init.lisp` still evaluates last so user code wins):
 
 1. `~/.eseq.d/modules/`
 2. `~/.eseq.d/packages/<pkg>/src/` (and any configured distro)
-3. factory: `Resources/` (release) or `<repo>/assets/` (dev)
+3. factory: `Resources/` (release) or `<repo>/content/` (dev)
 
 ### 4.0 Packages: the tier shape recurses; a repo IS a package
 
@@ -231,7 +277,7 @@ becomes one line per root, not a repo-wide grep.
   (`instrument_storage.rs` ~10 sites, `paths.rs` init candidates, ui/
   loads, presets, sample-assets) goes through `AppPaths`; zero behavior
   change; grep-clean for `"instruments/"`-style relative literals.
-- **T2 — repo split.** `git mv` content into `assets/`, demos into
+- **T2 — repo split.** `git mv` content into `content/`, demos into
   `crates/eseqlisp/examples/`; flip the Dev roots; move
   `projects/`/`recordings/`/`samples.db`/`sounds/` to `.local/` and
   gitignore. One commit, mostly renames.
