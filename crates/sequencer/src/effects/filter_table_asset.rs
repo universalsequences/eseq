@@ -229,15 +229,14 @@ pub fn read_asset(path: &Path) -> Result<FilterTableAsset, String> {
     Ok(FilterTableAsset { meta, table })
 }
 
-/// Bundled factory asset directory (`crates/sequencer/assets/filter-tables`).
+/// Bundled factory asset directory (`content/filter-tables`).
 pub fn bundled_asset_dir() -> PathBuf {
     crate::app_paths::app_paths().filter_tables_dir()
 }
 
-/// User asset directory, resolved like `samples/`: relative to the working
-/// directory.
+/// User-authored filter tables in the mutable data tier.
 pub fn user_asset_dir() -> PathBuf {
-    PathBuf::from("filter-tables")
+    crate::app_paths::app_paths().user_filter_tables_dir()
 }
 
 /// How deep the asset walkers recurse. A library nested this far is already

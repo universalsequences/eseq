@@ -833,7 +833,7 @@ anything.
 | host / cache / publish | `crates/sequencer/src/ui/state_values/sound_palette.rs` (`GlyphFrames`, `:43-171`) |
 | transport | `crates/eseqlisp/src/sound_glyph_data.rs` — `SoundGlyphFrame { revision, strokes, marks }`, global `OnceLock<Mutex<HashMap<String, Arc<Frame>>>>` |
 | widget | `crates/eseqlisp/src/widget_render/sound_glyph.rs` — `"sound-glyph"`, `build_metal_primitives` `:80` |
-| draw site | `crates/sequencer/ui/sound-palette.lisp:148-152` |
+| draw site | `content/ui/sound-palette.lisp:148-152` |
 | cohort source | `App::sound_palette_entries` — `crates/sequencer/src/app/sound_palette.rs:302` |
 
 Everything the delta model needs from the app is already there:

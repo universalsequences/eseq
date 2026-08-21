@@ -61,7 +61,7 @@ forms. The materialized source is a generated view for DGenLisp and debugging.
 V1 library macros live in a repo-owned folder:
 
 ```text
-crates/sequencer/defmacros/
+content/defmacros/
   karplusstr2/
     macro.lisp
     macro.layout.json
@@ -175,8 +175,8 @@ User enters the `mine` macro view. Because `mine` is local, the view shows a
 
 When clicked:
 
-- create `crates/sequencer/defmacros/mine/macro.lisp`;
-- create `crates/sequencer/defmacros/mine/macro.layout.json`;
+- create `content/defmacros/mine/macro.lisp`;
+- create `content/defmacros/mine/macro.layout.json`;
 - create or rebuild `manifest.json`;
 - replace the local `defmacro` in the current patch with
   `(use-defmacro mine)`;
@@ -280,7 +280,7 @@ Accepting a local macro just inserts or renames the node.
 
 ## Library Index
 
-The library index is built from `crates/sequencer/defmacros/*`.
+The library index is built from `content/defmacros/*`.
 
 It should be rebuilt:
 

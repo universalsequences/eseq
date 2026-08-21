@@ -8,14 +8,8 @@
 **/__pycache__/
 *.pyc
 
-# Local sequencer data
-/samples/
-/samples.backup.*/
-/sample-assets/
-/samples.db
-/recordings/
-/projects/
-/projects.backup.*/
+# Generated crate-local output (runtime user data lives in the repo's .local/).
+/filter-tables/
 /instruments-backup/
 
 # Native build and DGenLisp output
@@ -27,7 +21,7 @@
 /patch.json
 /tools/*.bak-*
 # Staged hermetic dgen toolchain (~147 MB): vendored by rebuild_dgenlisp_tool.sh,
-# recorded by the committed tools/dgen-toolchain.lock — never committed itself.
+# recorded by the committed content/dgen-toolchain.lock — never committed itself.
 /tools/dgen-toolchain/
 /tools/dgen-toolchain.staging.*/
 

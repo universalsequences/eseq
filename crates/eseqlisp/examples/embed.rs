@@ -28,7 +28,7 @@ fn main() -> std::io::Result<()> {
         default_hook(info);
     }));
 
-    let init_src = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let init_src = eseqlisp::factory_init_source();
     let host = Rc::new(RefCell::new(DemoHost {
         steps: vec![false; 16],
         pending_jobs: Vec::new(),

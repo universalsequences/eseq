@@ -472,7 +472,7 @@ The first backend slice is intentionally hint-driven, not UI-mapped yet:
   stale MIDI-FX no-op behavior, MIDI-FX temporary slot overrides, and transient
   instrument/effect payload writes.
 
-The demo script `crates/sequencer/scripts/processes/process-phase3a-ports-demo.lisp`
+The demo script `content/scripts/processes/process-phase3a-ports-demo.lisp`
 exercises the current backend surface: named `pitch`, `gate`, and `speed` ports
 attached to track 0, with live handle updates like
 `(phase3a-port-writer-h :pitch 4)` and `(phase3a-port-writer-h :speed 0.75)`.
@@ -1516,7 +1516,7 @@ full semantics.
    per-track manual device bindings refresh per track at capture.
    `(processes :project ...)` is whole-layer replace with the same
    named-instance reconciliation rules as track chains; the empty form clears
-   the layer. Demo: `crates/sequencer/scripts/processes/process-project-layer-demo.lisp`.
+   the layer. Demo: `content/scripts/processes/process-project-layer-demo.lisp`.
 2. **Landed.** `track_process_slot_runtime_id` mixes the track index into the
    runtime id for project-layer slots, which keys both the state map and the
    RNG seed per `(instance, track)` — every track rolls its own dice and runs
@@ -1581,7 +1581,7 @@ Landed:
    base-value fallback, pattern-change reset, and exact bounded retention of 256
    step boundaries plus 256 fired triggers.
 3. `echo-track` and `wrap-crash` builtin library examples, plus the runnable
-   `crates/sequencer/scripts/processes/process-phase7-reads-demo.lisp` source/history/
+   `content/scripts/processes/process-phase7-reads-demo.lisp` source/history/
    state/outlet/channel walkthrough.
 
 ### Phase 8 — Sugar tier
@@ -1672,7 +1672,7 @@ Landed engine surface: `pitch-field`, `scalar-field`, `gate-field`, `suggest`,
 previous-tick/nil-safe `hear`, field component readers, and
 `field-nearest-delta`. `follow-harmony` is a builtin member process with
 lane-sequenceable obedience and passing-tone grace. The runnable proof is
-`crates/sequencer/scripts/processes/process-fields-band-demo.lisp`.
+`content/scripts/processes/process-fields-band-demo.lisp`.
 
 The genuine engine deltas — the depth this spec doesn't yet cover:
 
@@ -1693,7 +1693,7 @@ The genuine engine deltas — the depth this spec doesn't yet cover:
    are restricted to the bound play set and use the existing process emission
    path. `observed-tracks` and `play-tracks` expose bindings to raw
    `def-process` bodies. Runnable proof:
-   `crates/sequencer/scripts/processes/process-conductor-demo.lisp`.
+   `content/scripts/processes/process-conductor-demo.lisp`.
 2. **A determinism contract for stateful conductors.** A density-goal
    harmonizer with memory can't be a lane fold; it's the raw tier's "missing
    sugar shape" made concrete. Likely a third tier (`def-conductor`?):

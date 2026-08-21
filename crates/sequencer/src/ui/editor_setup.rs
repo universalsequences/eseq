@@ -38,6 +38,9 @@ pub(crate) fn create_editor_with_user_init_path(
     app: &app::App,
     user_init_path: Option<std::path::PathBuf>,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
+    // `@/` paths are rooted at immutable factory content, independent of the
+    // process working directory.
+    runtime.set_load_root(sequencer::app_paths::app_paths().factory_root());
     // The checked-in UI modules contain intentional module-local bare names
     // and historical alias declarations. Authored instruments/effects/scripts
     // stay outside this exclusion and are always preflighted.

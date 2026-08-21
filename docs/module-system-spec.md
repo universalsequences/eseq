@@ -367,7 +367,7 @@ future "host calls into a user file by convention" seam.
 Convention: module name maps to path segments, `eseq.track-collapse` →
 `track-collapse.lisp` under a load-path root. Search order:
 
-1. app-bundled core (`crates/sequencer/ui/`, the vanilla distro),
+1. app-bundled core (`content/ui/`, the vanilla distro),
 2. `packages/<pkg>/src/`,
 3. user dir `~/.eseq.d/`.
 
@@ -420,7 +420,7 @@ packages/alec.acid-tools/
 
 `sdf-stdlib.lisp` already hand-rolled this exact convention as flat strings:
 ~17 defmacros literally named `sdf/circle`, `sdf/rounded-rect`, `sdf/rotate`
-etc. (`crates/eseqlisp/sdf-stdlib.lisp`, loaded at `Runtime::new` via
+etc. (`content/core/sdf-stdlib.lisp`, loaded at `Runtime::new` via
 `include_str!`, `runtime.rs:1245`), plus `sdf/layer`/`sdf/fill`/`sdf/paint`
 as Rust-registered builtins referenced from lisp-in-Rust template strings
 (`runtime.rs:572-600`, `lib.rs:2190`). ~34 lisp files consume `sdf/*`.
@@ -1880,7 +1880,7 @@ stays as-is; real macro hygiene is out of scope for this spec.
   ### S3b waves 8-10 tally (2026-08-13) — slice 3 is COMPLETE
 
   Thirteen files in three parallel waves, each gated at baseline. **Every
-  non-fixture file under `crates/sequencer/ui` now carries a module header**
+  non-fixture file under `content/ui` now carries a module header**
   except the deliberate exclusions listed below.
 
   - **wave 8** — `eseq.step-grid-interactions` (71 defs, 42 identity aliases,
@@ -2018,7 +2018,7 @@ stays as-is; real macro hygiene is out of scope for this spec.
   ### What remains for slice 3
 
   **Nothing — slice 3 is complete.** Every non-fixture file under
-  `crates/sequencer/ui` carries a `(module …)` header except the
+  `content/ui` carries a `(module …)` header except the
   headerless-by-design set enumerated in the waves 8-10 tally above. The three
   items this section used to track are all closed:
 
@@ -2070,7 +2070,7 @@ stays as-is; real macro hygiene is out of scope for this spec.
     Clean scans are not memoized, so introducing an old name in a later edit is
     still detected. The scan is one lexer pass and happens before normal parse
     and evaluation; detection never blocks loading while aliases remain. Metal
-    Seq explicitly excludes only its checked-in `crates/sequencer/ui` factory
+    Seq explicitly excludes only its checked-in `content/ui` factory
     root, whose module-local bare names are valid and whose repeated startup
     pass is unnecessary. Authored instruments, effects, MIDI FX, and scripts
     remain outside that exclusion. Exclusions are registered roots rather than
@@ -2179,4 +2179,4 @@ warn; `:refer` of a non-exported symbol is an error.
 Related: `docs/big-file-split-plan.md` (the Rust-side analogue of slice 2),
 `crates/eseqlisp/src/defmacro_library.rs` (package format precedent),
 `crates/eseqlisp/src/hot_reload.rs` (ModuleGraph this builds on),
-`crates/sequencer/ui/README.md` (current `@/` load convention).
+`content/ui/README.md` (current `@/` load convention).

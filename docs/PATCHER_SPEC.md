@@ -227,7 +227,7 @@ Comment
 Each instrument/effect lives in its existing folder:
 
 ```
-crates/sequencer/instruments/videogame-arp/
+content/instruments/videogame-arp/
 ├── dsp.lisp           ← source of truth (already exists)
 ├── ui.lisp            ← out of scope for patcher
 └── dsp.layout.json    ← NEW; written on first edit in patcher

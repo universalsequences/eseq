@@ -159,7 +159,7 @@ impl SpringParams {
         }
     }
 
-    /// Fitted to `impulses/prepared/king-tubby.wav` (Grampian spring, the
+    /// Fitted to `content/impulses/prepared/king-tubby.wav` (Grampian spring, the
     /// King Tubby dub tank) with `scripts/spring_tune.py` staged Nelder-Mead
     /// from the `re201()` start, then a hand "boing" pass: the optimizer's
     /// centroid-based ridge metric under-rewards distinct chirp arcs, so

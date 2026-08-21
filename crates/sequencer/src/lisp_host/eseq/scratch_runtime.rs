@@ -225,7 +225,7 @@ pub fn load_process_library_source() -> String {
             format!("(load {:?})", path.to_string_lossy())
         }
         Err(_) => {
-            let source = include_str!("../../../processes/builtin.lisp");
+            let source = include_str!("../../../../../content/processes/builtin.lisp");
             if source.trim().is_empty() {
                 String::new()
             } else {

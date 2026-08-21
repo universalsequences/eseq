@@ -88,7 +88,7 @@ Gotchas to respect (from memory):
 - `write-history` return value is miswired — write as a bare statement, consume
   the value expression (`(def next …) (write-history h next)`).
 - Instrument contract: `dsp.lisp` + `ui.lisp` folder under
-  `crates/sequencer/instruments/`, inputs gate/pitch/vel/trigger/clock at 1–5,
+  `content/instruments/`, inputs gate/pitch/vel/trigger/clock at 1–5,
   mod1–4 at 6–9; spec in `crates/sequencer/src/agent/prompts/instrument.md`.
 
 ---

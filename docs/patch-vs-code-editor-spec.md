@@ -353,7 +353,7 @@ Reuse the editor stack — this mostly already exists:
   The code editor is a writable sibling: open `dsp.lisp` contents into a
   `*instrument-code:<name>*` buffer, `BufferMode::DGenLisp`, writable.
 - New layout mode `:instrument-code` mirroring `:instrument-patcher`
-  (`seq-instrument-patcher-layout-spec`, `crates/sequencer/ui/main.lisp:600`):
+  (`seq-instrument-patcher-layout-spec`, `content/ui/main.lisp:600`):
   code buffer in the main region, same bottom bar (unchanged per scope note),
   same `sbrowser-editor-header` save pane.
 - Session state: add a surface discriminant to `InstrumentEditSession` /

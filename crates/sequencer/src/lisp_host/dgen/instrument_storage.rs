@@ -42,7 +42,7 @@ pub(in crate::lisp_host) struct InstrumentPresetBank {
 
 /// Memo for the recursive-walk fallback in `resolve_instrument_storage_path`.
 /// Names that don't resolve via the cheap exact-path probes trigger a full
-/// scan of `INSTRUMENTS_DIR`; hot callers (the glyph feeds re-read sources
+/// scan of the AppPaths instrument roots; hot callers (the glyph feeds re-read sources
 /// every reactive tick) must not pay that walk repeatedly. Hits are
 /// revalidated with `exists()`, so deleting/moving a source re-resolves on
 /// the next call. Known staleness: adding a SECOND source with the same leaf

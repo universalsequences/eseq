@@ -83,6 +83,22 @@ pub mod tile;
 pub mod widget_render;
 pub mod widgets;
 
+/// Factory Lisp shipped at the repository or bundle content root. Standalone
+/// eseqlisp tools use this source-tree mapping; embedding applications should
+/// also pass the returned path as `EditorConfig::init_source_path` so relative
+/// loads (such as `./themes.lisp`) resolve beside it.
+pub fn factory_core_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/core")
+}
+
+pub fn factory_init_path() -> std::path::PathBuf {
+    factory_core_dir().join("init.lisp")
+}
+
+pub fn factory_init_source() -> String {
+    std::fs::read_to_string(factory_init_path()).unwrap_or_default()
+}
+
 use std::{
     io,
     time::{Duration, Instant},
@@ -109,7 +125,7 @@ pub fn run_prog(prog: &str) -> Result<Option<Value>, VMError> {
 }
 
 pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
-    let init_src = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let init_src = factory_init_source();
     let runtime = Runtime::new();
     let mut editor = Editor::new(
         runtime,
@@ -164,7 +180,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
     use backend::Backend;
     use metal_backend::MetalBackend;
 
-    let init_src = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let init_src = factory_init_source();
     let runtime = Runtime::new();
     let mut editor = Editor::new(
         runtime,

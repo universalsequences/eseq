@@ -11,14 +11,7 @@
 
 # Local app data and generated runtime output.
 crates/musicplayer/Music/
-crates/sequencer/projects/
-crates/sequencer/projects.backup.*/
-crates/sequencer/samples/
-crates/sequencer/samples.backup.*/
-crates/sequencer/sample-assets/
-crates/sequencer/samples.db
-crates/sequencer/recordings/
-crates/sequencer/instruments-backup/
+/.local/
 /.eseq/
 crates/eseqlisp/profiles/
 

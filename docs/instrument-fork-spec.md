@@ -132,7 +132,7 @@ Empty name on save is already rejected ("Name cannot be empty",
   This is the important one: it catches you mid-exploration, when you started
   editing in place and now want out without discarding your work.
 
-  Concretely, it belongs in the `h-stack` at `crates/sequencer/ui/browser.lisp`
+  Concretely, it belongs in the `h-stack` at `content/ui/browser.lisp`
   (the "Save button" block, ~line 1333) that today renders
   Finalize / Save & Add / Save plus cancel. Fork renders in that stack when
   `SEQ.editor-mode` is `edit-instrument` or `edit-effect` — i.e. exactly when

@@ -736,12 +736,7 @@ pub(crate) fn project_instrument_engine_names(app: &app::App) -> Vec<String> {
 }
 
 pub(crate) fn script_root_dir() -> std::path::PathBuf {
-    let local = std::path::PathBuf::from("scripts");
-    if local.is_dir() {
-        local
-    } else {
-        std::path::PathBuf::from("crates/sequencer/scripts")
-    }
+    sequencer::app_paths::app_paths().scripts_dir()
 }
 
 fn build_script_tree_nodes(dir: &std::path::Path, root: &std::path::Path) -> Vec<ScriptTreeNode> {

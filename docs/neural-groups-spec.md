@@ -3,7 +3,7 @@
 Status: draft spec, 2026-08-05. Companion to
 `docs/graph-homeostat-spec.md` (the delta overlay — normative for the nudge
 layer, already landed in `runtime/graph.rs`) and
-`crates/sequencer/scripts/sequencers/graph-neural-variable-reset-demo.lisp`
+`content/scripts/sequencers/graph-neural-variable-reset-demo.lisp`
 (the graph sequencer this extends).
 
 ## 1. Motivation

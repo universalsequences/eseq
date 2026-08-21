@@ -3,6 +3,12 @@
     use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
 
+    fn read_ui_source(relative: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(
+            sequencer::app_paths::app_paths().ui_dir().join(relative),
+        )
+    }
+
     #[test]
     fn process_lane_short_label_preserves_the_complete_inlet_name() {
         assert_eq!(
@@ -697,7 +703,7 @@
 
     #[test]
     fn metal_seq_grid_lisp_parses() {
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
+        let src = read_ui_source("main.lisp").expect("read ui/main.lisp");
         let tokens = Parser::new(src).parse().expect("tokenize ui/main.lisp");
         let mut pos = 0;
         while pos < tokens.len() {
@@ -715,7 +721,7 @@
 
     #[test]
     fn metal_seq_browser_lisp_parses() {
-        let src = std::fs::read_to_string("ui/browser.lisp").expect("read browser lisp");
+        let src = read_ui_source("browser.lisp").expect("read browser lisp");
         let tokens = Parser::new(src).parse().expect("tokenize ui/browser.lisp");
         let mut pos = 0;
         while pos < tokens.len() {
@@ -1088,7 +1094,7 @@
     fn load_step_gesture_source(runtime: &mut Runtime) {
         // S2 moved the step gesture defs from ui/main.lisp into the
         // step-grid-interactions section file.
-        let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
+        let src = read_ui_source("step-grid-interactions.lisp")
             .expect("read ui/step-grid-interactions.lisp");
         let start = src
             .find("(def selection-click?")
@@ -1107,7 +1113,7 @@
     fn load_keyboard_step_selection_source(runtime: &mut Runtime) {
         // S2 moved the keyboard step selection defs from ui/main.lisp into
         // the step-grid-interactions section file.
-        let src = std::fs::read_to_string("ui/step-grid-interactions.lisp")
+        let src = read_ui_source("step-grid-interactions.lisp")
             .expect("read ui/step-grid-interactions.lisp");
         // The anchor is pinned into `eseq.vanilla` (module spec §10 hazard m):
         // vanilla callers share this gesture slot and `set!` it through the
@@ -2210,7 +2216,7 @@
     }
 
     fn browser_editor_on_instrument_tab() -> eseqlisp::Editor {
-        let src = std::fs::read_to_string("ui/browser.lisp").expect("read browser lisp");
+        let src = read_ui_source("browser.lisp").expect("read browser lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -5775,7 +5781,7 @@
 
     #[test]
     fn metal_seq_mixer_lisp_parses() {
-        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         let tokens = Parser::new(src).parse().expect("tokenize ui/mixer.lisp");
         let mut pos = 0;
         while pos < tokens.len() {
@@ -5793,7 +5799,7 @@
 
     #[test]
     fn metal_seq_track_group_dispatcher_groups_only_multi_selection() {
-        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         let start = src
             .find("(def group-selected ()")
             .expect("mixer should define the group action");
@@ -5844,7 +5850,7 @@
 
     #[test]
     fn metal_seq_fx_lisp_parses() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let tokens = Parser::new(src).parse().expect("tokenize ui/effects.lisp");
         let mut pos = 0;
         while pos < tokens.len() {
@@ -5864,7 +5870,7 @@
 
     #[test]
     fn metal_seq_metal_lisp_parses() {
-        let src = std::fs::read_to_string("ui/step-grid.lisp").expect("read metal lisp");
+        let src = read_ui_source("step-grid.lisp").expect("read metal lisp");
         let tokens = Parser::new(src)
             .parse()
             .expect("tokenize ui/step-grid.lisp");
@@ -5886,7 +5892,7 @@
 
     #[test]
     fn metal_seq_sequencer_lisp_parses() {
-        let src = std::fs::read_to_string("ui/sequencer.lisp").expect("read sequencer lisp");
+        let src = read_ui_source("sequencer.lisp").expect("read sequencer lisp");
         let tokens = Parser::new(src)
             .parse()
             .expect("tokenize ui/sequencer.lisp");
@@ -7556,7 +7562,7 @@
 
     #[test]
     fn instrument_keys_tab_reads_and_writes_key_lock_values() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
         let mut key_lock = std::collections::HashMap::new();
         key_lock.insert(
@@ -10510,12 +10516,12 @@
         let mut app = test_app_with_instrument_descriptor(desc);
         let mut runtime = Runtime::new();
         runtime.register_reactive("SEQ", vec![("macros", Value::List(Vec::new()))], false);
-        let macro_state = std::fs::read_to_string("ui/macro-state.lisp").expect("read macro state");
+        let macro_state = read_ui_source("macro-state.lisp").expect("read macro state");
         runtime
             .eval_str(&macro_state)
             .expect("load shared macro state");
         let macro_controls =
-            std::fs::read_to_string("ui/macros.lisp").expect("read macro controls");
+            read_ui_source("macros.lisp").expect("read macro controls");
         runtime
             .eval_str(&macro_controls)
             .expect("load macro controls");
@@ -10634,12 +10640,12 @@
             false,
         );
         let macro_state =
-            std::fs::read_to_string("ui/macro-state.lisp").expect("read shared macro state");
+            read_ui_source("macro-state.lisp").expect("read shared macro state");
         editor
             .runtime_mut()
             .eval_str(&macro_state)
             .expect("load shared macro state");
-        let src = std::fs::read_to_string("ui/macros.lisp").expect("read reusable macro controls");
+        let src = read_ui_source("macros.lisp").expect("read reusable macro controls");
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -11553,7 +11559,7 @@
         let selected = Arc::new(Mutex::new(HashSet::new()));
         selected.lock().unwrap().insert(3);
         let rack_panel = build_instrument_panel_value(&app, 0, &selected);
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
@@ -11659,7 +11665,7 @@
         let app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::from([3])));
         let rack_panel = build_instrument_panel_value(&app, 0, &selected);
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
@@ -11806,7 +11812,7 @@
         let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let speed_wrapper_key = format!("sampler-param-{speed_idx}-mod-wrapper");
         let speed_depth_key = format!("sampler-param-{speed_idx}-mod-depth");
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
@@ -12173,7 +12179,7 @@
         ));
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let rack_panel = build_instrument_panel_value(&app, 0, &selected);
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
         editor.set_layout_viewport(160, 20);
@@ -13918,7 +13924,7 @@
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read grid lisp");
+        let src = read_ui_source("main.lisp").expect("read grid lisp");
         full_grid_editor_with_main_source(&src)
     }
 
@@ -13943,6 +13949,10 @@
         }
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor
+            .runtime_mut()
+            .set_load_root(sequencer::app_paths::app_paths().factory_root());
+        crate::natives::register_factory_path_native(editor.runtime_mut());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         register_agent_test_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
@@ -14241,7 +14251,7 @@
 
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from("ui/main.lisp")),
+            Some(sequencer::app_paths::app_paths().ui_dir().join("main.lisp")),
             main_source,
             overlays,
         );
@@ -14353,8 +14363,10 @@
 
     #[test]
     fn user_init_boot_proves_hook_mx_theme_and_visible_around_override() {
-        let main_source = std::fs::read_to_string("ui/main.lisp").expect("read main");
-        let init_path = std::path::Path::new("ui/test-fixtures/user-init-payoff.lisp");
+        let main_source = read_ui_source("main.lisp").expect("read main");
+        let init_path = sequencer::app_paths::app_paths()
+            .ui_dir()
+            .join("test-fixtures/user-init-payoff.lisp");
         let factory_source = r#"
 (module test.init-factory)
 (defhook "test-init-payoff-hook")
@@ -14362,7 +14374,7 @@
         let mut editor = full_grid_editor_with_post_factory_source(
             &main_source,
             Some(factory_source),
-            Some(init_path),
+            Some(&init_path),
         );
 
         assert!(
@@ -14433,7 +14445,7 @@
     /// resolve to the same values.
     #[test]
     fn metal_seq_main_import_block_boots_in_reverse_order() {
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
+        let src = read_ui_source("main.lisp").expect("read ui/main.lisp");
         let import_lines: Vec<&str> = src
             .lines()
             .filter(|line| line.starts_with("(import "))
@@ -15515,7 +15527,7 @@
             .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
             .expect("install shared mixer selection state");
         register_test_delete_target_natives(&mut editor, track_count);
-        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         // ui/track-collapse.lisp is a module now, and its compat aliases only
         // reach callers compiled after it is evaluated — this harness evals
         // the consumer's source directly, so the dep has to be a separate,
@@ -16422,7 +16434,7 @@
     #[test]
     fn metal_seq_script_scratch_cleanup_matches_relative_load_to_canonical_source() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let relative_path = "crates/sequencer/scripts/processes/process-conductor-demo.lisp";
+        let relative_path = "content/scripts/processes/process-conductor-demo.lisp";
         let canonical_path =
             std::fs::canonicalize(sequencer::paths::workspace_root().join(relative_path))
                 .expect("canonical process conductor demo path")
@@ -16615,10 +16627,10 @@
             .expect("install custom code/ui layout");
         editor.refresh_runtime_side_effects();
 
-        let src = std::fs::read_to_string("ui/main.lisp").expect("read grid lisp");
+        let src = read_ui_source("main.lisp").expect("read grid lisp");
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(PathBuf::from("ui/main.lisp")),
+            Some(sequencer::app_paths::app_paths().ui_dir().join("main.lisp")),
             &src,
             overlays,
         );
@@ -16729,7 +16741,7 @@
             .collect::<Vec<_>>();
         assert_eq!(
             lines,
-            vec!["(load \"crates/sequencer/scripts/sequencers/graph-neural-8x8-demo.lisp\")"],
+            vec!["(load \"content/scripts/sequencers/graph-neural-8x8-demo.lisp\")"],
             "scratch entry should persist only the project-relative load form"
         );
     }
@@ -17037,8 +17049,9 @@
             process_state,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
-        let script_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ui/inline-code-widgets-demo.lisp");
+        let script_path = sequencer::app_paths::app_paths()
+            .scripts_dir()
+            .join("ui/inline-code-widgets-demo.lisp");
         let load_form = format!(
             "(eseq.seq-script-picker/seq-script-load-file {:?})",
             script_path.display().to_string()
@@ -17676,14 +17689,13 @@
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
 
-        let script_path = format!(
-            "{}/scripts/processes/process-multi-accumulator-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = sequencer::app_paths::app_paths()
+            .scripts_dir()
+            .join("processes/process-multi-accumulator-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read multi accumulator demo script");
         runtime
-            .eval_source_at_path(script_path.into(), &source)
+            .eval_source_at_path(script_path, &source)
             .expect("evaluate multi accumulator demo");
 
         let Value::List(slots) = build_process_slots_value(&state, 0) else {
@@ -17803,7 +17815,7 @@
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let scratch_source =
-            r#"(load "crates/sequencer/scripts/sequencers/graph-neural-8x8-demo.lisp")"#;
+            r#"(load "content/scripts/sequencers/graph-neural-8x8-demo.lisp")"#;
         let scratch_idx = editor
             .buffers
             .iter()
@@ -17824,8 +17836,10 @@
 
     #[test]
     fn metal_seq_16_cycle_script_effect_buffer_matches_script_contract() {
-        let src = std::fs::read_to_string("scripts/sequencers/graph-neural-16-cycle-demo.lisp")
-            .expect("read 16-cycle script");
+        let path = sequencer::app_paths::app_paths()
+            .scripts_dir()
+            .join("sequencers/graph-neural-16-cycle-demo.lisp");
+        let src = std::fs::read_to_string(path).expect("read 16-cycle script");
         let tokens = Parser::new(src).parse().expect("tokenize 16-cycle script");
         let exprs = ASTParser::new(tokens)
             .parse()
@@ -17875,11 +17889,13 @@
     fn metal_seq_macro_player_script_renders_visible_controls_in_its_own_tab() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.drain_host_commands();
-        let src = std::fs::read_to_string("scripts/ui/macro-player-demo.lisp")
-            .expect("read macro player demo");
+        let path = sequencer::app_paths::app_paths()
+            .scripts_dir()
+            .join("ui/macro-player-demo.lisp");
+        let src = std::fs::read_to_string(&path).expect("read macro player demo");
         editor
             .runtime_mut()
-            .eval_source_at_path(PathBuf::from("scripts/ui/macro-player-demo.lisp"), &src)
+            .eval_source_at_path(path, &src)
             .expect("evaluate macro player demo");
 
         let commands = editor.drain_host_commands();
@@ -27875,7 +27891,7 @@
             ("doc", Value::String("Sparse transpose".to_string())),
             (
                 "source-path",
-                Value::String("crates/sequencer/scripts/sparse-transpose.lisp".to_string()),
+                Value::String("content/scripts/sparse-transpose.lisp".to_string()),
             ),
             ("enabled", Value::Bool(true)),
             ("target", Value::String("step-param:transpose".to_string())),
@@ -27989,7 +28005,7 @@
             ),
             (
                 "source-path",
-                Value::String("crates/sequencer/scripts/mod-writer.lisp".to_string()),
+                Value::String("content/scripts/mod-writer.lisp".to_string()),
             ),
             ("enabled", Value::Bool(true)),
             ("target", Value::String("shape:unbound".to_string())),
@@ -28777,7 +28793,7 @@
         };
         assert_eq!(
             extract_string_from_payload(payload, "path"),
-            Some("crates/sequencer/scripts/mod-writer.lisp".to_string())
+            Some("content/scripts/mod-writer.lisp".to_string())
         );
         editor
             .runtime_mut()
@@ -29131,14 +29147,13 @@
             Arc::clone(&state),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-multi-accumulator-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = sequencer::app_paths::app_paths()
+            .scripts_dir()
+            .join("processes/process-multi-accumulator-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read multi accumulator demo script");
         runtime
-            .eval_source_at_path(script_path.into(), &source)
+            .eval_source_at_path(script_path, &source)
             .expect("evaluate multi accumulator demo");
 
         let lanes = build_process_lanes_value(&state, 0);
@@ -32961,7 +32976,7 @@
 
     #[test]
     fn metal_seq_mixer_lisp_loads_and_builds_widget_tree() {
-        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -33208,7 +33223,7 @@
 
     #[test]
     fn metal_seq_fx_lisp_renders_track_and_bus_panels() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -33686,7 +33701,7 @@
 
     #[test]
     fn metal_seq_fx_filter_layout_contains_response_curve_editor() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -33786,7 +33801,7 @@
     // curve in place with no panel rerun.
     #[test]
     fn metal_seq_fx_filter_curve_band_is_bound_to_the_param_value_fields() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let cutoff_field = "track-0-effect-0-param-2-cutoff";
         let resonance_field = "track-0-effect-0-param-3-resonance";
         let mut params = test_filter_params();
@@ -33908,7 +33923,7 @@
 
     #[test]
     fn metal_seq_fx_eq8_layout_contains_eq8_editor() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -34021,7 +34036,7 @@
             );
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
         editor.runtime_mut().register_reactive(
@@ -34136,7 +34151,7 @@
 
     #[test]
     fn metal_seq_sampler_waveform_drag_sets_sample_range() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut instrument = test_sampler_instrument_map(0);
         instrument.insert(
             "buffer".to_string(),
@@ -34311,7 +34326,7 @@
 
     #[test]
     fn metal_seq_sampler_panel_accepts_sample_and_instrument_drops_for_current_track() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -34430,7 +34445,7 @@
 
     #[test]
     fn metal_seq_sampler_sample_rate_knob_uses_instrument_plock_when_steps_selected() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         let mut sr_plock = HashMap::new();
@@ -34601,7 +34616,7 @@
             }
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         let sampler_inst = test_sampler_instrument_map(0);
@@ -34786,7 +34801,7 @@
 
     #[test]
     fn metal_seq_fx_dimension_layout_contains_mode_buttons_and_knobs() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -34870,7 +34885,7 @@
 
     #[test]
     fn metal_seq_fx_phaser_flanger_layout_contains_mode_buttons_and_knobs() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -35084,7 +35099,7 @@
 
     #[test]
     fn metal_seq_fx_roar_layout_contains_stage_tabs_and_shaper_display() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let mut fields = vec![
             ("num-tracks", Value::Number(1.0)),
@@ -35248,7 +35263,7 @@
 
     #[test]
     fn metal_seq_fx_ott_layout_contains_band_fields_and_live_display() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let mut fields = vec![
             ("num-tracks", Value::Number(1.0)),
@@ -35441,7 +35456,7 @@
 
     #[test]
     fn metal_seq_fx_compressor_layout_contains_sidechain_display_and_controls() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -35564,7 +35579,7 @@
 
     #[test]
     fn metal_seq_fx_space_echo_layout_contains_mode_grid_and_knobs() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -35781,7 +35796,7 @@
                 || node.children.iter().any(layout_has_double_click)
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let mut fx = test_fx_map(
             "Filter Table",
@@ -36173,7 +36188,7 @@
             *effects_cell.borrow_mut() = test_list(vec![Value::Map(fx)]);
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -36298,7 +36313,7 @@
             Value::Map(map)
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         let mut fx = test_fx_map(
             "Filter Table",
@@ -36466,7 +36481,7 @@
 
     #[test]
     fn metal_seq_fx_filterbank_layout_contains_dual_filters_and_harmonics() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -36558,7 +36573,7 @@
 
     #[test]
     fn metal_seq_fx_multiverb_layout_contains_modes_presets_and_live_knobs() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -36772,7 +36787,7 @@
 
     #[test]
     fn metal_seq_fx_str8_delay_layout_contains_curve_and_offsets() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -36896,7 +36911,7 @@
 
     #[test]
     fn metal_seq_fx_builtin_without_custom_ui_falls_back_to_param_grid() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -37931,7 +37946,7 @@
 
     #[test]
     fn metal_seq_fx_custom_audio_effect_ui_lays_out_body_content() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let modum_ui =
             std::fs::read_to_string("effects/MODUM_DELAY/ui.lisp").expect("read MODUM_DELAY ui");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
@@ -38031,7 +38046,7 @@
 
     #[test]
     fn metal_seq_fx_sidechain_custom_ui_renders_route_dropdown() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -38172,7 +38187,7 @@
 
     #[test]
     fn metal_seq_fx_dimension_d_custom_ui_fits_below_header() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let dimension_ui = std::fs::read_to_string("effects/dimension-d-chorus/ui.lisp")
             .expect("read dimension-d-chorus ui");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
@@ -38302,7 +38317,7 @@
 
     #[test]
     fn custom_audio_fx_callbacks_keep_their_rendered_effect_scope() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -38437,7 +38452,7 @@
 
     #[test]
     fn custom_instrument_callbacks_survive_audio_fx_render_scope() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
         let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -38584,7 +38599,7 @@
 
     #[test]
     fn custom_instrument_matrix_renders_and_emits_tensor_cell_command() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/test-instrument/ui.lisp".to_string(),
@@ -38735,7 +38750,7 @@
 
     #[test]
     fn custom_instrument_option_callbacks_capture_scope_before_audio_fx_render() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
         let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -38906,7 +38921,7 @@
 
     #[test]
     fn custom_ui_section_selection_is_scoped_per_rendered_ui() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/test-instrument/ui.lisp".to_string(),
@@ -39055,7 +39070,7 @@
             }
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument/".to_string(),
             "test/ui.lisp".to_string(),
@@ -39240,7 +39255,7 @@
             );
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         fn lisp_def_slice<'a>(src: &'a str, start_pattern: &str, end_pattern: &str) -> &'a str {
             let start = src
                 .find(start_pattern)
@@ -39540,8 +39555,8 @@
         // S2 moved the fx lower-panel defs from ui/main.lisp into the
         // seq-panels section file.
         let grid_src =
-            std::fs::read_to_string("ui/seq-panels.lisp").expect("read seq panels lisp");
-        let effect_panels_src = std::fs::read_to_string("ui/effects/effect-panels.lisp")
+            read_ui_source("seq-panels.lisp").expect("read seq panels lisp");
+        let effect_panels_src = read_ui_source("effects/effect-panels.lisp")
             .expect("read effect panels lisp");
         let toggle_action_src = lisp_def_slice(
             &effect_panels_src,
@@ -40041,7 +40056,7 @@
             ]))),
         );
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -40255,7 +40270,7 @@
 
     #[test]
     fn metal_seq_fx_lisp_lays_out_agent_instrument_stub_skeleton() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "agent-draft-1/".to_string(),
             "instruments/agent-draft-1/ui.lisp".to_string(),
@@ -40369,7 +40384,7 @@
             }
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let korg1_ui =
             std::fs::read_to_string("instruments/bass/korg1/ui.lisp").expect("read korg1 ui");
         let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
@@ -40502,7 +40517,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let analog_ui = std::fs::read_to_string("instruments/core/analog-bread-and-butter/ui.lisp")
             .expect("read analog bread-and-butter ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -40642,7 +40657,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let drift_ui =
             std::fs::read_to_string("instruments/core/drift/ui.lisp").expect("read drift ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -40773,7 +40788,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let triton_ui =
             std::fs::read_to_string("instruments/core/triton/ui.lisp").expect("read triton ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -40917,7 +40932,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let tabla_ui = std::fs::read_to_string("instruments/drums/membrane-tabla/ui.lisp")
             .expect("read membrane-tabla ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41093,7 +41108,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let hat_ui = std::fs::read_to_string("instruments/drums/membrane-hat/ui.lisp")
             .expect("read membrane-hat ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41239,7 +41254,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let vox_ui =
             std::fs::read_to_string("instruments/monomachine/vox/ui.lisp").expect("read vox ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41369,7 +41384,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let grit_ui =
             std::fs::read_to_string("instruments/monomachine/grit/ui.lisp").expect("read grit ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41499,7 +41514,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let melt_ui =
             std::fs::read_to_string("instruments/monomachine/melt/ui.lisp").expect("read melt ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41630,7 +41645,7 @@
             node.children.iter().find_map(find_focusable_descendant)
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let wave3_ui = std::fs::read_to_string("instruments/monomachine/wave3/ui.lisp")
             .expect("read wave3 ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41765,7 +41780,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let operator_ui =
             std::fs::read_to_string("instruments/core/operator/ui.lisp").expect("read operator ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -41918,7 +41933,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let flute_ui =
             std::fs::read_to_string("instruments/woodwinds/flute/ui.lisp").expect("read flute ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -42066,7 +42081,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let wavetable_ui = std::fs::read_to_string("instruments/core/wavetable/ui.lisp")
             .expect("read wavetable ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -42474,7 +42489,7 @@
             ),
         ]));
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -42736,7 +42751,7 @@
             ),
         ]));
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -42906,7 +42921,7 @@
             ],
         ));
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -43246,7 +43261,7 @@
             ),
         ]));
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -43630,7 +43645,7 @@
             ),
         ]));
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
         editor.runtime_mut().register_reactive(
@@ -44076,7 +44091,7 @@
 
     #[test]
     fn metal_seq_fx_lisp_lays_out_modulator_panel_controls() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(180, 18);
         editor.runtime_mut().register_reactive(
@@ -44238,7 +44253,7 @@
             }
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let ui = std::fs::read_to_string("instruments/drums/909-mutant-fm/ui.lisp")
             .expect("read 909 ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -44456,7 +44471,7 @@
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let ui = std::fs::read_to_string("instruments/emulations/prophet-6-inspired/ui.lisp")
             .expect("read prophet-6-inspired ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -44680,7 +44695,7 @@
             .expect("load md-hat custom UI");
         editor
             .runtime_mut()
-            .eval_str(&std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp"))
+            .eval_str(&read_ui_source("effects.lisp").expect("read fx lisp"))
             .expect("load fx lisp");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -44796,7 +44811,7 @@
                 .find_map(|child| find_clickable_node_containing(child, needle))
         }
 
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let minimoog_ui = std::fs::read_to_string("instruments/emulations/minimoog-lad2/ui.lisp")
             .expect("read ui");
         let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
@@ -44913,7 +44928,7 @@
 
     #[test]
     fn metal_seq_fx_lisp_lego_text_readout_uses_optical_vertical_center() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument/".to_string(),
             "test/ui.lisp".to_string(),
@@ -45018,7 +45033,7 @@
     /// knobs (korg1's actual shape) should still produce multiple columns.
     #[test]
     fn metal_seq_fx_lisp_ui_rack_korg1_shape_renders_all_panels() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument/".to_string(),
             "test/ui.lisp".to_string(),
@@ -45177,7 +45192,7 @@
     /// only the first column was rendering (panels stretched to rack width).
     #[test]
     fn metal_seq_fx_lisp_ui_rack_renders_multiple_columns() {
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument/".to_string(),
             "test/ui.lisp".to_string(),
@@ -45382,7 +45397,7 @@
             }
         }
 
-        let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
+        let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 30);
@@ -47226,7 +47241,7 @@
 
     #[test]
     fn metal_seq_piano_roll_lisp_loads() {
-        let src = std::fs::read_to_string("ui/piano-roll.lisp").expect("read piano roll lisp");
+        let src = read_ui_source("piano-roll.lisp").expect("read piano roll lisp");
         let tokens = Parser::new(src.clone())
             .parse()
             .expect("tokenize ui/piano-roll.lisp");
@@ -47521,7 +47536,7 @@
 
     #[test]
     fn sync_piano_roll_state_applies_pending_track_fit_after_items_update() {
-        let src = std::fs::read_to_string("ui/piano-roll.lisp").expect("read piano roll lisp");
+        let src = read_ui_source("piano-roll.lisp").expect("read piano roll lisp");
         let mut runtime = Runtime::new();
         runtime.register_reactive(
             "SEQ",
@@ -48878,7 +48893,7 @@
     /// resolves to a registered slot.
     #[test]
     fn every_shipped_theme_key_resolves_to_a_registered_theme_slot() {
-        let themes_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/themes");
+        let themes_dir = sequencer::app_paths::app_paths().ui_dir().join("themes");
         let mut checked_files = 0;
         let mut checked_keys = 0;
         for entry in std::fs::read_dir(&themes_dir).expect("read ui/themes") {
@@ -48919,8 +48934,9 @@
     /// node editor both come up on the Rust fallback colours.
     #[test]
     fn the_boot_theme_defines_the_shared_completion_palette() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("ui/themes/mac-osx-dark.lisp");
+        let path = sequencer::app_paths::app_paths()
+            .ui_dir()
+            .join("themes/mac-osx-dark.lisp");
         let source = std::fs::read_to_string(&path).expect("read mac-osx-dark theme");
         for key in [
             "comp-unselected-bg",
@@ -50111,7 +50127,7 @@
             )
             .expect("install rack fx panel test helpers");
         register_test_delete_target_natives(&mut editor, 1);
-        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor.refresh_runtime_side_effects();
         editor

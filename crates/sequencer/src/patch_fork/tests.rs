@@ -3,11 +3,11 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn instruments_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("instruments")
+    crate::app_paths::app_paths().instruments_dir()
 }
 
 fn effects_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("effects")
+    crate::app_paths::app_paths().effects_dir()
 }
 
 /// Scratch dir under the system temp root. Tests must never write into the

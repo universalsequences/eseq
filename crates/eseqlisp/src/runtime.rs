@@ -1320,7 +1320,7 @@ impl Runtime {
             });
         }
         // Load SDF standard library (macros for SDF primitives)
-        let sdf_src = include_str!("../sdf-stdlib.lisp");
+        let sdf_src = include_str!("../../../content/core/sdf-stdlib.lisp");
         if !sdf_src.trim().is_empty() {
             let _ = runtime.eval_str(sdf_src);
         }
@@ -1937,6 +1937,12 @@ impl Runtime {
         self.current_committed_ui_snapshot_generation =
             snapshot.current_committed_ui_snapshot_generation;
         self.last_ui_invalidation_trace = snapshot.last_ui_invalidation_trace;
+    }
+
+    /// Set the root used by `@/` load paths. Embedding applications should
+    /// point this at their immutable factory content root.
+    pub fn set_load_root(&mut self, root: std::path::PathBuf) {
+        self.vm.source_manager.set_cwd(root);
     }
 
     pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {

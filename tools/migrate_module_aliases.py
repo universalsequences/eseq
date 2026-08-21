@@ -19,21 +19,21 @@ import sys
 from collections.abc import Iterable
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-UI_ROOT = ROOT / "crates/sequencer/ui"
+UI_ROOT = ROOT / "content/ui"
 DEFAULT_TABLE = ROOT / "tools/module-compat-aliases.tsv"
 MODULE_RE = re.compile(r"\(module\s+([^\s()]+)\)")
 ALIAS_RE = re.compile(r"\(module-compat-alias\s+([^\s()]+)\s+([^\s()]+)\)")
 DELIMITERS = frozenset("()[]{}\"'`,;")
 CONTENT_PREFIXES = (
-    "crates/sequencer/instruments/",
-    "crates/sequencer/effects/",
-    "crates/sequencer/defmacros/",
-    "crates/sequencer/midi-fx/",
-    "crates/sequencer/scripts/",
+    "content/instruments/",
+    "content/effects/",
+    "content/defmacros/",
+    "content/midi-fx/",
+    "content/scripts/",
 )
 UI_CONTENT_PREFIXES = (
     "crates/sequencer/ui/capture-fixtures/",
-    "crates/sequencer/ui/themes/",
+    "content/ui/themes/",
 )
 CATEGORIES = ("instruments", "effects", "defmacros", "midi-fx", "scripts", "fixtures+themes")
 
@@ -113,9 +113,9 @@ def category(path: pathlib.Path) -> str | None:
     if path.name == "dsp.lisp":
         return None
     for name in CATEGORIES[:-1]:
-        if relative.startswith(f"crates/sequencer/{name}/"):
+        if relative.startswith(f"content/{name}/"):
             return name
-    if relative == "crates/sequencer/ui/themes.lisp" or relative.startswith(UI_CONTENT_PREFIXES):
+    if relative == "content/ui/themes.lisp" or relative.startswith(UI_CONTENT_PREFIXES):
         return "fixtures+themes"
     return None
 

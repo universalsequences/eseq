@@ -247,7 +247,7 @@ fn default_window_split_bindings_survive_runtime_sync() {
 
 #[test]
 fn ctrl_x_ctrl_f_opens_find_file_minibuffer() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -6061,7 +6061,7 @@ fn reevaluating_defstate_and_effect_rebuilds_each_layout() {
 
 #[test]
 fn dired_mode_loads_and_refreshes() {
-    let init = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let init = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/core/init.lisp")).unwrap_or_default();
     let runtime = Runtime::new();
     let mut editor = Editor::new(
         runtime,
@@ -9043,7 +9043,7 @@ fn first_layout_buffer_stays_interactive_after_second_layout_buffer_eval() {
 
 #[test]
 fn first_layout_buffer_stays_interactive_after_buffer_list_switch() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -9116,7 +9116,7 @@ fn first_layout_buffer_stays_interactive_after_buffer_list_switch() {
 
 #[test]
 fn buffer_list_mode_accepts_filter_input_while_read_only() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -9234,7 +9234,7 @@ fn named_buffer_text_natives_replace_append_and_create_buffers() {
 
 #[test]
 fn buffer_list_mode_shows_previous_buffer_first() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -9265,7 +9265,7 @@ fn buffer_list_mode_shows_previous_buffer_first() {
 
 #[test]
 fn buffer_list_mode_backspace_updates_filter() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,

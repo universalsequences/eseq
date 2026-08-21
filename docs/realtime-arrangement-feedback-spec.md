@@ -25,7 +25,7 @@ row transitions, §13 the mode machine), `docs/arrangement-lane-model-spec.md`
 `crates/sequencer/src/sequencer/state/sequencer_state/song_playback.rs`,
 `crates/sequencer/src/scheduler/lookahead.rs`,
 `crates/sequencer/src/ui/state_values/song_state.rs`,
-`crates/sequencer/ui/arrangement.lisp`
+`content/ui/arrangement.lisp`
 
 ## 1. Summary
 

@@ -214,7 +214,7 @@ succeeds using only `AppPaths`-resolved locations.
 - Extend `rebuild_dgenlisp_tool.sh` to also stage the toolchain: untar the
   dgen archive into `crates/sequencer/tools/dgen-toolchain/` (gitignored —
   147 MB does not belong in git; the script records the archive sha256 it
-  staged into a small committed `tools/dgen-toolchain.lock` file and fails
+  staged into a small committed `content/dgen-toolchain.lock` file and fails
   when they diverge).
 - Rebuild `tools/DGenLisp` from dgen main (post-D1) and commit it as today.
 - ESeq's subprocess spawn (`effect_compile.rs:415-455`) adds

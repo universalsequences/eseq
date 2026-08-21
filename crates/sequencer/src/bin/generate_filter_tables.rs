@@ -9,7 +9,7 @@
 //! generate_filter_tables [--out <dir>] [--probes <dir>] [--no-audio]
 //!
 //! `--out` defaults to the bundled factory directory
-//! (`crates/sequencer/assets/filter-tables`). Same code, same output: the
+//! (`content/filter-tables`). Same code, same output: the
 //! `bundled_factory_assets_match_their_recipes` test fails if the baked
 //! files drift from the recipes in code.
 

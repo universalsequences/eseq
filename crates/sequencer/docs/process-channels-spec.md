@@ -311,7 +311,7 @@ UI reactions to channel activity do not cross into the scheduler. Channel last-v
 
 ## Persistence
 
-Solved by the existing script mechanism: processes are code, and code lives in scripts (`crates/sequencer/scripts/`) pulled into a project via the script selector (`ctrl-c s`), which adds a `(load "...")` line to the scratch buffer. The scratch buffer is persisted and re-loaded with the project, so any `def-process` / `defchan` / `start` calls in it come back with the project. No new serialization is needed — a process definition is no different from a `def-sequencer`.
+Solved by the existing script mechanism: processes are code, and code lives in scripts (`content/scripts/`) pulled into a project via the script selector (`ctrl-c s`), which adds a `(load "...")` line to the scratch buffer. The scratch buffer is persisted and re-loaded with the project, so any `def-process` / `defchan` / `start` calls in it come back with the project. No new serialization is needed — a process definition is no different from a `def-sequencer`.
 
 One convention carries over from the graph-sequencer scripts: loading a file should publish definitions but not necessarily start instances with side effects; scripts that auto-`start` mutating processes on load should make that explicit and obvious (or gate it behind a `script-init-fn`-style entrypoint, matching the existing "loading does not write overrides" convention).
 

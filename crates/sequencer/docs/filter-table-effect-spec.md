@@ -184,7 +184,7 @@ reference harmonics, and non-finite or negative magnitudes.
 
 An asset is referenced as `fltab:<stem>` in the persisted `table` field and
 resolves by stem under `filter-tables/` in the working directory first, then
-the bundled factory directory `crates/sequencer/assets/filter-tables/`.
+the bundled factory directory `content/filter-tables/`.
 Loading an asset (any `.fltab` path passed to `set-filter-table-source`)
 skips analysis entirely; analysis modes do not apply to baked assets and the
 mode command reports that. The procedural default table remains generated in

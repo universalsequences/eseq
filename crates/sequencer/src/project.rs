@@ -323,6 +323,8 @@ impl<'de> Deserialize<'de> for ProjectFile {
     {
         let wire = ProjectFileWire::deserialize(deserializer)?;
         let tracks = migrate_project_tracks(wire.version, wire.tracks).map_err(D::Error::custom)?;
+        let mut scratch = wire.scratch;
+        migrate_factory_content_paths(&mut scratch.buffer);
         let mut project = Self {
             version: wire.version,
             name: wire.name,
@@ -335,7 +337,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             tracks,
             custom_effects: wire.custom_effects,
             device_instances: wire.device_instances,
-            scratch: wire.scratch,
+            scratch,
             patterns: wire.patterns,
             groups: wire.groups,
             macros: wire.macros,
@@ -2521,7 +2523,7 @@ pub fn save_sound_preset(name: &str, sound: &ProjectSoundPreset) -> std::io::Res
 
 pub fn save_rack_preset(name: &str, preset: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
     save_container_preset(
-        &crate::app_paths::app_paths().rack_presets_dir(),
+        &crate::app_paths::app_paths().user_rack_presets_dir(),
         "rackpreset",
         "rack preset",
         name,
@@ -2553,13 +2555,19 @@ pub fn load_sound_preset(path: &Path) -> std::io::Result<ProjectSoundPreset> {
 }
 
 pub fn load_rack_preset(name: &str) -> std::io::Result<ProjectSoundPreset> {
-    let path = rack_preset_path(name);
+    let file_name = format!("{}.rackpreset", sanitize_project_name(name));
+    let paths = crate::app_paths::app_paths();
+    let path = [paths.rack_presets_dir(), paths.user_rack_presets_dir()]
+        .into_iter()
+        .map(|dir| dir.join(&file_name))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| paths.rack_presets_dir().join(file_name));
     load_container_preset(&path, "rack preset")
 }
 
 pub fn rack_preset_path(name: &str) -> PathBuf {
     crate::app_paths::app_paths()
-        .rack_presets_dir()
+        .user_rack_presets_dir()
         .join(format!("{}.rackpreset", sanitize_project_name(name)))
 }
 
@@ -2581,35 +2589,41 @@ fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoun
 }
 
 pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
-    let dir = crate::app_paths::app_paths().rack_presets_dir();
-    std::fs::create_dir_all(&dir)?;
-    let mut names = std::fs::read_dir(&dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rackpreset"))
-        .filter_map(|path| {
-            let fallback = path.file_stem()?.to_str()?.to_owned();
-            let preset = load_container_preset(&path, "rack preset").ok()?;
-            let name = preset.metadata.name.trim();
-            Some(if name.is_empty() {
-                fallback
-            } else {
-                name.to_owned()
-            })
-        })
-        .collect::<Vec<_>>();
+    let paths = crate::app_paths::app_paths();
+    std::fs::create_dir_all(paths.user_rack_presets_dir())?;
+    let mut names = Vec::new();
+    for dir in [paths.rack_presets_dir(), paths.user_rack_presets_dir()] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        names.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().and_then(|ext| ext.to_str()) == Some("rackpreset")
+                })
+                .filter_map(|path| {
+                    let fallback = path.file_stem()?.to_str()?.to_owned();
+                    let preset = load_container_preset(&path, "rack preset").ok()?;
+                    let name = preset.metadata.name.trim();
+                    Some(if name.is_empty() { fallback } else { name.to_owned() })
+                }),
+        );
+    }
     names.sort();
+    names.dedup();
     Ok(names)
 }
 
 pub fn kit_preset_path(name: &str) -> PathBuf {
     crate::app_paths::app_paths()
-        .kits_dir()
+        .user_kits_dir()
         .join(format!("{}.kit", sanitize_project_name(name)))
 }
 
 pub fn save_kit_preset(name: &str, kit: &ProjectKitPreset) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(crate::app_paths::app_paths().kits_dir())?;
+    std::fs::create_dir_all(crate::app_paths::app_paths().user_kits_dir())?;
     let path = kit_preset_path(name);
     let json = serde_json::to_string(kit).map_err(|error| {
         std::io::Error::new(
@@ -2632,15 +2646,23 @@ pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
 }
 
 pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
-    let dir = crate::app_paths::app_paths().kits_dir();
-    std::fs::create_dir_all(&dir)?;
-    let mut paths = std::fs::read_dir(&dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("kit"))
-        .collect::<Vec<_>>();
-    paths.sort();
-    Ok(paths)
+    let app_paths = crate::app_paths::app_paths();
+    std::fs::create_dir_all(app_paths.user_kits_dir())?;
+    let mut presets = Vec::new();
+    for dir in [app_paths.kits_dir(), app_paths.user_kits_dir()] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        presets.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("kit")),
+        );
+    }
+    presets.sort();
+    presets.dedup();
+    Ok(presets)
 }
 
 pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
@@ -2668,6 +2690,12 @@ pub fn sanitize_project_name(name: &str) -> String {
         })
         .collect();
     sanitized.trim_matches('-').to_string()
+}
+
+fn migrate_factory_content_paths(source: &mut String) {
+    if source.contains("crates/sequencer/scripts/") {
+        *source = source.replace("crates/sequencer/scripts/", "content/scripts/");
+    }
 }
 
 fn projects_dir() -> PathBuf {
@@ -4820,6 +4848,25 @@ mod tests {
         let restored: ProjectFile = serde_json::from_value(json).expect("load old project");
         assert!(restored.macros.is_empty());
         assert_eq!(restored.next_macro_id, 1);
+    }
+
+    #[test]
+    fn legacy_factory_script_paths_migrate_to_content_root() {
+        let mut source = concat!(
+            "(load \"crates/sequencer/scripts/sequencers/graph-neural.lisp\")\n",
+            "(load \"/tmp/user-script.lisp\")",
+        )
+        .to_string();
+
+        migrate_factory_content_paths(&mut source);
+
+        assert_eq!(
+            source,
+            concat!(
+                "(load \"content/scripts/sequencers/graph-neural.lisp\")\n",
+                "(load \"/tmp/user-script.lisp\")",
+            )
+        );
     }
 
     #[test]
