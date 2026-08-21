@@ -7935,6 +7935,86 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn published_sequencer_tick_compiles_once_and_hot_reloads_without_stale_code() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let id = 42;
+        let source = "(seq-emit :track 0 :at :now :vel 0.25)";
+        runtime
+            .register_published_sequencer(
+                id,
+                "published".to_string(),
+                Timebase::Sixteenth,
+                source.to_string(),
+            )
+            .expect("compile initial tick");
+        assert_eq!(runtime.sequencer_tick_compile_count, 1);
+
+        let invoke = |runtime: &mut ScratchControlRuntime, tick_index| {
+            runtime
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        id,
+                        generator_index: 0,
+                        tick_index,
+                        beat: tick_index as f64 * 0.25,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: Default::default(),
+                    },
+                )
+                .expect("invoke published tick")
+        };
+        assert!((invoke(&mut runtime, 0).emitted[0].resolved.velocity - 0.25).abs() < 1e-6);
+        assert!((invoke(&mut runtime, 1).emitted[0].resolved.velocity - 0.25).abs() < 1e-6);
+        assert_eq!(runtime.sequencer_tick_compile_count, 1);
+
+        runtime
+            .register_published_sequencer(
+                id,
+                "published".to_string(),
+                Timebase::Sixteenth,
+                "(seq-emit :track 0 :at :now :vel 0.75)".to_string(),
+            )
+            .expect("compile replacement tick");
+        assert_eq!(runtime.sequencer_tick_compile_count, 2);
+        assert!((invoke(&mut runtime, 2).emitted[0].resolved.velocity - 0.75).abs() < 1e-6);
+        assert_eq!(runtime.sequencer_tick_compile_count, 2);
+
+        let error = runtime
+            .register_published_sequencer(
+                id,
+                "published".to_string(),
+                Timebase::Sixteenth,
+                "(seq-emit".to_string(),
+            )
+            .expect_err("malformed replacement must fail");
+        assert!(error.contains("failed to compile sequencer tick 42"), "{error}");
+        assert_eq!(runtime.sequencer_tick_compile_count, 3);
+        assert!(runtime.sequencer_defs().is_empty(), "stale tick remained registered");
+
+        // The exact failed source is cached too, so a caller cannot accidentally
+        // move parsing malformed input into the steady-state scheduler path.
+        assert!(runtime
+            .register_published_sequencer(
+                id,
+                "published".to_string(),
+                Timebase::Sixteenth,
+                "(seq-emit".to_string(),
+            )
+            .is_err());
+        assert_eq!(runtime.sequencer_tick_compile_count, 3);
+    }
+
+    #[test]
     fn def_sequencer_drives_generator_runtime_end_to_end() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(

@@ -243,12 +243,17 @@ pub fn spawn_scheduler_thread(
                             if seq.graph.is_some() {
                                 continue; // graph-mode entries reconcile below, not as ticks
                             }
-                            runtime.register_published_sequencer(
+                            if let Err(error) = runtime.register_published_sequencer(
                                 seq.id,
                                 seq.name.clone(),
                                 crate::sequencer::Timebase::from_index(seq.resolution as u32),
                                 seq.tick_source.clone(),
-                            );
+                            ) {
+                                eprintln!(
+                                    "failed to register published sequencer {:?} ({}): {error}",
+                                    seq.name, seq.id
+                                );
+                            }
                         }
                     }
                     scratch_source_version = latest_scratch_source_version;

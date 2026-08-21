@@ -152,6 +152,11 @@ pub(crate) struct RegisteredSequencer {
     pub(super) tick: RegisteredAccumulatorCallback,
 }
 
+pub(super) struct CompiledSequencerTick {
+    source: String,
+    callback: Result<EValue, String>,
+}
+
 /// Per-invocation context for a generator `:tick`, mirroring [`AccumulatorEvalContext`]
 /// but for self-clocked generators: musical position only (no source step), an RNG
 /// cell for `gen-rand`, and the buffer that `seq-emit` pushes into.
@@ -290,7 +295,10 @@ pub struct ScratchControlRuntime {
     pub(super) process_eval: SharedProcessEvalContext,
     pub(super) graph_node: SharedGraphNodeContext,
     pub(super) graph_updates: HashMap<u64, CompiledGraphUpdate>,
+    sequencer_tick_callbacks: HashMap<u64, CompiledSequencerTick>,
     pub(super) process_run_callbacks: HashMap<String, EValue>,
+    #[cfg(test)]
+    pub(super) sequencer_tick_compile_count: usize,
     #[cfg(test)]
     pub(super) process_run_cache_enabled: bool,
     pub(super) runtime_globals: Vec<String>,
@@ -415,7 +423,10 @@ impl ScratchControlRuntime {
             process_eval,
             graph_node,
             graph_updates: HashMap::new(),
+            sequencer_tick_callbacks: HashMap::new(),
             process_run_callbacks: HashMap::new(),
+            #[cfg(test)]
+            sequencer_tick_compile_count: 0,
             #[cfg(test)]
             process_run_cache_enabled: true,
             runtime_globals: Vec::new(),
@@ -826,7 +837,10 @@ impl ScratchControlRuntime {
             process_eval,
             graph_node,
             graph_updates: HashMap::new(),
+            sequencer_tick_callbacks: HashMap::new(),
             process_run_callbacks: HashMap::new(),
+            #[cfg(test)]
+            sequencer_tick_compile_count: 0,
             #[cfg(test)]
             process_run_cache_enabled: true,
             runtime_globals: Vec::new(),
@@ -841,25 +855,79 @@ impl ScratchControlRuntime {
     /// `def-sequencer` published via `SequencerState`). Upserts by id so re-evaluating
     /// the authoring file hot-reloads the body without duplicating the generator.
     pub fn register_published_sequencer(
-        &self,
+        &mut self,
         id: u64,
         name: String,
         resolution: Timebase,
         tick_source: String,
-    ) {
-        if let Ok(mut registry) = self.sequencers.lock() {
-            let entry = RegisteredSequencer {
-                id,
-                name,
-                resolution,
-                tick: RegisteredAccumulatorCallback::Source(tick_source),
-            };
-            if let Some(existing) = registry.iter_mut().find(|e| e.id == id) {
-                *existing = entry;
-            } else {
-                registry.push(entry);
+    ) -> Result<(), String> {
+        if let Err(error) = self.sequencer_tick_callback(id, &tick_source) {
+            self.sequencers
+                .lock()
+                .map_err(|_| "failed to lock sequencer registry".to_string())?
+                .retain(|entry| entry.id != id);
+            return Err(error);
+        }
+
+        let entry = RegisteredSequencer {
+            id,
+            name,
+            resolution,
+            tick: RegisteredAccumulatorCallback::Source(tick_source),
+        };
+        let mut registry = self
+            .sequencers
+            .lock()
+            .map_err(|_| "failed to lock sequencer registry".to_string())?;
+        if let Some(existing) = registry.iter_mut().find(|entry| entry.id == id) {
+            *existing = entry;
+        } else {
+            registry.push(entry);
+        }
+        Ok(())
+    }
+
+    fn sequencer_tick_callback(&mut self, id: u64, source: &str) -> Result<EValue, String> {
+        if let Some(compiled) = self.sequencer_tick_callbacks.get(&id) {
+            if compiled.source == source {
+                return compiled.callback.clone();
             }
         }
+
+        // Remove the old VM-owned value before attempting a replacement. A failed
+        // hot reload must never leave the previous body callable under this id.
+        self.sequencer_tick_callbacks.remove(&id);
+        #[cfg(test)]
+        {
+            self.sequencer_tick_compile_count += 1;
+        }
+        let wrapped = format!("(lambda () {source})");
+        let callback = self
+            .runtime
+            .eval_str(&wrapped)
+            .map_err(|error| {
+                format!("failed to compile sequencer tick {id}: {error:?}; source={source}")
+            })
+            .and_then(|value| {
+                value.ok_or_else(|| {
+                    format!("sequencer tick {id} compilation produced no callback")
+                })
+            })
+            .and_then(|value| match value {
+                EValue::Closure(_, _) | EValue::NativeFunction(_) => Ok(value),
+                other => Err(format!(
+                    "sequencer tick {id} must compile to a callable, got {}",
+                    eseqlisp::vm::format_lisp_value(&other)
+                )),
+            });
+        self.sequencer_tick_callbacks.insert(
+            id,
+            CompiledSequencerTick {
+                source: source.to_string(),
+                callback: callback.clone(),
+            },
+        );
+        callback
     }
 
     /// Definitions of all generators registered in this VM, for the scheduler to
@@ -890,13 +958,19 @@ impl ScratchControlRuntime {
         registry_index: usize,
         input: crate::generator::GeneratorTickInput,
     ) -> Result<crate::generator::GeneratorTickResult, String> {
-        let callback = self
+        let (id, callback) = self
             .sequencers
             .lock()
             .map_err(|_| "failed to lock sequencer registry".to_string())?
             .get(registry_index)
-            .map(|entry| entry.tick.clone())
+            .map(|entry| (entry.id, entry.tick.clone()))
             .ok_or_else(|| "registered sequencer out of range".to_string())?;
+        let callback = match callback {
+            RegisteredAccumulatorCallback::Source(source) => {
+                self.sequencer_tick_callback(id, &source)?
+            }
+            RegisteredAccumulatorCallback::Closure(callback) => callback,
+        };
         {
             let mut ctx = self
                 .generator_tick
@@ -911,24 +985,17 @@ impl ScratchControlRuntime {
                 emitted: Vec::new(),
             });
         }
-        match callback {
-            RegisteredAccumulatorCallback::Source(source) => {
-                self.runtime
-                    .eval_str(&source)
-                    .map_err(|e| format!("{e:?}"))?;
-            }
-            RegisteredAccumulatorCallback::Closure(callback) => {
-                self.runtime
-                    .invoke(callback, vec![])
-                    .map_err(|e| format!("{e:?}"))?;
-            }
-        }
+        let invocation = self
+            .runtime
+            .invoke(callback, vec![])
+            .map_err(|error| format!("{error:?}"));
         let ctx = self
             .generator_tick
             .lock()
             .map_err(|_| "failed to lock generator tick context".to_string())?
             .take()
             .ok_or_else(|| "generator tick did not produce a context".to_string())?;
+        invocation?;
         Ok(crate::generator::GeneratorTickResult {
             emitted: ctx.emitted,
             random_state: ctx.random_state,
