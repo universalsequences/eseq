@@ -167,6 +167,25 @@ pub fn module_file_candidates(name: &str) -> Vec<String> {
     candidates
 }
 
+/// Paths to try beneath each configured load-path root. Direct spellings map
+/// user `modules/` and package `src/` roots; `ui/` spellings map the factory
+/// content root. Either shape also supports embedders that choose the more
+/// specific root.
+pub fn module_relative_file_candidates(name: &str) -> Vec<std::path::PathBuf> {
+    let stripped = name.strip_prefix("eseq.").unwrap_or(name);
+    let flat = std::path::PathBuf::from(format!("{stripped}.lisp"));
+    let nested = std::path::PathBuf::from(format!("{}.lisp", stripped.replace('.', "/")));
+    let mut candidates = vec![flat.clone()];
+    if nested != flat {
+        candidates.push(nested.clone());
+    }
+    candidates.push(std::path::Path::new("ui").join(&flat));
+    if nested != flat {
+        candidates.push(std::path::Path::new("ui").join(nested));
+    }
+    candidates
+}
+
 /// True if `name` is already module-qualified (`module/name`). The first
 /// `/` splits; a bare `/` (division), a leading `/`, or a trailing `/`
 /// does not qualify. Pre-existing flat names that hand-rolled the

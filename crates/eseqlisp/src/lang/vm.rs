@@ -2652,35 +2652,45 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         }
         vm.imported_at_epoch.insert(name.clone(), epoch);
-        let mut errors = Vec::new();
-        for candidate in crate::modules::module_file_candidates(name) {
-            match vm.source_manager.load_source(&candidate) {
-                Ok(loaded) => {
-                    let path_display = loaded.path.display().to_string();
-                    return match vm.eval_module_source(
-                        loaded.path,
-                        &loaded.text,
-                        loaded.revision,
-                    ) {
-                        Ok(_) => {
-                            if !vm.declared_modules.contains_key(name) {
-                                vm.source_load_errors.push(format!(
-                                    "import {name}: {path_display} did not declare \
-                                     (module {name})"
-                                ));
-                            }
-                            Value::Nil
+        let relative_candidates = crate::modules::module_relative_file_candidates(name);
+        let (loaded, errors) = match vm
+            .source_manager
+            .load_module_source(&relative_candidates)
+        {
+            Some(Ok(loaded)) => (Some(loaded), Vec::new()),
+            Some(Err(errors)) => (None, errors),
+            None => {
+                let mut loaded = None;
+                let mut errors = Vec::new();
+                for candidate in crate::modules::module_file_candidates(name) {
+                    match vm.source_manager.load_source(&candidate) {
+                        Ok(source) => {
+                            loaded = Some(source);
+                            break;
                         }
-                        Err(e) => {
-                            let message =
-                                format!("import {name}: {path_display}: eval error: {e:?}");
-                            vm.source_load_errors.push(message.clone());
-                            Value::String(message)
-                        }
-                    };
+                        Err(error) => errors.push(error),
+                    }
                 }
-                Err(error) => errors.push(error),
+                (loaded, errors)
             }
+        };
+        if let Some(loaded) = loaded {
+            let path_display = loaded.path.display().to_string();
+            return match vm.eval_module_source(loaded.path, &loaded.text, loaded.revision) {
+                Ok(_) => {
+                    if !vm.declared_modules.contains_key(name) {
+                        vm.source_load_errors.push(format!(
+                            "import {name}: {path_display} did not declare (module {name})"
+                        ));
+                    }
+                    Value::Nil
+                }
+                Err(e) => {
+                    let message = format!("import {name}: {path_display}: eval error: {e:?}");
+                    vm.source_load_errors.push(message.clone());
+                    Value::String(message)
+                }
+            };
         }
         let message = format!(
             "import {name}: no module file found ({})",
@@ -7311,6 +7321,41 @@ mod tests {
             .eval_str("(test.native-rereg/call-probe)")
             .expect("second call after re-registration");
         assert_eq!(second, Some(Value::Number(2.0)));
+    }
+
+    #[test]
+    fn import_uses_the_first_matching_module_load_root() {
+        let mut vm = module_test_vm();
+        let root = std::env::temp_dir().join(format!(
+            "eseqlisp-module-load-path-{}",
+            std::process::id()
+        ));
+        let user = root.join("user");
+        let package = root.join("package");
+        let factory = root.join("factory");
+        for (directory, value) in [(&user, 31), (&package, 22), (&factory, 13)] {
+            std::fs::create_dir_all(directory).expect("create module root");
+            std::fs::write(
+                directory.join("test.shadow-probe.lisp"),
+                format!(
+                    "(module test.shadow-probe)\n(export value)\n(def value () {value})"
+                ),
+            )
+            .expect("write shadowed module");
+        }
+        vm.source_manager
+            .set_module_load_roots(vec![user, package, factory]);
+
+        let result = vm
+            .eval_module_source(
+                root.join("consumer.lisp"),
+                "(import test.shadow-probe :as probe)\n(probe/value)",
+                1,
+            )
+            .expect("import from tiered load path");
+        assert_eq!(result, Some(Value::Number(31.0)));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

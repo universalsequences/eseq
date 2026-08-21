@@ -38,13 +38,16 @@ pub(crate) fn create_editor_with_user_init_path(
     app: &app::App,
     user_init_path: Option<std::path::PathBuf>,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
+    let app_paths = sequencer::app_paths::app_paths();
     // `@/` paths are rooted at immutable factory content, independent of the
-    // process working directory.
-    runtime.set_load_root(sequencer::app_paths::app_paths().factory_root());
+    // process working directory. Module imports use the tiered user → package
+    // → factory search path instead of this raw-load root.
+    runtime.set_load_root(app_paths.factory_root());
+    runtime.set_module_load_path(app_paths.load_path()?);
     // The checked-in UI modules contain intentional module-local bare names
     // and historical alias declarations. Authored instruments/effects/scripts
     // stay outside this exclusion and are always preflighted.
-    runtime.exclude_module_alias_scan_root(sequencer::app_paths::app_paths().ui_dir());
+    runtime.exclude_module_alias_scan_root(app_paths.ui_dir());
     let (factory_init_source, factory_init_path) = read_eseqlisp_factory_init_source();
     let mut editor = Editor::new(
         runtime,

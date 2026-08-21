@@ -1945,6 +1945,13 @@ impl Runtime {
         self.vm.source_manager.set_cwd(root);
     }
 
+    /// Configure ordered module import roots. This is separate from the raw
+    /// `(load …)` root so user modules can shadow package and factory modules
+    /// without changing relative loads inside any source file.
+    pub fn set_module_load_path(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.vm.source_manager.set_module_load_roots(roots);
+    }
+
     pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
         self.vm.source_manager.exclude_module_alias_scan_root(root);
     }

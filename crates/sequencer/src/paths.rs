@@ -27,18 +27,10 @@ pub fn project_scratch_source_path() -> PathBuf {
     workspace_root().join(".eseqlisp-scratch")
 }
 
-/// User Lisp customization entrypoint. Keep discovery behind this one seam so
-/// the user-tier work can generalize roots without touching boot ordering.
+/// User Lisp customization entrypoint from the process-wide, captured path
+/// layout. The file is optional, but its root is always well-defined.
 pub fn user_init_path() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("ESEQ_CONFIG_DIR") {
-        if !root.trim().is_empty() {
-            return Some(PathBuf::from(root).join("init.lisp"));
-        }
-    }
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .map(|home| home.join(".eseq.d/init.lisp"))
+    Some(crate::app_paths::app_paths().user_lisp_root().join("init.lisp"))
 }
 
 pub fn eseqlisp_init_candidates() -> Vec<PathBuf> {

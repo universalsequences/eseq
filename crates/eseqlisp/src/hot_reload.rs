@@ -233,6 +233,7 @@ pub struct SourceManager {
     diagnostics: Vec<String>,
     evaluated_sources: HashMap<(PathBuf, u64), String>,
     module_alias_scan_exclusions: Vec<PathBuf>,
+    module_load_roots: Vec<PathBuf>,
 }
 
 impl Default for SourceManager {
@@ -254,6 +255,7 @@ impl SourceManager {
             diagnostics: Vec::new(),
             evaluated_sources: HashMap::new(),
             module_alias_scan_exclusions: Vec::new(),
+            module_load_roots: Vec::new(),
         }
     }
 
@@ -262,6 +264,47 @@ impl SourceManager {
     /// a synthetic layout without touching the process-wide cwd.
     pub fn set_cwd(&mut self, cwd: PathBuf) {
         self.cwd = cwd;
+    }
+
+    /// Set ordered roots used exclusively for module imports. Ordinary
+    /// `(load …)` remains relative to the importing file. An empty list keeps
+    /// the legacy candidate behavior for standalone embedders and tests.
+    pub fn set_module_load_roots(&mut self, roots: Vec<PathBuf>) {
+        self.module_load_roots = roots
+            .into_iter()
+            .map(|root| self.canonicalize_path(&root))
+            .collect();
+    }
+
+    /// Resolve module-relative candidates against the configured tiered load
+    /// path. The first existing source wins, which is the shadowing contract.
+    pub fn load_module_source(
+        &mut self,
+        candidates: &[PathBuf],
+    ) -> Option<Result<LoadedSource, Vec<String>>> {
+        if self.module_load_roots.is_empty() {
+            return None;
+        }
+        let roots = self.module_load_roots.clone();
+        let mut errors = Vec::new();
+        for root in roots {
+            for relative in candidates {
+                let resolved = self.canonicalize_path(&root.join(relative));
+                match self.source_for_canonical_path(resolved.clone()) {
+                    Ok(source) => {
+                        if let Some(parent) = self.load_stack.last().cloned() {
+                            self.pending_children
+                                .entry(parent)
+                                .or_default()
+                                .insert(resolved);
+                        }
+                        return Some(Ok(source));
+                    }
+                    Err(error) => errors.push(error),
+                }
+            }
+        }
+        Some(Err(errors))
     }
 
     /// Excludes a known factory-content root from legacy-alias preflight.
