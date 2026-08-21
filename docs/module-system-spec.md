@@ -1,7 +1,7 @@
 # Module System — Namespaces, Imports, and Packages for eseqlisp
 
 Status: rev 3, 2026-08-11 — surface syntax locked (`module` / `import` /
-`/` qualifier / `%` private); slice 1 scoped with the sdf stdlib conversion
+`/` qualifier / explicit exports); slice 1 scoped with the sdf stdlib conversion
 as the acceptance test; §6.1 adds `override` (advice-style, survives owner
 reload) as the blessed user-override mechanism. **§6 hooks are BUILT** ahead of the module slices:
 `defhook`/`add-hook`/`remove-hook`/`run-hook` natives in
@@ -43,10 +43,12 @@ are never interchanged (Common Lisp's mistake).
 (import eseq.track-collapse :as tc)
 (import eseq.seqv :refer (cursor-step))
 
+(export track-strip)
+
 (defstate panel-visible false)
 
 (def track-strip (i)
-  (if (tc/track-collapsed? i) (%collapsed-strip i) (full-strip i)))
+  (if (tc/track-collapsed? i) (collapsed-strip i) (full-strip i)))
 ```
 
 Locked decisions:
@@ -74,13 +76,11 @@ Locked decisions:
    not contain further slashes. `.` is unavailable — it is taken by reactive
    namespaces (`SEQ.x`, single-dot enforced at
    `crates/eseqlisp/src/lang/compiler.rs:643-654`).
-4. **`%name` marks private.** A leading `%` on a definition means internal:
-   visible and callable from outside (hackability — a warning, not a wall),
-   but qualified references to another module's `%`-symbols emit a compiler
-   warning. Self-documenting at both definition and call site, survives
-   copy-paste, needs no metadata syntax. Rejected: `^:private` (metadata
-   system we don't have), a `(private …)` block (information invisible at
-   call sites).
+4. **Named modules are private by default and declare their public surface
+   with `(export …)`.** This supersedes the migration-era `%name` privacy
+   convention. Qualified access to a non-exported symbol remains callable but
+   warns, while `:refer` of one is an error. The complete syntax, semantics,
+   and rationale are specified in [`module-export-spec.md`](module-export-spec.md).
 5. **Function syntax is `(def name (args) body)`** — this spec's examples
    use the real eseqlisp form (e.g. `(def track-peak (i) …)`,
    `ui/mixer.lisp:6`), not Scheme-style `(def (name args) …)`.
@@ -329,11 +329,10 @@ Semantics:
   factory def. Later reads bypass the broken body until it is re-registered,
   so a per-frame UI call cannot repeat the error indefinitely. A broken user
   override degrades one component; it never bricks the app.
-- Overriding a `%`-private symbol warns, exactly like a qualified `%`
-  reference (§2, decision 4): privates are the unstable rung, and the warning
-  enumerates which overrides will break on update. Overriding *public*
-  defs is the semi-stable API surface — `%` is the lever that keeps that
-  surface deliberately small.
+- Overriding a non-exported symbol warns, exactly like a qualified reference
+  to one (§2, decision 4): internals are the unstable rung, and the warning
+  enumerates which overrides may break on update. Overriding exported defs is
+  the semi-stable API surface.
 
 `metal_seq` discovers the user entrypoint at `$ESEQ_CONFIG_DIR/init.lisp` when
 that test/development override is set, otherwise at `~/.eseq.d/init.lisp`.
@@ -428,7 +427,7 @@ as Rust-registered builtins referenced from lisp-in-Rust template strings
 
 Conversion: the file gains `(module sdf)` and the defmacros drop their
 prefixes; internal fill-shape macros (`__hslider-fill`,
-`__vslider-fill-with-material`) become `%hslider-fill` etc.; the Rust
+`__vslider-fill-with-material`) become unexported `hslider-fill` etc.; the Rust
 builtins register into the `sdf` namespace. **Every call site keeps working
 verbatim** — `(sdf/circle val)` now parses as qualified reference instead of
 a lucky flat string. If all 34 consumers and the Rust templates pass
@@ -2149,10 +2148,10 @@ stays as-is; real macro hygiene is out of scope for this spec.
 - **Slice 5 — packages.** Manifest format, load path, author scoping,
   `defcustom`; generalize `defmacro_library.rs`.
 
-Warnings-not-errors throughout the migration: redefining a symbol owned by
+Warnings-not-errors where hackability matters: redefining a symbol owned by
 another module warns (this is the tooling that would have caught both
-duplicate-definition bugs in §1); referencing another module's `%`-symbol
-warns; `:refer :all`, if ever added, is loud and greppable.
+duplicate-definition bugs in §1); qualified references to non-exported symbols
+warn; `:refer` of a non-exported symbol is an error.
 
 ## 11. Open questions
 

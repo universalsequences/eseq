@@ -44,7 +44,7 @@
 
 ;; Mod-wrapped knob (same pattern as the Str8 Delay knobs, so intensity /
 ;; rate / volumes pick up modulation rings and plock handling).
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "space-echo-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "space-echo-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -207,7 +207,7 @@
       (label "ECHO" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (percent-knob fx "intensity" intensity-p)
-        (knob fx "echo vol" echo-p 2))
+        (parameter-knob fx "echo vol" echo-p 2))
       (box :height 0.85)
       (label "TONE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (v-stack :gap 0.30 :align :baseline
@@ -246,7 +246,7 @@
     (v-stack :gap 0.16 :align :center
       (label "REVERB" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (knob fx "reverb vol" reverb-p 2)
+        (parameter-knob fx "reverb vol" reverb-p 2)
         (if tension-p
           (percent-knob fx "tension" tension-p)
           (box :width 4.35 :height 2.45)))

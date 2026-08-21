@@ -43,7 +43,7 @@
 (def cream  () (rgba 0.93 0.88 0.72 1.0))
 
 ;; Effect-node selector for the live gate LED (same shape as Roar's meters).
-(def source (fx)
+(def effect-source (fx)
   (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
     (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
@@ -51,14 +51,14 @@
 ;; Tiny gate LED (env meter) next to the sense knob — lights Sherman-yellow
 ;; while the envelope gate is open. Fed by the `filterbank-meter:` frames the
 ;; live-audio analyzer publishes from the effect's state meter tail.
-(def gate-led (fx)
+(def gate-indicator (fx)
   (gate-led :width 0.9 :height 0.9
     :on-color (yellow)
-    :source (source fx)))
+    :source (effect-source fx)))
 
 ;; Mod-wrapped knob (same pattern as the Space Echo knobs, so freq / res /
 ;; mode / ser-par / crunch / fm / am pick up modulation rings and plocks).
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "filterbank-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "filterbank-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -129,7 +129,7 @@
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
 ;; On/off toggle button (yellow when lit).
-(def toggle (fx p label-text w)
+(def parameter-toggle (fx p label-text w)
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (yellow) :mixer-control-bg)
@@ -178,10 +178,10 @@
     (v-stack :gap 0.18 :align :center
       (label "INPUT" :font-size 8.0 :width 8.6 :color (yellow) :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (knob fx "input" input-p 1)
+        (parameter-knob fx "input" input-p 1)
         (v-stack :gap 0.10 :align :center
           (percent-knob fx "sense" sense-p)
-          (gate-led fx)))
+          (gate-indicator fx)))
       (label "HI EQ" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (h-stack :gap 0.14
         (choice fx hieq-p 0 "Cut" 2.95)
@@ -236,10 +236,10 @@
         (v-stack :gap 0.14 :align :center
           (choice fx envmode-p 0 "ADSR" 3.1)
           (choice fx envmode-p 1 "Flw" 3.1))
-        (knob fx "attack" attack-p 1)
-        (knob fx "decay" decay-p 0)
+        (parameter-knob fx "attack" attack-p 1)
+        (parameter-knob fx "decay" decay-p 0)
         (percent-knob fx "sustain" sustain-p)
-        (knob fx "release" release-p 0))
+        (parameter-knob fx "release" release-p 0))
       (h-stack :gap 0.30 :align :baseline
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "e-f1" envf1-p)
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "e-f2" envf2-p)
@@ -250,13 +250,13 @@
           (v-stack :gap 0.14 :align :center
             (label "lfo div" :font-size 9.0 :width 4.35 :color :dim :bg :transparent)
             (option fx div-p 4.35 1.05 9.5))
-          (knob fx "lfo rate" rate-p 2))
+          (parameter-knob fx "lfo rate" rate-p 2))
         (percent-knob fx "lfo depth" depth-p)
         (v-stack :gap 0.14 :align :center
           (option fx wave-p 5.0 1.05 9.5)
           (h-stack :gap 0.14
-            (toggle fx trig-p "Trig" 2.4)
-            (toggle fx sync-p "Sync" 2.4))))
+            (parameter-toggle fx trig-p "Trig" 2.4)
+            (parameter-toggle fx sync-p "Sync" 2.4))))
       (h-stack :gap 0.22 :align :center
         (percent-knob fx "fm amt" fm-p)
         (option fx fmsrc-p 6.0 1.05 9.0)
@@ -272,15 +272,15 @@
     (v-stack :gap 0.18 :align :center
       (label "OUTPUT" :font-size 8.0 :width 8.6 :color (yellow) :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (knob fx "ar atk" ar-attack-p 1)
-        (knob fx "ar rel" ar-release-p 0))
+        (parameter-knob fx "ar atk" ar-attack-p 1)
+        (parameter-knob fx "ar rel" ar-release-p 0))
       (h-stack :gap 0.22 :align :center
         (percent-knob fx "ar depth" ar-depth-p)
         (v-stack :gap 0.14 :align :center
           (label "SPLIT" :font-size 7.5 :width 3.4 :color :dim :bg :transparent)
-          (toggle fx split-p "L|R" 3.4)))
+          (parameter-toggle fx split-p "L|R" 3.4)))
       (h-stack :gap 0.22 :align :center
-        (knob fx "output" output-p 1)
+        (parameter-knob fx "output" output-p 1)
         (percent-knob fx "dry/wet" mix-p)))))
 
 ;; ── Panel body ──

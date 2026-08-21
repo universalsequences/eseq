@@ -97,7 +97,7 @@ choose-model-current-label	eseq.choose-model/current-label	crates/sequencer/ui/c
 choose-model-open	eseq.choose-model/open	crates/sequencer/ui/choose-model.lisp
 choose-model-open?	eseq.choose-model/open?	crates/sequencer/ui/choose-model.lisp
 choose-model-panel	eseq.choose-model/panel	crates/sequencer/ui/choose-model.lisp
-choose-model-select	eseq.choose-model/select	crates/sequencer/ui/choose-model.lisp
+choose-model-select	eseq.choose-model/select-model	crates/sequencer/ui/choose-model.lisp
 cmd-click?	eseq.step-grid-interactions/cmd-click?	crates/sequencer/ui/step-grid-interactions.lisp
 cool-off-follow	eseq.seq-core-state/cool-off-follow	crates/sequencer/ui/seq-core-state.lisp
 current-step	eseq.seq-core-state/current-step	crates/sequencer/ui/seq-core-state.lisp

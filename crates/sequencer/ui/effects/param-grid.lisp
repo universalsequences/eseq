@@ -340,7 +340,7 @@
             :on-change (lambda (v)
               (pc/param-set-control-value fx p v))))))))
 
-(def adsr-editor (params fx env-name key-prefix)
+(def adsr-param-editor (params fx env-name key-prefix)
   (let ((attack-p (env-role-param params env-name "attack"))
         (decay-p (env-role-param params env-name "decay"))
         (sustain-p (env-role-param params env-name "sustain"))
@@ -518,7 +518,7 @@
 (def selected-env-panel (params groups fx)
   (let ((source (selected-env-source params groups fx)))
     (if source
-      (adsr-editor params fx (get source :env)
+      (adsr-param-editor params fx (get source :env)
         (str "metadata-selected-env-" (get source :env)))
       (box :width 0 :height 0))))
 

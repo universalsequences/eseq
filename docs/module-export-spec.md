@@ -1,8 +1,7 @@
 # Module Exports — private-by-default visibility for eseqlisp modules
 
-Status: draft rev 1, 2026-08-19. Supersedes `%`-prefix privacy
-(module-system-spec.md §2 decision 4) once migration completes. Nothing
-here is built.
+Status: **BUILT**, rev 1. Shipped 2026-08-20. Supersedes `%`-prefix privacy
+(module-system-spec.md §2 decision 4).
 
 Parent spec: `docs/module-system-spec.md` (rev 3). This document only
 changes how a symbol's visibility is *declared*; resolution (§3), import
@@ -136,9 +135,9 @@ REPL story, parent spec §2 decision 2).
 
 ## 4. What happens to `%`
 
-`%` loses all semantic meaning: `is_private_name` (modules.rs:44) and
-its two warning sites are deleted at migration end (§6 step 4). The
-character remains legal in names (`is_valid_module_name` already allows
+`%` has no semantic meaning: `is_private_name` and its two warning sites
+were deleted at migration end (§6 step 4). The character remains legal in
+names (`is_valid_module_name` allows
 it) but the vanilla distro won't use it. It returns to being available
 for a future CL-style "genuinely dangerous internals" *convention* if we
 ever want one — convention only, enforced by nothing.
@@ -157,7 +156,7 @@ ever want one — convention only, enforced by nothing.
 
 ## 6. Migration
 
-Staged so the semantics flip and the mass rename never land in the same
+**Completed 2026-08-20.** Staged so the semantics flip and the mass rename never land in the same
 change, following the alias-era playbook (parent spec §10).
 
 1. **Land `export` + validation, `%` keeps meaning.** Both mechanisms

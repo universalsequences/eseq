@@ -2038,8 +2038,8 @@ pub struct VM {
     /// (None for include_str!-style sources with no path). `import`
     /// consults this for load-once semantics (spec §4).
     pub declared_modules: HashMap<String, Option<std::path::PathBuf>>,
-    /// Per-module visibility. Absence means not loaded; a legacy record has
-    /// no explicit export form and retains `%` privacy during migration.
+    /// Per-module visibility. Absence means not loaded; a loaded named module
+    /// exports exactly the names in its record.
     pub module_exports: crate::modules::ModuleExportRegistry,
     /// Module name → the import pass that last evaluated it (spec §4, §11
     /// q4). `import` is load-once *per pass*, not forever: hot reload
@@ -3900,7 +3900,7 @@ impl VM {
         if path.is_file() && self.source_manager.should_scan_module_aliases(&path) {
             crate::module_alias_migration::warn_on_old_module_aliases(&path, source);
         }
-        let (declared_module, has_export_form, export_declarations) =
+        let (declared_module, export_declarations) =
             crate::modules::inspect_exports(source).map_err(|error| {
                 self.source_load_errors
                     .push(format!("{}: {error}", path.display()));
@@ -3910,13 +3910,9 @@ impl VM {
         // set before compilation so nested imports can observe it, but retain
         // the previous valid set if this unit fails.
         let previous_exports = declared_module.as_ref().and_then(|module| {
-            let next = if has_export_form {
-                crate::modules::ModuleExports::explicit(
-                    export_declarations.iter().map(|entry| entry.name.clone()),
-                )
-            } else {
-                crate::modules::ModuleExports::default()
-            };
+            let next = crate::modules::ModuleExports::new(
+                export_declarations.iter().map(|entry| entry.name.clone()),
+            );
             self.module_exports.insert(module.clone(), next)
         });
         let mut defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
@@ -6811,31 +6807,31 @@ mod tests {
     }
 
     #[test]
-    fn private_override_warns_but_works() {
+    fn non_exported_override_warns_but_works() {
         let mut vm = module_test_vm();
         vm.eval_module_source(
             temp_lisp_path("private-override-owner"),
-            "(module test.private-factory)\n(def %value () 1)",
+            "(module test.private-factory)\n(def value () 1)",
             1,
         )
         .expect("owner");
         vm.eval_module_source(
             temp_lisp_path("private-override-user"),
             "(module test.private-user)\n\
-             (override test.private-factory/%value () 2)",
+             (override test.private-factory/value () 2)",
             1,
         )
         .expect("private override");
         assert_eq!(
-            vm.eval_str("(test.private-factory/%value)").expect("call"),
+            vm.eval_str("(test.private-factory/value)").expect("call"),
             Some(Value::Number(2.0))
         );
         assert!(
             vm.source_manager
                 .diagnostics()
                 .iter()
-                .any(|warning| warning.contains("overriding test.private-factory/%value")),
-            "expected private-override warning"
+                .any(|warning| warning.contains("overriding test.private-factory/value")),
+            "expected non-exported override warning"
         );
     }
 
@@ -7064,7 +7060,7 @@ mod tests {
             "test.refer-helper-{}.lisp",
             std::process::id()
         ));
-        std::fs::write(&helper, format!("(module test.refer-helper-{})\n(def refer-val () 11)", std::process::id()))
+        std::fs::write(&helper, format!("(module test.refer-helper-{})\n(export refer-val)\n(def refer-val () 11)", std::process::id()))
             .expect("write helper");
         let main_path = helper.with_file_name(format!(
             "eseqlisp-modules-refer-main-{}.lisp",
@@ -7095,22 +7091,22 @@ mod tests {
     }
 
     #[test]
-    fn private_reference_from_outside_warns_but_resolves() {
+    fn non_exported_reference_from_outside_warns_but_resolves() {
         let mut vm = module_test_vm();
         vm.eval_module_source(
             temp_lisp_path("privacy"),
-            "(module test.privacy)\n(def %secret () 6)",
+            "(module test.privacy)\n(def secret () 6)",
             1,
         )
         .expect("module eval");
-        let result = vm.eval_str("(test.privacy/%secret)").expect("private call");
+        let result = vm.eval_str("(test.privacy/secret)").expect("private call");
         assert_eq!(result, Some(Value::Number(6.0)));
         let diagnostics = vm.source_manager.diagnostics();
         assert!(
             diagnostics
                 .iter()
-                .any(|d| d.contains("%secret") && d.contains("internal")),
-            "expected %-privacy warning, got {diagnostics:?}"
+                .any(|d| d.contains("test.privacy/secret") && d.contains("not exported")),
+            "expected non-exported-symbol warning, got {diagnostics:?}"
         );
     }
 
@@ -7131,7 +7127,6 @@ mod tests {
         )
         .expect("module eval");
         let exports = &vm.module_exports["test.exports"];
-        assert!(exports.explicit);
         assert!(exports.exports("before"));
         assert!(exports.exports("after"));
         assert!(exports.exports("%published"));
@@ -7247,73 +7242,37 @@ mod tests {
     }
 
     #[test]
-    fn legacy_modules_without_export_forms_keep_percent_visibility() {
-        // Spec §6 step 1: opt-in coexistence. A module that declares no
-        // `export` form keeps the migration-era `%` rules, so unprefixed
-        // names stay public and `%`-names stay warn-but-callable.
+    fn named_module_without_export_forms_exports_nothing() {
         let mut vm = module_test_vm();
-        let module = format!("test.legacy-{}", std::process::id());
+        let module = format!("test.empty-exports-{}", std::process::id());
         let helper = std::env::temp_dir().join(format!("{module}.lisp"));
-        std::fs::write(
-            &helper,
-            format!("(module {module})\n(def public () 1)\n(def %hidden () 2)"),
-        )
-        .expect("write legacy module");
+        std::fs::write(&helper, format!("(module {module})\n(def value () 1)"))
+            .expect("write module");
         let consumer = helper.with_file_name(format!(
-            "eseqlisp-legacy-consumer-{}.lisp",
+            "eseqlisp-empty-exports-consumer-{}.lisp",
             std::process::id()
         ));
+        let refer = vm.eval_module_source(
+            consumer,
+            &format!("(import {module} :refer (value))\n(value)"),
+            1,
+        );
+        assert!(matches!(refer, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|error| error.contains("cannot :refer non-exported symbol 'value'"))
+        );
+        assert!(vm.module_exports[&module].names().is_empty());
         assert_eq!(
-            vm.eval_module_source(
-                consumer,
-                &format!("(import {module} :refer (public))\n(public)"),
-                1,
-            )
-            .expect("legacy :refer of an unprefixed name stays allowed"),
+            vm.eval_str(&format!("({module}/value)"))
+                .expect("qualified non-exported access remains callable"),
             Some(Value::Number(1.0))
         );
-        assert!(!vm.module_exports[&module].explicit);
-        assert_eq!(
-            vm.eval_str(&format!("({module}/%hidden)"))
-                .expect("qualified %-access remains callable"),
-            Some(Value::Number(2.0))
-        );
-        vm.eval_str(&format!(
-            "(module test.legacy-user)\n(override {module}/%hidden () 9)"
-        ))
-        .expect("%-private override remains allowed");
-        // The `%` rule is textual, so it also covers a module this unit has
-        // never seen loaded — there is no export set to consult there.
-        vm.eval_str("(module test.legacy-user)\n(override test.never-loaded/%absent () 9)")
-            .expect("escape-hatch override compiles");
         let diagnostics = vm.source_manager.diagnostics();
-        assert!(
-            diagnostics.iter().any(|warning| {
-                warning.contains(&format!("{module}/%hidden is internal to"))
-                    && warning.contains("%-private")
-            }),
-            "expected legacy %-privacy warning, got {diagnostics:?}"
-        );
-        assert!(
-            diagnostics.iter().any(|warning| {
-                warning.contains(&format!("overriding {module}/%hidden"))
-                    && warning.contains("%-private")
-            }),
-            "expected legacy %-override warning, got {diagnostics:?}"
-        );
-        assert!(
-            diagnostics.iter().any(|warning| {
-                warning.contains("overriding test.never-loaded/%absent")
-                    && warning.contains("%-private")
-            }),
-            "expected %-warning for an unloaded module, got {diagnostics:?}"
-        );
-        assert!(
-            !diagnostics
-                .iter()
-                .any(|warning| warning.contains(&format!("{module}/public"))),
-            "unprefixed legacy names must not warn, got {diagnostics:?}"
-        );
+        assert!(diagnostics.iter().any(|warning| {
+            warning.contains(&format!("{module}/value is not exported by {module}"))
+        }));
         let _ = std::fs::remove_file(helper);
     }
 

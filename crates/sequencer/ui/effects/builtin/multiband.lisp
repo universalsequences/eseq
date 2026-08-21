@@ -33,7 +33,7 @@
 (def band-orange () (rgba 1.00 0.62 0.25 1.0))
 (def button-on   () (rgba 0.94 0.69 0.32 1.0))
 
-(def source (fx)
+(def effect-source (fx)
   (if (get fx :rack-fx)
     (dict :kind :rack-effect :index (get fx :track-idx)
           :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
@@ -51,7 +51,7 @@
       "-" (get fx :slot-idx) "-" (get p :idx))
     body))
 
-(def knob (fx label-text p)
+(def parameter-knob (fx label-text p)
   (param-wrapper fx p "knob"
     (knob-number :label label-text
     :value (eseq.effects.param-controls/fx-param-value p)
@@ -110,7 +110,7 @@
       (field fx attack-p 1 "ms" color 4.4)
       (field fx release-p 0 "ms" color 4.4))))
 
-(def toggle (fx p label-text w)
+(def parameter-toggle (fx p label-text w)
   (param-wrapper fx p "toggle"
     (button label-text
     :width w :height 1.0 :padding 0 :font-size 8.0
@@ -129,8 +129,8 @@
     (h-stack :gap 0.22 :align :start
       (box :width 5.2 split-control)
       (v-stack :gap 0.12 :align :start
-        (toggle fx on-p "O" 1.4)
-        (toggle fx solo-p "S" 1.4)))))
+        (parameter-toggle fx on-p "O" 1.4)
+        (parameter-toggle fx solo-p "S" 1.4)))))
 
 (def split-box (fx high-split-p low-split-p xh-p xl-p
                  high-on-p high-solo-p mid-on-p mid-solo-p low-on-p low-solo-p
@@ -141,7 +141,7 @@
       (label "Split Freq" :font-size 8.5 :width 7.4 :color :dim :bg :transparent)
       (split-cell fx
         (v-stack :gap 0.12 :align :start
-          (toggle fx high-split-p "High" 5.0)
+          (parameter-toggle fx high-split-p "High" 5.0)
           (field fx xh-p 0 "Hz" (rgba 0.75 0.75 0.75 1.0) 5.0))
         high-on-p high-solo-p)
       (split-cell fx
@@ -149,20 +149,20 @@
         mid-on-p mid-solo-p)
       (split-cell fx
         (v-stack :gap 0.12 :align :start
-          (toggle fx low-split-p "Low" 5.0)
+          (parameter-toggle fx low-split-p "Low" 5.0)
           (field fx xl-p 0 "Hz" (rgba 0.75 0.75 0.75 1.0) 5.0))
         low-on-p low-solo-p)
-      (toggle fx knee-p "Soft Knee" 6.4))))
+      (parameter-toggle fx knee-p "Soft Knee" 6.4))))
 
 (def input-box (fx high-in-p mid-in-p low-in-p rms-p)
   (box :width 6.4 :height 9.4 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "Input" :font-size 8.5 :width 4.2 :color :dim :bg :transparent)
-      (knob fx "" high-in-p)
-      (knob fx "" mid-in-p)
-      (knob fx "" low-in-p)
-      (toggle fx rms-p "RMS" 3.6))))
+      (parameter-knob fx "" high-in-p)
+      (parameter-knob fx "" mid-in-p)
+      (parameter-knob fx "" low-in-p)
+      (parameter-toggle fx rms-p "RMS" 3.6))))
 
 (def display-box (fx params)
   (let ((p (lambda (name) (eseq.effects.builtin.filter-core/builtin-fx-param params name))))
@@ -189,7 +189,7 @@
             (box :height 0.8)
             (multiband-meter
               :width 17.0 :height 7.0
-              :source (source fx)
+              :source (effect-source fx)
               :low-below-thr (eseq.effects.param-controls/instrument-param-base-value lb-thr)
               :mid-below-thr (eseq.effects.param-controls/instrument-param-base-value mb-thr)
               :high-below-thr (eseq.effects.param-controls/instrument-param-base-value hb-thr)
@@ -217,16 +217,16 @@
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "Output" :font-size 8.5 :width 4.2 :color :dim :bg :transparent)
-      (knob fx "" high-out-p)
-      (knob fx "" mid-out-p)
-      (knob fx "" low-out-p))))
+      (parameter-knob fx "" high-out-p)
+      (parameter-knob fx "" mid-out-p)
+      (parameter-knob fx "" low-out-p))))
 
 (def global-box (fx output-p time-p amount-p)
   (box :width 6.4 :height 9.4 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "Output" :font-size 8.5 :width 4.2 :color :dim :bg :transparent)
-      (knob fx "" output-p)
+      (parameter-knob fx "" output-p)
       (percent-knob fx "Time" time-p)
       (percent-knob fx "Amount" amount-p))))
 

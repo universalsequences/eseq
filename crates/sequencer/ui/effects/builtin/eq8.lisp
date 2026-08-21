@@ -75,7 +75,7 @@
     (get p :text-value)
     "bell"))
 
-(def band (fx params band)
+(def band-data (fx params band)
   (let ((enabled-p (param params band "enabled"))
         (type-p (param params band "type"))
         (freq-p (param params band "freq"))
@@ -98,7 +98,7 @@
       :selected (= selected-band band))))
 
 (def bands (fx params)
-  (map |band| (band fx params band) (range 8)))
+  (map |band| (band-data fx params band) (range 8)))
 
 (def eq8-source (fx)
   (if (get fx :rack-fx)
@@ -137,7 +137,7 @@
           nil)))))
 
 (def band-button (fx params band)
-  (let ((band-map (band fx params band))
+  (let ((band-map (band-data fx params band))
       (enabled-p (param params band "enabled"))
       (selected (= (selected-band-for fx) band)))
     (h-stack :gap 0.08 :align :center

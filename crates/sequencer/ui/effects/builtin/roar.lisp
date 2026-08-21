@@ -46,7 +46,7 @@
 
 (defstate selected-stage 0)
 
-(def source (fx)
+(def effect-source (fx)
   (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
     (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
@@ -69,7 +69,7 @@
 
 ;; Mod-wrapped knobs (same pattern as Phaser-Flanger so drive / tone /
 ;; fb amount / dry-wet pick up modulation rings and plock handling).
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "roar-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "roar-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -115,7 +115,7 @@
         :width 4.35 :height 2.45 :knob-size 1.85
         :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))))))
 
-(def toggle (fx p label-text w)
+(def parameter-toggle (fx p label-text w)
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
@@ -143,7 +143,7 @@
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
       (label "INPUT" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
-      (knob fx "drive" drive-p 1)
+      (parameter-knob fx "drive" drive-p 1)
       (percent-knob fx "tone" tone-p)
       (subtree :key "roar-tone-mode-control"
         (option fx tone-mode-p 4.7))
@@ -188,7 +188,7 @@
   (v-stack :gap 0.16 :align :center
     (roar-shaper
       :width 9.4 :height 4.6
-      :source (source fx)
+      :source (effect-source fx)
       :stage stage
       ;; Base-value bindings, not snapshot values: knob drags update the
       ;; value field in place and do not rebuild the panel.
@@ -203,7 +203,7 @@
   (v-stack :gap 0.16 :align :center
     (roar-filter
       :width 9.4 :height 4.6
-      :source (source fx)
+      :source (effect-source fx)
       :stage stage
       :filter (eseq.effects.param-controls/instrument-param-base-value filter-p)
       :freq (eseq.effects.param-controls/instrument-param-base-value freq-p)
@@ -212,7 +212,7 @@
       (option fx filter-p 8.4))
     (h-stack :gap 0.30 :align :baseline
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "res" res-p)
-      (toggle fx pre-p "Pre" 2.4))))
+      (parameter-toggle fx pre-p "Pre" 2.4))))
 
 (def stage-box (fx params routing)
   (let ((stage (min selected-stage (- (tab-count routing) 1))))
@@ -231,7 +231,7 @@
           (h-stack :gap 0.40 :align :start
             (v-stack :gap 0.14 :align :center
               (percent-knob fx "amount" amount-p)
-              (knob fx "bias" bias-p 2)
+              (parameter-knob fx "bias" bias-p 2)
               (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "freq" freq-p))
             (shaper-view fx stage shaper-p amount-p bias-p level-p)
             (filter-view fx stage filter-p freq-p res-p pre-p)))))))
@@ -251,8 +251,8 @@
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "time" fbtime-p))
       (percent-knob fx "amount" fbamount-p)
       (h-stack :gap 0.26 :align :center
-        (toggle fx fbinvert-p "Ø" 1.6)
-        (toggle fx fbduck-p "Duck" 3.0))
+        (parameter-toggle fx fbinvert-p "Ø" 1.6)
+        (parameter-toggle fx fbduck-p "Duck" 3.0))
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "freq" fbfreq-p)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "wdth" fbwidth-p))))
 
@@ -264,8 +264,8 @@
     (v-stack :gap 0.10 :align :center
       (label "OUT" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
       (percent-knob fx "compress" compress-p)
-      (toggle fx schpf-p "SC HPF" 4.0)
-      (knob fx "output" output-p 1)
+      (parameter-toggle fx schpf-p "SC HPF" 4.0)
+      (parameter-knob fx "output" output-p 1)
       (percent-knob fx "dry/wet" mix-p))))
 
 (def panel (fx)

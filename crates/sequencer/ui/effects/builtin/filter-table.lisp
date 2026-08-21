@@ -10,7 +10,7 @@
 ;; need the complete modulation contract: in the mods tab the same knob edits
 ;; the selected source's depth, draws all assigned modulation ranges, and is
 ;; wrapped by the blue modulation target affordance.
-(def knob (fx label-text p decimals value-scale taper)
+(def parameter-knob (fx label-text p decimals value-scale taper)
   (pc/param-mod-wrapper fx p (str "filter-table-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "filter-table-param-" (get p :idx) (pc/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -37,16 +37,16 @@
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
 (def percent-knob (fx label-text p)
-  (knob fx label-text p 0 100 "linear"))
+  (parameter-knob fx label-text p 0 100 "linear"))
 
 (def number-knob (fx label-text p decimals)
-  (knob fx label-text p decimals 1 "linear"))
+  (parameter-knob fx label-text p decimals 1 "linear"))
 
 ;; Cutoff spans 40–18000 Hz; a linear knob leaves the musical 40–1000 Hz
 ;; region on ~5% of the travel. The log taper gives every octave equal arc
 ;; (typed Hz values and the displayed number are unaffected).
 (def freq-knob (fx label-text p)
-  (knob fx label-text p 0 1 "log"))
+  (parameter-knob fx label-text p 0 1 "log"))
 
 (def spectrum-source (fx)
   (if (get fx :rack-fx)

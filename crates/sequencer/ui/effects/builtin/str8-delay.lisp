@@ -139,7 +139,7 @@
           (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "ofs" offset-p))
         (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "ms" time-p)))))
 
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "str8-delay-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "str8-delay-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -235,7 +235,7 @@
           (v-stack :gap 0.16
             (h-stack :gap 0.18 :align :center
               (percent-knob fx "wet" wet-p)
-              (knob fx "fb" feedback-p 2))
+              (parameter-knob fx "fb" feedback-p 2))
             (label "Mod" :font-size 9.0 :width 7.8 :color :dim :bg :transparent)
             (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "rate" mod-rate-p)
             (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "amt" mod-amount-p)

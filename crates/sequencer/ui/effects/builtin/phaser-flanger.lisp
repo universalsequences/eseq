@@ -59,7 +59,7 @@
 
 ;; Mod-wrapped knobs (same pattern as the Space Echo knobs so amount /
 ;; feedback / dry-wet pick up modulation rings and plock handling).
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "phaser-flanger-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "phaser-flanger-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -279,7 +279,7 @@
           (div-grid fx div-p)
           (v-stack :gap 0.30 :align :center
             (box :height 0.8)
-            (knob fx "freq" rate-p 2)))
+            (parameter-knob fx "freq" rate-p 2)))
         (shape-column fx shape-p)))))
 
 ;; ── Sweep section (amount / feedback / Ø / stereo) ──
@@ -315,7 +315,7 @@
        :background-color :bg :corner-radius 7
     (v-stack :gap 0.10 :align :center
       (label "OUT" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
-      (knob fx "output" output-p 1)
+      (parameter-knob fx "output" output-p 1)
       (percent-knob fx "warmth" warmth-p)
       (percent-knob fx "dry/wet" mix-p))))
 

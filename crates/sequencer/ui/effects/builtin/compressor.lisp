@@ -34,12 +34,12 @@
 (def orange () (rgba 1.00 0.62 0.25 1.0))
 (def cyan   () (rgba 0.45 0.78 0.95 1.0))
 
-(def source (fx)
+(def effect-source (fx)
   (if (get fx :bus-fx)
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
     (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx))))
 
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (knob-number :label label-text
     :value (eseq.effects.param-controls/fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
@@ -82,7 +82,7 @@
       :on-change (lambda (v) (eseq.effects.param-controls/param-set-control-value fx p v))
       :width w :height 1.0)))
 
-(def toggle (fx p label-text w)
+(def parameter-toggle (fx p label-text w)
   (button label-text
     :width w :height 1.05 :padding 0 :font-size 8.5
     :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (orange) :mixer-control-bg)
@@ -126,13 +126,13 @@
     (v-stack :gap 0.18 :align :center
       (h-stack :gap 0.22 :align :baseline
         (label "Sidechain" :font-size 8.0 :width 4.4 :color :dim :bg :transparent)
-        (toggle fx sc-on-p "SC" 2.0)
-        (toggle fx listen-p "Ear" 2.0))
+        (parameter-toggle fx sc-on-p "SC" 2.0)
+        (parameter-toggle fx listen-p "Ear" 2.0))
       (option fx sc-source-p 7.6)
       (mini-number fx "Gain" sc-gain-p 1 4.2)
-      (toggle fx filter-on-p "SC Filter" 5.4)
+      (parameter-toggle fx filter-on-p "SC Filter" 5.4)
       (option fx type-p 7.6)
-      (knob fx "Freq" freq-p 0)
+      (parameter-knob fx "Freq" freq-p 0)
       (mini-number fx "Res" res-p 2 4.2))))
 
 ;; ── Ratio / Attack / Release column ──
@@ -141,10 +141,10 @@
   (box :width 7.4 :height 9.7 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.14 :align :center
-      (knob fx "Ratio" ratio-p 2)
-      (knob fx "Attack" attack-p 2)
-      (knob fx "Release" release-p 0)
-      (toggle fx auto-rel-p "Auto" 3.4))))
+      (parameter-knob fx "Ratio" ratio-p 2)
+      (parameter-knob fx "Attack" attack-p 2)
+      (parameter-knob fx "Release" release-p 0)
+      (parameter-toggle fx auto-rel-p "Auto" 3.4))))
 
 ;; ── Activity display ──
 
@@ -159,7 +159,7 @@
         (mini-number fx "Out" out-p 1 4.4))
       (compressor-display
         :width 23.6 :height 6.0
-        :source (source fx)
+        :source (effect-source fx)
         :threshold (eseq.effects.param-controls/instrument-param-base-value thr-p))
       (h-stack :gap 0.55 :align :baseline
         (mini-number fx "Knee" knee-p 1 3.6)
@@ -175,7 +175,7 @@
   (box :width 7.0 :height 9.7 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.20 :align :center
-      (toggle fx makeup-p "Makeup" 5.2)
+      (parameter-toggle fx makeup-p "Makeup" 5.2)
       (choice fx model-p 0 "Peak" 5.2)
       (choice fx model-p 1 "RMS" 5.2)
       (choice fx model-p 2 "Expand" 5.2)

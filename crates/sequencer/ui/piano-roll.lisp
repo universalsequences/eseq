@@ -54,7 +54,7 @@
 (defstate piano-roll-lane-height 0.5)
 (defstate cursor-time 0)
 (defstate selection-rect nil)
-(defstate status "piano roll")
+(defstate piano-roll-status "piano roll")
 (defstate create-duration 1)
 ;; PINNED (hazard m): mutable plain def, read flat by production Rust.
 (def eseq.vanilla/piano-roll-fit-pending false)
@@ -316,10 +316,10 @@
       :resize-item-absolute
       (set! create-duration (action-duration event)))
     (if (native-action? event)
-      (set! status (seq-piano-roll-action event))
-      (set! status "piano roll"))))
+      (set! piano-roll-status (seq-piano-roll-action event))
+      (set! piano-roll-status "piano roll"))))
 
-(def timeline ()
+(def piano-roll-timeline ()
   (box :height :fill :flex 1 :width 0
     ;; Flex child of the panel row (the arrangement-lane idiom): the timeline
     ;; absorbs exactly the width left of the clip panel — without :width 0
@@ -521,7 +521,7 @@
         :font-size 11 :color :dim :bg :transparent))
     (h-stack :width :fill :gap 0.0 :height :fill
       (clip-panel)
-      (timeline))))
+      (piano-roll-timeline))))
 
 (effect-buffer "*piano-roll*"
   (box :width :fill :height :fill

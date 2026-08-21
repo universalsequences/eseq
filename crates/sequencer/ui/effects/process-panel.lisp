@@ -267,7 +267,7 @@
         :background-color :transparent :border-color :transparent :color :dim
         :on-click (lambda (event) (open-slot-source slot))))))
 
-(def slot (slot index)
+(def slot-row (slot index)
   (subtree :key (str "process-panel-slot-" (get slot :instance-id))
     (box :key (str "slot-drop-" (get slot :instance-id))
       :width :fill :padding 0 :corner-radius 5
@@ -326,5 +326,5 @@
         :on-click (lambda (event) (clear-selection))
         (v-stack :width :fill :padding 0.24 :gap 0.16
           (each SEQ.process-slots |slot index|
-            (slot slot index))
+            (slot-row slot index))
           (end-drop-zone))))))

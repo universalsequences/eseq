@@ -30,7 +30,7 @@
 
 (export panel)
 
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "dj-mixer-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "dj-mixer-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -121,7 +121,7 @@
       (sync-button fx sync-p)
       (if (eseq.effects.param-controls/fx-param-on? sync-p)
         (div-grid fx div-p)
-        (knob fx "length" length-p 3)))))
+        (parameter-knob fx "length" length-p 3)))))
 
 (def panel (fx)
   (let ((params (get fx :params)))
@@ -138,8 +138,8 @@
           (box :width 6.4 :height 7.45 :padding 0.28
                :background-color :fx-inner-panel-bg :corner-radius 7
             (v-stack :gap 0.26 :align :center
-              (knob fx "speed" speed-p 2)
-              (knob fx "warp" warp-p 2)))
+              (parameter-knob fx "speed" speed-p 2)
+              (parameter-knob fx "warp" warp-p 2)))
           (box :width 6.4 :height 7.45 :padding 0.28
                :background-color :fx-inner-panel-bg :corner-radius 7
             (v-stack :gap 0.26 :align :center

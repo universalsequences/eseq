@@ -244,7 +244,7 @@
         " - " (target-label)))
     "Sound Pool"))
 
-(def header ()
+(def palette-header ()
   (box :width :fill :bg :transparent
     (h-stack :gap 0.3 :align :baseline
       (label (header-title)
@@ -309,7 +309,7 @@
     (box :debug-name "sound-palette-panel"
       :width :fill :height :fill :bg :transparent
       (v-stack :width :fill :gap 0.22
-        (header)
+        (palette-header)
         (scroll :width :fill :flex 1
           ;; Grid of §4 boxes (not a row list): each cell gets enough area
           ;; for a legible plant glyph; the grid reflows with the panel.

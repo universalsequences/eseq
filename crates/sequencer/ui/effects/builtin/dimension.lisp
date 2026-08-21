@@ -43,7 +43,7 @@
 
 ;; Mod-wrapped knob (same pattern as the Space Echo knobs, so depth / mix
 ;; pick up modulation rings and plock handling).
-(def knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "dimension-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "dimension-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -143,8 +143,8 @@
     (v-stack :gap 0.18 :align :center
       (label "CONTROLS" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (knob fx "depth" depth-p 2)
-        (knob fx "mix" mix-p 2))
+        (parameter-knob fx "depth" depth-p 2)
+        (parameter-knob fx "mix" mix-p 2))
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "rate" rate-p)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "width" width-p)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "tone" tone-p))))

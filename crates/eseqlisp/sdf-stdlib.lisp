@@ -6,7 +6,7 @@
 ;; the (module sdf) header qualifies each defmacro as sdf/<name>, so the
 ;; ~34 consumer files calling (sdf/circle …) etc. keep working verbatim —
 ;; the names they always used are now real qualified references instead
-;; of lucky flat strings. %-prefixed macros are internal (spec §2).
+;; of lucky flat strings. `%` has no visibility semantics.
 
 (module sdf)
 
@@ -135,7 +135,7 @@
 ;; Horizontal slider fill bar: rounded rect from left edge to value_t.
 ;; In SDF coords the fill center-x = aspect*(value_t - 1), halfW = aspect*value_t.
 ;; Vertical inset 0.64 (= (0.5 - 0.18) * 2 from UV padding), corner radius 0.24.
-(defmacro %hslider-fill ()
+(defmacro hslider-fill ()
   `(sdf/translate (* aspect (- value_t 1.0)) 0.0
      (sdf/rounded-rect (* aspect value_t) 0.64 0.24)))
 
@@ -143,7 +143,7 @@
 ;; Compute the fill shape in UV-like local coordinates so `d` matches the
 ;; hardcoded slider geometry more closely. This keeps material edge logic
 ;; from collapsing into an outline on tall, narrow sliders.
-(defmacro %vslider-fill-with-material (mat)
+(defmacro vslider-fill-with-material (mat)
   `(let ((__fill_lo (min value_t origin_t))
          (__fill_hi (max value_t origin_t))
          (__fill_span (- __fill_hi __fill_lo))

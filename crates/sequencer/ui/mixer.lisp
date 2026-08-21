@@ -729,7 +729,7 @@
       (rgba 0.96 0.82 0.18 1.0)
       (rgba 0.10 0.85 0.30 1.0))))
 
-(def meter (level-l level-r)
+(def meter-display (level-l level-r)
   (mixer-meter
     :level-l level-l :level-r level-r
     :width 2.22 :height 4.24
@@ -738,11 +738,11 @@
 
 (def track-meter (i)
   (subtree :key (str "mixer-v2-track-meter-" i)
-    (meter (track-peak i) (track-peak i))))
+    (meter-display (track-peak i) (track-peak i))))
 
 (def bus-meter (i)
   (subtree :key (str "mixer-v2-bus-meter-" i)
-    (meter (bus-peak-l i) (bus-peak-r i))))
+    (meter-display (bus-peak-l i) (bus-peak-r i))))
 
 (def track-meter-control (i)
   (box :width 3.65 :height 4.24

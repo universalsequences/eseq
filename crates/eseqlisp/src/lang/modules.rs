@@ -20,34 +20,26 @@ pub const IMPLICIT_MODULE: &str = "eseq.vanilla";
 /// referencing them, bare or qualified, needs no `import`.
 pub const CORE_NAMESPACES: &[&str] = &["sdf", "eseq.core"];
 
-/// Visibility declared by one named module. `explicit == false` is the
-/// migration-era legacy mode: every name except a `%`-prefixed one is public.
-/// The first `(export …)` switches the module to explicit export semantics.
+/// Visibility declared by one named module. Named modules are private by
+/// default, including modules with no `(export …)` forms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleExports {
-    pub explicit: bool,
     names: HashSet<String>,
 }
 
 impl ModuleExports {
-    pub fn explicit(names: impl IntoIterator<Item = String>) -> Self {
+    pub fn new(names: impl IntoIterator<Item = String>) -> Self {
         Self {
-            explicit: true,
             names: names.into_iter().collect(),
         }
     }
 
     pub fn append(&mut self, names: impl IntoIterator<Item = String>) {
-        self.explicit = true;
         self.names.extend(names);
     }
 
     pub fn exports(&self, name: &str) -> bool {
-        if self.explicit {
-            self.names.contains(name)
-        } else {
-            !is_private_name(name)
-        }
+        self.names.contains(name)
     }
 
     pub fn names(&self) -> &HashSet<String> {
@@ -78,7 +70,7 @@ pub struct ExportDeclaration {
 /// drives reload replacement and end-of-unit definition validation.
 pub fn inspect_exports(
     source: &str,
-) -> Result<(Option<String>, bool, Vec<ExportDeclaration>), String> {
+) -> Result<(Option<String>, Vec<ExportDeclaration>), String> {
     let tokens = Parser::new(source.to_string())
         .parse_spanned()
         .map_err(|error| format!("parse error: {error:?}"))?;
@@ -86,7 +78,6 @@ pub fn inspect_exports(
         .parse()
         .map_err(|error| format!("AST parse error: {error:?}"))?;
     let mut module = None;
-    let mut has_export_form = false;
     let mut exports = Vec::new();
     for expression in expressions {
         let ExprKind::List(items) = expression.kind else {
@@ -100,7 +91,6 @@ pub fn inspect_exports(
             }
             [head, names @ ..] if matches!(&head.kind, ExprKind::Symbol(form) if form == "export") =>
             {
-                has_export_form = true;
                 let (line, column) = line_column(source, expression.origin.primary_span.start_byte);
                 for name in names {
                     if let ExprKind::Symbol(name) = &name.kind
@@ -117,7 +107,7 @@ pub fn inspect_exports(
             _ => {}
         }
     }
-    Ok((module, has_export_form, exports))
+    Ok((module, exports))
 }
 
 fn line_column(source: &str, byte: usize) -> (usize, usize) {
@@ -150,12 +140,6 @@ pub fn is_valid_module_name(name: &str) -> bool {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '*' || c == '%')
         })
-}
-
-/// True if a base name is marked internal by the `%` privacy convention
-/// (spec §2 decision 4).
-pub fn is_private_name(base: &str) -> bool {
-    base.starts_with('%')
 }
 
 /// Candidate load paths for a module name (spec §7): `eseq.track-collapse`
@@ -254,30 +238,24 @@ mod tests {
     }
 
     #[test]
-    fn explicit_exports_replace_legacy_percent_visibility() {
-        let legacy = ModuleExports::default();
-        assert!(legacy.exports("public"));
-        assert!(!legacy.exports("%private"));
+    fn named_modules_export_only_declared_names() {
+        let empty = ModuleExports::default();
+        assert!(!empty.exports("ordinary"));
+        assert!(!empty.exports("%ordinary"));
 
-        let mut explicit = ModuleExports::default();
-        explicit.append(["%published".to_string()]);
-        explicit.append(["also-public".to_string()]);
-        assert!(explicit.exports("%published"));
-        assert!(explicit.exports("also-public"));
-        assert!(!explicit.exports("ordinary-private"));
-
-        let mut empty = ModuleExports::default();
-        empty.append(Vec::<String>::new());
-        assert!(empty.explicit);
-        assert!(!empty.exports("formerly-public"));
+        let mut exports = ModuleExports::default();
+        exports.append(["published".to_string()]);
+        exports.append(["also-public".to_string()]);
+        assert!(exports.exports("published"));
+        assert!(exports.exports("also-public"));
+        assert!(!exports.exports("ordinary-private"));
     }
 
     #[test]
     fn export_inspection_unions_forms_and_records_form_locations() {
         let source = "(module test.exports)\n(export first)\n(def first 1)\n(export second)";
-        let (module, explicit, exports) = inspect_exports(source).expect("inspect exports");
+        let (module, exports) = inspect_exports(source).expect("inspect exports");
         assert_eq!(module.as_deref(), Some("test.exports"));
-        assert!(explicit);
         assert_eq!(
             exports
                 .iter()

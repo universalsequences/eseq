@@ -71,7 +71,7 @@
       (accent mode)
       :dim)))
 
-(def knob (fx mode-p label-text p decimals)
+(def parameter-knob (fx mode-p label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "multiverb-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "multiverb-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -249,7 +249,7 @@
         (percent-knob fx mode-p "decay" decay-p)
         (percent-knob fx mode-p "size" size-p))
       (h-stack :gap 0.18
-        (knob fx mode-p "pre ms" predelay-p 0)
+        (parameter-knob fx mode-p "pre ms" predelay-p 0)
         (percent-knob fx mode-p "mix" mix-p)))))
 
 (def tone-box (fx mode-p damp-p bass-p diffusion-p era-p)
@@ -272,7 +272,7 @@
     (v-stack :gap 0.20 :align :center
       (label "MOTION / STEREO" :font-size 8.0 :width 8.6 :color :dim :bg :transparent)
       (h-stack :gap 0.18
-        (knob fx mode-p "rate hz" rate-p 2)
+        (parameter-knob fx mode-p "rate hz" rate-p 2)
         (percent-knob fx mode-p "depth" depth-p))
       (h-stack :gap 0.18
         (percent-knob fx mode-p "random" shape-p)

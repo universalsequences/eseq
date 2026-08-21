@@ -32,7 +32,7 @@
         open
         close
         choose-model
-        select
+        select-model
         panel)
 
 ;; Compat aliases (module-system spec §10 slice 3) for every name with callers
@@ -78,7 +78,7 @@
 (def choose-model ()
   (open))
 
-(def select (value)
+(def select-model (value)
   (do
     (agent/set-patch-model
       (if (= value (default-label)) "" value))
@@ -120,7 +120,7 @@
           :width 22.0
           :height 1.35
           :font-size 11
-          :on-change (lambda (v) (select v)))
+          :on-change (lambda (v) (select-model v)))
         (box :flex 1 :bg :transparent))
       ;; No escaped quotes here: the lexer does not support \" inside a string
       ;; literal, and silently reads the rest as symbols.

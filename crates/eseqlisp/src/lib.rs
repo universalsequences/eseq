@@ -2223,7 +2223,7 @@ mod tests {
             runtime.declared_modules().contains_key("sdf"),
             "sdf-stdlib should declare (module sdf)"
         );
-        for key in ["sdf/circle", "sdf/rounded-rect", "sdf/lit", "sdf/%hslider-fill"] {
+        for key in ["sdf/circle", "sdf/rounded-rect", "sdf/lit", "sdf/hslider-fill"] {
             assert!(
                 runtime.macros().contains_key(key),
                 "expected macro key {key}"
