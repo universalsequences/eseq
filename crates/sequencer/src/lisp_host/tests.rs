@@ -8494,10 +8494,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn jaki_surface_flat_route_grammar_fans_out() {
         // tier-2 surface: same routing as the plumbed fan-out test above, but
-        // authored through the bare `jaki` macro and the `->` route grammar
+        // authored through the bare `jak` macro and the `->` route grammar
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(jaki "kit" :16
+            r#"(jak "kit" :16
                  . . - .
                  -> 0
                  -> 1 (shift 1)
@@ -8539,7 +8539,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn jaki_surface_no_routes_defaults_to_track_zero() {
         let mut rt = jaki_runtime();
-        rt.eval(r#"(jaki "kick" :16 . . . .)"#).expect("jaki surface macro");
+        rt.eval(r#"(jak "kick" :16 . . . .)"#).expect("jaki surface macro");
 
         let mut generators = crate::generator::GeneratorRuntime::default();
         generators.sync_definitions(&rt.sequencer_defs(), 0.0);
@@ -8574,7 +8574,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn jaki_surface_vel_route_word_scales_velocity() {
         let mut rt = jaki_runtime();
-        rt.eval(r#"(jaki "soft" :16 . . . . -> 0 (vel 0.5))"#)
+        rt.eval(r#"(jak "soft" :16 . . . . -> 0 (vel 0.5))"#)
             .expect("jaki surface macro");
 
         let mut generators = crate::generator::GeneratorRuntime::default();
@@ -8598,7 +8598,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn jaki_surface_multi_voice_lines_each_carry_their_own_routes() {
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(jaki "kit" :16
+            r#"(jak "kit" :16
                  (. . - . -> 0)
                  (. . - . -> 1 (shift 1) -> 2 left))"#,
         )
@@ -8634,9 +8634,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn jaki_library_gate_prepends_only_when_referenced() {
         let plain = super::jaki_library_source_with_user_source("(def x 1)");
         assert_eq!(plain, "(def x 1)");
-        let gated = super::jaki_library_source_with_user_source(r#"(jaki "kit" :16 . .)"#);
+        let gated = super::jaki_library_source_with_user_source(r#"(jak "kit" :16 . .)"#);
         assert!(gated.contains("jaki.lisp") || gated.contains("(module jaki)"));
-        assert!(gated.ends_with(r#"(jaki "kit" :16 . .)"#));
+        assert!(gated.ends_with(r#"(jak "kit" :16 . .)"#));
     }
 
     #[test]

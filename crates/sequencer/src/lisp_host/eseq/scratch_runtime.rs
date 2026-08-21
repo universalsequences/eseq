@@ -237,7 +237,7 @@ pub fn load_process_library_source() -> String {
 
 pub fn load_jaki_library_source() -> String {
     // jaki.lisp is the (module jaki) evaluator core; jaki-surface.lisp is the
-    // headerless file that defines the bare `jaki` macro. Evaluate through
+    // headerless file that defines the bare `jak` macro. Evaluate through
     // `load` so the module keeps its real source path for navigation;
     // embedded fallback for packaged builds.
     let sequencers = crate::app_paths::app_paths().scripts_dir().join("sequencers");
@@ -269,11 +269,11 @@ pub fn load_jaki_library_source() -> String {
     parts.join("\n")
 }
 
-/// Prepend the jaki library when the scratch buffer uses it — the bare `jaki`
+/// Prepend the jaki library when the scratch buffer uses it — the bare `jak`
 /// macro must exist in the authoring runtime before the user source compiles.
 /// Same pre-package stopgap gate as the scheduler runtime (eseq-5k5).
 pub fn jaki_library_source_with_user_source(user_source: &str) -> String {
-    if !user_source.contains("jaki") {
+    if !user_source.contains("jak") {
         return user_source.to_string();
     }
     let library = load_jaki_library_source();

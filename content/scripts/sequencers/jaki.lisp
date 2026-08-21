@@ -780,9 +780,9 @@
 
 (def emit (p track) (emit* p track (dict)))
 
-;; ── tier-2 route surface: (jaki "name" :res events… -> track words…) ────────
+;; ── tier-2 route surface: (jak "name" :res events… -> track words…) ────────
 ;;
-;; The bare `jaki` macro (jaki-surface.lisp, headerless so the name stays
+;; The bare `jak` macro (jaki-surface.lisp, headerless so the name stays
 ;; unqualified) expands to a def-sequencer whose tick calls (jaki/run body).
 ;; `run` interprets the body data: segments split at `->` symbols — segment
 ;; zero is the pattern (same grammar as jaki/pat), each later segment is
