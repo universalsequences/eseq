@@ -2680,6 +2680,21 @@
                 ]),
             ),
             (
+                "origins",
+                test_list(vec![
+                    map_value([
+                        ("name", Value::String("user".to_string())),
+                        ("count", Value::Number(2.0)),
+                        ("selected", Value::Bool(false)),
+                    ]),
+                    map_value([
+                        ("name", Value::String("pkg:acid.tools".to_string())),
+                        ("count", Value::Number(1.0)),
+                        ("selected", Value::Bool(false)),
+                    ]),
+                ]),
+            ),
+            (
                 "items",
                 test_list(vec![
                     map_value([
@@ -3807,6 +3822,8 @@
             .unwrap_or_else(|| panic!("sample tag filter should render; rendered:\n{rendered}"));
         let kick = find_button_with_text(tag_filter, "kick")
             .unwrap_or_else(|| panic!("kick tag chip should render; rendered:\n{rendered}"));
+        let package = find_button_with_text(tag_filter, "acid.tools")
+            .unwrap_or_else(|| panic!("package provenance chip should render; rendered:\n{rendered}"));
 
         assert!(
             tag_filter.rect.width > 1.0 && tag_filter.rect.height > 0.4,
@@ -3822,6 +3839,11 @@
             kick.rect.height <= 0.95,
             "tag chips should stay visually smaller than regular browser buttons: {:?}; rendered:\n{rendered}",
             kick.rect
+        );
+        assert!(
+            package.rect.width > 1.0 && package.rect.height > 0.4,
+            "package provenance chip should have a finite visible rect: {:?}; rendered:\n{rendered}",
+            package.rect
         );
     }
 

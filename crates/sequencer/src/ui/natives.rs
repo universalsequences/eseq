@@ -6236,9 +6236,11 @@ pub(crate) fn init_runtime(
         };
         let selected_tags = value_string_list(args.get(1));
         let selected_tag_refs: Vec<&str> = selected_tags.iter().map(String::as_str).collect();
+        let selected_origins = value_string_list(args.get(2));
+        let selected_origin_refs: Vec<&str> = selected_origins.iter().map(String::as_str).collect();
         sample_browser_for_native
             .borrow_mut()
-            .query(query, &selected_tag_refs)
+            .query_with_origins(query, &selected_tag_refs, &selected_origin_refs)
             .map_err(|error| format!("failed to query samples.db browser state: {error}"))
     });
 

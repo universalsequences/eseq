@@ -99,6 +99,7 @@
 (defstate last-sidebar-sample "")
 (defstate selected-sample "")
 (defstate selected-tags (list))
+(defstate selected-origins (list))
 ;; Preview strip below the samples tree (Ableton-style): the sample the tree
 ;; cursor last landed on, plus its waveform-buffer map from
 ;; `seq-sample-waveform` (false while nothing decodable is focused). Cached
@@ -640,6 +641,15 @@
 (def clear-tags ()
   (set! selected-tags (list)))
 
+(def toggle-origin (origin)
+  (if (list-contains? selected-origins origin)
+    (set! selected-origins (list-remove selected-origins origin))
+    (set! selected-origins (append selected-origins (list origin)))))
+
+(def clear-sample-filters ()
+  (set! selected-tags (list))
+  (set! selected-origins (list)))
+
 (def set-search-filter (value)
   (if (and (= sbrowser-tab "samples") (not (= value search-filter)))
     (clear-tags))
@@ -665,6 +675,22 @@
         (set! search-filter "") 
         (toggle-tag name)
         ))))
+
+(def origin-chip (origin)
+  (let ((name (get origin :name))
+      (selected (get origin :selected)))
+    (button (if (= name "user") "Yours"
+      (if (= name "factory") "Factory"
+        (if (string-starts-with? name "pkg:") (substring name 4 (len name)) name)))
+      :variant :ghost
+      :background-color (if selected :accent :bg)
+      :color (if selected (rgba 0.1 0.1 0.2 1) :dim)
+      :border-color :transparent
+      :height 0.9
+      :padding 0.5532
+      :font-size 11.0
+      :corner-radius 24
+      :on-click |x y r| (toggle-origin name))))
 
 (def search-placeholder ()
   (if (= sbrowser-tab "samples") "Search samples..."
@@ -1218,28 +1244,33 @@
     (box :height 0)))
 
 (def samples-panel-with-activation (tree-key activation)
-  (let ((browser (seq-sample-browser search-filter selected-tags)))
+  (let ((browser (seq-sample-browser search-filter selected-tags selected-origins)))
     (let ((tags (get browser :tags))
+        (origins (get browser :origins))
         (items (get browser :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
           (v-stack :width :fill :gap 0.35
-            (if (> (len selected-tags) 0)
+            (if (or (> (len selected-tags) 0) (> (len selected-origins) 0))
               (button "Clear"
                 :variant :ghost
                 :width :fill
                 :height 1.15
                 :border-color :transparent
                 :font-size 9
-                :on-click |x y r| (clear-tags)
+                :on-click |x y r| (clear-sample-filters)
                 :color :white))
+            (if (> (len origins) 0)
+              (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
+                (each (range 0 (len origins)) |i|
+                  (origin-chip (nth origins i)))))
             (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
               (each (range 0 (len tags)) |i|
                 (tag-chip (nth tags i))))))
         (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
           (if (= (len items) 0)
             (empty-message
-              (if (and (= search-filter "") (= (len selected-tags) 0))
+              (if (and (= search-filter "") (= (len selected-tags) 0) (= (len selected-origins) 0))
                 "Choose a tag or search samples."
                 "No samples found."))
             (scroll :key "samples-tab-scroll" :width :fill :flex 1

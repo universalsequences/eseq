@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -36,12 +37,19 @@ pub(crate) struct DecodedAudio {
 }
 
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "aif", "aiff", "mp3", "flac"];
+static STORE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn stage_paths(paths: &[PathBuf], db: &SampleDb) -> Vec<StagedSample> {
     let mut files = collect_audio_files(paths);
     files.sort();
     files.dedup();
-    files.into_iter().map(|path| stage_file(path, db)).collect()
+    files
+        .into_iter()
+        .map(|path| {
+            let tags = path_derived_tags(&path, paths);
+            stage_file(path, tags, db)
+        })
+        .collect()
 }
 
 pub fn collect_audio_files(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -108,18 +116,7 @@ fn import_one(
     {
         return Ok(false);
     }
-    let decoded = decode_audio_file(&sample.source_path)?;
-    let dest = sample_dir.join(format!("{hash}.wav"));
-    let tmp = sample_dir.join(format!("{hash}.wav.tmp"));
-    write_wav(&tmp, &decoded)?;
-    fs::rename(&tmp, &dest).map_err(|error| {
-        let _ = fs::remove_file(&tmp);
-        format!(
-            "failed to move {} to {}: {error}",
-            tmp.display(),
-            dest.display()
-        )
-    })?;
+    let dest = transcode_to_store(&sample.source_path, hash, sample_dir)?;
     let mut tags = batch_tags.to_vec();
     tags.extend(sample.tags.clone());
     tags = normalize_tags(&tags);
@@ -173,7 +170,7 @@ fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn stage_file(path: PathBuf, db: &SampleDb) -> StagedSample {
+fn stage_file(path: PathBuf, tags: Vec<String>, db: &SampleDb) -> StagedSample {
     let title = default_title_for_path(&path);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -182,7 +179,7 @@ fn stage_file(path: PathBuf, db: &SampleDb) -> StagedSample {
                 source_path: path,
                 hash: None,
                 title,
-                tags: Vec::new(),
+                tags,
                 status: StagedSampleStatus::Error(format!("read failed: {error}")),
             };
         }
@@ -200,9 +197,56 @@ fn stage_file(path: PathBuf, db: &SampleDb) -> StagedSample {
         source_path: path,
         hash: Some(hash),
         title,
-        tags: Vec::new(),
+        tags,
         status,
     }
+}
+
+fn path_derived_tags(path: &Path, roots: &[PathBuf]) -> Vec<String> {
+    let root = roots
+        .iter()
+        .filter(|root| root.is_dir() && path.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let Ok(relative) = path.strip_prefix(root) else {
+        return Vec::new();
+    };
+    let Some(parent) = relative.parent() else {
+        return Vec::new();
+    };
+    normalize_tags(
+        &parent
+            .components()
+            .filter_map(|component| component.as_os_str().to_str().map(str::to_string))
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub fn transcode_to_store(source: &Path, hash: &str, sample_dir: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(sample_dir)
+        .map_err(|error| format!("failed to create {}: {error}", sample_dir.display()))?;
+    let dest = sample_dir.join(format!("{hash}.wav"));
+    if dest.is_file() {
+        return Ok(dest);
+    }
+    let decoded = decode_audio_file(source)?;
+    let tmp = sample_dir.join(format!(
+        "{hash}.wav.tmp-{}-{}",
+        std::process::id(),
+        STORE_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+    ));
+    write_wav(&tmp, &decoded)?;
+    fs::rename(&tmp, &dest).map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        format!(
+            "failed to move {} to {}: {error}",
+            tmp.display(),
+            dest.display()
+        )
+    })?;
+    Ok(dest)
 }
 
 pub fn normalize_tags(tags: &[String]) -> Vec<String> {
@@ -221,7 +265,7 @@ pub fn normalize_tags(tags: &[String]) -> Vec<String> {
     out
 }
 
-fn default_title_for_path(path: &Path) -> String {
+pub fn default_title_for_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .map(|stem| stem.replace(['_', '-'], " "))
@@ -468,6 +512,19 @@ mod tests {
             Some("Deep Kick".to_string())
         );
         assert_eq!(db.tags_for(hash).unwrap(), vec!["drum", "kick"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn staging_a_directory_derives_tags_from_relative_parent_segments() {
+        let dir = unique_temp_dir("path-tags");
+        let source = dir.join("kicks/808/Long_Kick.wav");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        write_test_wav(&source);
+        let db = SampleDb::open_in_memory().unwrap();
+        let staged = stage_paths(&[dir.clone()], &db);
+        assert_eq!(staged[0].title, "Long Kick");
+        assert_eq!(staged[0].tags, vec!["kicks", "808"]);
         let _ = fs::remove_dir_all(dir);
     }
 

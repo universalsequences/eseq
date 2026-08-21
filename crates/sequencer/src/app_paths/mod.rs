@@ -254,6 +254,9 @@ impl AppPaths {
     pub fn sample_db_path(&self) -> PathBuf {
         self.user_data_root().join("samples.db")
     }
+    pub fn sample_facts_path(&self) -> PathBuf {
+        self.user_data_root().join("samples.jsonl")
+    }
     pub fn sounds_dir(&self) -> PathBuf {
         self.user_data_root().join("sounds")
     }
@@ -477,6 +480,7 @@ mod tests {
         assert_eq!(paths.instruments_dir(), PathBuf::from("/ws/content/instruments"));
         assert_eq!(paths.projects_dir(), PathBuf::from("/ws/.local/projects"));
         assert_eq!(paths.sample_db_path(), PathBuf::from("/ws/.local/samples.db"));
+        assert_eq!(paths.sample_facts_path(), PathBuf::from("/ws/.local/samples.jsonl"));
         assert_eq!(
             paths.effect_dirs(),
             vec![PathBuf::from("/ws/content/effects"), PathBuf::from("/ws/.local/effects")]
@@ -551,6 +555,7 @@ mod tests {
         assert_eq!(paths.projects_dir(), PathBuf::from("/Support/projects"));
         assert_eq!(paths.samples_dir(), PathBuf::from("/Support/samples"));
         assert_eq!(paths.sample_db_path(), PathBuf::from("/Support/samples.db"));
+        assert_eq!(paths.sample_facts_path(), PathBuf::from("/Support/samples.jsonl"));
     }
 
     #[test]
