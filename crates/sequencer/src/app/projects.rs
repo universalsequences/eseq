@@ -1206,6 +1206,9 @@ impl App {
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
         wav_path: &Path,
     ) -> Result<ProjectSampleAsset, String> {
+        // Content-addressed references ("samples/<sha>.wav") resolve against
+        // the sample store before canonicalization.
+        let wav_path = &crate::app_paths::resolve_sample_ref(wav_path);
         // Canonical paths collapse relative, absolute, and symlinked references
         // before any decode, graph allocation, or analyzer submission occurs.
         let canonical_path = wav_path.canonicalize().map_err(|error| {

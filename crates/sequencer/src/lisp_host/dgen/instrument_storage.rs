@@ -264,15 +264,32 @@ pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -
     std::fs::write(path, format!("{json}\n"))
 }
 
+/// Strip a content root from `parent`: any AppPaths root in `roots`, or the
+/// bare relative dir name (`instruments/…`, `effects/…`) that production path
+/// strings still carry (patcher buffers, UI state, saved descriptors).
+fn strip_source_root(parent: &Path, roots: &[PathBuf], relative_dir: &str) -> Option<PathBuf> {
+    for root in roots {
+        if let Ok(rel) = parent.strip_prefix(root) {
+            return Some(rel.to_path_buf());
+        }
+    }
+    parent
+        .strip_prefix(relative_dir)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
 pub(in crate::lisp_host) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
     if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         if let Some(parent) = path.parent() {
-            for root in crate::app_paths::app_paths().instrument_dirs() {
-                if let Ok(rel) = parent.strip_prefix(root) {
-                    let rel = rel.to_string_lossy().replace('\\', "/");
-                    if !rel.is_empty() {
-                        return Some(format!("{rel}/"));
-                    }
+            if let Some(rel) = strip_source_root(
+                parent,
+                &crate::app_paths::app_paths().instrument_dirs(),
+                "instruments",
+            ) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if !rel.is_empty() {
+                    return Some(format!("{rel}/"));
                 }
             }
         }
@@ -287,12 +304,15 @@ pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Pat
         CompileKind::Instrument => instrument_name_from_source_path(path),
         CompileKind::Effect => {
             if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
-                path.parent().and_then(|parent| {
-                    crate::app_paths::app_paths()
-                        .effect_dirs()
-                        .into_iter()
-                        .find_map(|root| parent.strip_prefix(root).ok().map(Path::to_path_buf))
-                }).map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                path.parent()
+                    .and_then(|parent| {
+                        strip_source_root(
+                            parent,
+                            &crate::app_paths::app_paths().effect_dirs(),
+                            "effects",
+                        )
+                    })
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
             } else {
                 path.file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())

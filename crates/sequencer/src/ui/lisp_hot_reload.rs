@@ -559,8 +559,12 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         for path in [
-            PathBuf::from("instruments/bass/korg1/ui.lisp"),
-            PathBuf::from("effects/sidechain/ui.lisp"),
+            sequencer::app_paths::app_paths()
+                .instruments_dir()
+                .join("bass/korg1/ui.lisp"),
+            sequencer::app_paths::app_paths()
+                .effects_dir()
+                .join("sidechain/ui.lisp"),
         ] {
             assert!(
                 watched.contains(&watch_path(&path)),

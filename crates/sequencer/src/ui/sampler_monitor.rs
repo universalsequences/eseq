@@ -173,8 +173,13 @@ pub(crate) fn sync_watched_sampler_voices(
 
 /// Register a WAV file with eseqlisp's sample registry so the waveform widget can display it.
 pub(crate) fn register_waveform_sample(path: &Path) {
-    match eseqlisp::audio::sample::SampleBuffer::load_wav(path) {
-        Ok(sample) => {
+    // Read from the sample store when the reference is content-addressed, but
+    // register under the caller's path: registry lookups key off the same
+    // string the track carries (see `sampler_path_for_track` lookups above).
+    let resolved = sequencer::app_paths::resolve_sample_ref(path);
+    match eseqlisp::audio::sample::SampleBuffer::load_wav(&resolved) {
+        Ok(mut sample) => {
+            sample.path = path.to_path_buf();
             sample.register();
         }
         Err(e) => {

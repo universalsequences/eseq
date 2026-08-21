@@ -2749,9 +2749,10 @@
             // members include a 1-slot instrument-rack track and a plain
             // sampler track, a 5-effect chain on the group's backing bus, and
             // 6 tracks outside the group. All groups stay expanded.
-            let fixture_sample = std::path::PathBuf::from(
-                "samples/9151328ca89bbcef0d606a644e14d93d263e7ddfd1f9221cf5542353fe4565cc.wav",
-            );
+            let fixture_sample =
+                sequencer::app_paths::resolve_sample_ref(std::path::Path::new(
+                    "samples/9151328ca89bbcef0d606a644e14d93d263e7ddfd1f9221cf5542353fe4565cc.wav",
+                ));
             assert!(
                 fixture_sample.exists(),
                 "group-selection fixture sample must ship with project 92"

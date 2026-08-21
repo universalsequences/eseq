@@ -9,6 +9,12 @@
         )
     }
 
+    fn read_factory_source(relative: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(
+            sequencer::app_paths::app_paths().factory_root().join(relative),
+        )
+    }
+
     #[test]
     fn process_lane_short_label_preserves_the_complete_inlet_name() {
         assert_eq!(
@@ -880,7 +886,7 @@
             "ui/effects/builtin/filter-table.lisp",
             "ui/effects/builtin/filterbank.lisp",
         ] {
-            let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            let src = read_factory_source(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             let tokens = Parser::new(src)
                 .parse()
                 .unwrap_or_else(|e| panic!("tokenize {path}: {e:?}"));
@@ -893,7 +899,7 @@
     #[test]
     fn legacy_mixer_definitions_are_top_level_and_source_loads() {
         let path = "ui/legacy/mixer.lisp";
-        let src = std::fs::read_to_string(path).expect("read legacy mixer lisp");
+        let src = read_factory_source(path).expect("read legacy mixer lisp");
         let tokens = Parser::new(src)
             .parse()
             .expect("tokenize legacy mixer lisp");
@@ -966,7 +972,7 @@
             ("ui/themes/mac-osx-light-theme.lisp", "light"),
             ("ui/themes/mac-osx-midnight-50.lisp", "Midnight 50"),
         ] {
-            let src = std::fs::read_to_string(path)
+            let src = read_factory_source(path)
                 .unwrap_or_else(|error| panic!("read {path}: {error}"));
             let keys = src
                 .lines()
@@ -1012,7 +1018,7 @@
             "ui/themes/mac-osx-ember.lisp",
             "ui/themes/mac-osx-violet.lisp",
         ] {
-            let src = std::fs::read_to_string(path)
+            let src = read_factory_source(path)
                 .unwrap_or_else(|error| panic!("read {path}: {error}"));
             for slot in step_surface_slots {
                 let definition = format!(":{slot}");
@@ -5098,7 +5104,7 @@
     #[test]
     fn metal_seq_new_track_drop_zones_delegate_builtin_routing_to_the_browser() {
         for path in ["ui/mixer.lisp", "ui/sequencer.lisp"] {
-            let src = std::fs::read_to_string(path).expect("read drop-zone lisp");
+            let src = read_factory_source(path).expect("read drop-zone lisp");
             assert!(
                 src.contains("(eseq.browser/drop-instrument-new-track payload)"),
                 "{path} should route instrument drops through the shared router"
@@ -10889,7 +10895,7 @@
             test_list(vec![test_macro_value_with_mappings(vec![])]),
         );
         for path in ["ui/effects/state.lisp", "ui/effects/param-controls.lisp"] {
-            let source = std::fs::read_to_string(path).expect("read macro mapping UI source");
+            let source = read_factory_source(path).expect("read macro mapping UI source");
             let overlays = editor.snapshot_file_backed_sources();
             let report = editor.runtime_mut().eval_source_transactional(
                 Some(std::path::PathBuf::from(path)),
@@ -37948,7 +37954,7 @@
     fn metal_seq_fx_custom_audio_effect_ui_lays_out_body_content() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let modum_ui =
-            std::fs::read_to_string("effects/MODUM_DELAY/ui.lisp").expect("read MODUM_DELAY ui");
+            read_factory_source("effects/MODUM_DELAY/ui.lisp").expect("read MODUM_DELAY ui");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
             "MODUM_DELAY".to_string(),
             "effects/MODUM_DELAY/ui.lisp".to_string(),
@@ -38188,7 +38194,7 @@
     #[test]
     fn metal_seq_fx_dimension_d_custom_ui_fits_below_header() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let dimension_ui = std::fs::read_to_string("effects/dimension-d-chorus/ui.lisp")
+        let dimension_ui = read_factory_source("effects/dimension-d-chorus/ui.lisp")
             .expect("read dimension-d-chorus ui");
         let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
             "dimension-d-chorus".to_string(),
@@ -40386,7 +40392,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let korg1_ui =
-            std::fs::read_to_string("instruments/bass/korg1/ui.lisp").expect("read korg1 ui");
+            read_factory_source("instruments/bass/korg1/ui.lisp").expect("read korg1 ui");
         let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
         let korg1_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "korg1/".to_string(),
@@ -40518,7 +40524,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let analog_ui = std::fs::read_to_string("instruments/core/analog-bread-and-butter/ui.lisp")
+        let analog_ui = read_factory_source("instruments/core/analog-bread-and-butter/ui.lisp")
             .expect("read analog bread-and-butter ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -40659,7 +40665,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let drift_ui =
-            std::fs::read_to_string("instruments/core/drift/ui.lisp").expect("read drift ui");
+            read_factory_source("instruments/core/drift/ui.lisp").expect("read drift ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/core/drift/ui.lisp".to_string(),
@@ -40790,7 +40796,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let triton_ui =
-            std::fs::read_to_string("instruments/core/triton/ui.lisp").expect("read triton ui");
+            read_factory_source("instruments/core/triton/ui.lisp").expect("read triton ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/core/triton/ui.lisp".to_string(),
@@ -40933,7 +40939,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let tabla_ui = std::fs::read_to_string("instruments/drums/membrane-tabla/ui.lisp")
+        let tabla_ui = read_factory_source("instruments/drums/membrane-tabla/ui.lisp")
             .expect("read membrane-tabla ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -41109,7 +41115,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let hat_ui = std::fs::read_to_string("instruments/drums/membrane-hat/ui.lisp")
+        let hat_ui = read_factory_source("instruments/drums/membrane-hat/ui.lisp")
             .expect("read membrane-hat ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -41256,7 +41262,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let vox_ui =
-            std::fs::read_to_string("instruments/monomachine/vox/ui.lisp").expect("read vox ui");
+            read_factory_source("instruments/monomachine/vox/ui.lisp").expect("read vox ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/monomachine/vox/ui.lisp".to_string(),
@@ -41386,7 +41392,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let grit_ui =
-            std::fs::read_to_string("instruments/monomachine/grit/ui.lisp").expect("read grit ui");
+            read_factory_source("instruments/monomachine/grit/ui.lisp").expect("read grit ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/monomachine/grit/ui.lisp".to_string(),
@@ -41516,7 +41522,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let melt_ui =
-            std::fs::read_to_string("instruments/monomachine/melt/ui.lisp").expect("read melt ui");
+            read_factory_source("instruments/monomachine/melt/ui.lisp").expect("read melt ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/monomachine/melt/ui.lisp".to_string(),
@@ -41646,7 +41652,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let wave3_ui = std::fs::read_to_string("instruments/monomachine/wave3/ui.lisp")
+        let wave3_ui = read_factory_source("instruments/monomachine/wave3/ui.lisp")
             .expect("read wave3 ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -41782,7 +41788,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let operator_ui =
-            std::fs::read_to_string("instruments/core/operator/ui.lisp").expect("read operator ui");
+            read_factory_source("instruments/core/operator/ui.lisp").expect("read operator ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/core/operator/ui.lisp".to_string(),
@@ -41935,7 +41941,7 @@
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let flute_ui =
-            std::fs::read_to_string("instruments/woodwinds/flute/ui.lisp").expect("read flute ui");
+            read_factory_source("instruments/woodwinds/flute/ui.lisp").expect("read flute ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/woodwinds/flute/ui.lisp".to_string(),
@@ -42082,7 +42088,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let wavetable_ui = std::fs::read_to_string("instruments/core/wavetable/ui.lisp")
+        let wavetable_ui = read_factory_source("instruments/core/wavetable/ui.lisp")
             .expect("read wavetable ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -44254,7 +44260,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let ui = std::fs::read_to_string("instruments/drums/909-mutant-fm/ui.lisp")
+        let ui = read_factory_source("instruments/drums/909-mutant-fm/ui.lisp")
             .expect("read 909 ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "909-mutant-fm/".to_string(),
@@ -44472,7 +44478,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let ui = std::fs::read_to_string("instruments/emulations/prophet-6-inspired/ui.lisp")
+        let ui = read_factory_source("instruments/emulations/prophet-6-inspired/ui.lisp")
             .expect("read prophet-6-inspired ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "emulations/prophet-6-inspired/".to_string(),
@@ -44595,7 +44601,7 @@
         }
 
         fn dsp_param_names(path: &str) -> Vec<String> {
-            std::fs::read_to_string(path)
+            read_factory_source(path)
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
                 .lines()
                 .filter_map(|line| {
@@ -44645,7 +44651,7 @@
         }
 
         let ui =
-            std::fs::read_to_string("instruments/drums/md-hat/ui.lisp").expect("read md-hat ui");
+            read_factory_source("instruments/drums/md-hat/ui.lisp").expect("read md-hat ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "drums/md-hat/".to_string(),
             "instruments/drums/md-hat/ui.lisp".to_string(),
@@ -44812,7 +44818,7 @@
         }
 
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
-        let minimoog_ui = std::fs::read_to_string("instruments/emulations/minimoog-lad2/ui.lisp")
+        let minimoog_ui = read_factory_source("instruments/emulations/minimoog-lad2/ui.lisp")
             .expect("read ui");
         let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
         let minimoog_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((

@@ -383,6 +383,25 @@ fn dev_toolchain_override_from_env() -> Option<PathBuf> {
     Some(root)
 }
 
+/// Resolve a possibly-relative, content-addressed sample reference
+/// (`samples/<sha256>.wav`, per docs/content-tiers-spec.md §5) against the
+/// sample store: strip the directory prefix and look the file name up under
+/// [`AppPaths::samples_dir`]. Absolute paths and paths that already exist
+/// from the current working directory pass through untouched, so external
+/// files and test fixtures are unaffected.
+pub fn resolve_sample_ref(path: &std::path::Path) -> PathBuf {
+    if path.is_absolute() || path.exists() {
+        return path.to_path_buf();
+    }
+    if let Some(name) = path.file_name() {
+        let candidate = app_paths().samples_dir().join(name);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
 
 /// Install the dev-layout `AppPaths` for this process. Called at startup next
@@ -393,9 +412,24 @@ pub fn init_dev() -> io::Result<()> {
         crate::paths::sequencer_dir()?,
         crate::paths::workspace_root(),
     );
-    eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+    configure_eseqlisp_roots(&paths);
     let _ = APP_PATHS.set(paths);
     Ok(())
+}
+
+/// Hand eseqlisp the roots it cannot derive itself: the defmacro library and
+/// the relative-`(load …)` fallback roots. User scratch buffers load factory
+/// scripts with paths like `scripts/sequencers/x.lisp` (or the migrated
+/// `content/scripts/…` form); those resolved against the crate-dir cwd before
+/// the content/ split and must now fall back to the factory content root.
+fn configure_eseqlisp_roots(paths: &AppPaths) {
+    eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+    let factory_root = paths.factory_root();
+    let mut roots = vec![factory_root.clone()];
+    if let Some(parent) = factory_root.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    eseqlisp::hot_reload::set_global_load_fallback_roots(roots);
 }
 
 /// Process-wide accessor. Falls back to a dev-layout construction when
@@ -407,7 +441,7 @@ pub fn app_paths() -> &'static AppPaths {
         let sequencer_dir = crate::paths::sequencer_dir()
             .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         let paths = AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root());
-        eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+        configure_eseqlisp_roots(&paths);
         paths
     })
 }

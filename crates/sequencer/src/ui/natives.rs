@@ -35,9 +35,14 @@ pub(super) fn register_factory_path_native(runtime: &mut Runtime) {
         let path = std::path::Path::new(&path);
         let factory_root = sequencer::app_paths::app_paths().factory_root();
         let relative = if path.is_absolute() {
-            path.strip_prefix(&factory_root).map_err(|_| {
-                format!("path '{}' is outside factory content", path.display())
-            })?
+            match path.strip_prefix(&factory_root) {
+                Ok(relative) => relative,
+                // Paths outside factory content (user scripts, temp files)
+                // have no portable content form: pass them through verbatim.
+                Err(_) => {
+                    return Ok(Value::String(path.to_string_lossy().into_owned()));
+                }
+            }
         } else {
             path.strip_prefix("content").unwrap_or(path)
         };

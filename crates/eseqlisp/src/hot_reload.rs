@@ -5,6 +5,40 @@ use std::time::SystemTime;
 
 const CWD_RELATIVE_LOAD_PREFIX: &str = "@/";
 
+/// Process-wide fallback roots for relative `(load …)` paths that do not
+/// resolve against the load stack or cwd. The host application installs its
+/// content roots here (the sequencer's factory `content/` dir and its
+/// parent), so user source that loads factory scripts by a repo-relative
+/// path (`scripts/…`, `content/scripts/…`) keeps working regardless of the
+/// process cwd. Empty (no fallback) unless the host installs roots.
+static LOAD_FALLBACK_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+pub fn set_global_load_fallback_roots(roots: Vec<PathBuf>) {
+    let _ = LOAD_FALLBACK_ROOTS.set(roots);
+}
+
+/// When the host never installs roots, fall back to the dev-workspace layout
+/// derived from this crate's manifest dir (same precedent as
+/// `defmacro_library::default_library_root`), so tests and helper tools
+/// resolve factory content without explicit setup. Missing dirs → no
+/// fallback.
+fn load_fallback_roots() -> &'static [PathBuf] {
+    LOAD_FALLBACK_ROOTS
+        .get_or_init(|| {
+            let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let content = workspace.join("content");
+            if content.is_dir() {
+                vec![
+                    content.canonicalize().unwrap_or(content),
+                    workspace.canonicalize().unwrap_or(workspace),
+                ]
+            } else {
+                Vec::new()
+            }
+        })
+        .as_slice()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceId(pub PathBuf);
 
@@ -295,14 +329,34 @@ impl SourceManager {
             return self.canonicalize_path(raw);
         }
         if let Some(cwd_relative) = path.strip_prefix(CWD_RELATIVE_LOAD_PREFIX) {
-            return self.canonicalize_path(Path::new(cwd_relative));
+            let primary = self.canonicalize_path(Path::new(cwd_relative));
+            if primary.exists() || self.overlays.contains_key(&primary) {
+                return primary;
+            }
+            for root in load_fallback_roots() {
+                let candidate = root.join(cwd_relative);
+                if candidate.exists() {
+                    return self.canonicalize_path(&candidate);
+                }
+            }
+            return primary;
         }
         let base = self
             .load_stack
             .last()
             .and_then(|path| path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| self.cwd.clone());
-        self.canonicalize_path(&base.join(raw))
+        let primary = self.canonicalize_path(&base.join(raw));
+        if primary.exists() || self.overlays.contains_key(&primary) {
+            return primary;
+        }
+        for root in load_fallback_roots() {
+            let candidate = root.join(raw);
+            if candidate.exists() {
+                return self.canonicalize_path(&candidate);
+            }
+        }
+        primary
     }
 
     pub fn load_source(&mut self, path: &str) -> Result<LoadedSource, String> {
@@ -555,19 +609,45 @@ mod tests {
     }
 
     #[test]
+    fn relative_load_falls_back_to_installed_content_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "eseqlisp-load-fallback-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/demo-seq.lisp"), "(+ 1 2)\n").unwrap();
+        set_global_load_fallback_roots(vec![root.clone()]);
+
+        let mut manager = SourceManager::new();
+        manager.cwd = std::env::temp_dir().join("eseqlisp-load-fallback-elsewhere");
+
+        assert_eq!(
+            manager.resolve_load_path("scripts/demo-seq.lisp"),
+            root.join("scripts/demo-seq.lisp").canonicalize().unwrap()
+        );
+        // Paths that resolve normally are untouched by the fallback.
+        assert_eq!(
+            manager.resolve_load_path("scripts/missing.lisp"),
+            manager.cwd.join("scripts/missing.lisp")
+        );
+    }
+
+    #[test]
     fn explicit_cwd_relative_load_ignores_the_active_module_directory() {
         let cwd = std::env::temp_dir().join("eseqlisp-source-root");
         let mut manager = SourceManager::new();
         manager.cwd = cwd.clone();
         manager.enter_file(cwd.join("ui/main.lisp"), 1);
 
+        // Names that exist nowhere (in particular not under the content
+        // fallback roots), so the assertions see pure resolution semantics.
         assert_eq!(
-            manager.resolve_load_path("@/ui/themes.lisp"),
-            cwd.join("ui/themes.lisp")
+            manager.resolve_load_path("@/ui/no-such-themes.lisp"),
+            cwd.join("ui/no-such-themes.lisp")
         );
         assert_eq!(
-            manager.resolve_load_path("themes.lisp"),
-            cwd.join("ui/themes.lisp")
+            manager.resolve_load_path("no-such-themes.lisp"),
+            cwd.join("ui/no-such-themes.lisp")
         );
     }
 }

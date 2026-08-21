@@ -406,7 +406,7 @@ mod tests {
     use crate::layout::{LayoutEngine, format_layout_tree_lines};
     use crate::parser::Parser;
     use crate::vm::{EffectTarget, VMError, format_lisp_source, format_lisp_value};
-    const SDF_LIGHTING_V2_DEMO: &str = include_str!("../sdf-lighting-v2-demo.lisp");
+    const SDF_LIGHTING_V2_DEMO: &str = include_str!("../examples/sdf-lighting-v2-demo.lisp");
 
     fn demo_source_without_window_ops() -> &'static str {
         SDF_LIGHTING_V2_DEMO

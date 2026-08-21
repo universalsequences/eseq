@@ -82,8 +82,8 @@ pub(super) fn handle(
                 ));
                 return;
             };
-            let path = Path::new(&path_str);
-            match eseqlisp::audio::sample::load_wav_file(path) {
+            let path = sequencer::app_paths::resolve_sample_ref(Path::new(&path_str));
+            match eseqlisp::audio::sample::load_wav_file(&path) {
                 Ok(decoded) => {
                     let channels = decoded.channels.max(1) as usize;
                     let mut stereo = Vec::with_capacity(decoded.frames * 2);
