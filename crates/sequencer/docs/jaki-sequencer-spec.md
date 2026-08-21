@@ -265,21 +265,21 @@ hit), `:figure` (index, for splitting concatenations across tracks).
 One `def-sequencer` per Jaki instance:
 
 ```lisp
-(import alec.jaki.core)
+(import alez.jaki.core)
 
 (def-sequencer "jaki-kit"
   :resolution :16
   :tick
   (do
-    (alec.jaki.core/init :16)
-    (let ((base (alec.jaki.core/pat . . -
+    (alez.jaki.core/init :16)
+    (let ((base (alez.jaki.core/pat . . -
                   (every 2 swap)
                   (* (cyc 1 2)))))
       (do
-        (alec.jaki.core/emit base 0)
-        (alec.jaki.core/emit (alec.jaki.core/shift base 1) 1)
-        (alec.jaki.core/emit
-          (alec.jaki.core/filter base '(:hand :left)) 2)))))
+        (alez.jaki.core/emit base 0)
+        (alez.jaki.core/emit (alez.jaki.core/shift base 1) 1)
+        (alez.jaki.core/emit
+          (alez.jaki.core/filter base '(:hand :left)) 2)))))
 ```
 
 - **1 unit = 1 tick of the generator's `:resolution` grid.** No step gate,
@@ -411,12 +411,12 @@ New integration tests (generator-level):
 ## 11.1 Implementation notes (phases 1–3, bead eseq-5k5)
 
 Phases 1–3 first shipped as a pre-package module and moved in phase 4 to
-`content/packages/alec.jaki/src/core.lisp` (`(module alec.jaki.core)`). Tick
+`content/packages/alez.jaki/src/core.lisp` (`(module alez.jaki.core)`). Tick
 bodies are authored on the UI VM but run on the scheduler VM via
 `def-sequencer`'s quoted-source shipping — the library must never be captured
 as UI-VM closures. Low-level callers import it as
-`(import alec.jaki.core :as jaki)`; tick source should use fully qualified
-`alec.jaki.core/…` names because aliases do not travel in the serialized tick
+`(import alez.jaki.core :as jaki)`; tick source should use fully qualified
+`alez.jaki.core/…` names because aliases do not travel in the serialized tick
 body. Deviations from the surface sketched above, all forced by measured
 eseqlisp semantics:
 
@@ -459,13 +459,13 @@ eseqlisp semantics:
 ## 11.2 Tier-2 route surface (`jak` macro)
 
 The def-sequencer skeleton is now machine-written. The package module
-`alec.jaki.surface` exports the `jak` macro; callers opt in explicitly:
+`alez.jaki.surface` exports the `jak` macro; callers opt in explicitly:
 
 ```lisp
-(import alec.jaki.surface :refer (jak))
+(import alez.jaki.surface :refer (jak))
 ```
 
-`alec.jaki.core/run` interprets the body:
+`alez.jaki.core/run` interprets the body:
 
 ```lisp
 (jak "kit" :16
@@ -492,21 +492,21 @@ The def-sequencer skeleton is now machine-written. The package module
   `->`, every element is one voice line with its own pattern and routes:
   `(jak "kit" :16 (. . - . -> 0) (- . . . -> 1 stac))`.
 - The macro expands to the plain skeleton `(def-sequencer name :resolution
-  res :tick (do (alec.jaki.core/init res) (alec.jaki.core/run '(body…))))`,
+  res :tick (do (alez.jaki.core/init res) (alez.jaki.core/run '(body…))))`,
   so the VM split is unchanged: the body ships as quoted source and is
   interpreted scheduler-side each tick.
-- Jaki is a validated factory package (`alec/jaki`, entry
-  `alec.jaki.surface`). Both authoring and scheduler scratch runtimes receive
+- Jaki is a validated factory package (`alez/jaki`, entry
+  `alez.jaki.surface`). Both authoring and scheduler scratch runtimes receive
   the scoped package module path. There is no source sniff, textual prepend,
   embedded fallback, or unconditional UI-VM load.
 
 ## 11.3 Phase 4 package layout
 
 ```text
-content/packages/alec.jaki/
+content/packages/alez.jaki/
   manifest.json
-  src/core.lisp       ;; alec.jaki.core
-  src/surface.lisp    ;; alec.jaki.surface; exports jak
+  src/core.lisp       ;; alez.jaki.core
+  src/surface.lisp    ;; alez.jaki.surface; exports jak
 ```
 
 The factory package rung follows user-installed packages and precedes ordinary

@@ -8060,7 +8060,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     // ── jaki: pure-Lisp evaluator core + pattern surface + generator wiring ──
-    // (content/packages/alec.jaki, spec docs/jaki-sequencer-spec.md)
+    // (content/packages/alez.jaki, spec docs/jaki-sequencer-spec.md)
 
     fn jaki_runtime() -> ScratchControlRuntime {
         let state = Arc::new(SequencerState::new(
@@ -8075,7 +8075,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
         );
         runtime
-            .eval("(import alec.jaki.surface :refer (jak))")
+            .eval("(import alez.jaki.surface :refer (jak))")
             .expect("import Jaki package");
         runtime
     }
@@ -8094,7 +8094,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     fn jaki_eval_nums(runtime: &mut ScratchControlRuntime, code: &str) -> Vec<f64> {
-        let source = format!("(import alec.jaki.core :as jaki)\n{code}");
+        let source = format!("(import alez.jaki.core :as jaki)\n{code}");
         let value = runtime
             .eval(&source)
             .expect("eval jaki snippet")
@@ -8369,8 +8369,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(def-sequencer "jaki-t1"
                  :resolution :16
                  :tick (do
-                   (alec.jaki.core/init :16)
-                   (alec.jaki.core/emit (alec.jaki.core/pat . . . .) 0)))"#,
+                   (alez.jaki.core/init :16)
+                   (alez.jaki.core/emit (alez.jaki.core/pat . . . .) 0)))"#,
         )
         .expect("def-sequencer");
 
@@ -8416,8 +8416,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(def-sequencer "jaki-t2"
                  :resolution :16
                  :tick (do
-                   (alec.jaki.core/init :16)
-                   (alec.jaki.core/emit (alec.jaki.core/pat . - (* 2)) 0)))"#,
+                   (alez.jaki.core/init :16)
+                   (alez.jaki.core/emit (alez.jaki.core/pat . - (* 2)) 0)))"#,
         )
         .expect("def-sequencer");
 
@@ -8452,12 +8452,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(def-sequencer "jaki-t3"
                  :resolution :16
                  :tick (do
-                   (alec.jaki.core/init :16)
-                   (let ((base (alec.jaki.core/pat . . - .)))
+                   (alez.jaki.core/init :16)
+                   (let ((base (alez.jaki.core/pat . . - .)))
                      (do
-                       (alec.jaki.core/emit base 0)
-                       (alec.jaki.core/emit (alec.jaki.core/shift base 1) 1)
-                       (alec.jaki.core/emit (alec.jaki.core/filter base '(:hand :left)) 2)))))"#,
+                       (alez.jaki.core/emit base 0)
+                       (alez.jaki.core/emit (alez.jaki.core/shift base 1) 1)
+                       (alez.jaki.core/emit (alez.jaki.core/filter base '(:hand :left)) 2)))))"#,
         )
         .expect("def-sequencer");
 
@@ -8500,7 +8500,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // authored through the bare `jak` macro and the `->` route grammar
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "kit" :16
                  . . - .
                  -> 0
@@ -8544,7 +8544,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn jaki_surface_no_routes_defaults_to_track_zero() {
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "kick" :16 . . . .)"#,
         )
         .expect("jaki surface macro");
@@ -8586,7 +8586,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // cycle via the (fast (cyc …)) route word. Per-pattern threading state
         // keeps the two routes from fighting over the shared cycle counter.
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "snare" :16
                  . . - .
                  -> 0
@@ -8625,7 +8625,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn jaki_surface_vel_route_word_scales_velocity() {
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "soft" :16 . . . . -> 0 (vel 0.5))"#,
         )
         .expect("jaki surface macro");
@@ -8651,7 +8651,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn jaki_surface_multi_voice_lines_each_carry_their_own_routes() {
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "kit" :16
                  (. . - . -> 0)
                  (. . - . -> 1 (shift 1) -> 2 left))"#,
@@ -8699,7 +8699,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         }
         // real-world shape: multi-fig, cyc'd velocity params, every/align, 5 routes
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "hit" :16
                  (fig . - . .)
                  (fig . - - (minvel 0) (dashdecay 0.1) (dotdecay (cyc 0.1 0)) (/ 2))
@@ -8711,7 +8711,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         )
         .expect("jaki surface macro");
         rt.eval(
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "hats" :16
                  . . - . - . . (dashdecay 0) (minvel 0.1)
                  (dotdecay (cyc 0.1 0.8)) (/ (cyc 1 2))
@@ -8726,7 +8726,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .unwrap_or(0);
         for i in 0..stale {
             rt.eval(&format!(
-                r#"(import alec.jaki.surface :refer (jak))
+                r#"(import alez.jaki.surface :refer (jak))
                    (jak "stale-{i}" :16 . . - . -> 0)"#,
             ))
                 .expect("stale def");

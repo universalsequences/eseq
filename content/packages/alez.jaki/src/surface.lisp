@@ -1,8 +1,8 @@
 ;; Jaki tier-2 package surface. Callers explicitly refer the exported macro:
 ;;
-;;   (import alec.jaki.surface :refer (jak))
+;;   (import alez.jaki.surface :refer (jak))
 ;;
-;; The evaluator core lives in alec.jaki.core and is loaded by this module.
+;; The evaluator core lives in alez.jaki.core and is loaded by this module.
 ;;
 ;; One form defines a sequencer:
 ;;
@@ -13,9 +13,9 @@
 ;;     -> 2 (shift 1) stac
 ;;     -> 3 accent (vel 0.7))
 ;;
-;; Everything before the first `->` is the pattern (alec.jaki.core/pat
+;; Everything before the first `->` is the pattern (alez.jaki.core/pat
 ;; grammar); each `->` starts a route: a track number followed by route words
-;; (see alec.jaki.core/run).
+;; (see alez.jaki.core/run).
 ;; With no routes the pattern plays on track 0. Multi-voice stacks one
 ;; parenthesized line per voice:
 ;;
@@ -26,14 +26,14 @@
 ;; The expansion is the plain def-sequencer skeleton, so the body still ships
 ;; as quoted source and runs on the scheduler VM.
 
-(module alec.jaki.surface)
+(module alez.jaki.surface)
 
-(import alec.jaki.core)
+(import alez.jaki.core)
 (export jak)
 
 (defmacro jak (name res &rest body)
   `(def-sequencer ,name
      :resolution ,res
      :tick (do
-       (alec.jaki.core/init ,res)
-       (alec.jaki.core/run '(,@body)))))
+       (alez.jaki.core/init ,res)
+       (alez.jaki.core/run '(,@body)))))

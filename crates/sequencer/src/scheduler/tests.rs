@@ -2182,7 +2182,7 @@
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let runtime = super::build_scheduler_scratch_runtime(
             state,
-            r#"(import alec.jaki.surface :refer (jak))
+            r#"(import alez.jaki.surface :refer (jak))
                (jak "package-import" :16 . . - . -> 0)"#,
             false,
         )
