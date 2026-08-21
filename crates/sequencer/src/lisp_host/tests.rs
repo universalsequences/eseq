@@ -4742,7 +4742,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         }
 
         let mut failures = Vec::new();
-        visit(std::path::Path::new(super::INSTRUMENTS_DIR), &mut failures);
+        visit(&crate::app_paths::app_paths().instruments_dir(), &mut failures);
 
         assert!(
             failures.is_empty(),
@@ -11768,8 +11768,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn save_folder_instrument_writes_dsp_lisp_even_when_folder_is_new() {
         let name = format!("__test-agent-folder-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
-        let legacy_file = std::path::Path::new(super::INSTRUMENTS_DIR)
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
+        let legacy_file = crate::app_paths::app_paths().user_instruments_dir()
             .join(format!("{}.lisp", name.trim_end_matches('/')));
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_file(&legacy_file);
@@ -11791,7 +11791,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn missing_instrument_metadata_defaults_to_instrument_run_mode() {
         let name = format!("__test-run-mode-missing-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
         let _ = std::fs::remove_dir_all(&folder);
 
         super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
@@ -11808,7 +11808,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn folder_instrument_run_mode_roundtrips_to_instrument_json() {
         let name = format!("__test-run-mode-folder-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
         let _ = std::fs::remove_dir_all(&folder);
 
         super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
@@ -11836,7 +11836,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn legacy_file_instrument_run_mode_roundtrips_to_sidecar_json() {
         let name = format!("__test-run-mode-legacy-{}", std::process::id());
-        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let root = crate::app_paths::app_paths().user_instruments_dir();
         let source_path = root.join(format!("{name}.lisp"));
         let metadata_path = root.join(format!("{name}.instrument.json"));
         let _ = std::fs::remove_file(&source_path);
@@ -11862,7 +11862,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn invalid_instrument_run_mode_reports_error() {
         let name = format!("__test-run-mode-invalid-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
         let _ = std::fs::remove_dir_all(&folder);
 
         super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
@@ -11885,11 +11885,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn moved_folder_instrument_resolves_by_unique_leaf_name() {
         let leaf = format!("__test-moved-folder-{}", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR)
+        let folder = crate::app_paths::app_paths().user_instruments_dir()
             .join("__test-resolve-category")
             .join(&leaf);
-        let direct_folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(&leaf);
-        let legacy_file = std::path::Path::new(super::INSTRUMENTS_DIR).join(format!("{leaf}.lisp"));
+        let direct_folder = crate::app_paths::app_paths().user_instruments_dir().join(&leaf);
+        let legacy_file = crate::app_paths::app_paths().user_instruments_dir().join(format!("{leaf}.lisp"));
         let _ = std::fs::remove_dir_all(folder.parent().unwrap());
         let _ = std::fs::remove_dir_all(&direct_folder);
         let _ = std::fs::remove_file(&legacy_file);
@@ -11923,7 +11923,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn moved_folder_instrument_leaf_match_requires_unique_source() {
         let leaf = format!("__test-ambiguous-folder-{}", std::process::id());
-        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let root = crate::app_paths::app_paths().user_instruments_dir();
         let first = root.join("__test-ambiguous-a").join(&leaf);
         let second = root.join("__test-ambiguous-b").join(&leaf);
         let _ = std::fs::remove_dir_all(root.join("__test-ambiguous-a"));

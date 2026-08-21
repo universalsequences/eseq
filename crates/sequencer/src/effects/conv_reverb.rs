@@ -44,12 +44,12 @@ pub fn dsp_source() -> &'static str {
 pub const DEFAULT_IR_REF: &str = "lexicon-300-rich-plate";
 
 /// Absolute path to the bundled default impulse response, if present. Shipped
-/// in the crate under `assets/ir/` so a fresh Convolution Reverb has a sound
+/// in the factory impulse library so a fresh Convolution Reverb has a sound
 /// out of the box without touching the user's sample library.
 pub fn default_ir_path() -> Option<std::path::PathBuf> {
-    let p = crate::paths::sequencer_dir()
-        .ok()?
-        .join("assets/ir/lexicon-300-rich-plate.wav");
+    let p = crate::app_paths::app_paths()
+        .impulses_dir()
+        .join("lexicon-300-rich-plate.wav");
     p.exists().then_some(p)
 }
 

@@ -1712,7 +1712,7 @@ fn toggle_master_recording_capture(
     toggle_master_recording_capture_in(
         master_recording,
         master_recorder,
-        std::path::Path::new("recordings"),
+        &sequencer::app_paths::app_paths().recordings_dir(),
     )
 }
 
@@ -6134,8 +6134,10 @@ pub(crate) fn init_runtime(
     });
 
     let sample_db = Rc::new(
-        sequencer::sample_db::SampleDb::open(std::path::Path::new("samples.db"))
-            .expect("metal_seq requires crates/sequencer/samples.db for sample browsing"),
+        sequencer::sample_db::SampleDb::open(
+            &sequencer::app_paths::app_paths().sample_db_path(),
+        )
+        .expect("metal_seq requires the AppPaths sample database for sample browsing"),
     );
     eprintln!("metal_seq: sample db opened");
 

@@ -81,24 +81,30 @@ pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extensio
         }
     }
 
-    let root = Path::new(INSTRUMENTS_DIR);
+    let roots = crate::app_paths::app_paths().instrument_dirs();
     let trimmed = name.trim_end_matches('/');
-    if extension == "lisp" && name.ends_with('/') {
-        let dsp = root.join(trimmed).join("dsp.lisp");
-        if dsp.exists() {
-            return Ok(dsp);
+    for root in &roots {
+        if extension == "lisp" && name.ends_with('/') {
+            let dsp = root.join(trimmed).join("dsp.lisp");
+            if dsp.exists() {
+                return Ok(dsp);
+            }
+        }
+        let exact = root.join(format!("{name}.{extension}"));
+        if exact.exists() {
+            return Ok(exact);
+        }
+        if extension == "lisp" {
+            let dsp = root.join(name).join("dsp.lisp");
+            if dsp.exists() {
+                return Ok(dsp);
+            }
         }
     }
-    let exact = root.join(format!("{name}.{extension}"));
-    if exact.exists() {
-        return Ok(exact);
-    }
-    if extension == "lisp" {
-        let dsp = root.join(name).join("dsp.lisp");
-        if dsp.exists() {
-            return Ok(dsp);
-        }
-    }
+    let exact = roots
+        .first()
+        .expect("AppPaths always supplies a factory instrument root")
+        .join(format!("{name}.{extension}"));
 
     let cache_key = (name.to_string(), extension.to_string());
     if let Some(cached) = resolved_walk_cache()
@@ -118,11 +124,13 @@ pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extensio
         .and_then(|s| s.to_str())
         .unwrap_or(trimmed);
     let mut matches = Vec::new();
-    if extension == "lisp" {
-        collect_folder_source_matches(root, basename, &mut matches);
-    }
     let file_name = format!("{basename}.{extension}");
-    collect_file_matches(root, &file_name, &mut matches);
+    for root in &roots {
+        if extension == "lisp" {
+            collect_folder_source_matches(root, basename, &mut matches);
+        }
+        collect_file_matches(root, &file_name, &mut matches);
+    }
     matches.sort_by_key(|path| path.to_string_lossy().to_lowercase());
     matches.dedup();
 
@@ -139,7 +147,8 @@ pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extensio
         _ => Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "Ambiguous instrument '{name}': found multiple matching instrument sources under {INSTRUMENTS_DIR}"
+                "Ambiguous instrument '{name}': found multiple matching instrument sources under {}",
+                roots.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
             ),
         )),
     }
@@ -237,7 +246,8 @@ pub fn load_instrument_run_mode(name: &str) -> io::Result<CustomInstrumentRunMod
 }
 
 pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -> io::Result<()> {
-    let path = instrument_metadata_path(name)?;
+    let source = writable_instrument_source_path(name);
+    let path = instrument_metadata_path_for_source_path(&source)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -257,10 +267,12 @@ pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -
 pub(in crate::lisp_host) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
     if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         if let Some(parent) = path.parent() {
-            if let Ok(rel) = parent.strip_prefix(INSTRUMENTS_DIR) {
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                if !rel.is_empty() {
-                    return Some(format!("{rel}/"));
+            for root in crate::app_paths::app_paths().instrument_dirs() {
+                if let Ok(rel) = parent.strip_prefix(root) {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if !rel.is_empty() {
+                        return Some(format!("{rel}/"));
+                    }
                 }
             }
         }
@@ -275,9 +287,12 @@ pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Pat
         CompileKind::Instrument => instrument_name_from_source_path(path),
         CompileKind::Effect => {
             if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
-                path.parent()
-                    .and_then(|parent| parent.strip_prefix(EFFECTS_DIR).ok())
-                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                path.parent().and_then(|parent| {
+                    crate::app_paths::app_paths()
+                        .effect_dirs()
+                        .into_iter()
+                        .find_map(|root| parent.strip_prefix(root).ok().map(Path::to_path_buf))
+                }).map(|rel| rel.to_string_lossy().replace('\\', "/"))
             } else {
                 path.file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())
@@ -308,7 +323,16 @@ pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> 
 }
 
 pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
-    let path = instrument_preset_path(name)?;
+    let path = if name.ends_with('/') {
+        crate::app_paths::app_paths()
+            .user_instruments_dir()
+            .join(name.trim_end_matches('/'))
+            .with_extension("presets")
+    } else {
+        crate::app_paths::app_paths()
+            .user_instruments_dir()
+            .join(format!("{name}.presets"))
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -546,14 +570,17 @@ pub fn build_init_message_for_voice(
 
 // ── Instrument storage ──
 
-pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
-    let path = if name.ends_with('/') {
-        Path::new(INSTRUMENTS_DIR)
-            .join(name.trim_end_matches('/'))
-            .join("dsp.lisp")
+fn writable_instrument_source_path(name: &str) -> PathBuf {
+    let root = crate::app_paths::app_paths().user_instruments_dir();
+    if name.ends_with('/') {
+        root.join(name.trim_end_matches('/')).join("dsp.lisp")
     } else {
-        resolve_instrument_storage_path(name, "lisp")?
-    };
+        root.join(format!("{name}.lisp"))
+    }
+}
+
+pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
+    let path = writable_instrument_source_path(name);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -561,7 +588,16 @@ pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
-    let path = instrument_ui_path(name)?;
+    let path = if name.ends_with('/') {
+        crate::app_paths::app_paths()
+            .user_instruments_dir()
+            .join(name.trim_end_matches('/'))
+            .join("ui.lisp")
+    } else {
+        writable_instrument_source_path(name)
+            .with_extension("")
+            .join("ui.lisp")
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -570,15 +606,21 @@ pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
 
 pub fn instrument_ui_path(name: &str) -> io::Result<PathBuf> {
     if name.ends_with('/') {
-        let direct = Path::new(INSTRUMENTS_DIR)
-            .join(name.trim_end_matches('/'))
-            .join("ui.lisp");
-        if direct.exists() {
+        let direct = crate::app_paths::app_paths()
+            .instrument_dirs()
+            .into_iter()
+            .map(|root| root.join(name.trim_end_matches('/')).join("ui.lisp"))
+            .find(|path| path.exists());
+        if let Some(direct) = direct {
             return Ok(direct);
         }
     } else {
-        let direct = Path::new(INSTRUMENTS_DIR).join(name).join("ui.lisp");
-        if direct.exists() {
+        if let Some(direct) = crate::app_paths::app_paths()
+            .instrument_dirs()
+            .into_iter()
+            .map(|root| root.join(name).join("ui.lisp"))
+            .find(|path| path.exists())
+        {
             return Ok(direct);
         }
     }
@@ -629,10 +671,12 @@ pub fn list_saved_instruments() -> Vec<String> {
         }
     }
 
-    let dir = Path::new(INSTRUMENTS_DIR);
     let mut names = Vec::new();
-    collect(dir, dir, &mut names);
+    for dir in crate::app_paths::app_paths().instrument_dirs() {
+        collect(&dir, &dir, &mut names);
+    }
     names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
     names
 }
 
@@ -657,8 +701,8 @@ pub(in crate::lisp_host) fn validate_instrument_relative_dir(path: &str) -> io::
 }
 
 pub fn move_saved_instrument(name: &str, target_folder: &str) -> io::Result<String> {
-    let root = Path::new(INSTRUMENTS_DIR);
-    let source = instrument_source_path(name)?;
+    let root = crate::app_paths::app_paths().user_instruments_dir();
+    let source = writable_instrument_source_path(name);
     if !source.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,

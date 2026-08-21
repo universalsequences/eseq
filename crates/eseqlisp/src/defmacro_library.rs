@@ -510,15 +510,24 @@ pub fn top_level_imports(exprs: &[Expression]) -> Result<Vec<String>, DefmacroLi
     Ok(imports)
 }
 
+static DEFAULT_LIBRARY_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Install the application's factory defmacro root. The embedding application
+/// owns filesystem layout; the eseqlisp crate retains a source-tree fallback
+/// only for standalone tools and tests.
+pub fn set_default_library_root(root: PathBuf) {
+    let _ = DEFAULT_LIBRARY_ROOT.set(root);
+}
+
 pub fn default_library_root() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let mut candidates = Vec::new();
-    candidates.push(cwd.join("defmacros"));
-    candidates.push(cwd.join("crates/sequencer/defmacros"));
-    for ancestor in cwd.ancestors() {
-        candidates.push(ancestor.join("crates/sequencer/defmacros"));
-        candidates.push(ancestor.join("defmacros"));
+    if let Some(root) = DEFAULT_LIBRARY_ROOT.get() {
+        return root.is_dir().then(|| root.clone());
     }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("../sequencer/defmacros"),
+        manifest_dir.join("../../content/defmacros"),
+    ];
     candidates.into_iter().find(|path| path.is_dir())
 }
 

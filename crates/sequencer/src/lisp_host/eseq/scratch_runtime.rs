@@ -112,24 +112,12 @@ pub(in crate::lisp_host) fn scratch_runtime_with_fallbacks_inner(
 }
 
 pub(in crate::lisp_host) fn midi_fx_library_root_candidates() -> Vec<PathBuf> {
-    let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("midi-fx");
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let candidates = [
-        cwd.join("midi-fx"),
-        cwd.join("crates").join("sequencer").join("midi-fx"),
-        manifest_root,
-    ];
-    let mut unique = Vec::new();
-    for candidate in candidates {
-        if !candidate.is_dir() {
-            continue;
-        }
-        let canonical = candidate.canonicalize().unwrap_or(candidate);
-        if !unique.iter().any(|existing| existing == &canonical) {
-            unique.push(canonical);
-        }
+    let root = crate::app_paths::app_paths().midi_fx_dir();
+    if root.is_dir() {
+        vec![root.canonicalize().unwrap_or(root)]
+    } else {
+        Vec::new()
     }
-    unique
 }
 
 pub(in crate::lisp_host) fn midi_fx_name_components(name: &str) -> Option<Vec<&str>> {
@@ -225,9 +213,7 @@ pub fn load_midi_fx_library_source() -> String {
 }
 
 pub fn load_process_library_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("processes")
-        .join("builtin.lisp");
+    let path = crate::app_paths::app_paths().processes_dir().join("builtin.lisp");
     match std::fs::read_to_string(&path) {
         Ok(source) if source.trim().is_empty() => String::new(),
         Ok(_) => {

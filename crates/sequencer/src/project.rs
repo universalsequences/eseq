@@ -23,10 +23,6 @@ use crate::sequencer::{
 };
 use crate::track_color::TrackColor;
 
-const PROJECTS_DIR: &str = "projects";
-const SOUNDS_DIR: &str = "sounds";
-const RACK_PRESETS_DIR: &str = "presets/racks";
-const KITS_DIR: &str = "kits";
 // Version history:
 //   1 — original format; dgenlisp node-state header was 6 slots, so saved
 //       `param_node_indices` for dgen slots are `6 + cell_id`.
@@ -2514,12 +2510,18 @@ pub fn load_project_from_path(path: &Path) -> std::io::Result<ProjectFile> {
 }
 
 pub fn save_sound_preset(name: &str, sound: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
-    save_container_preset(Path::new(SOUNDS_DIR), "sound", "Sound", name, sound)
+    save_container_preset(
+        &crate::app_paths::app_paths().sounds_dir(),
+        "sound",
+        "Sound",
+        name,
+        sound,
+    )
 }
 
 pub fn save_rack_preset(name: &str, preset: &ProjectSoundPreset) -> std::io::Result<PathBuf> {
     save_container_preset(
-        Path::new(RACK_PRESETS_DIR),
+        &crate::app_paths::app_paths().rack_presets_dir(),
         "rackpreset",
         "rack preset",
         name,
@@ -2556,7 +2558,9 @@ pub fn load_rack_preset(name: &str) -> std::io::Result<ProjectSoundPreset> {
 }
 
 pub fn rack_preset_path(name: &str) -> PathBuf {
-    Path::new(RACK_PRESETS_DIR).join(format!("{}.rackpreset", sanitize_project_name(name)))
+    crate::app_paths::app_paths()
+        .rack_presets_dir()
+        .join(format!("{}.rackpreset", sanitize_project_name(name)))
 }
 
 fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoundPreset> {
@@ -2577,8 +2581,9 @@ fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoun
 }
 
 pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
-    std::fs::create_dir_all(RACK_PRESETS_DIR)?;
-    let mut names = std::fs::read_dir(RACK_PRESETS_DIR)?
+    let dir = crate::app_paths::app_paths().rack_presets_dir();
+    std::fs::create_dir_all(&dir)?;
+    let mut names = std::fs::read_dir(&dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rackpreset"))
@@ -2598,11 +2603,13 @@ pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
 }
 
 pub fn kit_preset_path(name: &str) -> PathBuf {
-    Path::new(KITS_DIR).join(format!("{}.kit", sanitize_project_name(name)))
+    crate::app_paths::app_paths()
+        .kits_dir()
+        .join(format!("{}.kit", sanitize_project_name(name)))
 }
 
 pub fn save_kit_preset(name: &str, kit: &ProjectKitPreset) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(KITS_DIR)?;
+    std::fs::create_dir_all(crate::app_paths::app_paths().kits_dir())?;
     let path = kit_preset_path(name);
     let json = serde_json::to_string(kit).map_err(|error| {
         std::io::Error::new(
@@ -2625,8 +2632,9 @@ pub fn load_kit_preset(path: &Path) -> std::io::Result<ProjectKitPreset> {
 }
 
 pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(KITS_DIR)?;
-    let mut paths = std::fs::read_dir(KITS_DIR)?
+    let dir = crate::app_paths::app_paths().kits_dir();
+    std::fs::create_dir_all(&dir)?;
+    let mut paths = std::fs::read_dir(&dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("kit"))
@@ -2636,8 +2644,9 @@ pub fn list_kit_presets() -> std::io::Result<Vec<PathBuf>> {
 }
 
 pub fn list_sound_presets() -> std::io::Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(SOUNDS_DIR)?;
-    let mut paths = std::fs::read_dir(SOUNDS_DIR)?
+    let dir = crate::app_paths::app_paths().sounds_dir();
+    std::fs::create_dir_all(&dir)?;
+    let mut paths = std::fs::read_dir(&dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sound"))
@@ -2661,8 +2670,8 @@ pub fn sanitize_project_name(name: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
-fn projects_dir() -> &'static Path {
-    Path::new(PROJECTS_DIR)
+fn projects_dir() -> PathBuf {
+    crate::app_paths::app_paths().projects_dir()
 }
 
 pub fn project_file_version() -> u32 {

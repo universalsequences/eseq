@@ -3044,7 +3044,7 @@ impl App {
             None
         }
 
-        walk(Path::new("samples"), sample_name)
+        walk(&crate::app_paths::app_paths().samples_dir(), sample_name)
     }
 
     /// Resolve a saved Convolution Reverb IR reference to an absolute path: the

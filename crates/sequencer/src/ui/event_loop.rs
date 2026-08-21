@@ -458,7 +458,10 @@ pub(crate) fn run_event_loop(
             let event_started = Instant::now();
             match event {
                 BackendEvent::FileDrop(paths) => {
-                    match SampleImportSession::from_drop(paths, Path::new("samples.db")) {
+                    match SampleImportSession::from_drop(
+                        paths,
+                        &sequencer::app_paths::app_paths().sample_db_path(),
+                    ) {
                         Ok(session) => {
                             if session.is_empty() {
                                 editor.show_transient_message(
@@ -520,7 +523,10 @@ pub(crate) fn run_event_loop(
                                 }
                                 ImportKeyOutcome::Commit => {
                                     let summary = session
-                                        .commit(Path::new("samples.db"), Path::new("samples"));
+                                        .commit(
+                                            &sequencer::app_paths::app_paths().sample_db_path(),
+                                            &sequencer::app_paths::app_paths().samples_dir(),
+                                        );
                                     sample_import_session = None;
                                     switch_to_sequencer(&mut editor);
                                     match summary {

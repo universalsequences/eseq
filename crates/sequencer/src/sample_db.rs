@@ -517,7 +517,7 @@ pub fn display_title_for_sample_path(path: &Path) -> Option<String> {
         return None;
     }
 
-    let db_path = crate::paths::sequencer_dir().ok()?.join("samples.db");
+    let db_path = crate::app_paths::app_paths().sample_db_path();
     if !db_path.is_file() {
         return None;
     }

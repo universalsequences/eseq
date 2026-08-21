@@ -231,7 +231,7 @@ pub fn read_asset(path: &Path) -> Result<FilterTableAsset, String> {
 
 /// Bundled factory asset directory (`crates/sequencer/assets/filter-tables`).
 pub fn bundled_asset_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/filter-tables")
+    crate::app_paths::app_paths().filter_tables_dir()
 }
 
 /// User asset directory, resolved like `samples/`: relative to the working

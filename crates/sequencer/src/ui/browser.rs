@@ -682,8 +682,10 @@ fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
 
 pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String]) -> Value {
     let query_lower = query.trim().to_lowercase();
-    let root = std::path::Path::new("instruments");
-    let top = build_instrument_tree_nodes(root, root);
+    let mut top = Vec::new();
+    for root in sequencer::app_paths::app_paths().instrument_dirs() {
+        top.extend(build_instrument_tree_nodes(&root, &root));
+    }
     let custom = list_items(instrument_tree_nodes_to_value(
         &filter_instrument_tree_nodes(&top, &query_lower),
     ));

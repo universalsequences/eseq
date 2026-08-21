@@ -186,27 +186,70 @@ impl AppPaths {
         }
     }
 
-    /// Saved effect sources ("effects" tree; the user-visible/serialized
-    /// names stay relative to this root).
-    pub fn effects_dir(&self) -> PathBuf {
+    /// Read-only factory content root. Before the T2 directory split the dev
+    /// root is the sequencer crate itself; T2 changes only this mapping.
+    pub fn factory_root(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("effects"),
+            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.clone(),
             AppPaths::Release {
-                application_support,
-                ..
-            } => application_support.join("effects"),
+                contents_resources, ..
+            } => contents_resources.clone(),
         }
     }
 
-    /// Saved instrument sources ("instruments" tree).
-    pub fn instruments_dir(&self) -> PathBuf {
+    /// Mutable, machine-managed user data. Before T2 this preserves the
+    /// historical dev layout under the sequencer crate.
+    pub fn user_data_root(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("instruments"),
+            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.clone(),
             AppPaths::Release {
-                application_support,
-                ..
-            } => application_support.join("instruments"),
+                application_support, ..
+            } => application_support.clone(),
         }
+    }
+
+    /// Core eseqlisp shipped with the application. It has a separate source
+    /// location before T2 but shares the factory root in an installed bundle.
+    pub fn core_dir(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("../eseqlisp"),
+            AppPaths::Release { .. } => self.factory_root().join("core"),
+        }
+    }
+
+    pub fn ui_dir(&self) -> PathBuf { self.factory_root().join("ui") }
+    pub fn defmacros_dir(&self) -> PathBuf { self.factory_root().join("defmacros") }
+    pub fn midi_fx_dir(&self) -> PathBuf { self.factory_root().join("midi-fx") }
+    pub fn presets_dir(&self) -> PathBuf { self.factory_root().join("presets") }
+    pub fn rack_presets_dir(&self) -> PathBuf { self.presets_dir().join("racks") }
+    pub fn kits_dir(&self) -> PathBuf { self.factory_root().join("kits") }
+    pub fn processes_dir(&self) -> PathBuf { self.factory_root().join("processes") }
+    pub fn scripts_dir(&self) -> PathBuf { self.factory_root().join("scripts") }
+    pub fn impulses_dir(&self) -> PathBuf { self.factory_root().join("impulses") }
+    pub fn filter_tables_dir(&self) -> PathBuf {
+        self.factory_root().join("assets/filter-tables")
+    }
+
+    pub fn projects_dir(&self) -> PathBuf { self.user_data_root().join("projects") }
+    pub fn recordings_dir(&self) -> PathBuf { self.user_data_root().join("recordings") }
+    pub fn samples_dir(&self) -> PathBuf { self.user_data_root().join("samples") }
+    pub fn sample_db_path(&self) -> PathBuf { self.user_data_root().join("samples.db") }
+    pub fn sounds_dir(&self) -> PathBuf { self.user_data_root().join("sounds") }
+    pub fn sample_assets_dir(&self) -> PathBuf { self.user_data_root().join("sample-assets") }
+
+    /// Factory effect and instrument trees are immutable. Authoring paths are
+    /// separate even while both map to the same pre-T2 dev location.
+    pub fn effects_dir(&self) -> PathBuf { self.factory_root().join("effects") }
+    pub fn instruments_dir(&self) -> PathBuf { self.factory_root().join("instruments") }
+    pub fn user_effects_dir(&self) -> PathBuf { self.user_data_root().join("effects") }
+    pub fn user_instruments_dir(&self) -> PathBuf { self.user_data_root().join("instruments") }
+
+    pub fn effect_dirs(&self) -> Vec<PathBuf> {
+        distinct_paths([self.effects_dir(), self.user_effects_dir()])
+    }
+
+    pub fn instrument_dirs(&self) -> Vec<PathBuf> {
+        distinct_paths([self.instruments_dir(), self.user_instruments_dir()])
     }
 
     /// Base for resolving relative `@file` asset references when a compile
@@ -266,6 +309,16 @@ impl AppPaths {
 /// Always loud: an active override is logged, and a set-but-missing path is
 /// reported (and still honored, so the compile preflight hard-errors against
 /// the path the user asked for instead of silently using another toolchain).
+fn distinct_paths<const N: usize>(paths: [PathBuf; N]) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    for path in paths {
+        if !result.contains(&path) {
+            result.push(path);
+        }
+    }
+    result
+}
+
 fn dev_toolchain_override_from_env() -> Option<PathBuf> {
     let raw = std::env::var_os("ESEQ_DGEN_TOOLCHAIN_ROOT")?;
     if raw.is_empty() {
@@ -297,6 +350,7 @@ pub fn init_dev() -> io::Result<()> {
         crate::paths::sequencer_dir()?,
         crate::paths::workspace_root(),
     );
+    eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
     let _ = APP_PATHS.set(paths);
     Ok(())
 }
@@ -309,7 +363,9 @@ pub fn app_paths() -> &'static AppPaths {
     APP_PATHS.get_or_init(|| {
         let sequencer_dir = crate::paths::sequencer_dir()
             .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root())
+        let paths = AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root());
+        eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+        paths
     })
 }
 
@@ -336,14 +392,16 @@ mod tests {
             paths.perf_probe_projects_dir(),
             PathBuf::from("/ws/crates/sequencer/tests/fixtures/projects")
         );
-        assert_eq!(
-            paths.effects_dir(),
-            PathBuf::from("/ws/crates/sequencer/effects")
-        );
-        assert_eq!(
-            paths.instruments_dir(),
-            PathBuf::from("/ws/crates/sequencer/instruments")
-        );
+        assert_eq!(paths.factory_root(), PathBuf::from("/ws/crates/sequencer"));
+        assert_eq!(paths.user_data_root(), PathBuf::from("/ws/crates/sequencer"));
+        assert_eq!(paths.core_dir(), PathBuf::from("/ws/crates/sequencer/../eseqlisp"));
+        assert_eq!(paths.ui_dir(), PathBuf::from("/ws/crates/sequencer/ui"));
+        assert_eq!(paths.effects_dir(), PathBuf::from("/ws/crates/sequencer/effects"));
+        assert_eq!(paths.instruments_dir(), PathBuf::from("/ws/crates/sequencer/instruments"));
+        assert_eq!(paths.projects_dir(), PathBuf::from("/ws/crates/sequencer/projects"));
+        assert_eq!(paths.sample_db_path(), PathBuf::from("/ws/crates/sequencer/samples.db"));
+        assert_eq!(paths.effect_dirs(), vec![PathBuf::from("/ws/crates/sequencer/effects")]);
+        assert_eq!(paths.instrument_dirs(), vec![PathBuf::from("/ws/crates/sequencer/instruments")]);
         assert_eq!(
             paths.dgen_asset_fallback_base(),
             PathBuf::from("/ws/crates/sequencer")
@@ -386,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn release_perf_probe_projects_resolve_from_resources() {
+    fn release_content_and_user_data_resolve_to_separate_tiers() {
         let paths = AppPaths::release(
             PathBuf::from("/App/Contents/MacOS"),
             PathBuf::from("/App/Contents/Resources"),
@@ -397,6 +455,19 @@ mod tests {
             paths.perf_probe_projects_dir(),
             PathBuf::from("/App/Contents/Resources/test-fixtures/projects")
         );
+        assert_eq!(paths.core_dir(), PathBuf::from("/App/Contents/Resources/core"));
+        assert_eq!(paths.ui_dir(), PathBuf::from("/App/Contents/Resources/ui"));
+        assert_eq!(
+            paths.instruments_dir(),
+            PathBuf::from("/App/Contents/Resources/instruments")
+        );
+        assert_eq!(
+            paths.user_instruments_dir(),
+            PathBuf::from("/Support/instruments")
+        );
+        assert_eq!(paths.projects_dir(), PathBuf::from("/Support/projects"));
+        assert_eq!(paths.samples_dir(), PathBuf::from("/Support/samples"));
+        assert_eq!(paths.sample_db_path(), PathBuf::from("/Support/samples.db"));
     }
 
     #[test]

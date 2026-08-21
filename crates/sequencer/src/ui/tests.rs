@@ -1901,11 +1901,11 @@
             },
         );
         reload_custom_instrument_ui(&mut editor);
-        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let _ = editor.open_or_create_file_buffer(ui_entrypoint_path());
         let grid_source = editor.active_buffer().text();
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            Some(ui_entrypoint_path()),
             &grid_source,
             overlays,
         );
@@ -2602,11 +2602,11 @@
             },
         );
         reload_custom_instrument_ui(&mut editor);
-        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let _ = editor.open_or_create_file_buffer(ui_entrypoint_path());
         let grid_source = editor.active_buffer().text();
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            Some(ui_entrypoint_path()),
             &grid_source,
             overlays,
         );
@@ -11023,11 +11023,11 @@
             },
         );
         reload_custom_instrument_ui(&mut editor);
-        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let _ = editor.open_or_create_file_buffer(ui_entrypoint_path());
         let grid_source = editor.active_buffer().text();
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            Some(ui_entrypoint_path()),
             &grid_source,
             overlays,
         );

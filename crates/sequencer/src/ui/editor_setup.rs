@@ -3,7 +3,7 @@ use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::{Editor, EditorConfig, Runtime};
 use sequencer::app;
 
-use super::constants::UI_ENTRYPOINT_PATH;
+use super::constants::ui_entrypoint_path;
 use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
@@ -41,9 +41,7 @@ pub(crate) fn create_editor_with_user_init_path(
     // The checked-in UI modules contain intentional module-local bare names
     // and historical alias declarations. Authored instruments/effects/scripts
     // stay outside this exclusion and are always preflighted.
-    runtime.exclude_module_alias_scan_root(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"),
-    );
+    runtime.exclude_module_alias_scan_root(sequencer::app_paths::app_paths().ui_dir());
     let (factory_init_source, factory_init_path) = read_eseqlisp_factory_init_source();
     let mut editor = Editor::new(
         runtime,
@@ -55,17 +53,19 @@ pub(crate) fn create_editor_with_user_init_path(
     );
 
     reload_custom_instrument_ui(&mut editor);
-    let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+    let ui_entrypoint = ui_entrypoint_path();
+    let _ = editor.open_or_create_file_buffer(&ui_entrypoint);
     let grid_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
     let report = editor.runtime_mut().eval_source_transactional(
-        Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+        Some(ui_entrypoint.clone()),
         &grid_source,
         overlays,
     );
     if !report.success {
         return Err(format!(
-            "failed to load {UI_ENTRYPOINT_PATH}: {}",
+            "failed to load {}: {}",
+            ui_entrypoint.display(),
             report.failure_message()
         )
         .into());

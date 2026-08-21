@@ -2284,7 +2284,7 @@ impl App {
             Ok(_) => None,
             Err(error) => Some(error),
         };
-        let browser_tree = BrowserNode::scan_root("samples");
+        let browser_tree = BrowserNode::scan_root(crate::app_paths::app_paths().samples_dir());
 
         let mut app = Self {
             state,
@@ -3301,7 +3301,11 @@ impl App {
         match previous_source {
             Some(source) => crate::lisp_host::save_instrument(name, source)
                 .map_err(|error| format!("Failed to restore instrument '{}': {error}", name)),
-            None => std::fs::remove_file(format!("instruments/{name}.lisp"))
+            None => std::fs::remove_file(
+                crate::app_paths::app_paths()
+                    .user_instruments_dir()
+                    .join(format!("{name}.lisp")),
+            )
                 .or_else(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         Ok(())
