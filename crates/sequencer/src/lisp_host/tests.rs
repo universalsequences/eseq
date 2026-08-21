@@ -8572,6 +8572,47 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_surface_fast_route_word_retimes_one_route_conditionally() {
+        let mut rt = jaki_runtime();
+        // track 0 plays the pattern straight; track 1 doubles up every other
+        // cycle via the (fast (cyc …)) route word. Per-pattern threading state
+        // keeps the two routes from fighting over the shared cycle counter.
+        rt.eval(
+            r#"(jak "snare" :16
+                 . . - .
+                 -> 0
+                 -> 1 (fast (cyc 1 2)))"#,
+        )
+        .expect("jaki surface macro");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        // two 5-unit cycles of the base pattern = 2.5 beats
+        generators.process_block(
+            0.0,
+            2.5,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        let count = |t: usize| out.iter().filter(|e| e.event.track == Some(t)).count();
+                assert_eq!(count(0), 10);
+        // fast route: cycle 0 matches the straight route, cycle 1 is denser
+        let cycle_boundary = 66_000; // cycle 0 spans samples 12k..=60k (first boundary at 0.25 beats)
+        let t1_times: Vec<u64> = out
+            .iter()
+            .filter(|e| e.event.track == Some(1))
+            .map(|e| e.sample_time)
+            .collect();
+        let t1_first = t1_times.iter().filter(|t| **t < cycle_boundary).count();
+        assert_eq!(t1_first, 5, "track1 sample times: {t1_times:?}");
+        assert!(count(1) > count(0), "fast cycle should add events");
+    }
+
+    #[test]
     fn jaki_surface_vel_route_word_scales_velocity() {
         let mut rt = jaki_runtime();
         rt.eval(r#"(jak "soft" :16 . . . . -> 0 (vel 0.5))"#)

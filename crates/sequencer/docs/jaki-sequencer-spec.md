@@ -474,6 +474,9 @@ macro; `jaki/run` in the library interprets the body:
 - Route words map onto the existing pattern functions: `left`/`right`
   (hand filter), `accent` (accent filter), `rev`/`stac`/`ghost`/`swap`,
   `(shift n)`, `(rot n)`, `(trunc n)`, `(every n t)`, `(for-hand h t)`,
+  `(fast n)` / `(slow n)` (retime just this route; `n` may be `(cyc …)` for
+  conditional retiming — threading state is keyed per pattern id so routes
+  with different cycle structures don't fight over the shared cells),
   and emission options `(vel s)` (`:vel-scale`) and `(note n)`. Unknown
   words are ignored.
 - Multi-voice: when the first body element is a list containing a top-level

@@ -23,7 +23,7 @@
 (module jaki)
 
 (export pat from-list xform rev rot trunc every stac ghost swap
-        shift filter for-hand
+        shift filter for-hand fast slow
         eval-at eval-cycle cycle-length locate cycle-index
         default-state mk-state
         init emit emit* reset
@@ -170,6 +170,15 @@
     :figs (map (lambda (f) (merge f :xf (append (get f :xf) (list (norm-xf t)))))
                (get p :figs))
     :id (str (get p :id) "|xf:" (source t))))
+
+;; retime every figure: (fast p 2), (slow p (cyc 1 2)) — n is raw per-cycle
+;; argument data, same as a figure's own (* n)/(/ n) time-mod
+(def retime (p mode n)
+  (merge p
+    :figs (map (lambda (f) (merge f :tm (list mode n))) (get p :figs))
+    :id (str (get p :id) "|tm:" (source (list mode n)))))
+(def fast (p n) (retime p :fast n))
+(def slow (p n) (retime p :slow n))
 
 (def rev (p) (xform p 'rev))
 (def rot (p n) (xform p (list 'rot n)))
@@ -723,36 +732,43 @@
 (def b->n (b) (if b 1 0))
 (def n->b (n) (not (= n 0)))
 
-(def load-state ()
-  (mk-state (state-get "jaki-vel" 0.8)
-            (n->b (state-get "jaki-pwd" 0))
-            (state-get "jaki-streak" 0)))
+;; Threading state cells are keyed per pattern id: derived route patterns can
+;; disagree about cycle structure (per-route fast/slow, trunc), and sharing
+;; cells would make them fight over "which cycle are we in" every tick.
+;; Structurally identical patterns thread to identical values independently.
+(def cell (p name) (str name ":" (get p :id)))
 
-(def store-state (c hand st)
-  (do (state-set! "jaki-cycle" c)
-      (state-set! "jaki-hand" (hand->n hand))
-      (state-set! "jaki-vel" (get st :cur))
-      (state-set! "jaki-pwd" (b->n (get st :pwd)))
-      (state-set! "jaki-streak" (get st :streak))
+(def load-state (p)
+  (mk-state (state-get (cell p "jaki-vel") 0.8)
+            (n->b (state-get (cell p "jaki-pwd") 0))
+            (state-get (cell p "jaki-streak") 0)))
+
+(def store-state (p c hand st)
+  (do (state-set! (cell p "jaki-cycle") c)
+      (state-set! (cell p "jaki-hand") (hand->n hand))
+      (state-set! (cell p "jaki-vel") (get st :cur))
+      (state-set! (cell p "jaki-pwd") (b->n (get st :pwd)))
+      (state-set! (cell p "jaki-streak") (get st :streak))
       nil))
 
 (def roll-state (p from to)
   (if (>= from to)
       nil
-      (let ((r (eval-cycle p from (n->hand (state-get "jaki-hand" 0)) (load-state))))
-        (do (store-state (+ from 1) (get r :end-hand) (get r :end-st))
+      (let ((r (eval-cycle p from (n->hand (state-get (cell p "jaki-hand") 0))
+                           (load-state p))))
+        (do (store-state p (+ from 1) (get r :end-hand) (get r :end-st))
             (roll-state p (+ from 1) to)))))
 
 ;; advance the threaded hand/velocity state to cycle c: contiguous advances
 ;; roll the ending state forward; jumps (transport relocation, generator
 ;; reset) restart from defaults — cycle indexing itself stays closed-form
 (def ensure-state (p c)
-  (let ((stored (state-get "jaki-cycle" -1)))
+  (let ((stored (state-get (cell p "jaki-cycle") -1)))
     (if (= stored c)
         nil
         (if (and (>= stored 0) (> c stored) (<= (- c stored) 8))
             (roll-state p stored c)
-            (store-state c :left default-state)))))
+            (store-state p c :left default-state)))))
 
 ;; idempotent per-tick setup: record the beat length of one unit
 (def init (res) (do (state-set! "jaki-unit" (beats res)) nil))
@@ -792,7 +808,8 @@
     (let ((loc (locate p tick)))
       (let ((c (first loc)) (cstart (nth loc 1)))
         (do (ensure-state p c)
-            (let ((r (eval-cycle p c (n->hand (state-get "jaki-hand" 0)) (load-state))))
+            (let ((r (eval-cycle p c (n->hand (state-get (cell p "jaki-hand") 0))
+                                 (load-state p))))
               (emit-window (get r :events) (- tick cstart) track opts)))))))
 
 (def emit (p track) (emit* p track (dict)))
@@ -806,6 +823,7 @@
 ;; `track word…`. Route words:
 ;;   left right accent rev stac ghost swap
 ;;   (shift n) (rot n) (trunc n) (every n t) (for-hand h t)
+;;   (fast n) (slow n) — n may be (cyc …) for conditional retiming
 ;;   (vel s) (note n)
 ;; Multi-voice: when the first body element is a list containing a top-level
 ;; `->`, every element is one voice line with its own pattern and routes.
@@ -831,6 +849,8 @@
       'rot    (merge acc :p (rot (get acc :p) (nth args 0)))
       'trunc  (merge acc :p (trunc (get acc :p) (nth args 0)))
       'shift  (merge acc :p (shift (get acc :p) (nth args 0)))
+      'fast   (merge acc :p (fast (get acc :p) (nth args 0)))
+      'slow   (merge acc :p (slow (get acc :p) (nth args 0)))
       'every  (merge acc :p (every (get acc :p) (nth args 0) (nth args 1)))
       'for-hand (merge acc :p (for-hand (get acc :p) (nth args 0) (nth args 1)))
       'vel    (merge acc :opts (merge (get acc :opts) :vel-scale (nth args 0)))
