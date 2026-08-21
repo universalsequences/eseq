@@ -23,7 +23,7 @@ mod worker;
 #[allow(unused_imports)]
 use {
     clock::*, enqueue::*, geometry::*, lookahead::*, midi_fx::*, params::*, process::*, roll::*,
-    runtime::*, worker::reconcile_playing_topology_change,
+    runtime::*, worker::{reconcile_playing_topology_change, topology_edit_frontier_drained},
 };
 
 pub use worker::spawn_scheduler_thread;

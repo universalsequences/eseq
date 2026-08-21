@@ -2083,6 +2083,18 @@
         );
     }
 
+    fn assert_event_compatible_topology_publish(
+        app: &App,
+        pattern_epoch_before: u64,
+        topology_epoch_before: u64,
+        context: &str,
+    ) {
+        let snapshot = app.state.latest_scheduler_snapshot();
+        assert_eq!(snapshot.transport.pattern_epoch, pattern_epoch_before, "{context}");
+        assert_eq!(snapshot.transport.topology_epoch, topology_epoch_before + 1, "{context}");
+        assert_published_epochs_are_live(app, context);
+    }
+
     #[test]
     fn mixed_track_additions_publish_one_additive_topology_without_pattern_epoch_churn() {
         let graph = TestLiveGraph::new("additive-track-topology-publish-test");
@@ -2150,21 +2162,33 @@
     }
 
     #[test]
-    fn rack_slot_edits_publish_the_bumped_transport_epochs() {
+    fn rack_slot_edits_preserve_queued_event_epochs() {
         let graph = TestLiveGraph::new("rack-slot-epoch-publish-test");
         let mut app = test_app_with_track_count(&graph, 0);
         let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("one-slot rack should load");
+        app.state.transport.playing.store(true, Ordering::Relaxed);
+        app.state.publish_scheduler_snapshot();
+
+        let mut pattern_epoch_before = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let mut topology_epoch_before = app.state.transport.topology_epoch.load(Ordering::Relaxed);
         app.apply_recorded_rack_slot_add(0, "Add rack sample", |app| {
             app.graph_controller().add_sampler_slot_to_rack(0, sample)
         })
         .expect("second sampler slot should append");
-        assert_published_epochs_are_live(&app, "rack slot append");
+        assert_event_compatible_topology_publish(
+            &app,
+            pattern_epoch_before,
+            topology_epoch_before,
+            "rack slot append",
+        );
 
         // The drag-drop audition path: dropping a sample onto an occupied
         // rack slot replaces that layer's source.
+        pattern_epoch_before = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
+        topology_epoch_before = app.state.transport.topology_epoch.load(Ordering::Relaxed);
         app.apply_recorded_rack_slot_source_replacement(
             0,
             1,
@@ -2175,12 +2199,52 @@
             },
         )
         .expect("rack slot should take the dropped sample");
-        assert_published_epochs_are_live(&app, "rack slot sample replacement");
+        assert_event_compatible_topology_publish(
+            &app,
+            pattern_epoch_before,
+            topology_epoch_before,
+            "rack slot sample replacement",
+        );
 
+        pattern_epoch_before = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
+        topology_epoch_before = app.state.transport.topology_epoch.load(Ordering::Relaxed);
         app.graph_controller()
             .delete_rack_slot(0, 1)
             .expect("rack slot should delete cleanly");
-        assert_published_epochs_are_live(&app, "rack slot delete");
+        assert_event_compatible_topology_publish(
+            &app,
+            pattern_epoch_before,
+            topology_epoch_before,
+            "rack slot delete",
+        );
+
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "rack-append-custom".to_string(),
+            source: "rack-append-custom.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        pattern_epoch_before = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
+        topology_epoch_before = app.state.transport.topology_epoch.load(Ordering::Relaxed);
+        app.graph_controller()
+            .add_custom_slot_to_rack(
+                0,
+                "rack-append-custom",
+                engine_id,
+                &manifest,
+                &lib,
+                CustomInstrumentRunMode::Instrument,
+            )
+            .expect("custom rack slot should append");
+        assert_event_compatible_topology_publish(
+            &app,
+            pattern_epoch_before,
+            topology_epoch_before,
+            "custom rack slot append",
+        );
         graph.process_block();
     }
 

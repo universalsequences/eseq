@@ -642,11 +642,11 @@ pub(in crate::audio) fn sync_free_patch_transport_routes(data: &mut AudioCallbac
     }
 }
 
-/// Make newly published tracks visible without disturbing voices or events on
-/// tracks that were already live. Additions only append runtime slots, so the
-/// destructive reset required by compaction and in-place rewrites is neither
-/// necessary nor musically correct.
-pub(in crate::audio) fn extend_audio_runtime_for_track_topology(
+/// Reconcile an event-compatible topology publication without disturbing
+/// voices or queued events. Track appends initialize only new pools; rack slot
+/// changes resync their route-backed pools while every existing track keeps
+/// its callback-local voice and transport state.
+pub(in crate::audio) fn reconcile_event_compatible_topology(
     data: &mut AudioCallbackData,
     num_tracks: usize,
     topology_epoch: u64,
@@ -666,13 +666,186 @@ pub(in crate::audio) fn extend_audio_runtime_for_track_topology(
     sync_rack_voice_pools(data, num_tracks);
     data.last_num_tracks = num_tracks;
     data.last_topology_epoch = topology_epoch;
+    data.pending_topology_delete_track = None;
+}
+
+pub(in crate::audio) fn remap_route_after_track_delete(
+    route: usize,
+    deleted_track: usize,
+) -> Option<usize> {
+    if route < MAX_TRACKS {
+        return match route.cmp(&deleted_track) {
+            std::cmp::Ordering::Less => Some(route),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(route - 1),
+        };
+    }
+    let offset = route - MAX_TRACKS;
+    let route_track = offset / MAX_RACK_SLOTS;
+    let slot = offset % MAX_RACK_SLOTS;
+    match route_track.cmp(&deleted_track) {
+        std::cmp::Ordering::Less => Some(route),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => rack_slot_pool_index(route_track - 1, slot),
+    }
+}
+
+fn remap_track_index_after_delete(track: &mut usize, deleted_track: usize) -> bool {
+    match (*track).cmp(&deleted_track) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Equal => false,
+        std::cmp::Ordering::Greater => {
+            *track -= 1;
+            true
+        }
+    }
+}
+
+fn remap_scheduled_event_after_track_delete(
+    event: &mut ScheduledEvent,
+    deleted_track: usize,
+    pattern_epoch: u64,
+) -> bool {
+    let keep = match &mut event.kind {
+        ScheduledEventKind::ResolvedTrigger { track, .. }
+        | ScheduledEventKind::InstrumentParams { track, .. }
+        | ScheduledEventKind::EffectParams { track, .. } => {
+            remap_track_index_after_delete(track, deleted_track)
+        }
+        ScheduledEventKind::NetworkTrigger { track, seed, .. } => {
+            if let Some((seed_track, _)) = seed {
+                if !remap_track_index_after_delete(seed_track, deleted_track) {
+                    *seed = None;
+                }
+            }
+            remap_track_index_after_delete(track, deleted_track)
+        }
+    };
+    if keep {
+        event.pattern_epoch = pattern_epoch;
+    }
+    keep
+}
+
+fn reconcile_audio_runtime_after_track_delete(
+    data: &mut AudioCallbackData,
+    deleted_track: usize,
+    num_tracks: usize,
+    topology_epoch: u64,
+) {
+    // The scheduler drained its old-index horizon before authorizing deletion.
+    // Callback-local swing delays and gate-offs can legitimately extend past
+    // that frontier, so reindex survivors rather than throwing them away.
+    let pattern_epoch = data.scheduler_snapshot.transport.pattern_epoch;
+    data.countdown_events.retain_mut(|event| {
+        let keep = match &mut event.kind {
+            CountdownEventKind::Scheduled(scheduled) => {
+                remap_scheduled_event_after_track_delete(
+                    scheduled,
+                    deleted_track,
+                    pattern_epoch,
+                )
+            }
+            CountdownEventKind::GateOff(gate_off) => {
+                remap_track_index_after_delete(&mut gate_off.track_idx, deleted_track)
+            }
+            CountdownEventKind::Chop(chop) => {
+                remap_track_index_after_delete(&mut chop.track_idx, deleted_track)
+            }
+        };
+        if keep {
+            event.pattern_epoch = pattern_epoch;
+        }
+        keep
+    });
+    data.block_events.clear();
+
+    for pool in &mut data.custom_engine_pools {
+        for voice in &mut pool.voices[..pool.num_voices] {
+            match voice.assigned_track.map(|track| track.cmp(&deleted_track)) {
+                Some(std::cmp::Ordering::Equal) => {
+                    if voice.active {
+                        let seq = next_event_sequence_from(&mut data.event_seq);
+                        unsafe { send_custom_note_off(data.lg.0, voice.logical_id, 0, seq) };
+                    }
+                    voice.active = false;
+                    voice.release_started_sample = None;
+                    voice.assigned_track = None;
+                    voice.assigned_route = None;
+                }
+                Some(std::cmp::Ordering::Greater) => {
+                    voice.assigned_track = voice.assigned_track.map(|track| track - 1);
+                    voice.assigned_route = voice
+                        .assigned_route
+                        .and_then(|route| remap_route_after_track_delete(route, deleted_track));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for track in deleted_track..num_tracks {
+        data.voice_pools.swap(track, track + 1);
+        data.active_keyboard_notes.swap(track, track + 1);
+        data.rack_choke_last_trigger.swap(track, track + 1);
+        for slot in 0..MAX_RACK_SLOTS {
+            let current = rack_slot_pool_index(track, slot).expect("validated rack pool");
+            let next = rack_slot_pool_index(track + 1, slot).expect("validated rack pool");
+            data.voice_pools.swap(current, next);
+        }
+    }
+    data.voice_pools[num_tracks].reset();
+    data.active_keyboard_notes[num_tracks] = [None; MAX_VOICES];
+    data.rack_choke_last_trigger[num_tracks] = u64::MAX;
+    for track in 0..num_tracks {
+        for note in data.active_keyboard_notes[track].iter_mut().flatten() {
+            for voice in &mut note.voices[..note.voice_count as usize] {
+                if let ActiveKeyboardVoiceTarget::Sampler { pool_id } = &mut voice.target {
+                    if let Some(remapped) = remap_route_after_track_delete(*pool_id, deleted_track) {
+                        *pool_id = remapped;
+                    }
+                }
+            }
+        }
+    }
+    for slot in 0..MAX_RACK_SLOTS {
+        let retired = rack_slot_pool_index(num_tracks, slot).expect("validated rack pool");
+        data.voice_pools[retired].reset();
+    }
+
+    for track in 0..num_tracks {
+        sync_sampler_voice_pool(&data.state, track, &mut data.voice_pools[track]);
+        if let Some(engine_id) = track_engine_id(&data.state, track) {
+            sync_custom_engine_pool(
+                &data.state,
+                engine_id,
+                &mut data.custom_engine_pools[engine_id],
+            );
+        }
+    }
+    sync_rack_voice_pools(data, num_tracks);
+    data.pending_accum_reset = [true; MAX_TRACKS];
+    data.last_num_tracks = num_tracks;
+    data.last_topology_epoch = topology_epoch;
+    data.free_patch_transport_routes = [FreePatchTransportRouteState::default(); MAX_TRACKS];
+    data.last_pattern = u32::MAX;
 }
 
 pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
     data: &mut AudioCallbackData,
     num_tracks: usize,
     topology_epoch: u64,
+    deleted_track: Option<usize>,
 ) {
+    if let Some(deleted_track) = deleted_track.filter(|track| *track <= num_tracks) {
+        reconcile_audio_runtime_after_track_delete(
+            data,
+            deleted_track,
+            num_tracks,
+            topology_epoch,
+        );
+        return;
+    }
     // Topology edits can invalidate the per-track gate-off bookkeeping for
     // already-ringing custom voices. Explicitly send gate-off to every live
     // custom engine voice before resetting callback-local state so notes do
@@ -706,9 +879,12 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
     data.event_seq = 0;
     data.last_num_tracks = num_tracks;
     data.last_topology_epoch = topology_epoch;
+    data.pending_topology_delete_track = None;
     data.last_playing = false;
-    data.host_clock_was_playing = false;
-    data.host_clock_play_start_sample = data.rendered_samples.load(Ordering::Acquire);
+    // Topology teardown deliberately does not touch host_transport_clock.
+    // Clock phase belongs to the continuously running transport; resetting its
+    // anchor here leaves every clock-driven existing instrument out of phase
+    // until the user restarts playback.
     data.free_patch_transport_routes = [FreePatchTransportRouteState::default(); MAX_TRACKS];
     data.last_pattern = u32::MAX;
 

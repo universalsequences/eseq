@@ -133,25 +133,12 @@ pub(super) fn compute_host_transport_clock(
     data: &mut AudioCallbackData,
     block_start_sample: u64,
 ) -> HostTransportClock {
-    let playing = data.state.transport.playing.load(Ordering::Relaxed);
-    if playing && !data.host_clock_was_playing {
-        data.host_clock_play_start_sample = block_start_sample;
-    }
-    if !playing && data.host_clock_was_playing {
-        data.host_clock_play_start_sample = block_start_sample;
-    }
-    data.host_clock_was_playing = playing;
-
-    let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
-    let samples_per_bar = data.sample_rate * 240.0 / bpm;
-    let elapsed_samples = block_start_sample.saturating_sub(data.host_clock_play_start_sample);
-    let bar_phase = (elapsed_samples as f64 / samples_per_bar).fract() as f32;
-    let bar_phase_increment = (1.0 / samples_per_bar) as f32;
-
-    HostTransportClock {
-        bar_phase,
-        bar_phase_increment,
-    }
+    data.host_transport_clock.sample(
+        data.state.transport.playing.load(Ordering::Relaxed),
+        block_start_sample,
+        data.sample_rate,
+        data.state.transport.bpm.load(Ordering::Relaxed),
+    )
 }
 
 pub(super) fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, clock: HostTransportClock) {

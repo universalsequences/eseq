@@ -88,6 +88,36 @@ impl ActiveKeyboardNote {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct HostTransportClockRuntime {
+    was_playing: bool,
+    play_start_sample: u64,
+}
+
+impl HostTransportClockRuntime {
+    pub(super) fn sample(
+        &mut self,
+        playing: bool,
+        block_start_sample: u64,
+        sample_rate: f64,
+        bpm: u32,
+    ) -> HostTransportClock {
+        // Only an actual transport edge may move the phase anchor. Graph and
+        // track topology have a separate lifecycle and must never restart it.
+        if playing != self.was_playing {
+            self.play_start_sample = block_start_sample;
+        }
+        self.was_playing = playing;
+
+        let samples_per_bar = sample_rate * 240.0 / bpm.max(1) as f64;
+        let elapsed_samples = block_start_sample.saturating_sub(self.play_start_sample);
+        HostTransportClock {
+            bar_phase: (elapsed_samples as f64 / samples_per_bar).fract() as f32,
+            bar_phase_increment: (1.0 / samples_per_bar) as f32,
+        }
+    }
+}
+
 pub(super) struct AudioCallbackData {
     pub(super) lg: LiveGraphPtr,
     pub(super) state: Arc<SequencerState>,
@@ -107,8 +137,8 @@ pub(super) struct AudioCallbackData {
     pub(super) last_pattern: u32,
     pub(super) last_num_tracks: usize,
     pub(super) last_topology_epoch: u64,
-    pub(super) host_clock_was_playing: bool,
-    pub(super) host_clock_play_start_sample: u64,
+    pub(super) pending_topology_delete_track: Option<usize>,
+    pub(super) host_transport_clock: HostTransportClockRuntime,
     pub(super) free_patch_transport_routes: [FreePatchTransportRouteState; MAX_TRACKS],
     /// Sample at which each track last fired a drum rack v2 choke trigger,
     /// `u64::MAX` for never. Two pads of one choke group hit on the same frame

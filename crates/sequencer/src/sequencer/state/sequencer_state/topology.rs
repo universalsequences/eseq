@@ -34,11 +34,11 @@ impl SequencerState {
         request_id
     }
 
-    /// Commit an additive track topology change as one scheduler-visible
-    /// publication. Existing track pattern data did not change, so its epoch
-    /// deliberately remains stable: already-queued events stay valid while
-    /// the scheduler starts including the new lane at its current frontier.
-    pub fn publish_additive_track_topology(&self) -> Arc<SequencerSnapshot> {
+    /// Commit a scheduler-event-compatible topology change as one publication.
+    /// Appending tracks or changing rack slots does not alter the meaning of
+    /// queued triggers for existing track indices, so the pattern epoch stays
+    /// stable and those events remain valid against the newly published graph.
+    pub fn publish_event_compatible_topology(&self) -> Arc<SequencerSnapshot> {
         self.transport
             .topology_epoch
             .fetch_add(1, Ordering::Relaxed);

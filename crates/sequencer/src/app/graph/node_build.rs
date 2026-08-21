@@ -373,7 +373,7 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.latch_track_created_during_song_playback(idx);
-        self.app.state.publish_additive_track_topology();
+        self.app.state.publish_event_compatible_topology();
         Ok(())
     }
 

@@ -122,19 +122,9 @@ impl GraphController<'_> {
             .state
             .append_rack_slot_for_all_pattern_snapshots(track_idx, rack_slot);
         self.refresh_rack_signature_from_live_state(track_idx);
-        self.app
-            .state
-            .transport
-            .topology_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app
-            .state
-            .transport
-            .pattern_epoch
-            .fetch_add(1, Ordering::Relaxed);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        self.app.state.publish_scheduler_snapshot();
+        self.app.state.publish_event_compatible_topology();
         Ok(slot_idx)
     }
 
@@ -201,21 +191,7 @@ impl GraphController<'_> {
         self.app.set_rack_selected_slot(track_idx, next_selection);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        // Both epochs advance before the publish: the scheduler stamps queued
-        // events with snapshot.pattern_epoch while the audio callback rejects
-        // events against the live atomic epoch, so a snapshot carrying the
-        // pre-bump epoch silences *every* track until something republishes.
-        self.app
-            .state
-            .transport
-            .topology_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app
-            .state
-            .transport
-            .pattern_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app.state.publish_scheduler_snapshot();
+        self.app.state.publish_event_compatible_topology();
         self.app.push_all_restored_defaults();
         Ok(())
     }
@@ -320,19 +296,9 @@ impl GraphController<'_> {
             .state
             .append_rack_slot_for_all_pattern_snapshots(track_idx, rack_slot);
         self.refresh_rack_signature_from_live_state(track_idx);
-        self.app
-            .state
-            .transport
-            .topology_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app
-            .state
-            .transport
-            .pattern_epoch
-            .fetch_add(1, Ordering::Relaxed);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        self.app.state.publish_scheduler_snapshot();
+        self.app.state.publish_event_compatible_topology();
         Ok(slot_idx)
     }
 
@@ -381,21 +347,7 @@ impl GraphController<'_> {
         self.app.set_rack_selected_slot(track_idx, slot_idx);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
-        // Both epochs advance before the publish: the scheduler stamps queued
-        // events with snapshot.pattern_epoch while the audio callback rejects
-        // events against the live atomic epoch, so a snapshot carrying the
-        // pre-bump epoch silences *every* track until something republishes.
-        self.app
-            .state
-            .transport
-            .topology_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app
-            .state
-            .transport
-            .pattern_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app.state.publish_scheduler_snapshot();
+        self.app.state.publish_event_compatible_topology();
         self.app.push_all_restored_defaults();
         Ok(())
     }

@@ -6,7 +6,7 @@
         resolve_instrument_plocks,
         reconcile_playing_topology_change, resolve_sampler_params, resolve_track_send_params,
         resolved_slot_param_value, run_midi_fx_chain_for_track, schedule_playing_lookahead,
-        should_reload_neural_runtime,
+        should_reload_neural_runtime, topology_edit_frontier_drained,
         swing_delay_samples_from_quarter, swung_network_sample_time,
         track_active_note_spans_at_beat,
         track_note_spans_for_trigger, EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent,
@@ -137,6 +137,13 @@
     }
 
     #[test]
+    fn topology_delete_waits_for_existing_lookahead_frontier() {
+        assert!(!topology_edit_frontier_drained(11_999, 12_000));
+        assert!(topology_edit_frontier_drained(12_000, 12_000));
+        assert!(topology_edit_frontier_drained(12_001, 12_000));
+    }
+
+    #[test]
     fn additive_track_topology_preserves_existing_lookahead_and_schedules_new_lane() {
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(
@@ -185,7 +192,7 @@
             );
             let old_frontier = first.scheduled_until_sample;
 
-            let added = state.publish_additive_track_topology();
+            let added = state.publish_event_compatible_topology();
             assert_eq!(
                 added.transport.pattern_epoch, initial.transport.pattern_epoch,
                 "an additive topology publication must keep queued event epochs valid"

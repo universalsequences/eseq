@@ -14,7 +14,8 @@ use super::{
     for_each_custom_voice_route_update,
     free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
     instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
-    mute_group_winner_for_block_events, resolve_live_instrument_defaults,
+    mute_group_winner_for_block_events, remap_route_after_track_delete,
+    resolve_live_instrument_defaults,
     resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
     resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
     select_output_channels, select_output_config, store_active_keyboard_note,
@@ -22,12 +23,50 @@ use super::{
     ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
     BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
     FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
-    MetronomeState, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
-    FALLBACK_SAMPLE_RATE,
+    HostTransportClockRuntime, MetronomeState, OutputDeviceConfig, OutputFormatRange,
+    RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
 use crate::sequencer::MAX_TRACKS;
 use crate::analysis::{pack_ptr, OnsetTableShared};
+
+#[test]
+fn host_transport_clock_anchor_changes_only_on_transport_edges() {
+    let mut clock = HostTransportClockRuntime::default();
+    let started = clock.sample(true, 4_800, 48_000.0, 120);
+    assert_eq!(started.bar_phase, 0.0);
+
+    let before_topology_change = clock.sample(true, 52_800, 48_000.0, 120);
+    assert!((before_topology_change.bar_phase - 0.5).abs() < 1.0e-6);
+
+    // Track publication and graph rebuilding happen between these callback
+    // samples, but do not represent a transport edge. Keeping `playing=true`
+    // must therefore continue from the original sample anchor.
+    let after_topology_change = clock.sample(true, 76_800, 48_000.0, 120);
+    assert!((after_topology_change.bar_phase - 0.75).abs() < 1.0e-6);
+
+    let stopped = clock.sample(false, 80_000, 48_000.0, 120);
+    assert_eq!(stopped.bar_phase, 0.0);
+    let restarted = clock.sample(true, 90_000, 48_000.0, 120);
+    assert_eq!(restarted.bar_phase, 0.0);
+}
+
+#[test]
+fn track_delete_remaps_flat_and_rack_custom_routes_without_touching_survivors() {
+    assert_eq!(remap_route_after_track_delete(1, 2), Some(1));
+    assert_eq!(remap_route_after_track_delete(2, 2), None);
+    assert_eq!(remap_route_after_track_delete(3, 2), Some(2));
+
+    let before = crate::sequencer::rack_slot_pool_index(1, 4).unwrap();
+    let deleted = crate::sequencer::rack_slot_pool_index(2, 4).unwrap();
+    let shifted = crate::sequencer::rack_slot_pool_index(3, 4).unwrap();
+    assert_eq!(remap_route_after_track_delete(before, 2), Some(before));
+    assert_eq!(remap_route_after_track_delete(deleted, 2), None);
+    assert_eq!(
+        remap_route_after_track_delete(shifted, 2),
+        crate::sequencer::rack_slot_pool_index(2, 4),
+    );
+}
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
     ParamScaling, TensorParamDescriptor,

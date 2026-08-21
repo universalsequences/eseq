@@ -20,7 +20,6 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     // Reading live num_tracks/epochs independently can observe the middle of
     // an add-track publication and clear valid events before the scheduler can
     // possibly have produced replacements.
-    let previous_pattern_epoch = data.scheduler_snapshot.transport.pattern_epoch;
     let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
     if scheduler_snapshot_version != data.scheduler_snapshot_version {
         data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
@@ -29,12 +28,14 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let num_tracks = data.scheduler_snapshot.transport.num_tracks;
     let topology_epoch = data.scheduler_snapshot.transport.topology_epoch;
     if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {
-        let additive_growth = num_tracks > data.last_num_tracks
-            && data.scheduler_snapshot.transport.pattern_epoch == previous_pattern_epoch;
+        // A non-compacting topology keeps existing track indices stable. Even
+        // when one track's instrument changed (and therefore its pattern epoch
+        // advanced), callback runtime for every unaffected track remains valid.
+        let non_compacting = num_tracks >= data.last_num_tracks;
         if data.trace_audio {
             eprintln!(
                 "audio-trace: topology {} tracks {}->{} epoch {}->{} rendered_samples={}",
-                if additive_growth { "extend" } else { "reset" },
+                if non_compacting { "reconcile" } else { "reset" },
                 data.last_num_tracks,
                 num_tracks,
                 data.last_topology_epoch,
@@ -43,16 +44,29 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             );
             data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
         }
-        if additive_growth {
-            extend_audio_runtime_for_track_topology(data, num_tracks, topology_epoch);
+        if non_compacting {
+            reconcile_event_compatible_topology(data, num_tracks, topology_epoch);
         } else {
-            reset_audio_runtime_for_track_topology(data, num_tracks, topology_epoch);
+            let deleted_track = (data.last_num_tracks.checked_sub(num_tracks) == Some(1))
+                .then(|| data.pending_topology_delete_track.take())
+                .flatten();
+            reset_audio_runtime_for_track_topology(
+                data,
+                num_tracks,
+                topology_epoch,
+                deleted_track,
+            );
         }
     }
     if data.state.topology_edit_in_flight() {
-        data.scheduled_events.clear();
-        clear_countdown_events(data);
-        data.event_seq = 0;
+        let track = data
+            .state
+            .transport
+            .topology_edit_track
+            .load(Ordering::Acquire) as usize;
+        if track < MAX_TRACKS {
+            data.pending_topology_delete_track = Some(track);
+        }
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;

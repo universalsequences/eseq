@@ -12,10 +12,10 @@ use super::*;
 /// transport simply starts this much later; nothing is skipped or doubled.
 const ROLL_PLAY_START_HOLD: Duration = Duration::from_millis(50);
 
-/// Reconcile a topology publication without throwing away valid lookahead for
-/// a pure append. Destructive changes still rebuild from the render head, but
-/// an added track starts at the existing scheduling frontier while every event
-/// already queued for existing tracks remains sample-exact and audible.
+/// Reconcile a topology publication without throwing away valid lookahead
+/// when queued event meaning is unchanged. Track appends join at the current
+/// frontier and rack slot changes are resolved from the latest audio snapshot;
+/// destructive changes still rebuild from the render head.
 pub(super) fn reconcile_playing_topology_change<const CAPACITY: usize>(
     scheduler: &mut SchedulerLookaheadState,
     state: &Arc<SequencerState>,
@@ -26,9 +26,9 @@ pub(super) fn reconcile_playing_topology_change<const CAPACITY: usize>(
     previous_num_tracks: usize,
     previous_pattern_epoch: u64,
 ) {
-    let additive_growth = snapshot.transport.num_tracks > previous_num_tracks
+    let event_compatible = snapshot.transport.num_tracks >= previous_num_tracks
         && snapshot.transport.pattern_epoch == previous_pattern_epoch;
-    if additive_growth {
+    if event_compatible {
         for track in previous_num_tracks..snapshot.transport.num_tracks.min(MAX_TRACKS) {
             scheduler.pending_accum_reset[track] = true;
         }
@@ -50,6 +50,13 @@ pub(super) fn reconcile_playing_topology_change<const CAPACITY: usize>(
         .process_runtime
         .reset_transport(scheduler.clock.total_beats);
     state.set_neural_visualization(scheduler.neural_runtime.visualization_snapshot());
+}
+
+pub(super) fn topology_edit_frontier_drained(
+    rendered_sample: u64,
+    scheduled_until_sample: u64,
+) -> bool {
+    rendered_sample >= scheduled_until_sample
 }
 
 pub fn spawn_scheduler_thread(
@@ -494,27 +501,27 @@ pub fn spawn_scheduler_thread(
                     roll_play_hold = None;
                 }
 
-                if topology_edit_in_flight {
-                    queue.clear();
+                if topology_edit_in_flight && applied_edit < requested_edit {
+                    // Stop extending lookahead, but let the audio callback
+                    // consume everything already scheduled. The edit becomes
+                    // safe exactly at that frontier: no stale track indices
+                    // remain to clear, and playback reaches the handoff without
+                    // a scheduler-created hole.
                     lookahead_state.midi_fx_quantizer_state.reset();
                     lookahead_state.process_runtime.clear_scene_pending();
-                    // Freeze future scheduling while the topology edit is in
-                    // flight, but preserve the clock's current musical phase
-                    // so resuming after the edit does not jump backwards.
-                    scheduled_until_sample = rendered;
                     lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
-                    lookahead_state.neural_runtime.reset_state(lookahead_state.clock.total_beats);
-                    state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
+                    if !topology_edit_frontier_drained(rendered, scheduled_until_sample) {
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
                     if ready_edit < requested_edit {
                         state
                             .transport
                             .topology_edit_ready_id
                             .store(requested_edit, Ordering::Release);
                     }
-                    if applied_edit < requested_edit {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
                 }
 
                 if reset_all {
