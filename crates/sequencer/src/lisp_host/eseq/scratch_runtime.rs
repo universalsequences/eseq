@@ -235,6 +235,27 @@ pub fn load_process_library_source() -> String {
     }
 }
 
+pub fn load_jaki_library_source() -> String {
+    let path = crate::app_paths::app_paths().scripts_dir().join("sequencers/jaki.lisp");
+    match std::fs::read_to_string(&path) {
+        Ok(source) if source.trim().is_empty() => String::new(),
+        Ok(_) => {
+            // Evaluate through `load` so the module keeps its real source path
+            // for navigation; embedded fallback for packaged builds.
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            format!("(load {:?})", path.to_string_lossy())
+        }
+        Err(_) => {
+            let source = include_str!("../../../../../content/scripts/sequencers/jaki.lisp");
+            if source.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; embedded scripts/sequencers/jaki.lisp\n{source}\n")
+            }
+        }
+    }
+}
+
 pub(in crate::lisp_host) fn load_midi_fx_descriptors_from_source(source: String) -> Vec<EffectDescriptor> {
     if source.trim().is_empty() {
         return Vec::new();

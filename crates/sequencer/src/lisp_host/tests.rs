@@ -7979,6 +7979,438 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(out[0].sample_time, 192_000); // 4 beats * 48000 spq
     }
 
+    // ── jaki: pure-Lisp evaluator core + pattern surface + generator wiring ──
+    // (content/scripts/sequencers/jaki.lisp, spec docs/jaki-sequencer-spec.md,
+    // bead eseq-5k5)
+
+    fn jaki_runtime() -> ScratchControlRuntime {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        let library = super::load_jaki_library_source();
+        assert!(!library.trim().is_empty(), "jaki library source resolves");
+        runtime.eval(&library).expect("evaluate jaki library");
+        runtime
+    }
+
+    fn jaki_nums(value: &Value) -> Vec<f64> {
+        let Value::List(items) = value else {
+            panic!("expected a list of numbers, got {value:?}");
+        };
+        items
+            .iter()
+            .map(|cell| match &*cell.borrow() {
+                Value::Number(n) => *n,
+                other => panic!("expected number, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn jaki_eval_nums(runtime: &mut ScratchControlRuntime, code: &str) -> Vec<f64> {
+        let value = runtime.eval(code).expect("eval jaki snippet").expect("value");
+        jaki_nums(&value)
+    }
+
+    fn assert_close(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert!((a - e).abs() < 1e-6, "{actual:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
+    fn jaki_hand_derivation_alternates_dots_and_keeps_dash_hand() {
+        let mut rt = jaki_runtime();
+        // (. . - .) → hits L R L L R at unit offsets 0..4 (spec §6.1)
+        let hands = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - .)) 0 :left jaki/default-state)))
+                 (map (lambda (e) (if (= (get e :hand) :left) 0 1)) (get r :events)))"#,
+        );
+        assert_eq!(hands, vec![0.0, 1.0, 0.0, 0.0, 1.0]);
+        let offs = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - .)) 0 :left jaki/default-state)))
+                 (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                      (get r :events)))"#,
+        );
+        assert_eq!(offs, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn jaki_hands_derive_after_order_transforms() {
+        let mut rt = jaki_runtime();
+        // (rev) runs first, hands derive over the reversed events (spec §6.2):
+        // (- . .) → dash L,L then R, L
+        let hands = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - (rev))) 0 :left jaki/default-state)))
+                 (map (lambda (e) (if (= (get e :hand) :left) 0 1)) (get r :events)))"#,
+        );
+        assert_eq!(hands, vec![0.0, 0.0, 1.0, 0.0]);
+        let vels = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . - (rev))) 0 :left jaki/default-state)))
+                 (map (lambda (e) (get e :vel)) (get r :events)))"#,
+        );
+        // dash base, dash-decay, post-dash accent, then dot decay from the accent
+        assert_close(&vels, &[0.8, 0.72, 0.92, 0.782]);
+    }
+
+    #[test]
+    fn jaki_velocity_decays_and_threads_across_cycles() {
+        let mut rt = jaki_runtime();
+        let vels = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((p (jaki/pat '(. . . .))))
+                 (let ((r0 (jaki/eval-at p 0 :left jaki/default-state)))
+                   (let ((r1 (jaki/eval-at p 1 (get r0 :end-hand) (get r0 :end-st))))
+                     (append (map (lambda (e) (get e :vel)) (get r0 :events))
+                             (map (lambda (e) (get e :vel)) (get r1 :events))))))"#,
+        );
+        // dot streak decays straight through the cycle boundary, clamped at
+        // min-vel 0.3 (spec §5: no per-step reset)
+        assert_close(
+            &vels,
+            &[
+                0.8,
+                0.68,
+                0.578,
+                0.49130000000000007,
+                0.417605,
+                0.35496425,
+                0.30171961249999996,
+                0.3,
+            ],
+        );
+    }
+
+    #[test]
+    fn jaki_every_swap_exchanges_hands_on_matching_cycles() {
+        let mut rt = jaki_runtime();
+        let hands = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((p (jaki/pat '(. . (every 2 swap)))))
+                 (append
+                   (map (lambda (e) (if (= (get e :hand) :left) 0 1))
+                        (get (jaki/eval-at p 0 :left jaki/default-state) :events))
+                   (map (lambda (e) (if (= (get e :hand) :left) 0 1))
+                        (get (jaki/eval-at p 1 :left jaki/default-state) :events))))"#,
+        );
+        // (every 2 ...) fires when (cycle+1) % 2 == 0 → cycle 1 swaps
+        assert_eq!(hands, vec![0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn jaki_fit_produces_exact_rational_offsets() {
+        let mut rt = jaki_runtime();
+        // (. . . -)(% 4): five hits scaled by 4/5 (spec §8.3) — offsets are
+        // exact (num den) pairs, no float rounding
+        let pairs = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . . - (% 4))) 0 :left jaki/default-state)))
+                 (reduce (lambda (acc e)
+                           (append acc (list (nth (get e :off) 0) (nth (get e :off) 1))))
+                         (list) (get r :events)))"#,
+        );
+        assert_eq!(pairs, vec![0.0, 1.0, 4.0, 5.0, 8.0, 5.0, 12.0, 5.0, 16.0, 5.0]);
+        let len = jaki_eval_nums(
+            &mut rt,
+            r#"(get (jaki/eval-at (jaki/pat '(. . . - (% 4))) 0 :left jaki/default-state) :len)"#,
+        );
+        assert_eq!(len, vec![4.0, 1.0]);
+    }
+
+    #[test]
+    fn jaki_cyc_time_mod_alternates_per_cycle() {
+        let mut rt = jaki_runtime();
+        let offs = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((p (jaki/pat '(. . (* (cyc 1 2))))))
+                 (append
+                   (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                        (get (jaki/eval-at p 0 :left jaki/default-state) :events))
+                   (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                        (get (jaki/eval-at p 1 :left jaki/default-state) :events))))"#,
+        );
+        // cycle 0: two hits on the grid; cycle 1: (* 2) doubles density in the
+        // same two units
+        assert_eq!(offs, vec![0.0, 1.0, 0.0, 0.5, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn jaki_hand_filter_keeps_offsets_and_extends_gates_legato() {
+        let mut rt = jaki_runtime();
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/filter (jaki/pat '(. . - .)) '(:hand :left))
+                                      0 :left jaki/default-state)))
+                 (reduce (lambda (acc e)
+                           (append acc (list (/ (nth (get e :off) 0) (nth (get e :off) 1))
+                                             (/ (nth (get e :gate) 0) (nth (get e :gate) 1)))))
+                         (list) (get r :events)))"#,
+        );
+        // left-hand events at 0, 2, 3; gates run legato to the next survivor,
+        // the last to cycle end (spec §7)
+        assert_eq!(nums, vec![0.0, 2.0, 2.0, 1.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn jaki_accent_filter_extends_to_next_unfiltered_event() {
+        let mut rt = jaki_runtime();
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/filter (jaki/pat '(- .)) '(:accent true))
+                                      0 :left jaki/default-state)))
+                 (reduce (lambda (acc e)
+                           (append acc (list (/ (nth (get e :off) 0) (nth (get e :off) 1))
+                                             (/ (nth (get e :gate) 0) (nth (get e :gate) 1))
+                                             (get e :vel))))
+                         (list) (get r :events)))"#,
+        );
+        // only the post-dash dot is accented; its gate extends to cycle end
+        assert_close(&nums, &[2.0, 1.0, 0.92]);
+    }
+
+    #[test]
+    fn jaki_align_pad_threads_hand_and_velocity_through_padding() {
+        let mut rt = jaki_runtime();
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . . (align 4 :pad))) 0 :left jaki/default-state)))
+                 (append
+                   (map (lambda (e) (if (= (get e :hand) :left) 0 1)) (get r :events))
+                   (map (lambda (e) (get e :vel)) (get r :events))
+                   (list (/ (nth (get r :len) 0) (nth (get r :len) 1))
+                         (if (= (get r :end-hand) :left) 0 1))))"#,
+        );
+        // three dots pad to four units; the pad dot continues the alternation
+        // (R) and the dot-decay streak, and the ending hand threads past it
+        assert_close(
+            &nums,
+            &[
+                0.0, 1.0, 0.0, 1.0, // hands L R L R
+                0.8, 0.68, 0.578, 0.49130000000000007, // pad continues decay
+                4.0, // padded length
+                0.0, // ending hand back to :left
+            ],
+        );
+    }
+
+    #[test]
+    fn jaki_stac_and_ghost_transforms() {
+        let mut rt = jaki_runtime();
+        let gates = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(. . (stac))) 0 :left jaki/default-state)))
+                 (reduce (lambda (acc e)
+                           (append acc (list (nth (get e :gate) 0) (nth (get e :gate) 1))))
+                         (list) (get r :events)))"#,
+        );
+        assert_eq!(gates, vec![1.0, 4.0, 1.0, 4.0]);
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat '(- . (ghost))) 0 :left jaki/default-state)))
+                 (reduce (lambda (acc e)
+                           (append acc (list (/ (nth (get e :off) 0) (nth (get e :off) 1))
+                                             (get e :vel))))
+                         (list) (get r :events)))"#,
+        );
+        // ghost drops the dash's first hit; the pickup keeps dash-decay as its
+        // velocity and the following dot still accents
+        assert_close(&nums, &[1.0, 0.9, 2.0, 0.92]);
+    }
+
+    #[test]
+    fn jaki_shift_rotates_offsets_within_the_cycle() {
+        let mut rt = jaki_runtime();
+        let vels = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/shift (jaki/pat '(. . . .)) 1)
+                                      0 :left jaki/default-state)))
+                 (map (lambda (e) (get e :vel)) (get r :events)))"#,
+        );
+        // rotate right by one unit: the last (quietest) hit wraps to offset 0
+        assert_close(&vels, &[0.49130000000000007, 0.8, 0.68, 0.578]);
+    }
+
+    #[test]
+    fn jaki_cycle_index_closed_form_over_variable_length_super_cycle() {
+        let mut rt = jaki_runtime();
+        let cycles = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((p (jaki/pat '(. . . . (% (cyc 4 6))))))
+                 (map (lambda (pos) (jaki/cycle-index p pos)) (list 0 3 4 9 10 23)))"#,
+        );
+        // lengths alternate 4, 6 (super-cycle 10): closed form, no state
+        assert_eq!(cycles, vec![0.0, 0.0, 1.0, 1.0, 2.0, 4.0]);
+        let starts = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((p (jaki/pat '(. . . . (% (cyc 4 6))))))
+                 (map (lambda (pos) (nth (jaki/locate p pos) 1)) (list 0 3 4 9 10 23)))"#,
+        );
+        assert_eq!(starts, vec![0.0, 0.0, 4.0, 4.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn jaki_per_cycle_memo_reuses_results_and_stays_bounded() {
+        let mut rt = jaki_runtime();
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((p (jaki/pat '(. . - .))))
+                 (do
+                   (map (lambda (k) (jaki/eval-cycle p k :left jaki/default-state))
+                        (range 0 20))
+                   (let ((a (jaki/eval-cycle p 3 :left jaki/default-state))
+                         (b (jaki/eval-cycle p 3 :left jaki/default-state)))
+                     (list (len jaki/memo-store)
+                           (if (= a b) 1 0)
+                           (len (get a :events))))))"#,
+        );
+        // the assoc memo caps at 16 entries and repeated lookups agree
+        assert_eq!(nums, vec![16.0, 1.0, 5.0]);
+    }
+
+    #[test]
+    fn jaki_def_sequencer_free_runs_and_threads_velocity_across_cycles() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(def-sequencer "jaki-t1"
+                 :resolution :16
+                 :tick (do
+                   (jaki/init :16)
+                   (jaki/emit (jaki/pat '(. . . .)) 0)))"#,
+        )
+        .expect("def-sequencer");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            2.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // 8 sixteenth boundaries = two 4-unit cycles; the dot-decay streak
+        // crosses the cycle boundary via the generator state cells
+        assert_eq!(out.len(), 8);
+        let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
+        assert_close(
+            &vels,
+            &[
+                0.8,
+                0.68,
+                0.578,
+                0.49130000000000007,
+                0.417605,
+                0.35496425,
+                0.30171961249999996,
+                0.3,
+            ],
+        );
+        assert_eq!(out[0].sample_time, 12_000);
+        assert!(out.iter().all(|e| e.event.track == Some(0)));
+    }
+
+    #[test]
+    fn jaki_def_sequencer_emits_fractional_offsets_exactly_once() {
+        let mut rt = jaki_runtime();
+        // (. -)(* 2) → hits at 0, 1/2, 1, 3/2, 2, 5/2 units; the quoted
+        // pattern also exercises the quote-preserving tick capture round-trip
+        rt.eval(
+            r#"(def-sequencer "jaki-t2"
+                 :resolution :16
+                 :tick (do
+                   (jaki/init :16)
+                   (jaki/emit (jaki/pat '(. - (* 2))) 0)))"#,
+        )
+        .expect("def-sequencer");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // each sub-unit hit is emitted exactly once from the tick window that
+        // owns it, at its exact fractional beat offset (:16 unit = 0.25 beats)
+        let mut samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
+        samples.sort_unstable();
+        // the 3-unit cycle wraps mid-block: tick 3 owns cycle 1's [0,1) window
+        // and emits both of its hits (0 and 1/2 units past beat 1.0)
+        assert_eq!(
+            samples,
+            vec![12_000, 18_000, 24_000, 30_000, 36_000, 42_000, 48_000, 54_000]
+        );
+    }
+
+    #[test]
+    fn jaki_def_sequencer_fans_out_one_pattern_to_multiple_tracks() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(def-sequencer "jaki-t3"
+                 :resolution :16
+                 :tick (do
+                   (jaki/init :16)
+                   (let ((base (jaki/pat '(. . - .))))
+                     (do
+                       (jaki/emit base 0)
+                       (jaki/emit (jaki/shift base 1) 1)
+                       (jaki/emit (jaki/filter base '(:hand :left)) 2)))))"#,
+        )
+        .expect("def-sequencer");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.25,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+
+        // one 5-unit cycle: full pattern on 0 and 1, the left hand's three
+        // hits on 2 with legato gates (2, 1, 2 units → 0.5, 0.25, 0.5 beats)
+        let track = |t: usize| -> Vec<&crate::generator::GeneratorEmission> {
+            out.iter().filter(|e| e.event.track == Some(t)).collect()
+        };
+        assert_eq!(track(0).len(), 5);
+        assert_eq!(track(1).len(), 5);
+        let left = track(2);
+        assert_eq!(left.len(), 3);
+        let durations: Vec<f64> = left
+            .iter()
+            .map(|e| e.event.resolved.duration as f64)
+            .collect();
+        assert_close(&durations, &[0.5, 0.25, 0.5]);
+        let base_vels: Vec<f64> = track(0)
+            .iter()
+            .map(|e| e.event.resolved.velocity as f64)
+            .collect();
+        assert_close(&base_vels, &[0.8, 0.68, 0.8, 0.72, 0.92]);
+    }
+
     #[test]
     fn def_sequencer_state_cells_persist_across_ticks() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));

@@ -751,6 +751,18 @@ pub fn format_lisp_source(value: &Value) -> String {
         Value::Symbol(s) => s.clone(),
         Value::Keyword(s) => format!(":{s}"),
         Value::List(items) => {
+            // A `(quote x)` pair prints as `'x` so captured def-sequencer tick
+            // data round-trips through the reader (which only accepts `'` before
+            // symbols and lists — other payloads keep the list spelling).
+            if items.len() == 2 {
+                if let Value::Symbol(head) = &*items[0].borrow() {
+                    if head == "quote"
+                        && matches!(&*items[1].borrow(), Value::Symbol(_) | Value::List(_))
+                    {
+                        return format!("'{}", format_lisp_source(&items[1].borrow()));
+                    }
+                }
+            }
             let rendered = items
                 .iter()
                 .map(|item| format_lisp_source(&item.borrow()))
@@ -9180,5 +9192,55 @@ counter
             debug_assert_cell_not_frozen(&child["label"], "test mutation");
         }));
         assert!(result.is_err(), "shared frozen cell must still assert");
+    }
+
+    // ── quote preservation through def-sequencer tick capture ──
+
+    fn quoted_value(source: &str) -> Value {
+        Value::List(
+            source
+                .split_whitespace()
+                .map(|s| Rc::new(RefCell::new(Value::Symbol(s.to_string()))))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn format_lisp_source_prints_quote_pairs_as_reader_quotes() {
+        let quoted_sym = quoted_value("quote x");
+        assert_eq!(super::format_lisp_source(&quoted_sym), "'x");
+
+        let inner = quoted_value(". . -");
+        let quoted_list = Value::List(vec![
+            Rc::new(RefCell::new(Value::Symbol("quote".to_string()))),
+            Rc::new(RefCell::new(inner)),
+        ]);
+        assert_eq!(super::format_lisp_source(&quoted_list), "'(. . -)");
+
+        // Payloads the reader rejects after ' keep the list spelling.
+        let quoted_num = Value::List(vec![
+            Rc::new(RefCell::new(Value::Symbol("quote".to_string()))),
+            Rc::new(RefCell::new(Value::Number(5.0))),
+        ]);
+        assert_eq!(super::format_lisp_source(&quoted_num), "(quote 5)");
+    }
+
+    #[test]
+    fn def_sequencer_tick_capture_preserves_inner_quotes_through_source_roundtrip() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-sequencer", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured tick body"),
+            ))
+        });
+        let result = vm
+            .eval_str(r#"(def-sequencer "j" :tick (jaki/pat '(. . - (every 2 swap)) 'sym))"#)
+            .expect("eval")
+            .expect("value");
+        let Value::String(tick_source) = result else {
+            panic!("expected the captured tick source, got {result:?}");
+        };
+        assert_eq!(tick_source, "(jaki/pat '(. . - (every 2 swap)) 'sym)");
     }
 }

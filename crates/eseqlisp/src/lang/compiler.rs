@@ -654,6 +654,45 @@ impl Compiler {
         Ok(())
     }
 
+    /// Like `compile_quoted_expression`, but an inner `'x` / `'(...)` is captured
+    /// as `(quote x)` data instead of being flattened into plain data. Used only
+    /// for `def-sequencer` `:tick`/`:init` bodies, whose captured data is
+    /// re-serialized to source (`format_lisp_source` prints the wrapper back as
+    /// `'x`) and re-evaluated in the scheduler VM — without the wrapper, quotes
+    /// authored inside a tick body would silently become live call forms there.
+    fn compile_quoted_expression_preserving_quotes(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        match expression {
+            Expression::QuoteList(items) => {
+                let quote_idx = self.use_string_constant("quote");
+                self.emit(OpCode::PushSymbol(quote_idx));
+                for item in items {
+                    self.compile_quoted_expression_preserving_quotes(item)?;
+                }
+                self.emit(OpCode::MakeList(items.len()));
+                self.emit(OpCode::MakeList(2));
+            }
+            Expression::QuoteSymbol(s) => {
+                let quote_idx = self.use_string_constant("quote");
+                self.emit(OpCode::PushSymbol(quote_idx));
+                let idx = self.use_string_constant(s);
+                self.emit(OpCode::PushSymbol(idx));
+                self.emit(OpCode::MakeList(2));
+            }
+            Expression::List(items) => {
+                for item in items {
+                    self.compile_quoted_expression_preserving_quotes(item)?;
+                }
+                self.emit(OpCode::MakeList(items.len()));
+            }
+            other => self.compile_quoted_expression(other)?,
+        }
+
+        Ok(())
+    }
+
     /// Consume the compiler and return the final global symbol table,
     /// so the VM can sync its own name→index mapping.
     pub fn into_global_names(self) -> Vec<String> {
@@ -2343,6 +2382,7 @@ impl Compiler {
                         if matches!(l.first(), Some(Expression::Symbol(s)) if s == "def-node"))
                 });
             let mut quote_next = false;
+            let mut quote_next_preserving = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
                 if is_graph_sequencer {
                     match elem {
@@ -2352,8 +2392,13 @@ impl Compiler {
                     continue;
                 }
                 if quote_next {
-                    self.compile_quoted_expression(elem)?;
+                    if quote_next_preserving {
+                        self.compile_quoted_expression_preserving_quotes(elem)?;
+                    } else {
+                        self.compile_quoted_expression(elem)?;
+                    }
                     quote_next = false;
+                    quote_next_preserving = false;
                     continue;
                 }
                 if is_def_accumulator && list.len() == 3 && i == 1 {
@@ -2408,6 +2453,7 @@ impl Compiler {
                         }
                         if is_def_sequencer && (k == "tick" || k == "init") {
                             quote_next = true;
+                            quote_next_preserving = true;
                         }
                         if is_def_process
                             && (k == "in"

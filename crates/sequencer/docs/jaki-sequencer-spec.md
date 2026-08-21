@@ -406,6 +406,54 @@ New integration tests (generator-level):
    scale / direction; small event-dot visualization across the cycle.
 6. **Seeded pitch** (v2, §8.3) once generator seeding lands.
 
+## 11.1 Implementation notes (phases 1–3, bead eseq-5k5)
+
+Phases 1–3 shipped as `content/scripts/sequencers/jaki.lisp` (`(module jaki)`
+with `export`), loaded into the **scheduler** scratch runtime when the
+project's scratch source mentions `jaki/` (stopgap until `import jaki`,
+eseq-jo7). Tick bodies are authored on the UI VM but run on the scheduler VM
+via def-sequencer's quoted-source shipping — the library must never be
+captured as UI-VM closures. Deviations from the surface sketched above, all
+forced by measured eseqlisp semantics:
+
+- **`jaki/pat` is a function over quoted data, not a macro.** eseqlisp
+  `defmacro` is a fixed-arity template engine (no `&rest`, no `,@`, no
+  expansion-time eval), so the variadic `(jaki/pat . . -)` spelling is
+  impossible today: write `(jaki/pat '(. . - (every 2 swap)))`. Filed as a
+  package-expressiveness gap (variadic + splicing macros); the library is
+  unchanged if that lands — only the entry point gains sugar.
+- **Quotes inside `:tick` now survive.** def-sequencer's captured tick data is
+  re-serialized with `format_lisp_source` for the scheduler VM, which used to
+  erase `'`. The compiler now captures inner quotes as `(quote x)` data (tick/
+  init capture only) and the formatter prints that pair back as `'x`.
+- **Transform arguments are data, not functions.** `(jaki/every base 4 'rev)`,
+  `(jaki/for-hand base :left '(stac))`, `(jaki/filter base '(:hand :left
+  :symbol :dash))` — a function value can't be mapped back to a transform
+  name, and filter axes ride in one quoted plist because Lisp-defined
+  functions are fixed-arity. `jaki/xform` appends any quoted transform.
+- **`jaki/emit` is `(jaki/emit pat track)`**, with `(jaki/emit* pat track
+  (dict :vel-scale … :note …))` for options. `:quantize`/`:chord`/`:pan`/
+  `:speed` passthrough needs conditional seq-emit call shapes — deferred to
+  the package bead. `(jaki/init :16)` is called at the top of `:tick`
+  (idempotent) because `def-sequencer`'s `:init` is parsed but not yet run.
+- **`(align n)` pads duration silently; `(align n :pad)` generates dot padding
+  events** with hand/velocity threading (Swift `@N` behavior); the `@N-` dash
+  tail was dropped from the surface.
+- **`(swap)` flips the emitted hand assignment for the cycle** but does not
+  disturb the threaded alternation (the ending hand ignores it).
+- Cycle lengths are provably integral (fast expansion multiplies raw units by
+  m, fit/slow/align are integer-valued), so each resolution tick belongs to
+  exactly one cycle; offsets within a cycle are exact `(num den)` rationals
+  and window membership is integer comparison, as §8.3 requires.
+- The per-cycle memo is a capped assoc list in scheduler-VM globals keyed by
+  `(pattern-id cycle hand vel-state…)` — dict keys can't be synthesized at
+  runtime in eseqlisp. Pattern ids derive from `(source body)` plus transform
+  tags, so hot-reloading a pattern re-keys naturally.
+- Velocity/hand threading crosses cycles through f64 generator state cells
+  (`jaki-cycle`/`jaki-hand`/`jaki-vel`/`jaki-pwd`/`jaki-streak`); contiguous
+  cycle advances roll the ending state forward, transport jumps restart from
+  defaults while the closed-form cycle index (§8.1) stays exact.
+
 ## 12. Open Questions
 
 - **`fig` transform scope**: whether a whole-pattern transform after `fig`
