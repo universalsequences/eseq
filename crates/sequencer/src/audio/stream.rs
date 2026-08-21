@@ -79,9 +79,10 @@ pub fn build_output_stream(
                 }
             });
     }
-    let initial_topology_epoch = state.transport.topology_epoch.load(Ordering::Relaxed);
     let initial_scheduler_snapshot_version = state.scheduler_snapshot_version();
     let initial_scheduler_snapshot = state.latest_scheduler_snapshot();
+    let initial_num_tracks = initial_scheduler_snapshot.transport.num_tracks;
+    let initial_topology_epoch = initial_scheduler_snapshot.transport.topology_epoch;
     let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
     crate::instruments::voice_modulator::set_process_stats_enabled(trace_audio);
     if trace_audio {
@@ -105,7 +106,7 @@ pub fn build_output_stream(
         accumulator_states: [crate::accumulator::AccumulatorRuntimeState::default(); MAX_TRACKS],
         last_playing: false,
         last_pattern: u32::MAX,
-        last_num_tracks: num_tracks,
+        last_num_tracks: initial_num_tracks,
         last_topology_epoch: initial_topology_epoch,
         host_clock_was_playing: false,
         host_clock_play_start_sample: 0,

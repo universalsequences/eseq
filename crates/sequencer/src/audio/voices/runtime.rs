@@ -642,7 +642,37 @@ pub(in crate::audio) fn sync_free_patch_transport_routes(data: &mut AudioCallbac
     }
 }
 
-pub(in crate::audio) fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_tracks: usize) {
+/// Make newly published tracks visible without disturbing voices or events on
+/// tracks that were already live. Additions only append runtime slots, so the
+/// destructive reset required by compaction and in-place rewrites is neither
+/// necessary nor musically correct.
+pub(in crate::audio) fn extend_audio_runtime_for_track_topology(
+    data: &mut AudioCallbackData,
+    num_tracks: usize,
+    topology_epoch: u64,
+) {
+    let first_new_track = data.last_num_tracks.min(num_tracks);
+    for track in first_new_track..num_tracks {
+        sync_sampler_voice_pool(&data.state, track, &mut data.voice_pools[track]);
+        if let Some(engine_id) = track_engine_id(&data.state, track) {
+            sync_custom_engine_pool(
+                &data.state,
+                engine_id,
+                &mut data.custom_engine_pools[engine_id],
+            );
+        }
+        data.pending_accum_reset[track] = true;
+    }
+    sync_rack_voice_pools(data, num_tracks);
+    data.last_num_tracks = num_tracks;
+    data.last_topology_epoch = topology_epoch;
+}
+
+pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
+    data: &mut AudioCallbackData,
+    num_tracks: usize,
+    topology_epoch: u64,
+) {
     // Topology edits can invalidate the per-track gate-off bookkeeping for
     // already-ringing custom voices. Explicitly send gate-off to every live
     // custom engine voice before resetting callback-local state so notes do
@@ -675,7 +705,7 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(data: &mut AudioC
     clear_countdown_events(data);
     data.event_seq = 0;
     data.last_num_tracks = num_tracks;
-    data.last_topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
+    data.last_topology_epoch = topology_epoch;
     data.last_playing = false;
     data.host_clock_was_playing = false;
     data.host_clock_play_start_sample = data.rendered_samples.load(Ordering::Acquire);

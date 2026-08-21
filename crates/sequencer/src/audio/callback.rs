@@ -16,12 +16,25 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let nframes = output.len() / data.num_channels;
     data.current_callback_nframes = nframes;
     data.trace_callback_counter = data.trace_callback_counter.wrapping_add(1);
-    let num_tracks = data.state.active_track_count();
-    let topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
+    // The immutable scheduler snapshot is the commit point for topology.
+    // Reading live num_tracks/epochs independently can observe the middle of
+    // an add-track publication and clear valid events before the scheduler can
+    // possibly have produced replacements.
+    let previous_pattern_epoch = data.scheduler_snapshot.transport.pattern_epoch;
+    let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
+    if scheduler_snapshot_version != data.scheduler_snapshot_version {
+        data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
+        data.scheduler_snapshot_version = scheduler_snapshot_version;
+    }
+    let num_tracks = data.scheduler_snapshot.transport.num_tracks;
+    let topology_epoch = data.scheduler_snapshot.transport.topology_epoch;
     if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {
+        let additive_growth = num_tracks > data.last_num_tracks
+            && data.scheduler_snapshot.transport.pattern_epoch == previous_pattern_epoch;
         if data.trace_audio {
             eprintln!(
-                "audio-trace: topology reset tracks {}->{} epoch {}->{} rendered_samples={}",
+                "audio-trace: topology {} tracks {}->{} epoch {}->{} rendered_samples={}",
+                if additive_growth { "extend" } else { "reset" },
                 data.last_num_tracks,
                 num_tracks,
                 data.last_topology_epoch,
@@ -30,17 +43,16 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             );
             data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
         }
-        reset_audio_runtime_for_track_topology(data, num_tracks);
+        if additive_growth {
+            extend_audio_runtime_for_track_topology(data, num_tracks, topology_epoch);
+        } else {
+            reset_audio_runtime_for_track_topology(data, num_tracks, topology_epoch);
+        }
     }
     if data.state.topology_edit_in_flight() {
         data.scheduled_events.clear();
         clear_countdown_events(data);
         data.event_seq = 0;
-    }
-    let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
-    if scheduler_snapshot_version != data.scheduler_snapshot_version {
-        data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
-        data.scheduler_snapshot_version = scheduler_snapshot_version;
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
@@ -483,7 +495,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         }
     }
 
-    let current_pattern_epoch = data.state.transport.pattern_epoch.load(Ordering::Relaxed);
+    let current_pattern_epoch = data.scheduler_snapshot.transport.pattern_epoch;
     collect_due_countdown_events(data, nframes, current_pattern_epoch);
     drain_scheduled_events_for_callback(data, block_start_sample, nframes, current_pattern_epoch);
     dispatch_block_events(data, block_start_sample);

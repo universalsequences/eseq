@@ -34,6 +34,17 @@ impl SequencerState {
         request_id
     }
 
+    /// Commit an additive track topology change as one scheduler-visible
+    /// publication. Existing track pattern data did not change, so its epoch
+    /// deliberately remains stable: already-queued events stay valid while
+    /// the scheduler starts including the new lane at its current frontier.
+    pub fn publish_additive_track_topology(&self) -> Arc<SequencerSnapshot> {
+        self.transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot()
+    }
+
     pub fn topology_edit_ready(&self, request_id: u64) -> bool {
         self.transport
             .topology_edit_ready_id

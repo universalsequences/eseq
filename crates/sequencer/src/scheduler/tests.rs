@@ -4,8 +4,9 @@
         midi_fx_window_events_from_step, process_device_write_value, quantized_live_tick_sample,
         reconcile_graph_runtimes, resolve_effect_defaults, resolve_effect_params,
         resolve_instrument_plocks,
-        resolve_sampler_params, resolve_track_send_params, resolved_slot_param_value,
-        run_midi_fx_chain_for_track, schedule_playing_lookahead, should_reload_neural_runtime,
+        reconcile_playing_topology_change, resolve_sampler_params, resolve_track_send_params,
+        resolved_slot_param_value, run_midi_fx_chain_for_track, schedule_playing_lookahead,
+        should_reload_neural_runtime,
         swing_delay_samples_from_quarter, swung_network_sample_time,
         track_active_note_spans_at_beat,
         track_note_spans_for_trigger, EmittedNetworkEventSource, LiveMidiFxTrackState, MidiFxEvent,
@@ -35,7 +36,7 @@
     };
     use crate::sequencer::{
         default_empty_effect_chain, SequencerState, StepParam, SwingResolution, Timebase,
-        MAX_TRACKS,
+        MAX_STEPS, MAX_TRACKS,
     };
     use eseqlisp::vm::Value;
     use eseqlisp::Runtime;
@@ -132,6 +133,116 @@
             assert!(values.contains(&(0, Some(0.0))), "step 0 baseline missing: {values:?}");
             assert!(values.contains(&(1, Some(0.8))), "step 1 send p-lock missing: {values:?}");
             assert!(values.contains(&(2, Some(0.0))), "step 2 baseline restore missing: {values:?}");
+        });
+    }
+
+    #[test]
+    fn additive_track_topology_preserves_existing_lookahead_and_schedules_new_lane() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                vec![
+                    default_empty_effect_chain(),
+                    default_empty_effect_chain(),
+                    default_empty_effect_chain(),
+                ],
+            ));
+            for track in 0..3 {
+                for step in 0..MAX_STEPS {
+                    state.pattern.patterns[track].set_step_active(step, true);
+                }
+            }
+            state.transport.playing.store(true, Ordering::Relaxed);
+
+            let published = state.publish_scheduler_snapshot();
+            let mut initial = (*published).clone();
+            initial.tracks.truncate(2);
+            initial.transport.num_tracks = 2;
+            let initial = Arc::new(initial);
+            let queue = ScheduledEventQueue::<32>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let samples_per_quarter = 48_000.0 * 60.0 / initial.transport.bpm as f64;
+
+            let first = schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &initial,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                initial.transport.pattern_epoch,
+                0,
+                6_000,
+                48_000,
+                6_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let old_frontier = first.scheduled_until_sample;
+
+            let added = state.publish_additive_track_topology();
+            assert_eq!(
+                added.transport.pattern_epoch, initial.transport.pattern_epoch,
+                "an additive topology publication must keep queued event epochs valid"
+            );
+            let mut scheduled_until_sample = old_frontier;
+            reconcile_playing_topology_change(
+                &mut scheduler,
+                &state,
+                &added,
+                &queue,
+                old_frontier,
+                &mut scheduled_until_sample,
+                2,
+                initial.transport.pattern_epoch,
+            );
+            assert_eq!(
+                scheduled_until_sample, old_frontier,
+                "additive growth must preserve the existing scheduling frontier"
+            );
+
+            let second = schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &added,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                added.transport.pattern_epoch,
+                old_frontier,
+                6_000,
+                48_000,
+                6_000,
+                samples_per_quarter,
+                scheduled_until_sample,
+                false,
+                false,
+            );
+            assert!(second.scheduled_until_sample > old_frontier);
+
+            let mut saw_preserved = [false; 2];
+            let mut saw_new_track = false;
+            while let Some(event) = queue.pop() {
+                assert_eq!(
+                    event.pattern_epoch, added.transport.pattern_epoch,
+                    "the audio callback must accept events across the additive publication"
+                );
+                if let ScheduledEventKind::ResolvedTrigger { track, .. } = event.kind {
+                    if track < 2 && event.sample_time < old_frontier {
+                        saw_preserved[track] = true;
+                    }
+                    if track == 2 && event.sample_time >= old_frontier {
+                        saw_new_track = true;
+                    }
+                }
+            }
+            assert_eq!(saw_preserved, [true, true], "existing tracks lost queued events");
+            assert!(saw_new_track, "the appended track never joined scheduling");
         });
     }
 

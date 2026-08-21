@@ -12,6 +12,46 @@ use super::*;
 /// transport simply starts this much later; nothing is skipped or doubled.
 const ROLL_PLAY_START_HOLD: Duration = Duration::from_millis(50);
 
+/// Reconcile a topology publication without throwing away valid lookahead for
+/// a pure append. Destructive changes still rebuild from the render head, but
+/// an added track starts at the existing scheduling frontier while every event
+/// already queued for existing tracks remains sample-exact and audible.
+pub(super) fn reconcile_playing_topology_change<const CAPACITY: usize>(
+    scheduler: &mut SchedulerLookaheadState,
+    state: &Arc<SequencerState>,
+    snapshot: &SequencerSnapshot,
+    queue: &ScheduledEventQueue<CAPACITY>,
+    rendered: u64,
+    scheduled_until_sample: &mut u64,
+    previous_num_tracks: usize,
+    previous_pattern_epoch: u64,
+) {
+    let additive_growth = snapshot.transport.num_tracks > previous_num_tracks
+        && snapshot.transport.pattern_epoch == previous_pattern_epoch;
+    if additive_growth {
+        for track in previous_num_tracks..snapshot.transport.num_tracks.min(MAX_TRACKS) {
+            scheduler.pending_accum_reset[track] = true;
+        }
+        return;
+    }
+
+    let previous_scheduled_until = *scheduled_until_sample;
+    queue.clear();
+    scheduler.midi_fx_quantizer_state.reset();
+    scheduler
+        .clock
+        .seek_to_rendered_position(snapshot, rendered, previous_scheduled_until);
+    *scheduled_until_sample = rendered;
+    scheduler.pending_accum_reset = [true; MAX_TRACKS];
+    scheduler
+        .neural_runtime
+        .reset_state(scheduler.clock.total_beats);
+    scheduler
+        .process_runtime
+        .reset_transport(scheduler.clock.total_beats);
+    state.set_neural_visualization(scheduler.neural_runtime.visualization_snapshot());
+}
+
 pub fn spawn_scheduler_thread(
     state: Arc<SequencerState>,
     sample_rate: u32,
@@ -29,6 +69,7 @@ pub fn spawn_scheduler_thread(
             let mut last_pattern = usize::MAX;
             let mut last_pattern_epoch = u64::MAX;
             let mut last_topology_epoch = u64::MAX;
+            let mut last_num_tracks = usize::MAX;
             let mut last_playing = false;
             let mut roll_play_hold: Option<std::time::Instant> = None;
             let lookahead_target_samples = (scheduler_block_size.max(1) * 4) as u64;
@@ -413,6 +454,7 @@ pub fn spawn_scheduler_thread(
                     last_pattern = pattern;
                     last_pattern_epoch = pattern_epoch;
                     last_topology_epoch = topology_epoch;
+                    last_num_tracks = snapshot.transport.num_tracks;
                     lookahead_state.pending_accum_reset = [false; MAX_TRACKS];
                     lookahead_state.accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
                     lookahead_state.midi_fx_quantizer_state.reset();
@@ -542,21 +584,20 @@ pub fn spawn_scheduler_thread(
                     lookahead_state.process_runtime.reset_transport(0.0);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                 } else if last_topology_epoch != topology_epoch {
-                    let previous_scheduled_until = scheduled_until_sample;
-                    queue.clear();
-                    lookahead_state.midi_fx_quantizer_state.reset();
-                    lookahead_state.clock.seek_to_rendered_position(&snapshot, rendered, previous_scheduled_until);
-                    scheduled_until_sample = rendered;
-                    lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
-                    lookahead_state.neural_runtime.reset_state(lookahead_state.clock.total_beats);
-                    lookahead_state
-                        .process_runtime
-                        .reset_transport(lookahead_state.clock.total_beats);
-                    state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
+                    reconcile_playing_topology_change(
+                        &mut lookahead_state,
+                        &state,
+                        &snapshot,
+                        &queue,
+                        rendered,
+                        &mut scheduled_until_sample,
+                        last_num_tracks,
+                        last_pattern_epoch,
+                    );
                 } else if !song_playback_active && last_pattern_epoch != pattern_epoch {
-                    // Track topology edits bump pattern_epoch without changing the
-                    // pattern index. Rebuild the scheduler horizon immediately so
-                    // future triggers target the compacted live track layout.
+                    // Destructive topology edits bump pattern_epoch without
+                    // changing the pattern index. Rebuild the scheduler horizon
+                    // immediately so future triggers target the rewritten layout.
                     // During song playback the scheduler is the launch
                     // authority: the control-side apply_song_row mirror keeps
                     // UI state in sync without invalidating the split
@@ -631,6 +672,7 @@ pub fn spawn_scheduler_thread(
                 last_pattern = pattern;
                 last_pattern_epoch = pattern_epoch;
                 last_topology_epoch = topology_epoch;
+                last_num_tracks = snapshot.transport.num_tracks;
                 thread::sleep(Duration::from_millis(1));
             }
         });

@@ -370,20 +370,10 @@ impl GraphController<'_> {
         self.app.ui.sidebar_tab = super::super::SidebarTab::Tools;
         self.app.ui.sidebar_mode = super::super::SidebarMode::Audition;
         self.app.ui.sidebar_search_focused = false;
-        self.app
-            .state
-            .transport
-            .topology_epoch
-            .fetch_add(1, Ordering::Relaxed);
-        self.app
-            .state
-            .transport
-            .pattern_epoch
-            .fetch_add(1, Ordering::Relaxed);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.latch_track_created_during_song_playback(idx);
-        self.app.state.publish_scheduler_snapshot();
+        self.app.state.publish_additive_track_topology();
         Ok(())
     }
 

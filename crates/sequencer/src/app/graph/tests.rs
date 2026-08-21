@@ -2084,6 +2084,72 @@
     }
 
     #[test]
+    fn mixed_track_additions_publish_one_additive_topology_without_pattern_epoch_churn() {
+        let graph = TestLiveGraph::new("additive-track-topology-publish-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.state.transport.playing.store(true, Ordering::Relaxed);
+        app.state.publish_scheduler_snapshot();
+
+        let manifest = test_instrument_manifest();
+        let lib = lisp_host::test_loaded_dgen_lib();
+        let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
+            name: "additive-custom".to_string(),
+            source: "additive-custom.lisp".to_string(),
+            manifest: manifest.clone(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+
+        for add in 0..3 {
+            let kind = match add {
+                0 => "custom instrument",
+                1 => "rack",
+                2 => "sampler",
+                _ => unreachable!(),
+            };
+            let pattern_epoch_before = app.state.transport.pattern_epoch.load(Ordering::Relaxed);
+            let topology_epoch_before = app.state.transport.topology_epoch.load(Ordering::Relaxed);
+            match add {
+                0 => {
+                    app.graph_controller()
+                        .add_custom_track(
+                            "additive-custom",
+                            engine_id,
+                            &manifest,
+                            &lib,
+                            CustomInstrumentRunMode::Instrument,
+                        )
+                        .expect("custom track should append");
+                }
+                1 => {
+                    app.graph_controller()
+                        .add_empty_layer_rack_track()
+                        .expect("rack track should append");
+                }
+                2 => {
+                    app.graph_controller()
+                        .add_blank_sampler_track()
+                        .expect("sampler track should append");
+                }
+                _ => unreachable!(),
+            }
+            let snapshot = app.state.latest_scheduler_snapshot();
+            assert_eq!(snapshot.transport.num_tracks, app.tracks.len(), "{kind}");
+            assert_eq!(
+                snapshot.transport.pattern_epoch, pattern_epoch_before,
+                "{kind} invalidated events already queued for existing tracks"
+            );
+            assert_eq!(
+                snapshot.transport.topology_epoch,
+                topology_epoch_before + 1,
+                "{kind} did not publish exactly one topology revision"
+            );
+            assert_published_epochs_are_live(&app, kind);
+        }
+        graph.process_block();
+    }
+
+    #[test]
     fn rack_slot_edits_publish_the_bumped_transport_epochs() {
         let graph = TestLiveGraph::new("rack-slot-epoch-publish-test");
         let mut app = test_app_with_track_count(&graph, 0);

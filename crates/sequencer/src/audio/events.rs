@@ -131,7 +131,7 @@ pub(super) fn schedule_gate_off_event(
         event_offset,
         0.0,
         1,
-        data.state.transport.pattern_epoch.load(Ordering::Relaxed),
+        data.scheduler_snapshot.transport.pattern_epoch,
         CountdownEventKind::GateOff(GateOffEvent {
             track_idx,
             logical_id,
@@ -163,7 +163,7 @@ pub(super) fn schedule_chop_events(
         source_frame_offset as f64 + first_delay_samples.max(0.0),
         interval_samples.max(1.0),
         repeats,
-        data.state.transport.pattern_epoch.load(Ordering::Relaxed),
+        data.scheduler_snapshot.transport.pattern_epoch,
         CountdownEventKind::Chop(ChopEvent {
             track_idx,
             step,
