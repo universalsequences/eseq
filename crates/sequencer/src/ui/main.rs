@@ -104,7 +104,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     sequencer::paths::enter_sequencer_dir()?;
     sequencer::app_paths::init_dev()?;
-    sequencer::app_paths::app_paths().ensure_user_tier()?;
+    let app_paths = sequencer::app_paths::app_paths();
+    app_paths.ensure_user_tier()?;
+    match sequencer::package_samples::reconcile_app_package_samples(app_paths) {
+        Ok(report) => {
+            for error in report.errors {
+                eprintln!("metal_seq: {error}");
+            }
+        }
+        Err(error) => eprintln!("metal_seq: failed to reconcile package samples: {error}"),
+    }
     sequencer::crash::install()?;
 
     if let Some(args) = capture_args {

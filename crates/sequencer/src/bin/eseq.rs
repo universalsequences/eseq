@@ -18,12 +18,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [package, install, identity, repository]
             if package == "package" && install == "install" =>
         {
+            let app_paths = sequencer::app_paths::app_paths();
+            app_paths.ensure_user_tier().map_err(|error| {
+                format!("failed to initialize user content directories: {error}")
+            })?;
             let result = sequencer::package_install::install_git_package(
                 repository,
                 identity,
-                &sequencer::app_paths::app_paths().packages_dir(),
+                &app_paths.packages_dir(),
             )?;
+            let report = sequencer::package_samples::reconcile_app_package_samples(app_paths)?;
             println!("installed {} at {}", result.identity, result.path.display());
+            for error in report.errors {
+                eprintln!("eseq: {error}");
+            }
             Ok(())
         }
         _ => Err(

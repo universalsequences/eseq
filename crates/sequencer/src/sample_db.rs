@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY
 );
 
+CREATE TABLE IF NOT EXISTS package_sample_ingest_state (
+    origin          TEXT PRIMARY KEY,
+    manifest_sha256 TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS user_fact_replay_state (
     singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
     byte_offset INTEGER NOT NULL

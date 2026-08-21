@@ -83,7 +83,7 @@ pub fn install_git_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package_samples::ingest_package_samples;
+    use crate::package_samples::reconcile_installed_package_samples;
     use crate::sample_db::SampleDb;
     use crate::sample_manifest::index_package;
 
@@ -210,10 +210,10 @@ mod tests {
         let store = root.join("store/samples");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
         let mut db = SampleDb::open(&root.join("store/samples.db")).unwrap();
-        assert_eq!(
-            ingest_package_samples(&result.path, &store, &mut db).unwrap(),
-            "pkg:test.publisher"
-        );
+        let report =
+            reconcile_installed_package_samples(&installed, &store, &mut db).unwrap();
+        assert_eq!(report.ingested_origins, vec!["pkg:test.publisher"]);
+        assert!(report.errors.is_empty());
         let rows = db
             .query(&[], &[], None, false, &["pkg:test.publisher"])
             .unwrap();

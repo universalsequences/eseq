@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use eseqlisp::package::InstalledPackage;
+use eseqlisp::package::{InstalledPackage, PackageCatalog};
+use rusqlite::params;
+use sha2::{Digest, Sha256};
 
 use crate::sample_db::SampleDb;
 use crate::sample_import::{decode_audio_file, transcode_to_store};
@@ -10,21 +12,103 @@ use crate::sample_manifest::{
     read_manifest, verify_payload, verify_source_asset, SampleManifestLine,
 };
 
-pub fn ingest_installed_packages(
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PackageSampleIngestReport {
+    pub ingested_origins: Vec<String>,
+    pub unchanged_origins: Vec<String>,
+    pub removed_origins: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Reconcile the sample database with every currently valid installed package.
+///
+/// Invalid packages and invalid sample manifests are isolated and reported.
+/// Origins that are no longer backed by a valid installed package are removed,
+/// while packages whose manifest digest has not changed are left untouched.
+pub fn reconcile_installed_package_samples(
     packages_dir: &Path,
     sample_dir: &Path,
     db: &mut SampleDb,
-) -> Result<Vec<String>, String> {
-    let mut packages = fs::read_dir(packages_dir)
-        .map_err(|error| format!("failed to scan {}: {error}", packages_dir.display()))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_dir() && path.join("samples.jsonl").is_file())
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages
-        .iter()
-        .map(|package| ingest_package_samples(package, sample_dir, db))
-        .collect()
+) -> Result<PackageSampleIngestReport, String> {
+    let (catalog, package_errors) = PackageCatalog::scan_reporting(packages_dir);
+    let mut report = PackageSampleIngestReport {
+        errors: package_errors.into_iter().map(|error| error.to_string()).collect(),
+        ..PackageSampleIngestReport::default()
+    };
+    let previous = package_ingest_state(db)?;
+    let mut retained_origins = HashSet::new();
+
+    for package in catalog.packages().values() {
+        let manifest_path = package.root.join("samples.jsonl");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let origin = format!("pkg:{}", package.module_prefix);
+        let digest = match manifest_digest(&manifest_path) {
+            Ok(digest) => digest,
+            Err(error) => {
+                db.remove_origin(&origin, sample_dir).map_err(|cleanup_error| {
+                    format!(
+                        "{error}; cleanup of {origin} also failed: {cleanup_error}"
+                    )
+                })?;
+                delete_package_ingest_state(db, &origin)?;
+                report.errors.push(error);
+                continue;
+            }
+        };
+        if previous.get(&origin).is_some_and(|stored| stored == &digest) {
+            retained_origins.insert(origin.clone());
+            report.unchanged_origins.push(origin);
+            continue;
+        }
+
+        match ingest_package_samples(&package.root, sample_dir, db) {
+            Ok(ingested_origin) => {
+                set_package_ingest_state(db, &ingested_origin, &digest)?;
+                retained_origins.insert(ingested_origin.clone());
+                report.ingested_origins.push(ingested_origin);
+            }
+            Err(error) => {
+                db.remove_origin(&origin, sample_dir).map_err(|cleanup_error| {
+                    format!(
+                        "failed to ingest package samples from '{}': {error}; \
+                         cleanup of {origin} also failed: {cleanup_error}",
+                        package.root.display()
+                    )
+                })?;
+                delete_package_ingest_state(db, &origin)?;
+                report.errors.push(format!(
+                    "failed to ingest package samples from '{}': {error}",
+                    package.root.display()
+                ));
+            }
+        }
+    }
+
+    for origin in previous.keys() {
+        if retained_origins.contains(origin) {
+            continue;
+        }
+        db.remove_origin(origin, sample_dir)
+            .map_err(|error| format!("failed to remove stale {origin}: {error}"))?;
+        delete_package_ingest_state(db, origin)?;
+        report.removed_origins.push(origin.clone());
+    }
+
+    report.ingested_origins.sort();
+    report.unchanged_origins.sort();
+    report.removed_origins.sort();
+    Ok(report)
+}
+
+pub fn reconcile_app_package_samples(
+    paths: &crate::app_paths::AppPaths,
+) -> Result<PackageSampleIngestReport, String> {
+    let db_path = paths.sample_db_path();
+    let mut db = SampleDb::open(&db_path)
+        .map_err(|error| format!("failed to open {}: {error}", db_path.display()))?;
+    reconcile_installed_package_samples(&paths.packages_dir(), &paths.samples_dir(), &mut db)
 }
 
 pub fn ingest_package_samples(
@@ -110,7 +194,48 @@ pub fn uninstall_package_samples(
     let module_prefix = eseqlisp::package::validate_package_name(package_identity)?;
     let origin = format!("pkg:{module_prefix}");
     db.remove_origin(&origin, sample_dir)
-        .map_err(|error| format!("failed to uninstall {origin}: {error}"))
+        .map_err(|error| format!("failed to uninstall {origin}: {error}"))?;
+    delete_package_ingest_state(db, &origin)?;
+    Ok(())
+}
+
+fn package_ingest_state(db: &SampleDb) -> Result<HashMap<String, String>, String> {
+    let mut statement = db
+        .connection()
+        .prepare("SELECT origin, manifest_sha256 FROM package_sample_ingest_state")
+        .map_err(|error| format!("failed to read package sample ingest state: {error}"))?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| format!("failed to read package sample ingest state: {error}"))?;
+    rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+        .map_err(|error| format!("failed to read package sample ingest state: {error}"))
+}
+
+fn set_package_ingest_state(db: &SampleDb, origin: &str, digest: &str) -> Result<(), String> {
+    db.connection()
+        .execute(
+            "INSERT INTO package_sample_ingest_state(origin, manifest_sha256) VALUES (?, ?) \
+             ON CONFLICT(origin) DO UPDATE SET manifest_sha256 = excluded.manifest_sha256",
+            params![origin, digest],
+        )
+        .map_err(|error| format!("failed to record package sample ingest state: {error}"))?;
+    Ok(())
+}
+
+fn delete_package_ingest_state(db: &SampleDb, origin: &str) -> Result<(), String> {
+    db.connection()
+        .execute(
+            "DELETE FROM package_sample_ingest_state WHERE origin = ?",
+            params![origin],
+        )
+        .map_err(|error| format!("failed to remove package sample ingest state: {error}"))?;
+    Ok(())
+}
+
+fn manifest_digest(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn validate_source_id(origin: &str, id: &str) -> Result<(), String> {
@@ -205,6 +330,86 @@ mod tests {
         };
         write_manifest(&manifest_path, &lines).unwrap();
         hash
+    }
+
+    #[test]
+    fn reconcile_skips_unchanged_packages_and_removes_deleted_package_claims() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-package-reconcile-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let packages = root.join("packages");
+        let package = packages.join("one");
+        let hash = make_package(&package, "test/one");
+        let store = root.join("store/samples");
+        fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let mut db = SampleDb::open(&root.join("store/samples.db")).unwrap();
+
+        let first = reconcile_installed_package_samples(&packages, &store, &mut db).unwrap();
+        assert_eq!(first.ingested_origins, vec!["pkg:test.one"]);
+        assert!(first.errors.is_empty());
+        db.contribute_sample(
+            &hash,
+            Some("My title wins"),
+            &["personal".to_string()],
+            "user",
+        )
+        .unwrap();
+
+        let unchanged = reconcile_installed_package_samples(&packages, &store, &mut db).unwrap();
+        assert_eq!(unchanged.unchanged_origins, vec!["pkg:test.one"]);
+        assert!(unchanged.ingested_origins.is_empty());
+
+        fs::remove_dir_all(&package).unwrap();
+        let removed = reconcile_installed_package_samples(&packages, &store, &mut db).unwrap();
+        assert_eq!(removed.removed_origins, vec!["pkg:test.one"]);
+        let rows = db.query(&[], &[], None, false, &["user"]).unwrap();
+        assert!(rows.iter().any(|row| row.hash == hash));
+        assert!(db
+            .query(&[], &[], None, false, &["pkg:test.one"])
+            .unwrap()
+            .is_empty());
+        assert!(store.join(format!("{hash}.wav")).is_file());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reconcile_reports_malformed_sample_manifest_without_rejecting_other_packages() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-package-reconcile-invalid-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let packages = root.join("packages");
+        make_package(&packages.join("valid"), "test/one");
+        make_package(&packages.join("broken"), "test/two");
+        fs::write(packages.join("broken/samples.jsonl"), "not json\n").unwrap();
+        let store = root.join("store/samples");
+        fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let mut db = SampleDb::open(&root.join("store/samples.db")).unwrap();
+
+        let report = reconcile_installed_package_samples(&packages, &store, &mut db).unwrap();
+        assert_eq!(report.ingested_origins, vec!["pkg:test.one"]);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("broken"));
+        assert_eq!(
+            db.query(&[], &[], None, false, &["pkg:test.one"])
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(db
+            .query(&[], &[], None, false, &["pkg:test.two"])
+            .unwrap()
+            .is_empty());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
