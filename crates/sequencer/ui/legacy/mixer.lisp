@@ -1,13 +1,13 @@
-;; ui/legacy/mixer.lisp - retained predecessor to ui/mixer.lisp; NOT loaded by
-;; ui/main.lisp, and (unlike step-grid.lisp) not even in the metal_seq parse
-;; gate's file list. Renders to the *mixer* buffer when evaluated directly.
+;; ui/legacy/mixer.lisp - retained predecessor to ui/mixer.lisp; not loaded by
+;; ui/main.lisp. Its top-level structure and direct loading have a dedicated
+;; metal_seq regression test. Renders to the *mixer* buffer when evaluated.
 ;;
 ;; Converted in S3b wave 10. Notes specific to this file:
 ;;
 ;;   * Dead reference code: a whole-tree sweep of crates/sequencer/src,
 ;;     crates/eseqlisp/src and crates/sequencer/ui found ZERO callers of any
 ;;     name defined here, and no loader/harness that reads this path. So every
-;;     `def` below is `%`-private and there are no compat aliases at all.
+;;     `def` below is unexported and there are no compat aliases at all.
 ;;     The live mixer (`ui/mixer.lisp` = `eseq.mixer`) owns the public
 ;;     mixer-shaped names; privatizing here keeps the two from ever competing
 ;;     for a flat slot (spec §10 hazard k).
@@ -17,13 +17,10 @@
 ;;     any other ui lisp file; ui/sequencer.lisp's lookalikes are the distinct
 ;;     `seqv-`-prefixed pair. No new clash is introduced.
 ;;   * The `:shader` bodies expand outside this module in a throwaway
-;;     implicit-module compiler (hazard g/h), so their `aqua-color` reference
-;;     stays FLAT through ui/materials.lisp's compat alias — likewise the
-;;     `(aqua-slider-material)` calls in the `:material` props. Do not import
-;;     eseq.materials and requalify them; that breaks them.
-;;   * `selected-bus` stays bare (including the `set!`s): it is
-;;     eseq.seq-core-state's `defstate`, and `defstate` resolves on the flat
-;;     key through `state_bindings`, so hazards (j)/(m) do not fire.
+;;     implicit-module compiler (hazard g/h). Material helpers therefore use
+;;     their explicit `eseq.materials/` names rather than module imports.
+;;   * Bus selection reads and writes use the explicit
+;;     `eseq.seq-core-state/selected-bus` state name.
 ;;   * No `import` lines at all — everything this file reads from outside is
 ;;     either a Rust native (`reactive-get`, the `seq-*` family) or a
 ;;     `defstate`. That also makes the file trivially safe under hazards
@@ -34,7 +31,9 @@
 
 (module eseq.legacy.mixer)
 
-(def %track-peak (i)
+(export)
+
+(def track-peak (i)
   (reactive-get "SEQ" (str "track-peak-" i)))
 
 (defwidget track-container
@@ -49,7 +48,7 @@
         (if selected (smoothstep 0 -0.1 d) 1)
         )
       )
-    )
+    ))
 
 ;; Record arm indicator (small circle)
 (defwidget rec-arm-dot
@@ -74,17 +73,17 @@
         
         ))))
 
-(def %mute-button-bg (active)
+(def mute-button-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)
     (rgba 0.115 0.130 0.144 1.0)))
 
-(def %solo-button-bg (active)
+(def solo-button-bg (active)
   (if active
     (rgba 0.72 0.10 0.10 1.0)
     (rgba 0.08 0.09 0.10 1.0)))
 
-(def %button-border (active)
+(def button-border (active)
   (if active
     (rgba 0.58 0.62 0.78 1.0)
     (rgba 0.28 0.29 0.32 1.0)))
@@ -160,14 +159,14 @@
           (min diag1 diag2))
         (material :color fg-col)))))
 
-(def %bus-row-label (i)
+(def bus-row-label (i)
   (if (= i 0) "M" (if (= i 1) "A" (if (= i 2) "B" (str i)))))
 
-(def %has-mix-bus? ()
+(def has-mix-bus? ()
   (and (> (len SEQ.bus-names) 0) (= (nth SEQ.bus-names 0) "Mix")))
 
-(def %display-bus-index (display-i)
-  (if (or (not (%has-mix-bus?)) (<= (len SEQ.bus-names) 1))
+(def display-bus-index (display-i)
+  (if (or (not (has-mix-bus?)) (<= (len SEQ.bus-names) 1))
     display-i
     (if (= display-i (- (len SEQ.bus-names) 1))
       0
@@ -194,13 +193,13 @@
                 (button (str (+ i 1))
                   :key (str "track-mute-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (%mute-button-bg (nth SEQ.track-mutes i))
+                  :background-color (mute-button-bg (nth SEQ.track-mutes i))
                   :color (if (nth SEQ.track-mutes i) :gray :blue)
                   :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-mute i)))
                 (button "S"
                   :key (str "track-solo-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (%solo-button-bg (nth SEQ.track-solos i))
+                  :background-color (solo-button-bg (nth SEQ.track-solos i))
                   :color (if (nth SEQ.track-solos i) :white :gray)
                   :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-solo i)))
                 (box :width 8.6 :height 1
@@ -220,7 +219,7 @@
                       :material (eseq.materials/slider-material)
                       :on-change (lambda (v) (do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track-volume i v))))
                     (subtree :key (str "mixer-track-meter-" i)
-                      (mixer-track-meter :level (%track-peak i)))))
+                      (mixer-track-meter :level (track-peak i)))))
                 (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i) (> SEQ.num-tracks 1))
                   (box :width 1.6 :height 1.2 :align :center
                     :bg :transparent
@@ -230,7 +229,7 @@
                     :active 0)
                   (label "" :width 1.6 :bg :transparent))))))
         (let ((display-i (- row SEQ.num-tracks))
-              (i (%display-bus-index (- row SEQ.num-tracks)))
+              (i (display-bus-index (- row SEQ.num-tracks)))
               (name (nth SEQ.bus-names i)))
           (subtree :key (str "mixer-bus-row-" i)
             (box :background "track-container"
@@ -239,16 +238,16 @@
               :selected (if (= eseq.seq-core-state/selected-bus i) 1 0)
               (h-stack :gap 0.5 :align :center
                 (label "" :width 2 :height 1.5 :bg :transparent)
-                (button (%bus-row-label i)
+                (button (bus-row-label i)
                   :key (str "bus-mute-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (%mute-button-bg (nth SEQ.bus-mutes i))
+                  :background-color (mute-button-bg (nth SEQ.bus-mutes i))
                   :color (if (nth SEQ.bus-mutes i) :gray :blue)
                   :on-click |x y r| (seq-toggle-bus-mute i))
                 (button "S"
                   :key (str "bus-solo-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (%solo-button-bg (nth SEQ.bus-solos i))
+                  :background-color (solo-button-bg (nth SEQ.bus-solos i))
                   :color (if (nth SEQ.bus-solos i) :white :gray)
                   :on-click |x y r| (seq-toggle-bus-solo i))
                 (box :width 8.6 :height 1
@@ -264,4 +263,4 @@
                     :value (nth SEQ.bus-volumes i)
                     :material (eseq.materials/slider-material)
                     :on-change (lambda (v) (seq-set-bus-volume i v))))
-                (label "" :width 1.6 :bg :transparent))))))))))
+                (label "" :width 1.6 :bg :transparent)))))))))

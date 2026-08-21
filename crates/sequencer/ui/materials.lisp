@@ -3,6 +3,12 @@
 
 (module eseq.materials)
 
+(export slider-material
+        slider-muted-material
+        slider-track-material
+        slider-track-muted-material
+        color)
+
 ;; Migration compat aliases (spec §10 slice 3): every renamed macro with a
 ;; caller outside this file. `aqua-color` has ~10 call sites in
 ;; sequencer.lisp / step-grid.lisp / legacy/mixer.lisp shader bodies, so it
@@ -34,7 +40,7 @@
 ;; ── Aqua material for sliders ──
 
 
-(defmacro %slider-material2 ()
+(defmacro slider-material2 ()
     `(material
        :lighting (lighting :edge-min -0.2015 :edge-max 0.01413
          :light (vec3 -0.1 -1.1 0.5) :shininess 71.0)
@@ -113,7 +119,7 @@
         0.0))))
 
 
-(defmacro %color-button (base1 base2)
+(defmacro color-button (base1 base2)
   `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
             (__base (mix ,base1
                 ,base2
@@ -146,7 +152,7 @@
             (lighting :edge-min -0.25 :edge-max 0.15
               :light (vec3 0.1 -1.0 0.5) :shininess 62.0)
             :color
-            (* (if (= active 1) 1 0.7) (eseq.materials/%color-button (rgba 0.35 0.35 0.45 1.0) (rgba 0.30 0.30 0.92 1.0)))
+            (* (if (= active 1) 1 0.7) (eseq.materials/color-button (rgba 0.35 0.35 0.45 1.0) (rgba 0.30 0.30 0.92 1.0)))
             :shadow (shadow
               :color (rgba 0 0 0 0.3)
               :blur 0.15

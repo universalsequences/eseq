@@ -15,6 +15,31 @@
 ;; The one exception is `cursor-step` — see its pin below.
 (module eseq.seq-core-state)
 
+(export selected-bus
+        selected-bus-name
+        seq-has-selected-bus?
+        samples-sidebar-visible
+        mixer-panel-visible
+        lower-panel-visible
+        patch-macros-panel-visible
+        param-mode
+        page-size
+        cursor-step-value
+        set-cursor-step-value
+        cursor-num-steps
+        current-step
+        page-count
+        visible-page
+        playhead-page
+        page-offset
+        cool-off-follow
+        sel-track-vis-field
+        sel-group-vis-field
+        sel-bus-vis-field
+        track-selected-vis-binding
+        group-selected-vis-binding
+        bus-selected-vis-binding)
+
 
 (defstate selected-bus -1)
 
@@ -90,13 +115,13 @@
 ;; Private: the app-wide sweep found no caller outside this file, and
 ;; `current-page` is one of the three names hazard (k) calls out by name as
 ;; collision-famous. `%` keeps it out of the flat keyspace entirely.
-(def %current-page ()
+(def current-page ()
   (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
 
 (def visible-page ()
   (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
     (playhead-page)
-    (%current-page)))
+    (current-page)))
 
 (def playhead-page ()
   (min SEQ.playhead-page
@@ -133,7 +158,7 @@
 (def bus-selected-vis-binding (i)
   (bind "SEQV" (sel-bus-vis-field i)))
 
-(def %sel-bus-index-of (bus-id)
+(def sel-bus-index-of (bus-id)
   (let ((matches (filter (lambda (i) (= (nth SEQ.bus-ids i) bus-id))
           (range 0 (len SEQ.bus-ids)))))
     (if (> (len matches) 0) (nth matches 0) -1)))
@@ -163,7 +188,7 @@
           (let ((group (nth SEQ.groups gi)))
             (reactive-set "SEQV" (sel-group-vis-field (get group :id))
               (if (and bus-active
-                    (= selected-bus (%sel-bus-index-of (get group :bus-id))))
+                    (= selected-bus (sel-bus-index-of (get group :bus-id))))
                 1
                 0))))
         (range 0 (len SEQ.groups)))

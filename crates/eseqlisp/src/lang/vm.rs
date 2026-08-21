@@ -2113,6 +2113,9 @@ pub struct VM {
     /// (None for include_str!-style sources with no path). `import`
     /// consults this for load-once semantics (spec §4).
     pub declared_modules: HashMap<String, Option<std::path::PathBuf>>,
+    /// Per-module visibility. Absence means not loaded; a loaded named module
+    /// exports exactly the names in its record.
+    pub module_exports: crate::modules::ModuleExportRegistry,
     /// Module name → the import pass that last evaluated it (spec §4, §11
     /// q4). `import` is load-once *per pass*, not forever: hot reload
     /// re-evaluates a changed file's owner root, and since the root reaches
@@ -2159,6 +2162,7 @@ pub struct VmStateSnapshot {
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
     overrides: HashMap<String, OverrideSet>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
+    module_exports: crate::modules::ModuleExportRegistry,
     imported_at_epoch: HashMap<String, u64>,
     import_pass_epoch: u64,
 }
@@ -2601,11 +2605,32 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         let path = vm.current_source_file();
         vm.declared_modules.insert(name.clone(), path);
+        vm.module_exports.entry(name.clone()).or_default();
         // A module evaluated by `load` counts as satisfied for this pass too,
         // so a later `import` of it does not double-evaluate (ui/effects.lisp
         // still `load`s files that effects/* modules import).
         let epoch = vm.import_pass_epoch;
         vm.imported_at_epoch.insert(name.clone(), epoch);
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("__module-export", |args, vm| {
+        let Some(Value::String(module)) = args.first() else {
+            log_native_misuse("__module-export", "expects a module name string");
+            return Value::Nil;
+        };
+        let mut names = Vec::with_capacity(args.len().saturating_sub(1));
+        for value in &args[1..] {
+            let Value::String(name) = value else {
+                log_native_misuse("__module-export", "expects symbol-name strings");
+                return Value::Nil;
+            };
+            names.push(name.clone());
+        }
+        vm.module_exports
+            .entry(module.clone())
+            .or_default()
+            .append(names);
         Value::Nil
     });
 
@@ -2676,6 +2701,12 @@ pub fn register_core_natives(vm: &mut VM) {
         };
         vm.extension_hooks.entry(name.clone()).or_default();
         let hook_name = name.clone();
+        // Hook names are a flat keyspace and the caller-facing native keeps
+        // that flat spelling (module-system-spec.md §11 e). `export` still
+        // accepts a hook name — the export-set check treats `(defhook "x")`
+        // as defining `x` in the enclosing module — but the native itself
+        // does not qualify, so in-module call sites still reach it through
+        // `run-hook`.
         vm.register_native_with_vm(&name, move |args, vm| {
             run_extension_hook(vm, &hook_name, args)
         });
@@ -3700,6 +3731,7 @@ impl VM {
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
             declared_modules: HashMap::new(),
+            module_exports: crate::modules::ModuleExportRegistry::new(),
             imported_at_epoch: HashMap::new(),
             import_pass_epoch: 1,
             global_store_hooks: Vec::new(),
@@ -3912,6 +3944,7 @@ impl VM {
                 macros,
                 source_file,
             );
+            compiler.set_module_exports(self.module_exports.clone());
             // Continuation segments belong to the same unit: the module
             // declaration and any :as/:refer bindings compiled in earlier
             // segments carry forward.
@@ -3932,8 +3965,12 @@ impl VM {
                     for warning in compiler.take_warnings() {
                         self.source_manager.push_diagnostic(warning);
                     }
-                    module_context = Some(compiler.take_module_context());
                     last_value = self.execute_from(entry_idx)?;
+                    if let Err(message) = compiler.validate_refers(&self.module_exports) {
+                        self.source_load_errors.push(message);
+                        return Err(VMError::CompileError);
+                    }
+                    module_context = Some(compiler.take_module_context());
                 }
                 Err(error) => {
                     if let CompilerError::Message(message) = &error {
@@ -3964,11 +4001,30 @@ impl VM {
         if path.is_file() && self.source_manager.should_scan_module_aliases(&path) {
             crate::module_alias_migration::warn_on_old_module_aliases(&path, source);
         }
+        let (declared_module, export_declarations) =
+            crate::modules::inspect_exports(source).map_err(|error| {
+                self.source_load_errors
+                    .push(format!("{}: {error}", path.display()));
+                VMError::ParseError
+            })?;
+        // File evaluation rebuilds visibility from scratch. Install the new
+        // set before compilation so nested imports can observe it, but retain
+        // the previous valid set if this unit fails.
+        let previous_exports = declared_module.as_ref().and_then(|module| {
+            let next = crate::modules::ModuleExports::new(
+                export_declarations.iter().map(|entry| entry.name.clone()),
+            );
+            self.module_exports.insert(module.clone(), next)
+        });
         let mut defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
             self.source_load_errors
                 .push(format!("{}: {error}", path.display()));
             VMError::ParseError
         })?;
+        // Keep the authored top-level definitions separate for export
+        // validation: pre-existing global slots from an earlier reload must
+        // not make an export of a deleted definition look valid.
+        let authored_defined_symbols = defined_symbols.clone();
         // Textual extraction yields bare names, but the compiler interns
         // most defs qualified (`eseq.vanilla/name`) and effect reads record
         // interned names. Track both forms so hot-reload invalidation
@@ -3985,11 +4041,32 @@ impl VM {
         self.source_manager
             .remember_evaluated_source(path.clone(), revision, source);
         self.source_manager.enter_file(path.clone(), revision);
-        let result = self.eval_str(source);
+        let mut result = self.eval_str(source);
         self.source_manager.leave_file();
+        if result.is_ok()
+            && let Some(module) = declared_module.as_deref()
+        {
+            for export in &export_declarations {
+                let qualified = crate::modules::qualify(module, &export.name);
+                let defined = authored_defined_symbols.contains(&export.name)
+                    || authored_defined_symbols.contains(&qualified);
+                if !defined {
+                    self.source_load_errors.push(format!(
+                        "{}:{}:{}: export '{}' is not defined in module {}",
+                        path.display(),
+                        export.line,
+                        export.column,
+                        export.name,
+                        module
+                    ));
+                    result = Err(VMError::CompileError);
+                    break;
+                }
+            }
+        }
         if result.is_ok() {
             self.source_manager.record_module_success(
-                path,
+                path.clone(),
                 source,
                 revision,
                 defined_symbols,
@@ -3997,6 +4074,16 @@ impl VM {
             );
         } else {
             self.source_manager.discard_module_loads(&path);
+            if let Some(module) = declared_module {
+                match previous_exports {
+                    Some(exports) => {
+                        self.module_exports.insert(module, exports);
+                    }
+                    None => {
+                        self.module_exports.remove(&module);
+                    }
+                }
+            }
         }
         result
     }
@@ -4082,6 +4169,7 @@ impl VM {
                 })
                 .collect(),
             declared_modules: self.declared_modules.clone(),
+            module_exports: self.module_exports.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
             import_pass_epoch: self.import_pass_epoch,
         }
@@ -4124,6 +4212,7 @@ impl VM {
         self.extension_hooks = snapshot.extension_hooks;
         self.overrides = snapshot.overrides;
         self.declared_modules = snapshot.declared_modules;
+        self.module_exports = snapshot.module_exports;
         self.imported_at_epoch = snapshot.imported_at_epoch;
         self.import_pass_epoch = snapshot.import_pass_epoch;
     }
@@ -4187,6 +4276,7 @@ impl VM {
             macros,
             source_file,
         );
+        compiler.set_module_exports(self.module_exports.clone());
         match compiler.compile() {
             Ok(chunks) => {
                 self.chunks = chunks;
@@ -7009,31 +7099,31 @@ mod tests {
     }
 
     #[test]
-    fn private_override_warns_but_works() {
+    fn non_exported_override_warns_but_works() {
         let mut vm = module_test_vm();
         vm.eval_module_source(
             temp_lisp_path("private-override-owner"),
-            "(module test.private-factory)\n(def %value () 1)",
+            "(module test.private-factory)\n(def value () 1)",
             1,
         )
         .expect("owner");
         vm.eval_module_source(
             temp_lisp_path("private-override-user"),
             "(module test.private-user)\n\
-             (override test.private-factory/%value () 2)",
+             (override test.private-factory/value () 2)",
             1,
         )
         .expect("private override");
         assert_eq!(
-            vm.eval_str("(test.private-factory/%value)").expect("call"),
+            vm.eval_str("(test.private-factory/value)").expect("call"),
             Some(Value::Number(2.0))
         );
         assert!(
             vm.source_manager
                 .diagnostics()
                 .iter()
-                .any(|warning| warning.contains("overriding test.private-factory/%value")),
-            "expected private-override warning"
+                .any(|warning| warning.contains("overriding test.private-factory/value")),
+            "expected non-exported override warning"
         );
     }
 
@@ -7262,7 +7352,7 @@ mod tests {
             "test.refer-helper-{}.lisp",
             std::process::id()
         ));
-        std::fs::write(&helper, format!("(module test.refer-helper-{})\n(def refer-val () 11)", std::process::id()))
+        std::fs::write(&helper, format!("(module test.refer-helper-{})\n(export refer-val)\n(def refer-val () 11)", std::process::id()))
             .expect("write helper");
         let main_path = helper.with_file_name(format!(
             "eseqlisp-modules-refer-main-{}.lisp",
@@ -7293,22 +7383,245 @@ mod tests {
     }
 
     #[test]
-    fn private_reference_from_outside_warns_but_resolves() {
+    fn non_exported_reference_from_outside_warns_but_resolves() {
         let mut vm = module_test_vm();
         vm.eval_module_source(
             temp_lisp_path("privacy"),
-            "(module test.privacy)\n(def %secret () 6)",
+            "(module test.privacy)\n(def secret () 6)",
             1,
         )
         .expect("module eval");
-        let result = vm.eval_str("(test.privacy/%secret)").expect("private call");
+        let result = vm.eval_str("(test.privacy/secret)").expect("private call");
         assert_eq!(result, Some(Value::Number(6.0)));
         let diagnostics = vm.source_manager.diagnostics();
         assert!(
             diagnostics
                 .iter()
-                .any(|d| d.contains("%secret") && d.contains("internal")),
-            "expected %-privacy warning, got {diagnostics:?}"
+                .any(|d| d.contains("test.privacy/secret") && d.contains("not exported")),
+            "expected non-exported-symbol warning, got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_exports_union_are_position_independent_and_percent_names_are_plain() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("explicit-export-union"),
+            "(module test.exports)\n\
+             (export after)\n\
+             (def before () 1)\n\
+             (export before %published published-hook)\n\
+             (def after () 2)\n\
+             (def %published () 3)\n\
+             (defhook \"published-hook\")\n\
+             (def private () 4)",
+            1,
+        )
+        .expect("module eval");
+        let exports = &vm.module_exports["test.exports"];
+        assert!(exports.exports("before"));
+        assert!(exports.exports("after"));
+        assert!(exports.exports("%published"));
+        assert!(exports.exports("published-hook"));
+        // A hook name may be exported; its caller-facing native stays flat
+        // (module-system-spec.md §11 e), which is what makes `run-hook` the
+        // in-module call form.
+        assert!(vm.has_global("published-hook"));
+        assert!(!exports.exports("private"));
+    }
+
+    #[test]
+    fn export_rejects_invalid_context_and_reserved_shapes() {
+        let cases = [
+            ("(export x)", "declare a module first"),
+            (
+                "(module test.bad-export)\n(def f () (export x))",
+                "must appear at top level",
+            ),
+            (
+                "(module test.bad-export)\n(export test.other/x)",
+                "bare, unqualified symbol",
+            ),
+            (
+                "(module test.bad-export)\n(export (from test.other x))",
+                "reserved for re-export",
+            ),
+        ];
+        for (source, expected) in cases {
+            let mut vm = module_test_vm();
+            assert!(matches!(
+                vm.eval_str(source),
+                Err(super::VMError::CompileError)
+            ));
+            let errors = vm.take_source_load_errors();
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected:?}, got {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_exported_definition_fails_with_symbol_and_form_location() {
+        let mut vm = module_test_vm();
+        let path = temp_lisp_path("missing-export");
+        let result = vm.eval_module_source(
+            path,
+            "(module test.missing)\n\n  (export absent)\n(def present 1)",
+            1,
+        );
+        assert!(matches!(result, Err(super::VMError::CompileError)));
+        let errors = vm.take_source_load_errors();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains(":3:3:") && error.contains("export 'absent'")),
+            "expected located missing-export error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_visibility_enforces_refer_and_warns_for_qualified_and_override_access() {
+        let mut vm = module_test_vm();
+        let module = format!("test.visibility-{}", std::process::id());
+        let helper = std::env::temp_dir().join(format!("{module}.lisp"));
+        std::fs::write(
+            &helper,
+            format!("(module {module})\n(export public)\n(def public () 1)\n(def private () 2)"),
+        )
+        .expect("write visibility module");
+        let consumer = helper.with_file_name(format!(
+            "eseqlisp-visibility-consumer-{}.lisp",
+            std::process::id()
+        ));
+        let refer = vm.eval_module_source(
+            consumer,
+            &format!("(import {module} :refer (private))\n(private)"),
+            1,
+        );
+        assert!(matches!(refer, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|error| error.contains("cannot :refer non-exported symbol 'private'"))
+        );
+        assert_eq!(
+            vm.eval_str(&format!("(import {module} :refer (public))\n(public)"))
+                .expect("exported refer remains allowed"),
+            Some(Value::Number(1.0))
+        );
+
+        assert_eq!(
+            vm.eval_str(&format!("({module}/private)"))
+                .expect("qualified private access remains callable"),
+            Some(Value::Number(2.0))
+        );
+        vm.eval_str(&format!(
+            "(module test.visibility-user)\n(override {module}/private () 9)"
+        ))
+        .expect("private override remains allowed");
+        let diagnostics = vm.source_manager.diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|warning| { warning.contains(&format!("{module}/private is not exported")) })
+        );
+        assert!(diagnostics.iter().any(|warning| {
+            warning.contains(&format!("overriding {module}/private"))
+                && warning.contains("not exported")
+        }));
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn named_module_without_export_forms_exports_nothing() {
+        let mut vm = module_test_vm();
+        let module = format!("test.empty-exports-{}", std::process::id());
+        let helper = std::env::temp_dir().join(format!("{module}.lisp"));
+        std::fs::write(&helper, format!("(module {module})\n(def value () 1)"))
+            .expect("write module");
+        let consumer = helper.with_file_name(format!(
+            "eseqlisp-empty-exports-consumer-{}.lisp",
+            std::process::id()
+        ));
+        let refer = vm.eval_module_source(
+            consumer,
+            &format!("(import {module} :refer (value))\n(value)"),
+            1,
+        );
+        assert!(matches!(refer, Err(super::VMError::CompileError)));
+        assert!(
+            vm.take_source_load_errors()
+                .iter()
+                .any(|error| error.contains("cannot :refer non-exported symbol 'value'"))
+        );
+        assert!(vm.module_exports[&module].names().is_empty());
+        assert_eq!(
+            vm.eval_str(&format!("({module}/value)"))
+                .expect("qualified non-exported access remains callable"),
+            Some(Value::Number(1.0))
+        );
+        let diagnostics = vm.source_manager.diagnostics();
+        assert!(diagnostics.iter().any(|warning| {
+            warning.contains(&format!("{module}/value is not exported by {module}"))
+        }));
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn export_reload_replaces_the_set_and_repl_forms_append() {
+        let mut vm = module_test_vm();
+        let path = temp_lisp_path("export-reload");
+        vm.eval_module_source(
+            path.clone(),
+            "(module test.reload-exports)\n(export old)\n(def old 1)",
+            1,
+        )
+        .expect("v1");
+        vm.eval_module_source(
+            path,
+            "(module test.reload-exports)\n(export new)\n(def new 2)",
+            2,
+        )
+        .expect("v2");
+        let exports = &vm.module_exports["test.reload-exports"];
+        assert!(!exports.exports("old"));
+        assert!(exports.exports("new"));
+        let stale = vm.eval_module_source(
+            temp_lisp_path("export-reload"),
+            "(module test.reload-exports)\n(export old)\n(def new 3)",
+            3,
+        );
+        assert!(matches!(stale, Err(super::VMError::CompileError)));
+        let exports = &vm.module_exports["test.reload-exports"];
+        assert!(
+            !exports.exports("old"),
+            "failed reload must restore the prior set"
+        );
+        assert!(exports.exports("new"));
+
+        vm.eval_str(
+            "(module test.repl-exports)\n(export first)\n(export second)\n(def first 1)\n(def second 2)",
+        )
+        .expect("REPL exports");
+        let repl = &vm.module_exports["test.repl-exports"];
+        assert!(repl.exports("first"));
+        assert!(repl.exports("second"));
+    }
+
+    #[test]
+    fn runtime_by_name_lookup_bypasses_export_visibility() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("host-private-lookup"),
+            "(module test.host-private)\n(export public)\n(def public 1)\n(def host-only 42)",
+            1,
+        )
+        .expect("module eval");
+        assert!(!vm.module_exports["test.host-private"].exports("host-only"));
+        assert_eq!(
+            vm.global_value("test.host-private/host-only"),
+            Some(Value::Number(42.0))
         );
     }
 

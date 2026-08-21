@@ -8,6 +8,41 @@
 ;; (the sections <-> runtime precedent); load-once terminates it.
 (import eseq.effects.custom-effect-ui :as fxui)
 
+(export inst-param
+        inst-base-note-param
+        ui-param-control
+        custom-ui-scope-name
+        custom-ui-current-scope
+        custom-ui-param-in-scope
+        custom-ui-set-param-in-scope
+        custom-ui-set-param-by-name-in-scope
+        custom-ui-set-adsr-in-scope
+        custom-ui-param-change-callback
+        custom-ui-param-change-callback-s
+        custom-ui-current-param
+        custom-ui-current-tensor-param
+        custom-ui-current-base-note-param
+        custom-ui-set-param
+        custom-ui-param-binding
+        custom-ui-param-value
+        custom-ui-param-control-min
+        custom-ui-param-control-max
+        custom-ui-param-mod-wrapper
+        custom-ui-param-control-key-mode
+        custom-ui-param-base-value-prop
+        custom-ui-param-base-min-prop
+        custom-ui-param-base-max-prop
+        custom-ui-param-plock-active?
+        custom-ui-param-plock-default
+        custom-ui-param-plock-text-color
+        custom-ui-param-knob-mod-slot-prop
+        custom-ui-param-knob-mod-depth-prop
+        custom-ui-selected-mod-slot-prop
+        custom-ui-tensor-bound-values
+        custom-ui-tensor-cell-change-callback
+        custom-ui-tensor-cell-change-callback-s
+        base-note)
+
 ;; Migration aliases (module spec §10). Every alias is an identity alias:
 ;; this file is the generated-custom-UI vocabulary (hub-file precedent —
 ;; the flat spellings are the contract generated code speaks), and its
@@ -32,13 +67,13 @@
 (def inst-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
 
-(def %inst-tensor-param (inst name)
+(def inst-tensor-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :tensors)) 0))
 
 (def inst-base-note-param (inst)
   (nth (filter |p| (= (get p :control) "base-note") (get inst :synth)) 0))
 
-(def %inst-param-row (inst name key)
+(def inst-param-row (inst name key)
   (let ((p (inst-param inst name)))
     (if p
       (pg/fx-param-row p false key)
@@ -70,26 +105,26 @@
     (fxui/audio-fx-ui-param (get scope :audio-fx) name)
     (inst-param (get scope :inst) name)))
 
-(def %tensor-param-in-scope (scope name)
+(def tensor-param-in-scope (scope name)
   (if (= (get scope :kind) "audio-fx")
     false
-    (%inst-tensor-param (get scope :inst) name)))
+    (inst-tensor-param (get scope :inst) name)))
 
-(def %base-note-param-in-scope (scope)
+(def base-note-param-in-scope (scope)
   (if (= (get scope :kind) "audio-fx")
     false
     (inst-base-note-param (get scope :inst))))
 
-(def %fx-in-scope (scope)
+(def fx-in-scope (scope)
   (if (= (get scope :kind) "audio-fx")
     (get scope :audio-fx)
     false))
 
-(def %current-fx ()
-  (%fx-in-scope (custom-ui-current-scope)))
+(def current-fx ()
+  (fx-in-scope (custom-ui-current-scope)))
 
 (def custom-ui-set-param-in-scope (scope p value)
-  (pc/param-set-control-value (%fx-in-scope scope) p value))
+  (pc/param-set-control-value (fx-in-scope scope) p value))
 
 (def custom-ui-set-param-by-name-in-scope (scope name value)
   (let ((p (custom-ui-param-in-scope scope name)))
@@ -100,7 +135,7 @@
         (decay-p (custom-ui-param-in-scope scope decay))
         (sustain-p (custom-ui-param-in-scope scope sustain))
         (release-p (if release (custom-ui-param-in-scope scope release) false))
-        (fx (%fx-in-scope scope)))
+        (fx (fx-in-scope scope)))
     (let ((updates (if release-p
           (list
             (dict :param-idx (get attack-p :idx) :value (get env :attack))
@@ -148,7 +183,7 @@
 (def custom-ui-current-tensor-param (name)
   (if (= eseq.vanilla/custom-ui-current-kind "audio-fx")
     false
-    (%inst-tensor-param eseq.vanilla/synth-ui-current-inst name)))
+    (inst-tensor-param eseq.vanilla/synth-ui-current-inst name)))
 
 (def custom-ui-current-base-note-param ()
   (if (= eseq.vanilla/custom-ui-current-kind "audio-fx")
@@ -159,7 +194,7 @@
   (custom-ui-set-param-in-scope (custom-ui-current-scope) p value))
 
 (def custom-ui-param-binding (p)
-  (pc/fx-param-value-for (%current-fx) p))
+  (pc/fx-param-value-for (current-fx) p))
 
 ;; Public custom-UI calculations have historically consumed a number here.
 ;; Keep that contract distinct from the binding passed directly to widgets.
@@ -167,45 +202,45 @@
   (reactive-value (custom-ui-param-binding p)))
 
 (def custom-ui-param-control-min (p)
-  (pc/param-control-min (%current-fx) p))
+  (pc/param-control-min (current-fx) p))
 
 (def custom-ui-param-control-max (p)
-  (pc/param-control-max (%current-fx) p))
+  (pc/param-control-max (current-fx) p))
 
 (def custom-ui-param-mod-wrapper (p key body)
-  (pc/param-mod-wrapper (%current-fx) p key body))
+  (pc/param-mod-wrapper (current-fx) p key body))
 
 (def custom-ui-param-control-key-mode (p)
-  (pc/param-control-key-mode (%current-fx) p))
+  (pc/param-control-key-mode (current-fx) p))
 
 (def custom-ui-param-base-value-prop (p)
-  (pc/param-base-value-prop (%current-fx) p))
+  (pc/param-base-value-prop (current-fx) p))
 
 (def custom-ui-param-base-min-prop (p)
-  (pc/param-base-min-prop (%current-fx) p))
+  (pc/param-base-min-prop (current-fx) p))
 
 (def custom-ui-param-base-max-prop (p)
-  (pc/param-base-max-prop (%current-fx) p))
+  (pc/param-base-max-prop (current-fx) p))
 
 (def custom-ui-param-plock-active? (p)
-  (pc/param-plock-active? (%current-fx) p))
+  (pc/param-plock-active? (current-fx) p))
 
 (def custom-ui-param-plock-default (p)
-  (pc/param-plock-default (%current-fx) p))
+  (pc/param-plock-default (current-fx) p))
 
 (def custom-ui-param-plock-text-color (p)
-  (pc/param-plock-text-color (%current-fx) p))
+  (pc/param-plock-text-color (current-fx) p))
 
 (def custom-ui-param-knob-mod-slot-prop (p idx)
-  (pc/param-knob-mod-slot-prop (%current-fx) p idx))
+  (pc/param-knob-mod-slot-prop (current-fx) p idx))
 
 (def custom-ui-param-knob-mod-depth-prop (p idx)
-  (pc/param-knob-mod-depth-prop (%current-fx) p idx))
+  (pc/param-knob-mod-depth-prop (current-fx) p idx))
 
 (def custom-ui-selected-mod-slot-prop (p)
-  (pc/param-selected-mod-slot-prop (%current-fx) p))
+  (pc/param-selected-mod-slot-prop (current-fx) p))
 
-(def %set-param-by-name (name value)
+(def set-param-by-name (name value)
   (let ((p (custom-ui-current-param name)))
     (if p (custom-ui-set-param p value) false)))
 

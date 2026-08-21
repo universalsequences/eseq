@@ -7,6 +7,8 @@
 
 (import eseq.seq-layout)
 
+(export sidebar-was-visible)
+
 ;; No compat aliases: nothing outside this file references its state, and hook
 ;; names are strings in the flat hook keyspace (spec §6), which does not
 ;; auto-qualify. The bare references below (`samples-sidebar-visible`,

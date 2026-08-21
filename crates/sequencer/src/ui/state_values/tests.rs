@@ -885,6 +885,71 @@
     }
 
     #[test]
+    fn legacy_mixer_definitions_are_top_level_and_source_loads() {
+        let path = "ui/legacy/mixer.lisp";
+        let src = std::fs::read_to_string(path).expect("read legacy mixer lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize legacy mixer lisp");
+        let expressions = ASTParser::new(tokens)
+            .parse()
+            .expect("parse legacy mixer lisp");
+        let signatures = expressions
+            .iter()
+            .map(|expression| match expression {
+                Expression::List(items) => match items.as_slice() {
+                    [Expression::Symbol(kind), Expression::Symbol(name), ..]
+                        if kind == "module" || kind == "def" || kind == "defwidget" =>
+                    {
+                        format!("{kind} {name}")
+                    }
+                    [Expression::Symbol(kind)] if kind == "export" => kind.clone(),
+                    [Expression::Symbol(kind), ..] if kind == "effect-buffer" => kind.clone(),
+                    _ => panic!("unexpected top-level legacy mixer form: {expression:?}"),
+                },
+                _ => panic!("unexpected top-level legacy mixer expression: {expression:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            signatures,
+            [
+                "module eseq.legacy.mixer",
+                "export",
+                "def track-peak",
+                "defwidget track-container",
+                "defwidget rec-arm-dot",
+                "def mute-button-bg",
+                "def solo-button-bg",
+                "def button-border",
+                "defwidget mixer-track-meter",
+                "defwidget delete-track-icon",
+                "def bus-row-label",
+                "def has-mix-bus?",
+                "def display-bus-index",
+                "effect-buffer",
+            ]
+        );
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(0.0)),
+                ("bus-names", Value::List(vec![])),
+            ],
+            true,
+        );
+        let loaded = runtime
+            .eval_str(r#"(load "ui/legacy/mixer.lisp")"#)
+            .expect("load legacy mixer lisp")
+            .expect("load should return a value");
+        assert!(
+            !matches!(&loaded, Value::String(error) if error.starts_with("load:")),
+            "legacy mixer load failed: {loaded:?}"
+        );
+    }
+
+    #[test]
     fn complete_themes_define_every_registered_theme_slot_once() {
         let registered_keys = eseqlisp::theme::reactive_fields()
             .into_iter()
@@ -2361,7 +2426,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(eseq.browser/%load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
+                r#"(eseq.browser/load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
             )
             .expect("activate the kit");
         let commands = editor.drain_host_commands();
@@ -2401,16 +2466,16 @@
         let _ = editor.drain_host_commands();
 
         editor.runtime_mut().eval_str(
-            r#"(eseq.browser/%load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
+            r#"(eseq.browser/load-kit (dict :label "House Kit" :path "kits/House-Kit.kit"))"#,
         ).expect("audition selected rack kit");
         editor.runtime_mut().eval_str(
-            r#"(eseq.browser/%load-sound (dict :label "Bass" :path "sounds/Bass.sound"))"#,
+            r#"(eseq.browser/load-sound (dict :label "Bass" :path "sounds/Bass.sound"))"#,
         ).expect("audition selected rack Sound");
         editor.runtime_mut().eval_str(
-            r#"(eseq.browser/%activate-instrument "emulations/minimoog")"#,
+            r#"(eseq.browser/activate-instrument "emulations/minimoog")"#,
         ).expect("refuse saved instrument audition on selected rack");
         editor.runtime_mut().eval_str(
-            r#"(eseq.browser/%activate-builtin-instrument "sampler")"#,
+            r#"(eseq.browser/activate-builtin-instrument "sampler")"#,
         ).expect("activate builtin sampler on selected rack");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 3,
@@ -2470,7 +2535,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(do (set! eseq.browser/%kit-save-name "Breakbeat") (eseq.browser/%save-kit))"#,
+                r#"(do (set! eseq.browser/kit-save-name "Breakbeat") (eseq.browser/save-kit))"#,
             )
             .expect("confirm kit save");
         let commands = editor.drain_host_commands();
@@ -4619,7 +4684,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(eseq.browser/%choose-learn-target
+                r#"(eseq.browser/choose-learn-target
                     (dict :label "Acoustic Kick 808" :path "samples/abc123.wav"))"#,
             )
             .expect("choose patch-learning target");
@@ -4717,7 +4782,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.browser/%preview-path")
+                .eval_str("eseq.browser/preview-path")
                 .expect("read preview path"),
             Some(Value::String("samples/kick.wav".to_string()))
         );
@@ -4725,7 +4790,7 @@
         // Toggling the headphone on auditions the focused sample...
         editor
             .runtime_mut()
-            .eval_str("(eseq.browser/%toggle-auto-preview)")
+            .eval_str("(eseq.browser/toggle-auto-preview)")
             .expect("headphone on");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -4773,7 +4838,7 @@
             .set_reactive("SEQ", "browser-preview-playing", Value::Bool(true));
         editor
             .runtime_mut()
-            .eval_str("(eseq.browser/%toggle-auto-preview)")
+            .eval_str("(eseq.browser/toggle-auto-preview)")
             .expect("headphone off");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -5730,7 +5795,7 @@
     fn metal_seq_track_group_dispatcher_groups_only_multi_selection() {
         let src = std::fs::read_to_string("ui/mixer.lisp").expect("read mixer lisp");
         let start = src
-            .find("(def %group-selected ()")
+            .find("(def group-selected ()")
             .expect("mixer should define the group action");
         let end = src
             .find("(define-mode \"seq-mixer-mode\"")
@@ -16094,7 +16159,7 @@
 
         editor
             .runtime_mut()
-            .eval_str(r#"(eseq.choose-model/select "gpt-5.5")"#)
+            .eval_str(r#"(eseq.choose-model/select-model "gpt-5.5")"#)
             .expect("select a model");
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.choose-model/open?").unwrap(),
@@ -27035,16 +27100,16 @@
             .expect("right-click mixer track strip");
         editor.refresh_runtime_side_effects();
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-track").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-menu-track").unwrap(),
             Some(Value::Number(0.0)),
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-col").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-menu-col").unwrap(),
             Some(Value::Number(83.25)),
             "the context menu should retain the pointer column",
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-row").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-menu-row").unwrap(),
             Some(Value::Number(7.5)),
             "the context menu should retain the pointer row",
         );
@@ -27062,12 +27127,12 @@
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
             Some(Value::Bool(false)),
             "selecting rename should close the context menu",
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-renaming").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-renaming").unwrap(),
             Some(Value::Number(0.0)),
         );
         let rename_layout = editor.widget_layout().expect("inline rename layout should build");
@@ -27080,7 +27145,7 @@
         assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
 
         editor.runtime_mut()
-            .eval_str("(eseq.mixer/%finish-track-rename 0 false)")
+            .eval_str("(eseq.mixer/finish-track-rename 0 false)")
             .expect("finish expanded inline rename");
         editor.runtime_mut().set_reactive(
             "SEQ",
@@ -27118,10 +27183,10 @@
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.runtime_mut().eval_str(&format!(
-                "(do (set! eseq.mixer/%track-menu-group-id -1) (set! eseq.mixer/%track-menu-track {target}))",
+                "(do (set! eseq.mixer/track-menu-group-id -1) (set! eseq.mixer/track-menu-track {target}))",
             )).expect("select track context-menu target");
             let Some(Value::List(actions)) = editor.runtime_mut()
-                .eval_str("(eseq.mixer/%track-context-menu-actions)")
+                .eval_str("(eseq.mixer/track-context-menu-actions)")
                 .expect("evaluate track context-menu actions")
             else {
                 panic!("track context-menu actions should be a list");
@@ -27156,10 +27221,10 @@
         track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]);
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
-            "(do (set! eseq.mixer/%track-menu-open true) (eseq.mixer/%select-track-menu-action (dict :id :group)))",
+            "(do (set! eseq.mixer/track-menu-open true) (eseq.mixer/select-track-menu-action (dict :id :group)))",
         ).expect("select Group Tracks");
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
             Some(Value::Bool(false)),
         );
         let commands = editor.drain_host_commands();
@@ -27188,11 +27253,11 @@
             editor
                 .runtime_mut()
                 .eval_str(&format!(
-                    "(set! eseq.mixer/%track-menu-group-id {group_id})",
+                    "(set! eseq.mixer/track-menu-group-id {group_id})",
                 ))
                 .expect("select group context-menu target");
             let Some(Value::List(actions)) = editor.runtime_mut()
-                .eval_str("(eseq.mixer/%track-context-menu-actions)")
+                .eval_str("(eseq.mixer/track-context-menu-actions)")
                 .expect("evaluate group context-menu actions")
             else {
                 panic!("group context-menu actions should be a list");
@@ -27223,10 +27288,10 @@
 
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
-            "(do (set! eseq.mixer/%track-menu-open true) (eseq.mixer/%select-track-menu-action (dict :id :ungroup)))",
+            "(do (set! eseq.mixer/track-menu-open true) (eseq.mixer/select-track-menu-action (dict :id :ungroup)))",
         ).expect("select Ungroup");
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/%track-menu-open").unwrap(),
+            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
             Some(Value::Bool(false)),
         );
         let commands = editor.drain_host_commands();
@@ -27527,7 +27592,7 @@
         );
 
         editor.runtime_mut()
-            .eval_str("(eseq.mixer/%begin-track-rename 0)")
+            .eval_str("(eseq.mixer/begin-track-rename 0)")
             .expect("begin inline track rename");
         editor.refresh_runtime_side_effects();
         let rename_layout = editor.widget_layout()
@@ -27541,7 +27606,7 @@
         assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
         assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
         editor.runtime_mut()
-            .eval_str("(eseq.mixer/%finish-track-rename 0 false)")
+            .eval_str("(eseq.mixer/finish-track-rename 0 false)")
             .expect("cancel inline track rename");
         editor.refresh_runtime_side_effects();
 
@@ -36169,12 +36234,12 @@
         assert_eq!(engine.props.get("value"), Some(&Value::String("Spectral".to_string())));
 
         editor.runtime_mut().eval_str(
-            r#"(eseq.effects.builtin.filter-table/%set-source
+            r#"(eseq.effects.builtin.filter-table/set-source
                 (dict :track-idx 0 :rack-slot 0 :rack-fx true :slot-idx 0)
                 "fltab:vowel-drift")"#,
         ).expect("select rack Filter Table preset");
         editor.runtime_mut().eval_str(
-            r#"(eseq.effects.builtin.filter-table/%set-engine
+            r#"(eseq.effects.builtin.filter-table/set-engine
                 (dict :track-idx 0 :rack-slot 0 :rack-fx true :slot-idx 0)
                 "causal")"#,
         ).expect("select rack Filter Table engine");
@@ -45720,7 +45785,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.mixer/%visual-track-range 7 11)")
+                .eval_str("(eseq.mixer/visual-track-range 7 11)")
                 .expect("build visual mixer range"),
             Some(test_number_list(&[7.0, 10.0, 11.0])),
             "shift ranges must contain the badges between their visual endpoints",
@@ -45733,31 +45798,31 @@
         calls.lock().unwrap().clear();
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-body-click (dict) 0)")
+            .eval_str("(eseq.mixer/track-body-click (dict) 0)")
             .expect("plain body click establishes range anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-body-click (dict :shift true) 1)")
+            .eval_str("(eseq.mixer/track-body-click (dict :shift true) 1)")
             .expect("shift body click extends from anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-body-click (dict :shift true) 0)")
+            .eval_str("(eseq.mixer/track-body-click (dict :shift true) 0)")
             .expect("second shift body click re-extends from the same anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-body-click (dict :cmd true) 1)")
+            .eval_str("(eseq.mixer/track-body-click (dict :cmd true) 1)")
             .expect("cmd body click toggles without moving anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-label-click (dict :shift true) 1)")
+            .eval_str("(eseq.mixer/track-label-click (dict :shift true) 1)")
             .expect("shift label click extends from the unchanged anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-label-click (dict) 1)")
+            .eval_str("(eseq.mixer/track-label-click (dict) 1)")
             .expect("plain label click resets range anchor and preserves delete gesture");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/%track-label-click (dict :shift true) 0)")
+            .eval_str("(eseq.mixer/track-label-click (dict :shift true) 0)")
             .expect("shift label click supports a reverse range");
         assert_eq!(
             calls.lock().unwrap().as_slice(),
@@ -49253,7 +49318,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%select-group 0)")
+            .eval_str("(eseq.sequencer/select-group 0)")
             .expect("select regular group container");
         let selected = editor
             .widget_layout()
@@ -49422,7 +49487,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(eseq.sequencer/%drop-on-pad-cell
+                r#"(eseq.sequencer/drop-on-pad-cell
                     (dict
                       :drag-type "sample"
                       :payload (dict :path "samples/hat.wav")
@@ -49439,7 +49504,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(eseq.sequencer/%drop-on-pad-cell
+                r#"(eseq.sequencer/drop-on-pad-cell
                     (dict
                       :drag-type "instrument"
                       :payload (dict :kind "instrument" :name "core/drift")
@@ -49456,19 +49521,19 @@
         // Paging moves the cell's note by an octave, not by sixteen pads.
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 2)")
+            .eval_str("(eseq.sequencer/set-pad-page 0 2)")
             .expect("paging should evaluate");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/%pad-cell-note 0 5)")
+                .eval_str("(eseq.sequencer/pad-cell-note 0 5)")
                 .expect("paged cell note should evaluate"),
             Some(Value::Number(33.0)),
             "the page below starts an octave down, so the same cell is note-12"
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 3)")
+            .eval_str("(eseq.sequencer/set-pad-page 0 3)")
             .expect("paging back should evaluate");
 
         // An occupied cell is the member track's own drop target. It also marks
@@ -49476,7 +49541,7 @@
         // replacement commands preserve the selected track.
         // Pad 36 is the page's lowest note, so it renders bottom-left: cell 12.
         let occupied_meta =
-            "(eseq.sequencer/%pad-cell-drop-meta 0 12 (eseq.sequencer/%pad-at 0 12))";
+            "(eseq.sequencer/pad-cell-drop-meta 0 12 (eseq.sequencer/pad-at 0 12))";
         assert_eq!(
             editor
                 .runtime_mut()
@@ -49539,7 +49604,7 @@
         editor
             .runtime_mut()
             .eval_str(
-                r#"(eseq.sequencer/%drop-on-pad-cell
+                r#"(eseq.sequencer/drop-on-pad-cell
                     (dict
                       :drag-type "sample"
                       :payload (dict :path "samples/hat.wav")
@@ -49647,7 +49712,7 @@
         };
         assert_eq!(floor, -36.0);
         assert_eq!(
-            eval(&mut editor, "(eseq.drum-rack-v2/%clamp-pad-note -37)"),
+            eval(&mut editor, "(eseq.drum-rack-v2/clamp-pad-note -37)"),
             Some(Value::Number(-36.0)),
             "below the floor clamps to the floor, not to 0"
         );
@@ -49682,13 +49747,13 @@
 
         // The grid opens on the page holding the rack's lowest pad (36), not on
         // page 0 — a kit that lives high up must not open onto empty octaves.
-        assert_eq!(number(&mut editor, "(eseq.sequencer/%pad-page 0)"), 3.0);
+        assert_eq!(number(&mut editor, "(eseq.sequencer/pad-page 0)"), 3.0);
 
         // Within a page: bottom-left is the lowest note, ascending left to
         // right then bottom to top. Cell 12 is the bottom-left cell.
         for (cell, note) in [(12, 36.0), (13, 37.0), (15, 39.0), (8, 40.0), (0, 48.0), (3, 51.0)] {
             assert_eq!(
-                number(&mut editor, &format!("(eseq.sequencer/%pad-cell-note 0 {cell})")),
+                number(&mut editor, &format!("(eseq.sequencer/pad-cell-note 0 {cell})")),
                 note,
                 "cell {cell} should name note {note}"
             );
@@ -49754,17 +49819,17 @@
         // Pads render sparsely AT their notes: 36 bottom-left, 38 two cells
         // along, and the cell between them empty.
         assert_eq!(
-            number(&mut editor, "(get (eseq.sequencer/%pad-at 0 12) :track)"),
+            number(&mut editor, "(get (eseq.sequencer/pad-at 0 12) :track)"),
             1.0
         );
         assert_eq!(
-            number(&mut editor, "(get (eseq.sequencer/%pad-at 0 14) :track)"),
+            number(&mut editor, "(get (eseq.sequencer/pad-at 0 14) :track)"),
             2.0
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(= (eseq.sequencer/%pad-at 0 13) nil)")
+                .eval_str("(= (eseq.sequencer/pad-at 0 13) nil)")
                 .expect("empty cell should evaluate"),
             Some(Value::Bool(true)),
             "the note between the two pads is an empty cell, not the next pad"
@@ -49774,7 +49839,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/%pad-cell-note 0 12))")
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/pad-cell-note 0 12))")
                 .expect("cell note label should evaluate"),
             Some(Value::String("C7".to_string())),
             "the bottom-left cell is the page's C, and pad 36 labels itself C7"
@@ -49784,19 +49849,19 @@
         // octave a pad could be placed on.
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 99)")
+            .eval_str("(eseq.sequencer/set-pad-page 0 99)")
             .expect("paging past the top should evaluate");
         assert_eq!(
-            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            number(&mut editor, "(eseq.sequencer/pad-page 0)"),
             max_page as f64,
             "the page clamps at the top rather than addressing notes off the pad map"
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 -99)")
+            .eval_str("(eseq.sequencer/set-pad-page 0 -99)")
             .expect("paging past the bottom should evaluate");
         assert_eq!(
-            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            number(&mut editor, "(eseq.sequencer/pad-page 0)"),
             min_page as f64,
             "and clamps at C1 on the way down"
         );
@@ -49831,7 +49896,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/%pad-page 0)")
+                .eval_str("(eseq.sequencer/pad-page 0)")
                 .expect("default page should evaluate"),
             Some(Value::Number(-1.0)),
             "the grid opens on the page holding the kit's lowest pad"
@@ -49839,7 +49904,7 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(get (eseq.sequencer/%pad-at 0 12) :track)")
+                .eval_str("(get (eseq.sequencer/pad-at 0 12) :track)")
                 .expect("bottom-left pad should evaluate"),
             Some(Value::Number(1.0)),
             "the kit's lowest pad still renders bottom-left, an octave away"
@@ -49848,12 +49913,12 @@
         // rack leaves this one on its own derived default.
         editor
             .runtime_mut()
-            .eval_str("(do (set! eseq.sequencer/%pad-grid-page-group 999) (set! eseq.sequencer/%pad-grid-page 0))")
+            .eval_str("(do (set! eseq.sequencer/pad-grid-page-group 999) (set! eseq.sequencer/pad-grid-page 0))")
             .expect("foreign page state should evaluate");
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.sequencer/%pad-page 0)")
+                .eval_str("(eseq.sequencer/pad-page 0)")
                 .expect("default page should evaluate"),
             Some(Value::Number(-1.0)),
             "another rack's page must not leak into this rack's grid"
@@ -49916,7 +49981,7 @@
         // The highlight is exactly the sixteen notes on screen: the rack's pads
         // sit at 36/38, so the grid opens on page 3 (36..51) and the four rows
         // based at 36/40/44/48 light up — the ones either side do not.
-        assert_eq!(number(&mut editor, "(eseq.sequencer/%pad-page 0)"), 3.0);
+        assert_eq!(number(&mut editor, "(eseq.sequencer/pad-page 0)"), 3.0);
         for (row, on_page) in [(4, false), (3, true), (2, true), (1, true), (0, true)] {
             assert_eq!(
                 flag(
@@ -49937,16 +50002,16 @@
             "(list (dict :pad-note 36 :track 4) (dict :pad-note 38 :track 7))";
         assert!(flag(
             &mut editor,
-            &format!("(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 36)")
+            &format!("(eseq.sequencer/note-occupied? (eseq.sequencer/pad-note-tracks {MAP_PADS}) 36)")
         ));
         assert!(!flag(
             &mut editor,
-            &format!("(eseq.sequencer/%note-occupied? (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 37)")
+            &format!("(eseq.sequencer/note-occupied? (eseq.sequencer/pad-note-tracks {MAP_PADS}) 37)")
         ));
         assert_eq!(
             number(
                 &mut editor,
-                &format!("(eseq.sequencer/%note-track (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 38)")
+                &format!("(eseq.sequencer/note-track (eseq.sequencer/pad-note-tracks {MAP_PADS}) 38)")
             ),
             7.0,
             "a map cell resolves to the member track behind its note"
@@ -49954,7 +50019,7 @@
         assert_eq!(
             number(
                 &mut editor,
-                &format!("(eseq.sequencer/%note-track (eseq.sequencer/%pad-note-tracks {MAP_PADS}) 37)")
+                &format!("(eseq.sequencer/note-track (eseq.sequencer/pad-note-tracks {MAP_PADS}) 37)")
             ),
             -1.0,
             "a note no pad answers to has no track"
@@ -49962,7 +50027,7 @@
         assert_eq!(
             number(
                 &mut editor,
-                &format!("(len (eseq.sequencer/%pad-note-tracks {MAP_PADS}))")
+                &format!("(len (eseq.sequencer/pad-note-tracks {MAP_PADS}))")
             ),
             number(
                 &mut editor,
@@ -49976,34 +50041,34 @@
         // the bottom row, C1, three octaves BELOW middle C.
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 (eseq.drum-rack-v2/page-of-note (eseq.drum-rack-v2/pad-map-row-base 21)))")
+            .eval_str("(eseq.sequencer/set-pad-page 0 (eseq.drum-rack-v2/page-of-note (eseq.drum-rack-v2/pad-map-row-base 21)))")
             .expect("map click should evaluate");
         assert_eq!(
-            number(&mut editor, "(eseq.sequencer/%pad-page 0)"),
+            number(&mut editor, "(eseq.sequencer/pad-page 0)"),
             -3.0,
             "a click on the bottom row pages to the page holding C1"
         );
         assert!(flag(
             &mut editor,
-            "(eseq.drum-rack-v2/pad-map-row-on-page? 21 (eseq.sequencer/%pad-page 0))"
+            "(eseq.drum-rack-v2/pad-map-row-on-page? 21 (eseq.sequencer/pad-page 0))"
         ));
         assert!(
             !flag(
                 &mut editor,
-                "(eseq.drum-rack-v2/pad-map-row-on-page? 3 (eseq.sequencer/%pad-page 0))"
+                "(eseq.drum-rack-v2/pad-map-row-on-page? 3 (eseq.sequencer/pad-page 0))"
             ),
             "the rows the grid left behind stop being highlighted"
         );
         // The clicked note is now on the enlarged grid, which is the point of
         // the jump.
         assert_eq!(
-            number(&mut editor, "(eseq.sequencer/%pad-cell-note 0 12)"),
+            number(&mut editor, "(eseq.sequencer/pad-cell-note 0 12)"),
             bottom
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/%pad-cell-note 0 12))")
+                .eval_str("(eseq.drum-rack-v2/note-label (eseq.sequencer/pad-cell-note 0 12))")
                 .expect("bottom-left label should evaluate"),
             Some(Value::String("C1".to_string())),
         );
@@ -50140,7 +50205,7 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%select-pad 0 (nth (eseq.drum-rack-v2/pads 0) 1))")
+            .eval_str("(eseq.sequencer/select-pad 0 (nth (eseq.drum-rack-v2/pads 0) 1))")
             .expect("selecting a pad should evaluate");
         assert_eq!(
             editor
@@ -50294,7 +50359,7 @@
 
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 0)")
+            .eval_str("(eseq.sequencer/set-pad-page 0 0)")
             .expect("paging should evaluate");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
@@ -50425,7 +50490,7 @@
         // page away from 36..51 and the map cell keeps its own light.
         editor
             .runtime_mut()
-            .eval_str("(eseq.sequencer/%set-pad-page 0 0)")
+            .eval_str("(eseq.sequencer/set-pad-page 0 0)")
             .expect("paging should evaluate");
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_visible_layouts_for_buffer_named("*fx*");

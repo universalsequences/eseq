@@ -1,14 +1,16 @@
 ;; Filter Table built-in FX panel.
 (module eseq.effects.builtin.filter-table)
 
-(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
+(import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
 (import eseq.effects.param-controls :as pc)
+
+(export filter-table-ui)
 
 ;; The generic dynamics knobs only edit base values. Filter Table parameters
 ;; need the complete modulation contract: in the mods tab the same knob edits
 ;; the selected source's depth, draws all assigned modulation ranges, and is
 ;; wrapped by the blue modulation target affordance.
-(def %knob (fx label-text p decimals value-scale taper)
+(def parameter-knob (fx label-text p decimals value-scale taper)
   (pc/param-mod-wrapper fx p (str "filter-table-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "filter-table-param-" (get p :idx) (pc/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -34,19 +36,19 @@
         :track-color '(rgba 0.4, 0.4, 0.4, 1)
         :on-change (lambda (v) (pc/param-set-control-value fx p v))))))
 
-(def %percent-knob (fx label-text p)
-  (%knob fx label-text p 0 100 "linear"))
+(def percent-knob (fx label-text p)
+  (parameter-knob fx label-text p 0 100 "linear"))
 
-(def %number-knob (fx label-text p decimals)
-  (%knob fx label-text p decimals 1 "linear"))
+(def number-knob (fx label-text p decimals)
+  (parameter-knob fx label-text p decimals 1 "linear"))
 
 ;; Cutoff spans 40–18000 Hz; a linear knob leaves the musical 40–1000 Hz
 ;; region on ~5% of the travel. The log taper gives every octave equal arc
 ;; (typed Hz values and the displayed number are unaffected).
-(def %freq-knob (fx label-text p)
-  (%knob fx label-text p 0 1 "log"))
+(def freq-knob (fx label-text p)
+  (parameter-knob fx label-text p 0 1 "log"))
 
-(def %spectrum-source (fx)
+(def spectrum-source (fx)
   (if (get fx :rack-fx)
     (dict :kind :rack-effect :index (get fx :track-idx)
           :rack-slot (get fx :rack-slot) :slot (get fx :slot-idx))
@@ -54,21 +56,21 @@
       (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
       (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
-(def %command-target (fx)
+(def command-target (fx)
   (dict :track (get fx :track-idx)
         :rack-slot (get fx :rack-slot)
         :slot (get fx :slot-idx)
         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)))
 
-(def %set-source (fx path)
+(def set-source (fx path)
   (host-command "set-filter-table-source"
-    (merge (%command-target fx) :path path)))
+    (merge (command-target fx) :path path)))
 
-(def %set-engine (fx engine)
+(def set-engine (fx engine)
   (host-command "set-filter-table-engine"
-    (merge (%command-target fx) :engine engine)))
+    (merge (command-target fx) :engine engine)))
 
-(def %drop-table (event)
+(def drop-table (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((path (get payload :path)))
@@ -84,17 +86,17 @@
 ;; drawn band curve is the widget's own approximation — the authoritative
 ;; response is the magnitude table above, which previews every edit live.
 
-(def %ed-target (fx)
+(def ed-target (fx)
   (dict :track (get fx :track-idx)
         :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
         :slot (get fx :slot-idx)))
 
-(def %ed-band-type (kind)
+(def ed-band-type (kind)
   (if (= kind "lowpass") "lowpass"
     (if (= kind "highpass") "highpass"
       (if (= kind "notch") "notch" "bell"))))
 
-(def %ed-band-action (ed event)
+(def ed-band-action (ed event)
   (if (and (= (get event :band-id) 0)
            (or (= (get event :type) :change-band)
                (= (get event :type) :commit-band)))
@@ -105,7 +107,7 @@
             :gain (get event :gain)
             :q (get event :q)))))
 
-(def %ed-bands (ed)
+(def ed-bands (ed)
   (let ((band (get ed :band))
         ;; Reference marker: a pinned, disabled point at harmonic 24 — the
         ;; bin the cutoff parameter transposes to its own frequency.
@@ -114,26 +116,26 @@
     (if band
       (list marker
             (dict :id 0
-                  :type (%ed-band-type (get band :kind))
+                  :type (ed-band-type (get band :kind))
                   :freq (get band :freq)
                   :gain (get band :gain)
                   :q (get band :q)
                   :enabled true :selected true))
       (list marker))))
 
-(def %ed-op-button (label-text payload w)
+(def ed-op-button (label-text payload w)
   (button label-text
     :width w :height 0.8 :padding 0 :font-size 7.0
     :background-color :mixer-control-bg :color :dim
     :on-click |x y r| (host-command "filter-table-editor-op" payload)))
 
-(def %ed-node-button (label-text kind)
+(def ed-node-button (label-text kind)
   (button label-text
     :width 3.0 :height 0.8 :padding 0 :font-size 7.0
     :background-color :mixer-control-bg :color :fg
     :on-click |x y r| (host-command "filter-table-editor-add-node" (dict :kind kind))))
 
-(def %editor-section (fx ed table-key)
+(def editor-section (fx ed table-key)
   (let ((frames (get ed :frames))
         (sel (get ed :selected-frame)))
     (box :width 36.4 :padding 0.2
@@ -171,7 +173,7 @@
         ;; disabled point pins harmonic 24 = cutoff) against dB.
         (response-curve-editor
           :mode :eq
-          :bands (%ed-bands ed)
+          :bands (ed-bands ed)
           :freq-min 1 :freq-max 1024
           :gain-min -24 :gain-max 24
           :q-min 0.25 :q-max 16
@@ -180,33 +182,33 @@
           :grid-color (rgba 0.30 0.32 0.36 0.5)
           :stroke-color :blue
           :point-color (rgba 1.0 0.62 0.25 1.0)
-          :on-action |event| (%ed-band-action ed event))
+          :on-action |event| (ed-band-action ed event))
         ;; Node + op toolbars. (The magnitude viewer above doubles as the
         ;; table overview: while the editor is open its highlight tracks
         ;; the editor's selected frame, not the frame parameter.)
         (h-stack :width :fill :height 0.68 :gap 0.25 :align :center
           (label "NODE" :font-size 7.0 :color :dim :bg :transparent)
-          (%ed-node-button "PEAK" "peak")
-          (%ed-node-button "NOTCH" "notch")
-          (%ed-node-button "LP" "lowpass")
-          (%ed-node-button "HP" "highpass")
-          (%ed-node-button "TILT" "tilt")
+          (ed-node-button "PEAK" "peak")
+          (ed-node-button "NOTCH" "notch")
+          (ed-node-button "LP" "lowpass")
+          (ed-node-button "HP" "highpass")
+          (ed-node-button "TILT" "tilt")
           (label "FRAME" :font-size 7.0 :color :dim :bg :transparent)
-          (%ed-op-button "DUP" (dict :kind "duplicate-frame") 2.4)
-          (%ed-op-button "INS" (dict :kind "insert-frame") 2.4)
-          (%ed-op-button "DEL" (dict :kind "delete-frame") 2.4)
-          (%ed-op-button "KEYS" (dict :kind "interpolate") 2.6))
+          (ed-op-button "DUP" (dict :kind "duplicate-frame") 2.4)
+          (ed-op-button "INS" (dict :kind "insert-frame") 2.4)
+          (ed-op-button "DEL" (dict :kind "delete-frame") 2.4)
+          (ed-op-button "KEYS" (dict :kind "interpolate") 2.6))
         (h-stack :width :fill :height 0.68 :gap 0.25 :align :center
           (label "TABLE" :font-size 7.0 :color :dim :bg :transparent)
-          (%ed-op-button "SM-SPEC" (dict :kind "smooth-spectral") 3.6)
-          (%ed-op-button "SM-TIME" (dict :kind "smooth-temporal") 3.6)
-          (%ed-op-button "NORM" (dict :kind "normalize") 2.6)
-          (%ed-op-button "TILT-" (dict :kind "tilt" :value -3) 2.6)
-          (%ed-op-button "TILT+" (dict :kind "tilt" :value 3) 2.6)
-          (%ed-op-button "<<" (dict :kind "shift" :value -0.5) 2.0)
-          (%ed-op-button ">>" (dict :kind "shift" :value 0.5) 2.0)
-          (%ed-op-button "STR-" (dict :kind "stretch" :value 0.8) 2.4)
-          (%ed-op-button "STR+" (dict :kind "stretch" :value 1.25) 2.4))))))
+          (ed-op-button "SM-SPEC" (dict :kind "smooth-spectral") 3.6)
+          (ed-op-button "SM-TIME" (dict :kind "smooth-temporal") 3.6)
+          (ed-op-button "NORM" (dict :kind "normalize") 2.6)
+          (ed-op-button "TILT-" (dict :kind "tilt" :value -3) 2.6)
+          (ed-op-button "TILT+" (dict :kind "tilt" :value 3) 2.6)
+          (ed-op-button "<<" (dict :kind "shift" :value -0.5) 2.0)
+          (ed-op-button ">>" (dict :kind "shift" :value 0.5) 2.0)
+          (ed-op-button "STR-" (dict :kind "stretch" :value 0.8) 2.4)
+          (ed-op-button "STR+" (dict :kind "stretch" :value 1.25) 2.4))))))
 
 (def filter-table-ui (fx)
   (let ((params (get fx :params)))
@@ -223,9 +225,9 @@
         (box :width 36.4 :height (if (get fx :editor) 3.3 4.15) :padding 0.25
           :background-color :instrument-control-bg :corner-radius 8
           :drop-types (list "sample")
-          :drop-meta (merge (%command-target fx) :kind "filter-table-source")
+          :drop-meta (merge (command-target fx) :kind "filter-table-source")
           :drop-hover-border-color :blue
-          :on-drop (lambda (event) (%drop-table event))
+          :on-drop (lambda (event) (drop-table event))
           (v-stack :width :fill :height :fill :gap 0.08 :align :stretch
             (h-stack :width :fill :height 0.85 :gap 0.35 :align :baseline
               ;; The table name doubles as the preset picker: the dropdown
@@ -240,7 +242,7 @@
                     :key (str "filter-table-preset-dd-" (get fx :slot-idx))
                     :options (get fx :table-options)
                     :on-change (lambda (v)
-                      (%set-source fx (str "fltab:" v)))
+                      (set-source fx (str "fltab:" v)))
                     :width 10.5 :height 0.85 :font-size 9))
                 (label (if table-name table-name "Drop an audio sample")
                   :font-size 9.0 :color :fg :bg :transparent))
@@ -274,7 +276,7 @@
                     :bg-color :mixer-strip-bg
                     :border-color :transparent
                     :on-change (lambda (v)
-                      (%set-engine fx (if (= v "Min Phase") "causal" "spectral")))
+                      (set-engine fx (if (= v "Min Phase") "causal" "spectral")))
                     :width 6.4 :height 0.8 :font-size 7.5))
                 (if table-engine
                   (label table-engine :font-size 7.5 :color :dim :bg :transparent)
@@ -286,7 +288,7 @@
                   :width 3.0 :height 0.8 :padding 0 :font-size 7.5
                   :border-color :transparent
                   :background-color :accent :color :fg :on-click |x y r|
-                  (host-command "filter-table-editor-open" (%ed-target fx)))
+                  (host-command "filter-table-editor-open" (ed-target fx)))
                 (box :width 0 :height 0)))
             (if table-key
               (wavetable-viewer
@@ -307,7 +309,7 @@
           (eq8-editor
             :width 36.4 :height 2.55
             :bands (list) :selected-band -1
-            :source (%spectrum-source fx) :tap-point :pre-fx
+            :source (spectrum-source fx) :tap-point :pre-fx
             :mode :eq :fft-size 8192 :time-slices 128
             :min-db -96 :max-db 0 :smoothing 0.65
             :freq-min 20 :freq-max 20000
@@ -322,10 +324,10 @@
             :spectrum-peak-color (rgba 0.36 0.62 0.92 0.58))
           (box :width :fill :height 0))
         (if (get fx :editor)
-          (%editor-section fx (get fx :editor) table-key)
+          (editor-section fx (get fx :editor) table-key)
           (h-stack :gap 0.6 :align :center
-            (if frame-p (%percent-knob fx "frame" frame-p) (box :width 0 :height 0))
-            (if cutoff-p (%freq-knob fx "cutoff" cutoff-p) (box :width 0 :height 0))
-            (if res-p (%percent-knob fx "resonance" res-p) (box :width 0 :height 0))
-            (if mix-p (%percent-knob fx "mix" mix-p) (box :width 0 :height 0))
-            (if output-p (%number-knob fx "output" output-p 2) (box :width 0 :height 0))))))))
+            (if frame-p (percent-knob fx "frame" frame-p) (box :width 0 :height 0))
+            (if cutoff-p (freq-knob fx "cutoff" cutoff-p) (box :width 0 :height 0))
+            (if res-p (percent-knob fx "resonance" res-p) (box :width 0 :height 0))
+            (if mix-p (percent-knob fx "mix" mix-p) (box :width 0 :height 0))
+            (if output-p (number-knob fx "output" output-p 2) (box :width 0 :height 0))))))))

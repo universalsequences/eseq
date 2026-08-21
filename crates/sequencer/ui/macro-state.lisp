@@ -2,6 +2,16 @@
 ;; device wrappers and the reusable macro controls.
 (module eseq.macro-state)
 
+(export mapping-open
+        mapping-selected
+        rack-mapping-selected
+        macro-mapping-sidebar-open-hook
+        macro-mapping-sidebar-close-hook
+        macro-mapping-sidebar-refresh-hook
+        clear-mapping-arm
+        rack-clear-mapping-arm
+        macro-mapping-arm-enter-hook)
+
 ;; Compat aliases (module-system spec §10 slice 3): every renamed def that has
 ;; callers outside this file. Unconverted callers keep using the flat names;
 ;; the table is deleted when the migration finishes. Aliases must be evaluated

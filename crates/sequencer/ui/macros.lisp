@@ -8,7 +8,7 @@
 ;;    user-authored and script-generated lisp calls by FLAT spelling — the
 ;;    317 lisp files under crates/sequencer outside ui/ (instruments, effects,
 ;;    scripts, midi-fx, defmacros) are content and stay headerless forever.
-;;    So: no renames, no %-private names, and one *identity* compat alias per
+;;    So: no renames, no private-name sigils, and one *identity* compat alias per
 ;;    def. An identity alias serves both rungs at once — a headerless caller
 ;;    matches the flat key exactly, and a converted module's bare reference
 ;;    qualifies against itself, misses, and lands on the same alias by base
@@ -31,6 +31,38 @@
 ;; bare hook call inside a module would intern a dead qualified slot instead
 ;; of reaching the flat hook keyspace.
 (module eseq.macros)
+
+(export macro-key-string
+        macro-by-key
+        macro-by-id
+        macro-id-for-key
+        macro-ensure
+        macro-set-key-value
+        macro-release-key
+        macro-mapping-active-for-key?
+        macro-toggle-mapping-arm
+        macro-set-mapping-display-range
+        macro-set-mapping-curve
+        macro-unmap-row
+        rack-macro-mapping-table-macro
+        active-macro-mapping-table-macros
+        macro-mapping-editor-header
+        macro-mapping-editor-row
+        macro-mapping-editor-row-count
+        macro-mapping-editor-rows-for-macro
+        macro-mapping-editor-rows
+        macro-mapping-editor-row-list
+        macro-mapping-editor-empty
+        macro-mapping-editor
+        macro-mapping-table
+        macro-knob
+        macro-momentary
+        macro-map-button
+        scene-macro-options
+        scene-macro-option-index
+        scene-macro-track-mask-with
+        scene-macro-config
+        scene-macro-controls)
 
 ;; Identity compat aliases — see note 1 above. Order matches the definitions.
 

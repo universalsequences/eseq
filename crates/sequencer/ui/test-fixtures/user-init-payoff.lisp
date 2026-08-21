@@ -2,6 +2,8 @@
 ;; post-factory user-init seam; never through the process user's ~/.eseq.d.
 (module test.user-init)
 
+(export init-payoff-command)
+
 (add-hook "test-init-payoff-hook" "user-init"
   (lambda ()
     (host-command "user-init-hook-ran" (dict))))

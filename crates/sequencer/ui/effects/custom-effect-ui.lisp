@@ -4,6 +4,11 @@
 (import eseq.effects.param-grid :as pg)
 (import eseq.effects.custom-ui-runtime :as rt)
 
+(export midi-fx-ui-param
+        midi-fx-ui-param-control
+        audio-fx-ui-param
+        audio-fx-ui-param-control)
+
 ;; Migration aliases (module spec §10). All four are identity aliases:
 ;; this file is part of the generated-custom-UI vocabulary (hub-file
 ;; precedent). Flat callers that cannot see qualified names:

@@ -2,8 +2,10 @@
 (module eseq.effects.builtin.tape)
 
 (import eseq.effects.builtin.dynamics :as dyn)
-(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
-(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
+(import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+
+(export tape-ui)
 
 (def tape-ui (fx)
   (let ((params (get fx :params)))

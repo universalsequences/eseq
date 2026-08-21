@@ -8,40 +8,42 @@
 (module eseq.effects.builtin.dimension)
 
 (import eseq.effects.param-controls :refer
-  (eseq.effects.param-controls/fx-param-on-for?
-   eseq.effects.param-controls/fx-param-value-for
-   eseq.effects.param-controls/fx-set-effect-value
-   eseq.effects.param-controls/fx-toggle-effect-value
-   eseq.effects.param-controls/param-base-max-prop
-   eseq.effects.param-controls/param-base-min-prop
-   eseq.effects.param-controls/param-base-value-prop
-   eseq.effects.param-controls/param-control-key-mode
-   eseq.effects.param-controls/param-control-max
-   eseq.effects.param-controls/param-control-min
-   eseq.effects.param-controls/param-knob-mod-depth-prop
-   eseq.effects.param-controls/param-knob-mod-slot-prop
-   eseq.effects.param-controls/param-mod-wrapper
-   eseq.effects.param-controls/param-plock-active?
-   eseq.effects.param-controls/param-plock-color-b
-   eseq.effects.param-controls/param-plock-color-g
-   eseq.effects.param-controls/param-plock-color-r
-   eseq.effects.param-controls/param-plock-default
-   eseq.effects.param-controls/param-plock-text-color
-   eseq.effects.param-controls/param-selected-mod-slot-prop
-   eseq.effects.param-controls/param-set-control-value))
+  (fx-param-on-for?
+   fx-param-value-for
+   fx-set-effect-value
+   fx-toggle-effect-value
+   param-base-max-prop
+   param-base-min-prop
+   param-base-value-prop
+   param-control-key-mode
+   param-control-max
+   param-control-min
+   param-knob-mod-depth-prop
+   param-knob-mod-slot-prop
+   param-mod-wrapper
+   param-plock-active?
+   param-plock-color-b
+   param-plock-color-g
+   param-plock-color-r
+   param-plock-default
+   param-plock-text-color
+   param-selected-mod-slot-prop
+   param-set-control-value))
 (import eseq.effects.builtin.filter-core :refer
-  (eseq.effects.builtin.filter-core/builtin-fx-param
-   eseq.effects.builtin.filter-core/builtin-fx-set-effect-option
-   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number
-   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent))
-(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
+  (builtin-fx-param
+   builtin-fx-set-effect-option
+   builtin-fx-filter-mini-number
+   builtin-fx-filter-mini-percent))
+(import eseq.effects.param-grid :refer (fx-param-grid))
 
-(def %cream () (rgba 0.93 0.89 0.80 1.0))
-(def %red   () (rgba 0.86 0.24 0.20 1.0))
+(export builtin-fx-dimension-ui)
+
+(def cream () (rgba 0.93 0.89 0.80 1.0))
+(def red   () (rgba 0.86 0.24 0.20 1.0))
 
 ;; Mod-wrapped knob (same pattern as the Space Echo knobs, so depth / mix
 ;; pick up modulation rings and plock handling).
-(def %knob (fx label-text p decimals)
+(def parameter-knob (fx label-text p decimals)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "dimension-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "dimension-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
@@ -66,10 +68,10 @@
 
 ;; ── Dimension mode buttons ──
 
-(def %mode-button (fx p label-text)
+(def mode-button (fx p label-text)
   (button label-text
     :width 1.95 :height 1.55 :padding 0 :font-size 9.5
-    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (%cream) :mixer-control-bg)
+    :background-color (if (eseq.effects.param-controls/fx-param-on-for? fx p) (cream) :mixer-control-bg)
     :color (if (eseq.effects.param-controls/fx-param-on-for? fx p) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -77,37 +79,37 @@
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :on-click |x y r| (eseq.effects.param-controls/fx-toggle-effect-value fx p)))
 
-(def %off-button (fx b1 b2 b3 b4)
+(def off-button (fx b1 b2 b3 b4)
   (let ((all-off (and (not (eseq.effects.param-controls/fx-param-on-for? fx b1)) (not (eseq.effects.param-controls/fx-param-on-for? fx b2))
                       (not (eseq.effects.param-controls/fx-param-on-for? fx b3)) (not (eseq.effects.param-controls/fx-param-on-for? fx b4)))))
     (button "0"
       :width 1.95 :height 1.55 :padding 0 :font-size 9.5
-      :background-color (if all-off (%red) :mixer-control-bg)
+      :background-color (if all-off (red) :mixer-control-bg)
       :color (if all-off :white :dim)
       :on-click |x y r| (do (eseq.effects.param-controls/fx-set-effect-value fx b1 0)
                             (eseq.effects.param-controls/fx-set-effect-value fx b2 0)
                             (eseq.effects.param-controls/fx-set-effect-value fx b3 0)
                             (eseq.effects.param-controls/fx-set-effect-value fx b4 0)))))
 
-(def %mode-box (fx b1 b2 b3 b4)
+(def mode-box (fx b1 b2 b3 b4)
   (box :width 11.4 :height 9 :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.50 :align :center
       (label "DIMENSION MODE" :font-size 8.0 :width 10.4 :color :dim :bg :transparent)
       (h-stack :gap 0.16
-        (%off-button fx b1 b2 b3 b4)
-        (%mode-button fx b1 "1")
-        (%mode-button fx b2 "2")
-        (%mode-button fx b3 "3")
-        (%mode-button fx b4 "4"))
+        (off-button fx b1 b2 b3 b4)
+        (mode-button fx b1 "1")
+        (mode-button fx b2 "2")
+        (mode-button fx b3 "3")
+        (mode-button fx b4 "4"))
       )))
 
 ;; ── Character section (dynamic color + lfo shape) ──
 
-(def %option-button (fx p label-text)
+(def option-button (fx p label-text)
   (button label-text
     :width 4.4 :height 0.95 :padding 0 :font-size 8.0
-    :background-color (if (= (get p :text-value) label-text) (%cream) :mixer-control-bg)
+    :background-color (if (= (get p :text-value) label-text) (cream) :mixer-control-bg)
     :color (if (= (get p :text-value) label-text) :black :dim)
     :plock-active (if (eseq.effects.param-controls/param-plock-active? fx p) 1 0)
     :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -115,34 +117,34 @@
     :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
     :on-click |x y r| (eseq.effects.builtin.filter-core/builtin-fx-set-effect-option fx p label-text)))
 
-(def %character-box (fx color-p shape-p)
+(def character-box (fx color-p shape-p)
   (box :width 11.2 :height :fill :padding 0.30
        :background-color :fx-inner-panel-bg :corner-radius 7
     (h-stack :width 5 :gap 0.40 :align :start
       (v-stack :gap 0.54 :align :center
         (label "COLOR" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
-        (%option-button fx color-p "smooth")
-        (%option-button fx color-p "default")
-        (%option-button fx color-p "lf sat 1")
-        (%option-button fx color-p "lf sat 2"))
+        (option-button fx color-p "smooth")
+        (option-button fx color-p "default")
+        (option-button fx color-p "lf sat 1")
+        (option-button fx color-p "lf sat 2"))
       (v-stack :gap 0.54 :align :center
         (label "LFO SHAPE" :font-size 8.0 :width 4.6 :color :dim :bg :transparent)
-        (%option-button fx shape-p "default")
-        (%option-button fx shape-p "sine")
-        (%option-button fx shape-p "ramp")
-        (%option-button fx shape-p "square")
-        (%option-button fx shape-p "triangle")))))
+        (option-button fx shape-p "default")
+        (option-button fx shape-p "sine")
+        (option-button fx shape-p "ramp")
+        (option-button fx shape-p "square")
+        (option-button fx shape-p "triangle")))))
 
 ;; ── Controls ──
 
-(def %controls-box (fx rate-p depth-p width-p tone-p mix-p)
+(def controls-box (fx rate-p depth-p width-p tone-p mix-p)
   (box :width 10.4 :height :fill :padding 0.36
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "CONTROLS" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (%knob fx "depth" depth-p 2)
-        (%knob fx "mix" mix-p 2))
+        (parameter-knob fx "depth" depth-p 2)
+        (parameter-knob fx "mix" mix-p 2))
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "rate" rate-p)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent fx "width" width-p)
       (eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number fx "tone" tone-p))))
@@ -162,7 +164,7 @@
           (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix")))
       (if (and b1-p b2-p b3-p b4-p color-p shape-p depth-p mix-p)
         (h-stack :gap 0.35 :align :start
-          (%mode-box fx b1-p b2-p b3-p b4-p)
-          (%character-box fx color-p shape-p)
-          (%controls-box fx rate-p depth-p width-p tone-p mix-p))
+          (mode-box fx b1-p b2-p b3-p b4-p)
+          (character-box fx color-p shape-p)
+          (controls-box fx rate-p depth-p width-p tone-p mix-p))
         (eseq.effects.param-grid/fx-param-grid params fx)))))

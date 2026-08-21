@@ -5,6 +5,15 @@
 (import eseq.effects.custom-ui-sections :as sec)
 (import eseq.effects.param-controls :as pc)
 
+(export ui-param-knob
+        ui-param-matrix
+        ui-param-knob-c
+        base-note-c
+        ui-panel-c
+        ui-param-value
+        ui-param-bound-value
+        ui-set-param)
+
 ;; Identity aliases: these names are the generated-instrument-UI vocabulary.
 ;; Bare callers: unconverted custom-ui-lego.lisp, generated
 ;; instruments/**/ui.lisp files (evaluated headerless), the ui_validate.rs
@@ -111,7 +120,7 @@
           :on-change (rt/custom-ui-param-change-callback p)))
       (label "missing: base_note" :font-size 9 :color :red :bg :transparent))))
 
-(def %ui-panel-header-c (title)
+(def ui-panel-header-c (title)
   (box :width 3.5 :height :fill :h-align :end :v-align :center :padding 0.1
     (label title :font-size 6 :color :dim :bg :transparent)))
 
@@ -123,7 +132,7 @@
        :border-width 1 :corner-radius 10 :padding 0.08
        :on-click (sec/ui-section-select-callback section)
     (h-stack :width :fill :gap 0.1 :align :center
-      (%ui-panel-header-c title)
+      (ui-panel-header-c title)
       body)))
 
 (def ui-param-value (name fallback)

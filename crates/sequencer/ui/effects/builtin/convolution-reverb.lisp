@@ -4,10 +4,12 @@
 
 (module eseq.effects.builtin.convolution-reverb)
 
-(import eseq.effects.builtin.filter-core :refer (eseq.effects.builtin.filter-core/builtin-fx-param))
+(import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
 (import eseq.effects.builtin.dynamics :refer (percent-knob number-knob))
 
-(def %drop-ir (event)
+(export convolution-reverb-ui)
+
+(def drop-ir (event)
   (let ((payload (get event :payload))
         (target (get event :target)))
     (let ((path (get payload :path))
@@ -34,7 +36,7 @@
                            :bus (if (get fx :bus-fx) (get fx :bus-idx) -1)
                            :slot (get fx :slot-idx))
           :drop-hover-border-color :blue
-          :on-drop (lambda (event) (%drop-ir event))
+          :on-drop (lambda (event) (drop-ir event))
           (v-stack :gap 0.15 :align :center
             (label "IMPULSE RESPONSE" :font-size 7.5 :color :dim :bg :transparent)
             (label (if ir-name ir-name "Drop a sample")

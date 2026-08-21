@@ -74,6 +74,7 @@ pub mod hot_reload;
 pub mod live_audio;
 pub mod mode;
 pub mod module_alias_migration;
+pub mod module_export_migration;
 pub mod reactive;
 pub mod runtime;
 pub mod sound_glyph_data;
@@ -2222,7 +2223,7 @@ mod tests {
             runtime.declared_modules().contains_key("sdf"),
             "sdf-stdlib should declare (module sdf)"
         );
-        for key in ["sdf/circle", "sdf/rounded-rect", "sdf/lit", "sdf/%hslider-fill"] {
+        for key in ["sdf/circle", "sdf/rounded-rect", "sdf/lit", "sdf/hslider-fill"] {
             assert!(
                 runtime.macros().contains_key(key),
                 "expected macro key {key}"

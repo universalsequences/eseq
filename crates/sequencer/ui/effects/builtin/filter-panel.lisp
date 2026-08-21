@@ -2,25 +2,27 @@
 (module eseq.effects.builtin.filter-panel)
 
 (import eseq.effects.builtin.filter-core :refer
-  (eseq.effects.builtin.filter-core/builtin-fx-param
-   eseq.effects.builtin.filter-core/builtin-fx-param-subtree-key
-   eseq.effects.builtin.filter-core/builtin-fx-filter-band
-   eseq.effects.builtin.filter-core/builtin-fx-filter-cutoff-knob
-   eseq.effects.builtin.filter-core/builtin-fx-filter-resonance-knob
-   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-percent
-   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-option
-   eseq.effects.builtin.filter-core/builtin-fx-filter-mini-number
-   eseq.effects.builtin.filter-core/builtin-fx-filter-sync-label
-   eseq.effects.builtin.filter-core/builtin-fx-handle-filter-curve-action
-   eseq.effects.builtin.filter-core/builtin-fx-set-effect-option))
+  (builtin-fx-param
+   builtin-fx-param-subtree-key
+   builtin-fx-filter-band
+   builtin-fx-filter-cutoff-knob
+   builtin-fx-filter-resonance-knob
+   builtin-fx-filter-mini-percent
+   builtin-fx-filter-mini-option
+   builtin-fx-filter-mini-number
+   builtin-fx-filter-sync-label
+   builtin-fx-handle-filter-curve-action
+   builtin-fx-set-effect-option))
 (import eseq.effects.param-controls :refer
-  (eseq.effects.param-controls/fx-param-on-for?
-   eseq.effects.param-controls/fx-set-effect-value
-   eseq.effects.param-controls/param-plock-active?
-   eseq.effects.param-controls/param-plock-color-r
-   eseq.effects.param-controls/param-plock-color-g
-   eseq.effects.param-controls/param-plock-color-b))
-(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
+  (fx-param-on-for?
+   fx-set-effect-value
+   param-plock-active?
+   param-plock-color-r
+   param-plock-color-g
+   param-plock-color-b))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+
+(export panel)
 
 (def panel (fx)
   (let ((params (get fx :params)))

@@ -489,13 +489,23 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
         return;
     };
     match items.as_slice() {
-        [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "def" => {
+        [Expression::Symbol(form), Expression::Symbol(name), ..]
+            if matches!(
+                form.as_str(),
+                "def"
+                    | "defn"
+                    | "defstate"
+                    | "defmacro"
+                    | "defwidget"
+                    | "def-process"
+                    | "def-accumulator"
+                    | "def-sequencer"
+                    | "defchan"
+            ) =>
+        {
             out.insert(name.clone());
         }
-        [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defstate" => {
-            out.insert(name.clone());
-        }
-        [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defmacro" => {
+        [Expression::Symbol(form), Expression::String(name), ..] if form == "defhook" => {
             out.insert(name.clone());
         }
         [Expression::Symbol(form), Expression::Symbol(name), ..]
@@ -504,9 +514,6 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
             // Overrides change the effective value of the factory symbol even
             // though they deliberately do not mutate its global cell. Mark it
             // changed so transactional init/hot reload rerenders dependents.
-            out.insert(name.clone());
-        }
-        [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "defwidget" => {
             out.insert(name.clone());
         }
         [Expression::Symbol(form), Expression::List(signature), ..] if form == "def" => {

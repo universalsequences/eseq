@@ -2,18 +2,24 @@
 (module eseq.effects.builtin.dynamics)
 
 (import eseq.effects.builtin.filter-core :refer
-  (eseq.effects.builtin.filter-core/builtin-fx-param
-   eseq.effects.builtin.filter-core/builtin-fx-set-effect-option))
+  (builtin-fx-param
+   builtin-fx-set-effect-option))
 (import eseq.effects.param-controls :refer
-  (eseq.effects.param-controls/fx-param-value
-   eseq.effects.param-controls/fx-set-effect-value
-   eseq.effects.param-controls/param-plock-active?
-   eseq.effects.param-controls/param-plock-color-b
-   eseq.effects.param-controls/param-plock-color-g
-   eseq.effects.param-controls/param-plock-color-r
-   eseq.effects.param-controls/param-plock-default
-   eseq.effects.param-controls/param-plock-text-color))
-(import eseq.effects.param-grid :refer (eseq.effects.param-grid/fx-param-grid))
+  (fx-param-value
+   fx-set-effect-value
+   param-plock-active?
+   param-plock-color-b
+   param-plock-color-g
+   param-plock-color-r
+   param-plock-default
+   param-plock-text-color))
+(import eseq.effects.param-grid :refer (fx-param-grid))
+
+(export percent-knob
+        number-knob
+        option-row
+        dynamics-ui
+        limiter-ui)
 
 (def percent-knob (fx label-text p)
   (knob-number :label label-text

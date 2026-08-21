@@ -5,6 +5,13 @@
 
 (import eseq.effects.process-panel :as pp)
 
+(export select-effect
+        select-midi-effect
+        select-bus-effect
+        select-rack-effect
+        has-selected-bus?
+        delete-selected-effect)
+
 ;; Aliases for Rust tests that eval the old flat spellings
 ;; (src/ui/state_values/tests.rs). The buffers.lisp flat edges
 ;; (fx-has-selected-bus?) retired with eseq.effects.buffers, which imports

@@ -6,16 +6,18 @@
 (import eseq.effects.effect-panels :as ep)
 (import eseq.effects.panel-frame :as pf)
 
+(export modulator-panel)
+
 ;; No compat aliases: the only external caller of `modulator-panel` is the
 ;; converted eseq.effects.instrument-panel, which imports this module. Every
 ;; Rust mention of "modulator-panel" is a :debug-name string, not a call.
 ;; `ui-accent-orange` stays bare: owned by effects/custom-ui-lego.lisp,
 ;; reached through its identity compat alias while that file converts.
 
-(def %modulator-param (inst name)
+(def modulator-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
 
-(def %modulator-knob (p label-text key)
+(def modulator-knob (p label-text key)
   (subtree :key key
     (knob-number :label label-text
       :value (pc/fx-param-value p)
@@ -28,8 +30,8 @@
       :on-change (lambda (v) (pc/instrument-set-param-control-value p v)))))
 
 (def modulator-panel (inst)
-  (let ((rise-p (%modulator-param inst "rise"))
-      (fall-p (%modulator-param inst "fall")))
+  (let ((rise-p (modulator-param inst "rise"))
+      (fall-p (modulator-param inst "fall")))
     (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
       :height st/fx-fixed-panel-height
       :debug-name "modulator-panel"
@@ -56,10 +58,10 @@
               :height 9.5
               (h-stack :width :fill :height :fill :gap 1.05 :align :center
                 (if rise-p
-                  (%modulator-knob rise-p "rise ms" "modulator-rise-knob")
+                  (modulator-knob rise-p "rise ms" "modulator-rise-knob")
                   (label "missing: rise" :font-size 10 :color :red :bg :transparent))
                 (if fall-p
-                  (%modulator-knob fall-p "fall ms" "modulator-fall-knob")
+                  (modulator-knob fall-p "fall ms" "modulator-fall-knob")
                   (label "missing: fall" :font-size 10 :color :red :bg :transparent))
                 (box :width 0.45 :height 1)
                 (box :width 12.8 :height 5.9 :padding 0.22

@@ -4,6 +4,14 @@
 (import eseq.effects.state :as st)
 (import eseq.effects.param-controls :as pc)
 
+(export selected-plock-row
+        plock-row-selected?
+        delete-selected-plock-row
+        plock-chip-click
+        track-plocks-panel
+        step-parameters-panel
+        track-parameters-panel)
+
 ;; Aliases for unconverted lisp callers (effects/panel-frame.lisp,
 ;; effects/step-buffer.lisp), the production by-name read of
 ;; fx-plock-row-selected? in src/ui/input.rs:133, and Rust tests that eval
@@ -11,10 +19,10 @@
 ;; flat edges (fx-track-parameters-panel, fx-delete-selected-plock-row)
 ;; retired with eseq.effects.buffers, which imports this module.
 
-(def %track-bus-send-field (bus)
+(def track-bus-send-field (bus)
   (str "tp-bus-" bus "-send"))
 
-(def %mute-group-value (label)
+(def mute-group-value (label)
   (if (= label "1") 1
     (if (= label "2") 2
       (if (= label "3") 3
@@ -25,7 +33,7 @@
                 (if (= label "8") 8
                   0)))))))))
 
-(def %set-timebase (label)
+(def set-timebase (label)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (if (seq-has-selection?)
@@ -36,20 +44,20 @@
 ;; (param-controls.lisp) instead of reading SEQ.track-plocks directly, so a
 ;; selection change only reruns this panel when one of these locks actually
 ;; changed.
-(def %track-param-plock-active? (target)
+(def track-param-plock-active? (target)
   (= (reactive-get "SEQV" (str "plk-t-" target "-on")) 1))
 
-(def %track-param-plock-default (target fallback)
-  (if (%track-param-plock-active? target)
+(def track-param-plock-default (target fallback)
+  (if (track-param-plock-active? target)
     (reactive-get "SEQV" (str "plk-t-" target "-def"))
     fallback))
 
-(def %track-bus-send-control (send)
+(def track-bus-send-control (send)
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
       (label (substring (get send :name) 0 8) :font-size 9 :color :dim :bg :transparent)
       (number-picker
-        :value (bind-seq (%track-bus-send-field (get send :bus-idx)))
+        :value (bind-seq (track-bus-send-field (get send :bus-idx)))
         :min 0 :max 1 :decimals 2
         :noui true :font-size 9 :text-color :dim
         :on-change (lambda (v)
@@ -60,7 +68,7 @@
         :width 4 :height 1))
     (box :width 8 :height 2
       (hslider :min 0 :max 1
-        :value (bind-seq (%track-bus-send-field (get send :bus-idx)))
+        :value (bind-seq (track-bus-send-field (get send :bus-idx)))
         :material (eseq.materials/slider-material)
         :on-change (lambda (v)
           (do
@@ -68,7 +76,7 @@
             (host-command "set-track-bus-send"
               (dict :bus (get send :bus-idx) :amount v))))))))
 
-(def %plock-set-value (p v)
+(def plock-set-value (p v)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (host-command "set-track-plock-entry"
@@ -79,7 +87,7 @@
             :param-idx (get p :param-idx)
             :value v))))
 
-(def %plock-set-option (p label)
+(def plock-set-option (p label)
   (do
     (eseq.seq-core-state/cool-off-follow)
     (host-command "set-track-plock-entry-option"
@@ -90,7 +98,7 @@
             :param-idx (get p :param-idx)
             :label label))))
 
-(def %plock-clear (p)
+(def plock-clear (p)
   (host-command "clear-track-plock-entry"
     (dict :target (get p :target)
           :step-idx (get p :step-idx)
@@ -103,37 +111,37 @@
 
 (defstate selected-plock-row -1)
 
-(def %plock-param-col-width 6.45)
-(def %plock-lock-col-width 6.35)
-(def %plock-def-col-width 4.25)
-(def %plock-col-gap 0.22)
+(def plock-param-col-width 6.45)
+(def plock-lock-col-width 6.35)
+(def plock-def-col-width 4.25)
+(def plock-col-gap 0.22)
 
 (def plock-row-selected? ()
   (and (>= selected-plock-row 0)
        (< selected-plock-row (len SEQ.track-plocks))))
 
-(def %selected-plock-row-preview? ()
+(def selected-plock-row-preview? ()
   (and (plock-row-selected?)
        (get (nth SEQ.track-plocks selected-plock-row) :preview)))
 
 (def delete-selected-plock-row ()
   (if (plock-row-selected?)
-    (if (%selected-plock-row-preview?)
+    (if (selected-plock-row-preview?)
       (set! selected-plock-row -1)
       (let ((idx selected-plock-row)
             (next-count (- (len SEQ.track-plocks) 1)))
         (do
-          (%plock-clear (nth SEQ.track-plocks idx))
+          (plock-clear (nth SEQ.track-plocks idx))
           (set! selected-plock-row
             (if (<= next-count 0)
               -1
               (min idx (- next-count 1)))))))
     nil))
 
-(def %plock-chip-color (chip)
+(def plock-chip-color (chip)
   (rgba (get chip :color-r) (get chip :color-g) (get chip :color-b) 1.0))
 
-(def %plock-chip-label (chip)
+(def plock-chip-label (chip)
   (if (get chip :display)
     (substring (get chip :display) 0 6)
     (get chip :label)))
@@ -149,10 +157,10 @@
       (host-command "preview-plock-variant"
         (dict :label (get chip :label))))))
 
-(def %plock-chip (chip)
+(def plock-chip (chip)
   (let ((current (get chip :current))
       (def-chip (= (get chip :kind) "def"))
-      (c (%plock-chip-color chip)))
+      (c (plock-chip-color chip)))
     (box :key (str "track-plock-chip-" (get chip :kind) "-" (get chip :label))
       :height 1.12
       :align :baseline
@@ -170,10 +178,10 @@
           :background-color (if def-chip :transparent c)
           :border-width (if def-chip 1 0)
           :border-color c)
-        (label (%plock-chip-label chip)
+        (label (plock-chip-label chip)
           :font-size 8.6 :color (if current :black :dim) :bg :transparent)))))
 
-(def %plock-domain-title (domain)
+(def plock-domain-title (domain)
   (if (= domain "inst")
     "INST"
     (if (= domain "seq")
@@ -182,10 +190,10 @@
         "FX"
         "NEURAL"))))
 
-(def %plock-domain-count (domain)
-  (len (filter |p| (= (%plock-row-domain p) domain) SEQ.track-plocks)))
+(def plock-domain-count (domain)
+  (len (filter |p| (= (plock-row-domain p) domain) SEQ.track-plocks)))
 
-(def %plock-row-domain (p)
+(def plock-row-domain (p)
   (if (get p :domain)
     (get p :domain)
     (if (or (= (get p :target) "neural-instrument")
@@ -199,27 +207,27 @@
           "fx"
           "seq")))))
 
-(def %plock-row-title (p)
+(def plock-row-title (p)
   (if (= (get p :source) "neuron")
     (str (get p :label) " " (get p :name))
     (get p :name)))
 
-(def %plock-row-key (idx suffix)
+(def plock-row-key (idx suffix)
   (str "track-plock-row-" idx "-" suffix))
 
-(def %plock-row-value (p)
+(def plock-row-value (p)
   (if (get p :value-field)
     (bind-seq (get p :value-field))
     (get p :value)))
 
-(def %plock-group-header (domain)
+(def plock-group-header (domain)
   (box :height 0.95
     (h-stack :gap 0.35 :align :center
-      (label (%plock-domain-title domain)
+      (label (plock-domain-title domain)
         :font-size 8.5 :color :dim :bg :transparent :width 4.5)
       (box :height 0.05 :width :fill :background-color (rgba 1 1 1 0.10)))))
 
-(def %plock-row (p idx)
+(def plock-row (p idx)
   (subtree :key (str "track-plock-" idx "-" (get p :target) "-" (get p :step-idx) "-"
       (get p :slot-idx) "-" (get p :param-idx))
     (box :width :fill
@@ -233,41 +241,41 @@
       :border-color (rgba 0.27 0.78 0.86 0.55)
       :corner-radius 2
       :on-click |x y r| (set! selected-plock-row idx)
-      (h-stack :width :fill :gap %plock-col-gap :align :baseline
-        (label (substring (%plock-row-title p) 0 12)
-          :key (%plock-row-key idx "param")
-          :font-size 9.2 :width %plock-param-col-width
+      (h-stack :width :fill :gap plock-col-gap :align :baseline
+        (label (substring (plock-row-title p) 0 12)
+          :key (plock-row-key idx "param")
+          :font-size 9.2 :width plock-param-col-width
           :color (if (= selected-plock-row idx) :white :dim)
           :bg :transparent)
         (if (or (= (get p :source) "neuron") (get p :preview))
           (label (if (get p :text-value) (get p :text-value) (str (get p :value)))
-            :key (%plock-row-key idx "lock")
-            :font-size 9.2 :width %plock-lock-col-width
+            :key (plock-row-key idx "lock")
+            :font-size 9.2 :width plock-lock-col-width
             :h-align :right :color :yellow :bg :transparent)
           (if (get p :options)
             (dropdown :value (get p :text-value)
               :options (get p :options)
-              :key (%plock-row-key idx "lock")
-              :on-change (lambda (v) (%plock-set-option p v))
-              :width %plock-lock-col-width :height 0.98 :font-size 8.4)
-            (number-picker :value (%plock-row-value p)
+              :key (plock-row-key idx "lock")
+              :on-change (lambda (v) (plock-set-option p v))
+              :width plock-lock-col-width :height 0.98 :font-size 8.4)
+            (number-picker :value (plock-row-value p)
               :min (pc/instrument-param-control-min p) :max (pc/instrument-param-control-max p) :decimals 2
-              :key (%plock-row-key idx "lock")
+              :key (plock-row-key idx "lock")
               :noui true :font-size 9.2 :text-color :yellow :text-align :right
-              :on-change (lambda (v) (%plock-set-value p v))
-              :width %plock-lock-col-width :height 1.0)))
+              :on-change (lambda (v) (plock-set-value p v))
+              :width plock-lock-col-width :height 1.0)))
         (label (if (get p :default-text) (get p :default-text) (str (get p :default)))
-          :key (%plock-row-key idx "def")
-          :font-size 9.2 :width %plock-def-col-width
+          :key (plock-row-key idx "def")
+          :font-size 9.2 :width plock-def-col-width
           :h-align :right :color :dark-gray :bg :transparent)))))
 
-(def %plock-group (domain)
-  (if (> (%plock-domain-count domain) 0)
+(def plock-group (domain)
+  (if (> (plock-domain-count domain) 0)
     (v-stack :gap 0.12
-      (%plock-group-header domain)
+      (plock-group-header domain)
       (each SEQ.track-plocks |p idx|
-        (if (= (%plock-row-domain p) domain)
-          (%plock-row p idx)
+        (if (= (plock-row-domain p) domain)
+          (plock-row p idx)
           (box :height 0))))
     (box :height 0)))
 
@@ -277,35 +285,35 @@
       (wrap :key "track-plock-variant-strip"
             :width :fill :gap 0.18 :row-gap 0.14 :align :start
         (each SEQ.track-plock-variants |chip idx|
-          (%plock-chip chip)))
+          (plock-chip chip)))
       (if (> (len SEQ.track-plocks) 0)
         (v-stack :key "track-plock-table" :width :fill :gap 0.1
-          (h-stack :key "track-plock-table-header" :width :fill :gap %plock-col-gap
+          (h-stack :key "track-plock-table-header" :width :fill :gap plock-col-gap
             (label "PARAM" :key "track-plock-header-param"
-              :font-size 8.2 :width %plock-param-col-width :color :dark-gray :bg :transparent)
+              :font-size 8.2 :width plock-param-col-width :color :dark-gray :bg :transparent)
             (label "LOCK" :key "track-plock-header-lock"
-              :font-size 8.2 :width %plock-lock-col-width :h-align :right
+              :font-size 8.2 :width plock-lock-col-width :h-align :right
               :color :dark-gray :bg :transparent)
             (label "DEF" :key "track-plock-header-def"
-              :font-size 8.2 :width %plock-def-col-width :h-align :right
+              :font-size 8.2 :width plock-def-col-width :h-align :right
               :color :dark-gray :bg :transparent))
-          (%plock-group "inst")
-          (%plock-group "seq")
-          (%plock-group "fx")
-          (%plock-group "neural"))
+          (plock-group "inst")
+          (plock-group "seq")
+          (plock-group "fx")
+          (plock-group "neural"))
         (label (if (> (len SEQ.selected-neural-neurons) 0)
                  "no p-locks for selected neurons"
                  "No locks")
           :font-size 9 :color :dim :bg :transparent)))))
 
-(def %step-param-value (mode)
+(def step-param-value (mode)
   (let ((values (eseq.seqv-track-params/seqv-current-param-values mode))
         (step (eseq.seq-core-state/current-step)))
     (if (< step (len values))
       (nth values step)
       0)))
 
-(def %step-set-param-direct (mode value)
+(def step-set-param-direct (mode value)
   ;; The stopped-transport edit path: cursor step, or the p-lock path for a
   ;; selection.
   (do
@@ -319,10 +327,10 @@
         (eseq.seqv-track-params/seqv-param-keyword mode)
         (eseq.seqv-track-params/seqv-step-param-value mode value)))))
 
-(def %step-set-param (mode value)
+(def step-set-param (mode value)
   ;; Playing with record on: the drag arms live PRINT mode — the value lands
   ;; on the trigger steps the playhead passes, not the cursor step (bead
-  ;; eseq-jc9), and only while the mouse is held (%step-param-release ends
+  ;; eseq-jc9), and only while the mouse is held (step-param-release ends
   ;; it). No cool-off-follow in that branch: the performer is watching the
   ;; playhead, so auto-follow must stay alive. The cursor step rides along
   ;; as the fallback target if the gate races off before dispatch.
@@ -331,44 +339,44 @@
       (eseq.seq-core-state/current-step)
       (eseq.seqv-track-params/seqv-param-keyword mode)
       (eseq.seqv-track-params/seqv-step-param-value mode value))
-    (%step-set-param-direct mode value)))
+    (step-set-param-direct mode value)))
 
-(def %step-param-release (mode)
+(def step-param-release (mode)
   ;; Hold-to-print: mouse-up on a picker ends that param's print
   ;; immediately. A no-op while nothing is latched (plain clicks, stopped
   ;; transport).
   (seq-print-step-param-release
     (eseq.seqv-track-params/seqv-param-keyword mode)))
 
-(def %step-duration-print-context? (mode)
+(def step-duration-print-context? (mode)
   (and (= mode 1) SEQ.playing SEQ.recording))
 
-(def %step-param-min (mode)
-  (if (%step-duration-print-context? mode) 0.125
+(def step-param-min (mode)
+  (if (step-duration-print-context? mode) 0.125
     (if (= mode 3) -48
       (if (= mode 1) 0
         (eseq.seqv-track-params/seqv-param-min mode)))))
 
-(def %step-param-max (mode)
-  (if (%step-duration-print-context? mode) 2
+(def step-param-max (mode)
+  (if (step-duration-print-context? mode) 2
     (if (= mode 3) 48
       (if (= mode 1) 128
         (eseq.seqv-track-params/seqv-param-max mode)))))
 
-(def %step-param-picker (mode key width)
+(def step-param-picker (mode key width)
   (v-stack :align :center :gap 0.24
     (label (eseq.seqv-track-params/seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
     (number-picker
       :key (str "step-param-" key)
       :value (bind-seq (str "fx-step-value-" key))
-      :min (%step-param-min mode)
-      :max (%step-param-max mode)
+      :min (step-param-min mode)
+      :max (step-param-max mode)
       :decimals (eseq.seqv-track-params/seqv-param-decimals mode)
       :noui true
       :font-size 10
       :text-color :white
-      :on-change (lambda (v) (%step-set-param mode v))
-      :on-release (lambda () (%step-param-release mode))
+      :on-change (lambda (v) (step-set-param mode v))
+      :on-release (lambda () (step-param-release mode))
       :width width
       :height 1.15)))
 
@@ -376,7 +384,7 @@
 ;; NOT an import: importing eseq.mixer would evaluate mixer.lisp, whose
 ;; top-level (effect-buffer "*mixer*") / define-mode registrations must not
 ;; ride along into every VM that loads the effects family.
-(def %step-track-badge ()
+(def step-track-badge ()
   (let ((track SEQ.current-track)
         (muted (eseq.mixer/muted? SEQ.current-track)))
     (box
@@ -402,7 +410,7 @@
       :corner-radius 16
       :border-color :mixer-strip-border    (v-stack :gap 0.55
         (h-stack :gap 0.45 :align :start
-          (%step-track-badge)
+          (step-track-badge)
           (h-stack :key "step-selection-summary" :gap 0.15 :align :center
             (number-label :key "step-cursor-label"
               :value (bind-seq "fx-step-cursor-number")
@@ -414,11 +422,11 @@
               :suffix " selected" :decimals 0 :width 5.0
               :font-size 8 :color :dim :bg :transparent)))
         (h-stack :gap 0.55 :align :center
-          (%step-param-picker 3 "transpose" 4.2)
-          (%step-param-picker 0 "velocity" 4.2)
-          (%step-param-picker 1 "duration" 4.2))))))
+          (step-param-picker 3 "transpose" 4.2)
+          (step-param-picker 0 "velocity" 4.2)
+          (step-param-picker 1 "duration" 4.2))))))
 
-(def %track-accumulator-panel ()
+(def track-accumulator-panel ()
   (h-stack :debug-name "track-accumulator-panel" :padding 0.00
     (box :padding 0.5
       :background-color :mixer-strip-bg
@@ -510,7 +518,7 @@
               :key "track-swing-resolution"
               :options '("1/16" "1/8" "1/4" "1/2")
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-swing-resolution v)))
-              :plock-active (if (%track-param-plock-active? "swing-resolution") 1 0)
+              :plock-active (if (track-param-plock-active? "swing-resolution") 1 0)
               :plock-color-r (pc/param-plock-color-r)
               :plock-color-g (pc/param-plock-color-g)
               :plock-color-b (pc/param-plock-color-b)
@@ -521,8 +529,8 @@
               (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
                 :key "track-swing"
                 :noui false :font-size 8 :text-color :dim
-                :plock-active (if (%track-param-plock-active? "swing") 1 0)
-                :plock-default (%track-param-plock-default "swing" SEQ.tp-swing)
+                :plock-active (if (track-param-plock-active? "swing") 1 0)
+                :plock-default (track-param-plock-default "swing" SEQ.tp-swing)
                 :plock-color-r (pc/param-plock-color-r)
                 :plock-color-g (pc/param-plock-color-g)
                 :plock-color-b (pc/param-plock-color-b)
@@ -535,8 +543,8 @@
             (dropdown :value SEQ.tp-timebase
               :key "track-timebase"
               :options st/seq-timebase-options
-              :on-change (lambda (v) (%set-timebase v))
-              :plock-active (if (%track-param-plock-active? "timebase") 1 0)
+              :on-change (lambda (v) (set-timebase v))
+              :plock-active (if (track-param-plock-active? "timebase") 1 0)
               :plock-color-r (pc/param-plock-color-r)
               :plock-color-g (pc/param-plock-color-g)
               :plock-color-b (pc/param-plock-color-b)
@@ -549,6 +557,6 @@
               :on-change (lambda (v)
                 (do
                   (eseq.seq-core-state/cool-off-follow)
-                  (seq-set-track-param :mute-group (%mute-group-value v))))
+                  (seq-set-track-param :mute-group (mute-group-value v))))
               :width 5.4 :height 1.25 :font-size 9))
           )))))

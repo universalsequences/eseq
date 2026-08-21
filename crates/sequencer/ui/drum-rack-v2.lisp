@@ -10,7 +10,59 @@
 
 (import eseq.track-collapse)
 
-(def %contains? (xs v)
+(export group-at
+        rack?
+        members
+        collapsed?
+        group-name
+        group-id
+        color
+        anchor
+        group-of-track
+        rack-of-track
+        rack-member?
+        visible-members
+        group-index-by-id
+        nested?
+        child-racks
+        group-anchor
+        bus-index
+        rack-of-bus
+        armed?
+        toggle-armed
+        toggle-collapsed
+        group-anchored-at
+        grid-render-items
+        visible-track-order
+        mixer-visible-track-order
+        track-relative
+        pads
+        pad-of-track
+        pad-label-of-track
+        choke-of-track
+        nudge-pad-note
+        choke-options
+        choke-value-index
+        set-pad-choke
+        trigger-pad
+        note-label
+        min-pad-page
+        max-pad-page
+        pad-page-count
+        clamp-pad-page
+        pad-page-base
+        min-grid-pad-note
+        max-grid-pad-note
+        page-of-note
+        cell-note
+        pad-page-label
+        pad-at-note
+        default-pad-page
+        pad-map-row-count
+        pad-map-row-base
+        pad-map-row-on-page?)
+
+(def contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
 
 (def group-at (gidx)
@@ -50,7 +102,7 @@
   (reduce |acc gidx|
     (if (>= acc 0)
       acc
-      (if (%contains? (members gidx) i) gidx acc))
+      (if (contains? (members gidx) i) gidx acc))
     -1
     (range 0 (len SEQ.groups))))
 
@@ -107,7 +159,7 @@
       (range 0 (len SEQ.bus-ids)))))
 
 ;; Index (in SEQ.groups) of the rack backed by bus `bus-idx`, else -1. Selecting
-;; a rack selects its bus (ui/sequencer.lisp, %select-rack), so this is how a
+;; a rack selects its bus (ui/sequencer.lisp, select-rack), so this is how a
 ;; bus-driven surface — the *fx* buffer — asks "is this selection a kit?".
 (def rack-of-bus (bus-idx)
   (if (< bus-idx 0)
@@ -147,7 +199,7 @@
     -1
     (range 0 (len SEQ.groups))))
 
-(def %unanchored-group-items ()
+(def unanchored-group-items ()
   (reduce |acc gidx|
     (if (and (not (nested? gidx)) (< (group-anchor gidx) 0))
       (append acc (list (dict :kind "group" :gidx gidx)))
@@ -155,7 +207,7 @@
     (list)
     (range 0 (len SEQ.groups))))
 
-(def %grid-render-items (include-collapsed-tracks)
+(def grid-render-items-with-collapsed-tracks (include-collapsed-tracks)
   (append
     (reduce |acc i|
       (let ((gidx (group-anchored-at i)))
@@ -169,29 +221,29 @@
               (append acc (list (dict :kind "track" :track i)))))))
       (list)
       (range 0 SEQ.num-tracks))
-    (%unanchored-group-items)))
+    (unanchored-group-items)))
 
 (def grid-render-items ()
-  (%grid-render-items false))
+  (grid-render-items-with-collapsed-tracks false))
 
-;; Flatten a group in exactly the order `%group-block` draws it: direct members
+;; Flatten a group in exactly the order `group-block` draws it: direct members
 ;; first, then each nested rack. The structural form includes hidden rows and is
 ;; used only to locate a selection that has become invisible.
-(def %group-track-order (gidx respect-group-collapse hide-collapsed-tracks)
+(def group-track-order (gidx respect-group-collapse hide-collapsed-tracks)
   (if (and respect-group-collapse (collapsed? gidx))
     (list)
     (reduce |acc child|
       (append acc
-        (%group-track-order child respect-group-collapse hide-collapsed-tracks))
+        (group-track-order child respect-group-collapse hide-collapsed-tracks))
       (if hide-collapsed-tracks (visible-members gidx) (members gidx))
       (child-racks gidx))))
 
-(def %flatten-track-order (items respect-group-collapse hide-collapsed-tracks)
+(def flatten-track-order (items respect-group-collapse hide-collapsed-tracks)
   (reduce |acc item|
     (append acc
       (if (= (get item :kind) "track")
         (list (get item :track))
-        (%group-track-order
+        (group-track-order
           (get item :gidx) respect-group-collapse hide-collapsed-tracks)))
     (list)
     items))
@@ -199,15 +251,15 @@
 ;; Selectable sequencer track rows in their rendered order. Group headers and
 ;; buses are deliberately absent: they retain their click-only selection path.
 (def visible-track-order ()
-  (%flatten-track-order (grid-render-items) true true))
+  (flatten-track-order (grid-render-items) true true))
 
 ;; The mixer shares the same group topology but still draws individually
 ;; collapsed tracks as narrow badges. Only a collapsed group removes tracks
 ;; from its visible order.
 (def mixer-visible-track-order ()
-  (%flatten-track-order (%grid-render-items true) true false))
+  (flatten-track-order (grid-render-items-with-collapsed-tracks true) true false))
 
-(def %index-of (xs value)
+(def index-of (xs value)
   (reduce |found i|
     (if (>= found 0) found (if (= (nth xs i) value) i found))
     -1
@@ -221,12 +273,13 @@
   (let ((visible (visible-track-order)))
     (if (= (len visible) 0)
       nil
-      (let ((visible-pos (%index-of visible track)))
+      (let ((visible-pos (index-of visible track)))
         (if (>= visible-pos 0)
           (nth visible (mod (+ visible-pos delta (len visible)) (len visible)))
           (let ((structural
-                  (%flatten-track-order (%grid-render-items true) false false)))
-            (let ((structural-pos (%index-of structural track)))
+                  (flatten-track-order
+                    (grid-render-items-with-collapsed-tracks true) false false)))
+            (let ((structural-pos (index-of structural track)))
               (if (< structural-pos 0)
                 nil
                 (reduce |found distance|
@@ -235,7 +288,7 @@
                             (nth structural
                               (mod (+ structural-pos (* delta distance) (len structural))
                                    (len structural)))))
-                      (if (%contains? visible candidate) candidate found))
+                      (if (contains? visible candidate) candidate found))
                     found)
                   nil
                   (range 1 (+ (len structural) 1)))))))))))
@@ -269,7 +322,7 @@
   (let ((pad (pad-of-track gidx track)))
     (if (= pad nil) -1 (get pad :choke))))
 
-(def %clamp-pad-note (note)
+(def clamp-pad-note (note)
   (max (min-grid-pad-note) (min (max-grid-pad-note) note)))
 
 ;; Move a pad by a semitone. The host rejects a collision with another pad and
@@ -278,7 +331,7 @@
 ;; cell exist but no page can show them, and a nudge must never strand a pad
 ;; where the grid cannot render it.
 (def nudge-pad-note (gidx pad delta)
-  (let ((note (%clamp-pad-note (+ (get pad :pad-note) delta))))
+  (let ((note (clamp-pad-note (+ (get pad :pad-note) delta))))
     (if (= note (get pad :pad-note))
       nil
       (host-command "set-rack-pad-note"
@@ -293,7 +346,7 @@
 (def choke-value-index (choke)
   (if (< choke 0) 0 choke))
 
-(def %choke-value-from-label (label)
+(def choke-value-from-label (label)
   (let ((opts (choke-options)))
     (reduce |acc i| (if (= (nth opts i) label) i acc) 0 (range 0 (len opts)))))
 
@@ -301,7 +354,7 @@
   (host-command "set-rack-pad-choke-group"
     (dict :group-id (group-id gidx)
           :pad-note (get pad :pad-note)
-          :value (%choke-value-from-label label))))
+          :value (choke-value-from-label label))))
 
 ;; A pad-grid hit takes the same live path a pad key takes: the pad's member
 ;; track at base pitch, so choke groups and the member's fx chain apply.
@@ -320,15 +373,15 @@
 ;; buy. Pages are clamped to the host's pad-note domain, C1 (page -3) up to
 ;; D#8 (page 3), so no cell ever names a note no pad could be placed on.
 
-(def %note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
+(def note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
 
 ;; Note name as the host writes pad labels (`drum_rack_pad_label`). A pad note
 ;; is a TRANSPOSE, the same one the step sequencer and piano roll speak, so 0
 ;; is C4 and notes below middle C are negative — hence the euclidean remainder
 ;; rather than a bare `mod`, which would index the name table backwards.
 (def note-label (note)
-  (let ((n (%clamp-pad-note note)))
-    (str (nth %note-names (mod (+ (mod n 12) 12) 12)) (+ 4 (floor (/ n 12))))))
+  (let ((n (clamp-pad-note note)))
+    (str (nth note-names (mod (+ (mod n 12) 12) 12)) (+ 4 (floor (/ n 12))))))
 
 ;; Pages -3..3, mirroring DRUM_RACK_FIRST_PAD_NOTE/DRUM_RACK_LAST_PAD_NOTE: the
 ;; bottom page starts at C1 (-36), the drum rack's home octave, and the top one
@@ -361,7 +414,7 @@
 ;; The page a note is drawn on. Overlap means a note can also appear in the
 ;; top row of the page below; this names the canonical one.
 (def page-of-note (note)
-  (clamp-pad-page (floor (/ (%clamp-pad-note note) 12))))
+  (clamp-pad-page (floor (/ (clamp-pad-note note) 12))))
 
 ;; Cell -> note, a pure function of (page, cell). Cell 0 is the TOP-left cell
 ;; of the rendered grid, so row 0 carries the page's highest four notes.
@@ -380,14 +433,14 @@
 
 ;; The page an empty rack opens on: the drum home, C1 — the bottom of the pad
 ;; space and where a rack's first pad lands (DRUM_RACK_FIRST_PAD_NOTE).
-(def %empty-rack-home-note () (min-grid-pad-note))
+(def empty-rack-home-note () (min-grid-pad-note))
 
 ;; Where a rack's grid opens: the page holding its lowest pad, so a kit that
 ;; lives at C7 does not open onto empty octaves.
 (def default-pad-page (gidx)
   (let ((ps (pads gidx)))
     (if (= (len ps) 0)
-      (page-of-note (%empty-rack-home-note))
+      (page-of-note (empty-rack-home-note))
       (page-of-note (reduce |acc pad| (min acc (get pad :pad-note))
         (max-grid-pad-note) ps)))))
 

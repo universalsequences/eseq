@@ -39,6 +39,10 @@
 (import eseq.seq-grid-mode :as gm)
 (import eseq.effects.state :as st)
 
+(export metal-track-r
+        metal-track-g
+        metal-track-b)
+
 ;; Read bare from ui/materials.lisp's shader macro bodies (see above).
 
 ;; ── Main UI ──
@@ -47,7 +51,7 @@
 (defstate metal-track-g 0.48)
 (defstate metal-track-b 0.98)
 
-(def %empty-track-fallback ()
+(def empty-track-fallback ()
   (box :width :fill :height :fill :padding 1 :h-align :center :v-align :center
     (v-stack :gap 0.35 :align :center
       (label "Select a sound to create a track"
@@ -55,41 +59,41 @@
       (label "Sampler, instruments, and projects are in the left browser."
         :font-size 10 :color :dark-gray :bg :transparent))))
 
-(def %current-track-color ()
+(def current-track-color ()
   (if (and (< SEQ.current-track (len SEQ.track-colors)) (>= SEQ.current-track 0))
     (nth SEQ.track-colors SEQ.current-track)
     (list 0.34 0.48 0.98)))
 
-(def %track-color-r ()
-  (nth (%current-track-color) 0))
+(def track-color-r ()
+  (nth (current-track-color) 0))
 
-(def %track-color-g ()
-  (nth (%current-track-color) 1))
+(def track-color-g ()
+  (nth (current-track-color) 1))
 
-(def %track-color-b ()
-  (nth (%current-track-color) 2))
+(def track-color-b ()
+  (nth (current-track-color) 2))
 
-(def %sync-track-color-state ()
+(def sync-track-color-state ()
   (do
-    (set! metal-track-r (%track-color-r))
-    (set! metal-track-g (%track-color-g))
-    (set! metal-track-b (%track-color-b))))
+    (set! metal-track-r (track-color-r))
+    (set! metal-track-g (track-color-g))
+    (set! metal-track-b (track-color-b))))
 
-(def %track-slider-fill ()
-  (rgba (%track-color-r) (%track-color-g) (%track-color-b) 1.0))
+(def track-slider-fill ()
+  (rgba (track-color-r) (track-color-g) (track-color-b) 1.0))
 
-(def %track-slider-muted-fill ()
+(def track-slider-muted-fill ()
   (rgba
-    (+ (* (%track-color-r) 0.30) (* 0.08 0.70))
-    (+ (* (%track-color-g) 0.30) (* 0.08 0.70))
-    (+ (* (%track-color-b) 0.30) (* 0.12 0.70))
+    (+ (* (track-color-r) 0.30) (* 0.08 0.70))
+    (+ (* (track-color-g) 0.30) (* 0.08 0.70))
+    (+ (* (track-color-b) 0.30) (* 0.12 0.70))
     0.50))
 
-(def %track-slider-muted-dot ()
+(def track-slider-muted-dot ()
   (rgba
-    (+ (* (%track-color-r) 0.28) (* 0.25 0.72))
-    (+ (* (%track-color-g) 0.28) (* 0.25 0.72))
-    (+ (* (%track-color-b) 0.28) (* 0.30 0.72))
+    (+ (* (track-color-r) 0.28) (* 0.25 0.72))
+    (+ (* (track-color-g) 0.28) (* 0.25 0.72))
+    (+ (* (track-color-b) 0.28) (* 0.30 0.72))
     0.55))
 
 (defwidget metal-track-tick
@@ -112,9 +116,9 @@
 
 (effect-buffer "*metal*"
   (if (= SEQ.num-tracks 0)
-    (%empty-track-fallback)
+    (empty-track-fallback)
     (do
-    (%sync-track-color-state)
+    (sync-track-color-state)
 
     (box :background-color :mixer-strip-bg :corner-radius 10
     (v-stack
@@ -208,7 +212,7 @@
                     :items (if (= eseq.seq-core-state/param-mode 5) SEQ.sync-labels '())
                     :font-size 11
                     :color :white
-                    :fill (%track-slider-fill)
+                    :fill (track-slider-fill)
                     :dot-color :dark-gray
                     :material (eseq.materials/slider-track-material)
                     :on-change (lambda (v)
@@ -233,8 +237,8 @@
                     :items (if (= eseq.seq-core-state/param-mode 5) SEQ.sync-labels '())
                     :font-size 11
                     :color :dim
-                    :fill (%track-slider-muted-fill)
-                    :dot-color (%track-slider-muted-dot)
+                    :fill (track-slider-muted-fill)
+                    :dot-color (track-slider-muted-dot)
                     :material (eseq.materials/slider-track-muted-material)
                     :on-change (lambda (v)
                       (if visible
@@ -270,9 +274,9 @@
                       :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                       :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
                       :selected (if visible (bind-seq-nth "selected-steps" step) 0)
-                      :track-r (%track-color-r)
-                      :track-g (%track-color-g)
-                      :track-b (%track-color-b)))
+                      :track-r (track-color-r)
+                      :track-g (track-color-g)
+                      :track-b (track-color-b)))
               (label (if visible (str (+ step 1)) "")
                 :font-size 10 :bg :transparent
                 :active (if visible (bind-seq-nth "selected-steps" step) 0)
