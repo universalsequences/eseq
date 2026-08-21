@@ -79,6 +79,7 @@ pub mod runtime;
 // Path-compat re-exports: the runtime engines moved into `runtime/` but keep
 // their historical `crate::<name>::` / `sequencer::<name>::` paths.
 pub use runtime::{accumulator, generator, graph, process};
+pub mod package_install;
 pub mod package_samples;
 pub mod sample_db;
 pub mod sample_import;

@@ -15,7 +15,21 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [package, index, path] if package == "package" && index == "index" => {
             index_package(PathBuf::from(path))
         }
-        _ => Err("usage: eseq package index [PACKAGE_DIR]".to_string()),
+        [package, install, identity, repository]
+            if package == "package" && install == "install" =>
+        {
+            let result = sequencer::package_install::install_git_package(
+                repository,
+                identity,
+                &sequencer::app_paths::app_paths().packages_dir(),
+            )?;
+            println!("installed {} at {}", result.identity, result.path.display());
+            Ok(())
+        }
+        _ => Err(
+            "usage: eseq package index [PACKAGE_DIR]\n       eseq package install AUTHOR/NAME GIT_URL"
+                .to_string(),
+        ),
     }
 }
 

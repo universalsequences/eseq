@@ -75,6 +75,7 @@ pub mod live_audio;
 pub mod mode;
 pub mod module_alias_migration;
 pub mod module_export_migration;
+pub mod package;
 pub mod reactive;
 pub mod runtime;
 pub mod sound_glyph_data;
@@ -114,7 +115,7 @@ use vm::{VMError, Value};
 
 pub use editor::{Editor, EditorConfig, EditorError, EditorExit};
 pub use host::{BufferId, CompileKind, HostCommand, HostEvent};
-pub use hot_reload::{ReloadReport, SourceOverlay, SourceSnapshot};
+pub use hot_reload::{ModuleLoadRoot, ReloadReport, SourceOverlay, SourceSnapshot};
 pub use mode::BufferMode;
 pub use runtime::{NativeContext, NativeResult, Runtime, RuntimeError, SymbolMetadata};
 

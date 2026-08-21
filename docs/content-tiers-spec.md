@@ -187,9 +187,10 @@ Distribution is git, not a registry (precedent: straight.el/Doom pins,
 Homebrew taps, Strudel's `samples('github:user/repo')` + `strudel.json` —
 runtime fetch keyed by repo path, no registry, and the repo name in code
 doubles as visible provenance): the convention above IS the standard, and
-install v1 is
-`git clone` into `~/.eseq.d/packages/`. An `install` command is a thin
-convenience — clone, validate manifest, verify declared asset hashes.
+install v1 is an atomic `git clone` into `~/.eseq.d/packages/`, exposed as
+`eseq package install AUTHOR/NAME GIT_URL`. The command clones to hidden
+staging, validates manifest/module ownership and declared asset hashes, then
+renames the repository into place; an invalid clone never becomes loadable.
 Packages ship **source, not binaries**: the embedded dgen toolchain
 compiles instrument dsp on the user's machine (no Xcode needed) and the
 dgen audit checks the compiled output regardless of origin.
@@ -278,8 +279,10 @@ becomes one line per root, not a repo-wide grep.
 - **T3 — user tier.** Create-on-first-run for App Support + `~/.eseq.d`;
   `$HOME` init candidate; load-path resolution (lands with module spec
   slice 4's init inversion — coordinate).
-- **T4 — copy-on-write UX + packages dir.** In-app "fork to user tier" /
-  "revert to factory"; `packages/` scan (module spec slice 5).
+- **T4 — copy-on-write UX + packages dir (BUILT 2026-08-21).** Existing
+  instrument/effect fork authoring writes finalized copies only to the user
+  tier while factory sources remain read-only; package scanning, validation,
+  scoped module roots, and atomic git installation land with module slice 5.
 - Release-arm activation and bundle copying remain Phase 5 of the
   toolchain spec; T1–T2 are its prerequisites.
 

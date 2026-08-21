@@ -792,6 +792,7 @@ dependencies = [
  "rustc_lexer",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "winit",
 ]

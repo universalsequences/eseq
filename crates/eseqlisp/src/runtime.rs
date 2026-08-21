@@ -1952,6 +1952,13 @@ impl Runtime {
         self.vm.source_manager.set_module_load_roots(roots);
     }
 
+    pub fn set_scoped_module_load_path(
+        &mut self,
+        roots: Vec<crate::hot_reload::ModuleLoadRoot>,
+    ) {
+        self.vm.source_manager.set_scoped_module_load_roots(roots);
+    }
+
     pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
         self.vm.source_manager.exclude_module_alias_scan_root(root);
     }

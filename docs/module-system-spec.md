@@ -385,6 +385,20 @@ which currently has none.
 
 ## 8. Packages
 
+**BUILT 2026-08-21 (slice 5).** `manifest.json` uses `name` (`author/name`),
+`version` (string or number, normalized to a string), `deps` (package-name
+array), `entry` (owned module), and `external_assets` (or `assets`) entries of
+`{"name": <package-relative path>, "sha256": <64 hex>}`. Installation and
+startup validate module ownership, dependency presence, and asset hashes before
+a package source root becomes importable. Package `src/` roots are namespace-
+scoped, so `alec.acid-tools.ui` resolves `src/ui.lisp` without allowing that
+root to satisfy an unrelated package's import.
+
+`defcustom` syntax is `(defcustom name default :type TYPE :doc "…")`; it is a
+reactive, auto-qualified declaration. `(setopt name value)` sets it, and
+`(custom-declarations)` returns sorted metadata maps for Lisp-generated settings
+UI.
+
 Generalize the existing dgenlisp defmacro-library format
 (`crates/eseqlisp/src/defmacro_library.rs` — dir-per-package,
 `manifest.json` with a version field, `use-defmacro` imports with cycle
@@ -2145,8 +2159,9 @@ stays as-is; real macro hygiene is out of scope for this spec.
   like `extension_hooks`; cached global reads add its effective-value rung.
   Acceptance test:
   `user_init_boot_proves_hook_mx_theme_and_visible_around_override`.
-- **Slice 5 — packages.** Manifest format, load path, author scoping,
-  `defcustom`; generalize `defmacro_library.rs`.
+- **Slice 5 — packages (BUILT 2026-08-21).** Manifest validation, scoped load
+  path, author scoping, external-asset verification, atomic git-clone install,
+  `defcustom`/`setopt`, and multi-symbol `defmacro_library.rs` packages.
 
 Warnings-not-errors where hackability matters: redefining a symbol owned by
 another module warns (this is the tooling that would have caught both

@@ -19,6 +19,10 @@ pub struct DefmacroManifest {
     pub params: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// Every public macro emitted by this package. `name` remains the primary
+    /// patcher macro for existing libraries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -34,6 +38,7 @@ pub struct DefmacroPackage {
     pub manifest_path: PathBuf,
     pub source: String,
     pub macro_expr: Expression,
+    pub macro_exprs: Vec<Expression>,
     pub params: Vec<String>,
     pub outputs: Vec<String>,
     pub imports: Vec<String>,
@@ -255,12 +260,21 @@ impl DefmacroLibrary {
                 shadowed_imports: Vec::new(),
             });
         }
-        let resolved = self.resolve_imports(&direct_imports, &local_macros)?;
+        let mut resolved = self.resolve_imports(&direct_imports, &local_macros)?;
 
         let imported_defs = resolved
             .packages
             .iter()
-            .map(|package| format_expression(&package.macro_expr))
+            .flat_map(|package| package.macro_exprs.iter())
+            .filter_map(|expression| {
+                let parsed = parse_defmacro(expression)?;
+                if local_macros.contains(&parsed.name) {
+                    resolved.shadowed.insert(parsed.name);
+                    None
+                } else {
+                    Some(format_expression(expression))
+                }
+            })
             .collect::<Vec<_>>();
         let user_source = remove_top_level_use_defmacro_forms(source);
         let source = if imported_defs.is_empty() {
@@ -367,23 +381,25 @@ impl DefmacroPackage {
         let manifest_path = package_dir.join(MACRO_MANIFEST_FILE);
         let exprs = parse_exprs(source, Some(source_path.clone()))?;
         let macros = exprs.iter().filter_map(parse_defmacro).collect::<Vec<_>>();
-        if macros.len() != 1 {
+        if macros.is_empty() {
             return Err(DefmacroLibraryError::InvalidPackage {
                 path: package_dir.to_path_buf(),
-                message: format!(
-                    "expected exactly one public defmacro, found {}",
-                    macros.len()
-                ),
+                message: "expected at least one public defmacro".to_string(),
             });
         }
-        let parsed = macros[0].clone();
-        if parsed.name != package_name {
+        let Some(parsed) = macros.iter().find(|macro_def| macro_def.name == package_name).cloned() else {
             return Err(DefmacroLibraryError::InvalidPackage {
                 path: package_dir.to_path_buf(),
-                message: format!(
-                    "public macro `{}` does not match package name `{package_name}`",
-                    parsed.name
-                ),
+                message: format!("package must define its primary macro `{package_name}`"),
+            });
+        };
+        let mut exports = macros.iter().map(|macro_def| macro_def.name.clone()).collect::<Vec<_>>();
+        exports.sort();
+        exports.dedup();
+        if exports.len() != macros.len() {
+            return Err(DefmacroLibraryError::InvalidPackage {
+                path: package_dir.to_path_buf(),
+                message: "duplicate public defmacro name".to_string(),
             });
         }
         let imports = top_level_imports(&exprs)?;
@@ -392,6 +408,7 @@ impl DefmacroPackage {
             name: parsed.name.clone(),
             params: parsed.params.clone(),
             outputs: infer_macro_outputs(&parsed.body),
+            exports,
             summary: None,
             tags: Vec::new(),
         };
@@ -403,6 +420,7 @@ impl DefmacroPackage {
             manifest_path,
             source: source.to_string(),
             macro_expr: parsed.expr,
+            macro_exprs: macros.into_iter().map(|macro_def| macro_def.expr).collect(),
             params: parsed.params,
             outputs: manifest.outputs.clone(),
             imports,
@@ -416,6 +434,7 @@ impl DefmacroPackage {
             name: self.name.clone(),
             params: self.params.clone(),
             outputs: self.outputs.clone(),
+            exports: self.macro_exprs.iter().filter_map(parse_defmacro).map(|macro_def| macro_def.name).collect(),
             summary: self.manifest.summary.clone(),
             tags: self.manifest.tags.clone(),
         }
@@ -889,6 +908,22 @@ mod tests {
             materialized.source,
             "(defmacro gain2 (x) (* x 2.0))\n(def y (gain2 x))"
         );
+    }
+
+    #[test]
+    fn one_defmacro_package_can_export_multiple_symbols() {
+        let root = tmp_root("multi-symbol");
+        write_package(
+            &root,
+            "acid",
+            "(defmacro acid-helper (x) (* x 2))\n(defmacro acid (x) (acid-helper x))",
+        );
+        let library = DefmacroLibrary::load(&root).unwrap();
+        let package = library.package("acid").unwrap();
+        assert_eq!(package.manifest.exports, vec!["acid", "acid-helper"]);
+        let materialized = library.materialize_source("(use-defmacro acid)\n(def y (acid x))").unwrap();
+        assert!(materialized.source.contains("(defmacro acid-helper"));
+        assert!(materialized.source.contains("(defmacro acid"));
     }
 
     #[test]

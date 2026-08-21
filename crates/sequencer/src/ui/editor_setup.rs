@@ -43,7 +43,7 @@ pub(crate) fn create_editor_with_user_init_path(
     // process working directory. Module imports use the tiered user → package
     // → factory search path instead of this raw-load root.
     runtime.set_load_root(app_paths.factory_root());
-    runtime.set_module_load_path(app_paths.load_path()?);
+    runtime.set_scoped_module_load_path(app_paths.module_load_roots()?);
     // The checked-in UI modules contain intentional module-local bare names
     // and historical alias declarations. Authored instruments/effects/scripts
     // stay outside this exclusion and are always preflighted.

@@ -221,6 +221,14 @@ struct OverlayRecord {
     revision: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleLoadRoot {
+    pub path: PathBuf,
+    /// When present, this root may resolve only this package's owned module
+    /// namespace. The prefix is stripped before mapping the module to `src/`.
+    pub module_prefix: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SourceManager {
     cwd: PathBuf,
@@ -233,7 +241,7 @@ pub struct SourceManager {
     diagnostics: Vec<String>,
     evaluated_sources: HashMap<(PathBuf, u64), String>,
     module_alias_scan_exclusions: Vec<PathBuf>,
-    module_load_roots: Vec<PathBuf>,
+    module_load_roots: Vec<ModuleLoadRoot>,
 }
 
 impl Default for SourceManager {
@@ -270,16 +278,27 @@ impl SourceManager {
     /// `(load …)` remains relative to the importing file. An empty list keeps
     /// the legacy candidate behavior for standalone embedders and tests.
     pub fn set_module_load_roots(&mut self, roots: Vec<PathBuf>) {
+        self.set_scoped_module_load_roots(
+            roots.into_iter().map(|path| ModuleLoadRoot { path, module_prefix: None }).collect()
+        );
+    }
+
+    pub fn set_scoped_module_load_roots(&mut self, roots: Vec<ModuleLoadRoot>) {
         self.module_load_roots = roots
             .into_iter()
-            .map(|root| self.canonicalize_path(&root))
+            .map(|root| ModuleLoadRoot {
+                path: self.canonicalize_path(&root.path),
+                module_prefix: root.module_prefix,
+            })
             .collect();
     }
 
-    /// Resolve module-relative candidates against the configured tiered load
-    /// path. The first existing source wins, which is the shadowing contract.
+    /// Resolve a module against the configured tiered load path. Scoped
+    /// package roots strip their owned prefix (`alec.tools.ui` → `ui.lisp`)
+    /// and are never considered for another package's namespace.
     pub fn load_module_source(
         &mut self,
+        module: &str,
         candidates: &[PathBuf],
     ) -> Option<Result<LoadedSource, Vec<String>>> {
         if self.module_load_roots.is_empty() {
@@ -288,8 +307,18 @@ impl SourceManager {
         let roots = self.module_load_roots.clone();
         let mut errors = Vec::new();
         for root in roots {
+            let package_candidates;
+            let candidates = if let Some(prefix) = &root.module_prefix {
+                let Some(suffix) = module.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('.')) else {
+                    continue;
+                };
+                package_candidates = crate::modules::module_relative_file_candidates(suffix);
+                package_candidates.as_slice()
+            } else {
+                candidates
+            };
             for relative in candidates {
-                let resolved = self.canonicalize_path(&root.join(relative));
+                let resolved = self.canonicalize_path(&root.path.join(relative));
                 match self.source_for_canonical_path(resolved.clone()) {
                     Ok(source) => {
                         if let Some(parent) = self.load_stack.last().cloned() {

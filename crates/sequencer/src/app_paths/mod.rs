@@ -236,24 +236,31 @@ impl AppPaths {
         self.user_lisp_root().join("packages")
     }
 
-    /// Module search roots in shadowing order: user modules, package source
-    /// trees (stable lexical package order), then immutable factory content.
+    /// Validated module roots in shadowing order. Package roots carry their
+    /// owned namespace so `src/ui.lisp` resolves `author.package.ui` without
+    /// allowing that package to satisfy somebody else's import.
+    pub fn module_load_roots(&self) -> io::Result<Vec<eseqlisp::ModuleLoadRoot>> {
+        let catalog = eseqlisp::package::PackageCatalog::scan(self.packages_dir())
+            .map_err(|errors| io::Error::new(
+                io::ErrorKind::InvalidData,
+                errors.into_iter().map(|error| error.to_string()).collect::<Vec<_>>().join("\n"),
+            ))?;
+        let mut roots = vec![eseqlisp::ModuleLoadRoot {
+            path: self.user_modules_dir(),
+            module_prefix: None,
+        }];
+        roots.extend(catalog.module_roots().into_iter().map(|(path, module_prefix)| {
+            eseqlisp::ModuleLoadRoot { path, module_prefix: Some(module_prefix) }
+        }));
+        roots.push(eseqlisp::ModuleLoadRoot {
+            path: self.factory_root(),
+            module_prefix: None,
+        });
+        Ok(roots)
+    }
+
     pub fn load_path(&self) -> io::Result<Vec<PathBuf>> {
-        let mut roots = vec![self.user_modules_dir()];
-        match std::fs::read_dir(self.packages_dir()) {
-            Ok(entries) => {
-                let mut package_sources = entries
-                    .map(|entry| entry.map(|entry| entry.path().join("src")))
-                    .collect::<io::Result<Vec<_>>>()?;
-                package_sources.retain(|path| path.is_dir());
-                package_sources.sort();
-                roots.extend(package_sources);
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        roots.push(self.factory_root());
-        Ok(distinct_vec_paths(roots))
+        Ok(self.module_load_roots()?.into_iter().map(|root| root.path).collect())
     }
 
     /// Create the complete mutable user-tier directory shape. This is safe to
@@ -703,9 +710,18 @@ mod tests {
         }
         assert!(!config.join("init.lisp").exists());
 
-        std::fs::create_dir_all(paths.packages_dir().join("zeta/src")).unwrap();
-        std::fs::create_dir_all(paths.packages_dir().join("alpha/src")).unwrap();
-        std::fs::create_dir_all(paths.packages_dir().join("ignored-no-src")).unwrap();
+        for (dir, identity, module) in [
+            ("zeta", "dev/zeta", "dev.zeta.main"),
+            ("alpha", "dev/alpha", "dev.alpha.main"),
+        ] {
+            let package = paths.packages_dir().join(dir);
+            std::fs::create_dir_all(package.join("src")).unwrap();
+            std::fs::write(package.join("src/main.lisp"), format!("(module {module})")).unwrap();
+            std::fs::write(package.join("manifest.json"), format!(
+                r#"{{"name":"{identity}","version":"1","entry":"{module}"}}"#
+            )).unwrap();
+        }
+        std::fs::create_dir_all(paths.packages_dir().join(".ignored-no-src")).unwrap();
         assert_eq!(
             paths.load_path().unwrap(),
             vec![

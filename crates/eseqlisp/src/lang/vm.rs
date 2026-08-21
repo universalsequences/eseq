@@ -63,6 +63,15 @@ pub struct OverrideSet {
     pub entries: Vec<OverrideEntry>,
     dispatcher: Rc<RefCell<Value>>,
 }
+
+#[derive(Clone)]
+pub struct CustomDeclaration {
+    pub name: String,
+    pub type_name: String,
+    pub default: Value,
+    pub doc: String,
+}
+
 pub type InlineWidgetMetadataResolver = Rc<dyn Fn(&str, &str) -> Option<InlineWidgetMetadata>>;
 pub type NodeId = u32;
 
@@ -2109,6 +2118,8 @@ pub struct VM {
     /// overriding module within each set; the most recently evaluated module
     /// is active. Factory global cells remain untouched underneath.
     pub overrides: HashMap<String, OverrideSet>,
+    /// Auto-qualified `defcustom` metadata used to generate settings UIs.
+    pub custom_declarations: HashMap<String, CustomDeclaration>,
     /// Modules declared via `(module NAME)` → the file that declared them
     /// (None for include_str!-style sources with no path). `import`
     /// consults this for load-once semantics (spec §4).
@@ -2161,6 +2172,7 @@ pub struct VmStateSnapshot {
     preserve_state_on_redefinition: bool,
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
     overrides: HashMap<String, OverrideSet>,
+    custom_declarations: HashMap<String, CustomDeclaration>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     module_exports: crate::modules::ModuleExportRegistry,
     imported_at_epoch: HashMap<String, u64>,
@@ -2606,6 +2618,9 @@ pub fn register_core_natives(vm: &mut VM) {
         let path = vm.current_source_file();
         vm.declared_modules.insert(name.clone(), path);
         vm.module_exports.entry(name.clone()).or_default();
+        let custom_prefix = format!("{name}/");
+        vm.custom_declarations
+            .retain(|custom_name, _| !custom_name.starts_with(&custom_prefix));
         // A module evaluated by `load` counts as satisfied for this pass too,
         // so a later `import` of it does not double-evaluate (ui/effects.lisp
         // still `load`s files that effects/* modules import).
@@ -2655,7 +2670,7 @@ pub fn register_core_natives(vm: &mut VM) {
         let relative_candidates = crate::modules::module_relative_file_candidates(name);
         let (loaded, errors) = match vm
             .source_manager
-            .load_module_source(&relative_candidates)
+            .load_module_source(name, &relative_candidates)
         {
             Some(Ok(loaded)) => (Some(loaded), Vec::new()),
             Some(Err(errors)) => (None, errors),
@@ -2806,6 +2821,46 @@ pub fn register_core_natives(vm: &mut VM) {
             quarantined: false,
         });
         Value::Nil
+    });
+
+    vm.register_native_with_vm("__register-defcustom", |args, vm| {
+        let (Some(default), Some(Value::String(name)), Some(Value::String(type_name)), Some(Value::String(doc))) =
+            (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            log_native_misuse("defcustom", "expected default, name, type, and docstring");
+            return Value::Nil;
+        };
+        let name = if crate::modules::is_qualified(name) {
+            crate::modules::strip_implicit(name).to_string()
+        } else {
+            let module = vm.current_module_name();
+            if module == crate::modules::IMPLICIT_MODULE { name.clone() }
+            else { crate::modules::qualify(module, name) }
+        };
+        vm.custom_declarations.insert(name.clone(), CustomDeclaration {
+            name,
+            type_name: type_name.clone(),
+            default: default.clone(),
+            doc: doc.clone(),
+        });
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("custom-declarations", |_args, vm| {
+        let mut declarations = vm.custom_declarations.values().cloned().collect::<Vec<_>>();
+        declarations.sort_by(|left, right| left.name.cmp(&right.name));
+        Value::List(declarations.into_iter().map(|declaration| {
+            let mut map = HashMap::new();
+            for (key, value) in [
+                ("name", Value::String(declaration.name)),
+                ("type", Value::Keyword(declaration.type_name)),
+                ("default", clone_value_for_snapshot(&declaration.default)),
+                ("doc", Value::String(declaration.doc)),
+            ] {
+                map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+            }
+            Rc::new(RefCell::new(Value::Map(map)))
+        }).collect())
     });
 
     vm.register_native_with_vm("__remove-override", |args, vm| {
@@ -3740,6 +3795,7 @@ impl VM {
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
+            custom_declarations: HashMap::new(),
             declared_modules: HashMap::new(),
             module_exports: crate::modules::ModuleExportRegistry::new(),
             imported_at_epoch: HashMap::new(),
@@ -4178,6 +4234,11 @@ impl VM {
                     )
                 })
                 .collect(),
+            custom_declarations: self.custom_declarations.iter().map(|(name, declaration)| {
+                let mut declaration = declaration.clone();
+                declaration.default = clone_value_for_snapshot(&declaration.default);
+                (name.clone(), declaration)
+            }).collect(),
             declared_modules: self.declared_modules.clone(),
             module_exports: self.module_exports.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
@@ -4221,6 +4282,7 @@ impl VM {
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
         self.overrides = snapshot.overrides;
+        self.custom_declarations = snapshot.custom_declarations;
         self.declared_modules = snapshot.declared_modules;
         self.module_exports = snapshot.module_exports;
         self.imported_at_epoch = snapshot.imported_at_epoch;
@@ -6168,6 +6230,14 @@ impl VM {
                     stack.push(Rc::new(RefCell::new(Value::Number(current))));
                     frames.last_mut().unwrap().pc += 1;
                 }
+                OpCode::Dup => {
+                    let Some(value) = stack.last() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let duplicate = clone_value_for_snapshot(&value.borrow());
+                    stack.push(Rc::new(RefCell::new(duplicate)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 OpCode::Pop => {
                     if stack.pop().is_none() {
                         return Err(VMError::StackUnderflow);
@@ -7297,6 +7367,24 @@ mod tests {
     }
 
     #[test]
+    fn scoped_package_root_strips_owned_prefix_and_cannot_resolve_foreign_modules() {
+        let mut vm = module_test_vm();
+        let root = import_test_dir("scoped-package-root");
+        std::fs::write(root.join("ui.lisp"), "(module alec.acid-tools.ui)\n(export answer)\n(def answer () 42)").unwrap();
+        vm.source_manager.set_scoped_module_load_roots(vec![crate::hot_reload::ModuleLoadRoot {
+            path: root,
+            module_prefix: Some("alec.acid-tools".into()),
+        }]);
+        assert_eq!(
+            vm.eval_str("(import alec.acid-tools.ui)\n(alec.acid-tools.ui/answer)"),
+            Ok(Some(Value::Number(42.0)))
+        );
+        let _ = vm.eval_str("(import bob.other.ui)");
+        assert!(!vm.declared_modules.contains_key("bob.other.ui"));
+        assert!(vm.take_source_load_errors().iter().any(|error| error.contains("bob.other.ui")));
+    }
+
+    #[test]
     fn native_reregistration_reaches_a_healed_module_slot() {
         // A converted module's bare call to a flat native interns a
         // qualified slot that the late-binding heal aliases to the native's
@@ -7872,6 +7960,35 @@ counter
             vm.read_tracked_state_value("host-tab"),
             Some(Value::String("instruments".to_string()))
         );
+    }
+
+    #[test]
+    fn defcustom_is_qualified_reactive_and_introspectable() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("defcustom"),
+            "(module alec.tools.settings)\n\
+             (defcustom gain 0.5 :type :number :doc \"Output gain\")\n\
+             (setopt gain 0.75)",
+            1,
+        ).expect("defcustom module");
+        assert_eq!(vm.read_tracked_state_value("alec.tools.settings/gain"), Some(Value::Number(0.75)));
+        let declaration = vm.custom_declarations.get("alec.tools.settings/gain").expect("declaration");
+        assert_eq!(declaration.type_name, "number");
+        assert_eq!(declaration.doc, "Output gain");
+        assert_eq!(declaration.default, Value::Number(0.5));
+        let listed = vm.eval_str("(get (first (custom-declarations)) :name)").expect("list declarations");
+        assert_eq!(listed, Some(Value::String("alec.tools.settings/gain".into())));
+    }
+
+    #[test]
+    fn defcustom_registry_is_transactional() {
+        let mut vm = module_test_vm();
+        let snapshot = vm.snapshot_state();
+        vm.eval_str("(defcustom temporary true :type :bool :doc \"Temporary\")").unwrap();
+        assert!(vm.custom_declarations.contains_key("temporary"));
+        vm.restore_state(snapshot);
+        assert!(!vm.custom_declarations.contains_key("temporary"));
     }
 
     // ── import's compile-time half (spec §4, eseq-mods.12) ──────────────
