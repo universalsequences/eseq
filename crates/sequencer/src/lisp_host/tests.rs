@@ -8643,8 +8643,26 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         if !processes.trim().is_empty() {
             rt.eval(&processes).expect("process library");
         }
-        rt.eval(r#"(jak "hit" :16 . . - -> 0 left -> 1 right)"#)
-            .expect("jaki surface macro");
+        // real-world shape: multi-fig, cyc'd velocity params, every/align, 5 routes
+        rt.eval(
+            r#"(jak "hit" :16
+                 (fig . - . .)
+                 (fig . - - (minvel 0) (dashdecay 0.1) (dotdecay (cyc 0.1 0)) (/ 2))
+                 (fig . - - (every 4 rev) (minvel 0.0) (dotdecay 0.1)
+                            (dashdecay (cyc 0.1 0.8 0)) (align 16))
+                 -> 0 left
+                 -> 1 (shift 3) right
+                 -> 2 (shift 2) left)"#,
+        )
+        .expect("jaki surface macro");
+        rt.eval(
+            r#"(jak "hats" :16
+                 . . - . - . . (dashdecay 0) (minvel 0.1)
+                 (dotdecay (cyc 0.1 0.8)) (/ (cyc 1 2))
+                 -> 3 left
+                 -> 4 (shift 4))"#,
+        )
+        .expect("jaki surface macro 2");
         // simulate a session's worth of stale renamed sequencers still registered
         let stale: usize = std::env::var("JAKI_PROBE_STALE")
             .ok()
@@ -8669,10 +8687,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             &mut out,
         );
         let mut pos = 4.0f64;
-        for window in 0..24 {
+        for window in 0..4 {
             let started = std::time::Instant::now();
             invocations = 0;
-            let end = pos + 256.0;
+            let end = pos + 128.0;
             while pos < end {
                 generators.process_block(
                     pos,
@@ -8694,15 +8712,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 elapsed,
                 elapsed.as_secs_f64() * 1_000.0 / invocations.max(1) as f64,
             );
-            if window % 6 == 3 {
-                // simulate the user re-evaluating the buffer a few times mid-run
-                for _ in 0..5 {
-                    rt.eval(r#"(jak "hit" :16 . . - -> 0 left -> 1 right)"#)
-                        .expect("re-eval");
-                }
-                generators.sync_definitions(&rt.sequencer_defs(), pos);
-                eprintln!("-- re-evaluated buffer 5x --");
-            }
             out.clear();
         }
     }

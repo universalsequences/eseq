@@ -685,18 +685,34 @@
           k
           (scan-cycle (rest lens) (- rem (first lens)) (+ k 1)))))
 
+;; per-pattern super-cycle table (lens total pd), memoized by pattern id.
+;; Cycle lengths are state-independent, so the table is computed once per
+;; pattern — without this, `locate` re-evaluated pd cycles per tick per route,
+;; thrashing the small shared memos (rich patterns pinned the scheduler).
+(def lens-memo (list))
+
+(def pat-lens (p)
+  (let ((hit (memo-find lens-memo (get p :id))))
+    (if (= hit nil)
+        (let ((pd (pat-period p)))
+          (let ((lens (map (lambda (k) (cycle-length p k)) (range 0 pd))))
+            (let ((entry (list lens (sum* lens) pd)))
+              (do (set! lens-memo
+                        (cons (list (get p :id) entry) (take* 23 lens-memo)))
+                  entry))))
+        hit)))
+
 ;; position (integer units) → (cycle-index cycle-start-unit)
 (def locate (p pos)
-  (let ((pd (pat-period p)))
-    (let ((lens (map (lambda (k) (cycle-length p k)) (range 0 pd))))
-      (let ((total (sum* lens)))
-        (if (<= total 0)
-            (list 0 pos)
-            (let ((full (idiv pos total)))
-              (let ((rem (- pos (* full total))))
-                (let ((k (scan-cycle lens rem 0)))
-                  (list (+ (* full pd) k)
-                        (+ (* full total) (prefix-sum lens k)))))))))))
+  (let ((entry (pat-lens p)))
+    (let ((lens (nth entry 0)) (total (nth entry 1)) (pd (nth entry 2)))
+      (if (<= total 0)
+          (list 0 pos)
+          (let ((full (idiv pos total)))
+            (let ((rem (- pos (* full total))))
+              (let ((k (scan-cycle lens rem 0)))
+                (list (+ (* full pd) k)
+                      (+ (* full total) (prefix-sum lens k))))))))))
 
 (def cycle-index (p pos) (first (locate p pos)))
 
@@ -744,6 +760,7 @@
 (def reset ()
   (do (set! memo-store (list))
       (set! len-memo (list))
+      (set! lens-memo (list))
       (state-set! "jaki-cycle" -1)
       nil))
 
