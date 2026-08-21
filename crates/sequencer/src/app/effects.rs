@@ -7493,6 +7493,118 @@ mod tests {
     }
 
     #[test]
+    fn track_effect_reorder_from_second_scene_keeps_parameter_targets_valid() {
+        let graph = TestLiveGraph::new("track-fx-second-scene-reorder-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("sampler track should be created");
+        let str8_slot = app
+            .add_builtin_effect_sync(0, "Str8 Delay")
+            .expect("Str8 Delay should install");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let str8_instance = app.device_registry.audio_effect(track_id, str8_slot);
+        let str8_node_id = app.state.pattern.effect_chains[0][str8_slot]
+            .node_id
+            .load(Ordering::Relaxed);
+
+        let second_scene = app.state.clone_pattern(
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        assert_eq!(second_scene, 1, "the cloned scene is active");
+
+        let filter_slot = app
+            .add_builtin_effect_sync(0, "Filter")
+            .expect("Filter should install in the second slot");
+        let filter_instance = app.device_registry.audio_effect(track_id, filter_slot);
+        let filter_node_id = app.state.pattern.effect_chains[0][filter_slot]
+            .node_id
+            .load(Ordering::Relaxed);
+        let moved_filter_slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Move audio effect", |app| {
+                app.move_effect_slot_sync(0, filter_slot, Some(str8_slot))
+            })
+            .expect("Filter should move before Str8 Delay");
+        let moved_str8_slot = filter_slot;
+        assert_eq!(moved_filter_slot, str8_slot);
+        assert_eq!(
+            app.device_registry.audio_effect_location(str8_instance),
+            Some((track_id, moved_str8_slot)),
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(filter_instance),
+            Some((track_id, moved_filter_slot)),
+        );
+
+        let assert_targets = |app: &mut App,
+                              scene: usize,
+                              expected_filter_slot: usize,
+                              expected_str8_slot: usize| {
+            app.apply_pattern_launch(&crate::app::PatternLaunchTarget::Scene { scene })
+                .expect("scene should launch");
+            for (reported_slot, target_node_id, expected_slot, expected_name) in [
+                (filter_slot, filter_node_id, expected_filter_slot, "Filter"),
+                (str8_slot, str8_node_id, expected_str8_slot, "Str8 Delay"),
+            ] {
+                let slot_idx = app
+                    .state
+                    .resolve_effect_slot_target(0, reported_slot, Some(target_node_id))
+                    .expect("the rendered target identity should resolve after reordering");
+                assert_eq!(slot_idx, expected_slot);
+                assert_eq!(app.graph.effect_descriptors[0][slot_idx].name, expected_name);
+                let param_count = app.graph.effect_descriptors[0][slot_idx].params.len();
+                for param_idx in 0..param_count {
+                    let value = app.state.pattern.effect_chains[0][slot_idx]
+                        .defaults
+                        .get(param_idx);
+                    crate::app::edit::try_apply_command(
+                        app,
+                        crate::app::AppCommand::SetEffectParam {
+                            track: 0,
+                            slot_idx,
+                            param_idx,
+                            value,
+                        },
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{expected_name} parameter {param_idx} is invalid in scene {}: {error:?}",
+                            scene + 1
+                        )
+                    });
+                    crate::app::edit::finish_active_gesture(app);
+                }
+            }
+        };
+
+        assert_targets(&mut app, 1, moved_filter_slot, moved_str8_slot);
+        assert_targets(&mut app, 0, moved_filter_slot, moved_str8_slot);
+        assert_targets(&mut app, 1, moved_filter_slot, moved_str8_slot);
+
+        let restored_filter_slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Move audio effect", |app| {
+                app.move_effect_slot_sync(0, moved_filter_slot, None)
+            })
+            .expect("Filter should move after Str8 Delay again");
+        assert_eq!(restored_filter_slot, filter_slot);
+        assert_targets(&mut app, 0, filter_slot, str8_slot);
+        assert_targets(&mut app, 1, filter_slot, str8_slot);
+
+        let moved_filter_slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Move audio effect", |app| {
+                app.move_effect_slot_sync(0, filter_slot, Some(str8_slot))
+            })
+            .expect("Filter should repeatedly move before Str8 Delay");
+        assert_targets(&mut app, 0, moved_filter_slot, moved_str8_slot);
+        assert_targets(&mut app, 1, moved_filter_slot, moved_str8_slot);
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_track_effect_add_undo_redo_restores_stable_instance() {
         let graph = TestLiveGraph::new("track-fx-history-add-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 1);

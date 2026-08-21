@@ -682,6 +682,11 @@ pub(super) fn handle(
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
+                let target_node_id =
+                    map.get("target-node-id").and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) => Some(*n as u32),
+                        _ => None,
+                    });
                 let param_idx =
                     map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                         Value::Number(n) => Some(*n as usize),
@@ -695,6 +700,16 @@ pub(super) fn handle(
                     (slot_idx, param_idx, value)
                 {
                     let track = current_track.load(Ordering::Relaxed);
+                    let Some(slot_idx) = state.resolve_effect_slot_target(
+                        track,
+                        slot_idx,
+                        target_node_id,
+                    ) else {
+                        editor.handle_host_event(HostEvent::Error(
+                            "effect parameter target is no longer available".to_string(),
+                        ));
+                        return;
+                    };
                     let desc = app
                         .graph
                         .effect_descriptors
@@ -1055,6 +1070,11 @@ pub(super) fn handle(
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
+                let target_node_id =
+                    map.get("target-node-id").and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) => Some(*n as u32),
+                        _ => None,
+                    });
                 let param_idx =
                     map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                         Value::Number(n) => Some(*n as usize),
@@ -1068,6 +1088,16 @@ pub(super) fn handle(
                     (slot_idx, param_idx, label)
                 {
                     let track = current_track.load(Ordering::Relaxed);
+                    let Some(slot_idx) = state.resolve_effect_slot_target(
+                        track,
+                        slot_idx,
+                        target_node_id,
+                    ) else {
+                        editor.handle_host_event(HostEvent::Error(
+                            "effect parameter target is no longer available".to_string(),
+                        ));
+                        return;
+                    };
                     let selected_idx = app
                         .graph
                         .effect_descriptors
@@ -1173,6 +1203,11 @@ pub(super) fn handle(
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
+                let target_node_id =
+                    map.get("target-node-id").and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) => Some(*n as u32),
+                        _ => None,
+                    });
                 let param_idx =
                     map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                         Value::Number(n) => Some(*n as usize),
@@ -1186,6 +1221,16 @@ pub(super) fn handle(
                     (slot_idx, param_idx, label)
                 {
                     let track = current_track.load(Ordering::Relaxed);
+                    let Some(slot_idx) = state.resolve_effect_slot_target(
+                        track,
+                        slot_idx,
+                        target_node_id,
+                    ) else {
+                        editor.handle_host_event(HostEvent::Error(
+                            "effect parameter target is no longer available".to_string(),
+                        ));
+                        return;
+                    };
                     let selected_idx = app
                         .graph
                         .effect_descriptors

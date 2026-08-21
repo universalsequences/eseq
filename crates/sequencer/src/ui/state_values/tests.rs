@@ -7500,6 +7500,10 @@
             Rc::new(RefCell::new(Value::Number(0.0))),
         );
         map.insert(
+            "target-node-id".to_string(),
+            Rc::new(RefCell::new(Value::Number((100 + slot_idx) as f64))),
+        );
+        map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(test_list(params))),
         );
@@ -38549,6 +38553,11 @@
                     payload.get("slot-idx").map(|value| value.borrow().clone()),
                     Some(Value::Number(0.0)),
                     "dimension base callback must target the first effect slot"
+                );
+                assert_eq!(
+                    payload.get("target-node-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(100.0)),
+                    "dimension base callback must retain its rendered effect identity"
                 );
                 assert_eq!(
                     payload.get("param-idx").map(|value| value.borrow().clone()),

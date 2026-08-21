@@ -433,9 +433,11 @@
         (if (seq-has-selection?) "set-midi-fx-plock" "set-midi-fx-param")
         (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))
       (if (seq-has-selection?)
-        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
+        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v (get fx :target-node-id))
         (host-command "set-effect-param"
-          (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))))))))
+          (dict :slot-idx (get fx :slot-idx)
+                :target-node-id (get fx :target-node-id)
+                :param-idx (get p :idx) :value v))))))))
 
 (def fx-toggle-instrument-value (p)
   (do
@@ -651,6 +653,7 @@
               (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
               (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
           (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
+                :target-node-id (get fx :target-node-id)
                 :param-idx (get p :idx) :label label))))
     (fx-set-instrument-option p label)))
 

@@ -5216,17 +5216,32 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(true))
     });
 
-    // seq-set-effect-plock — apply p-lock to ALL selected steps
+    // seq-set-effect-plock — apply p-lock to ALL selected steps. Rendered
+    // effect controls include their node identity so a callback created
+    // before a chain reorder still follows the intended effect.
+    let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     runtime.register_native("seq-set-effect-plock", move |args, ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
         else {
-            return Err("seq-set-effect-plock: expected (slot param value)".into());
+            return Err("seq-set-effect-plock: expected (slot param value [target-node-id])".into());
         };
         let track = ct.load(Ordering::Relaxed);
-        let slot_idx = *slot as usize;
+        let reported_slot = *slot as usize;
+        let target_node_id = match args.get(3) {
+            Some(Value::Number(node_id)) => Some(*node_id as u32),
+            Some(_) => return Err("seq-set-effect-plock: target node id must be a number".into()),
+            None => None,
+        };
+        let Some(slot_idx) = st.resolve_effect_slot_target(
+            track,
+            reported_slot,
+            target_node_id,
+        ) else {
+            return Err("seq-set-effect-plock: effect target is no longer available".into());
+        };
         let param_idx = *param as usize;
         let val = *val as f32;
         let mut steps = sel.lock().unwrap().iter().copied().collect::<Vec<_>>();
@@ -7191,7 +7206,7 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         ),
         (
             "seq-set-effect-plock",
-            "(seq-set-effect-plock slot param value)",
+            "(seq-set-effect-plock slot param value [target-node-id])",
             "Set an effect parameter p-lock on each selected step.",
         ),
         (

@@ -1,6 +1,25 @@
 use super::super::*;
 
 impl SequencerState {
+    /// Resolve a UI-authored effect target against the live chain. The node id
+    /// is the stable identity for the lifetime of a rendered control; unlike a
+    /// slot index, it follows the effect when the chain is reordered.
+    pub fn resolve_effect_slot_target(
+        &self,
+        track: usize,
+        reported_slot: usize,
+        target_node_id: Option<u32>,
+    ) -> Option<usize> {
+        let chain = self.pattern.effect_chains.get(track)?;
+        match target_node_id {
+            Some(0) => None,
+            Some(node_id) => chain.iter().position(|slot| {
+                slot.node_id.load(std::sync::atomic::Ordering::Relaxed) == node_id
+            }),
+            None => chain.get(reported_slot).map(|_| reported_slot),
+        }
+    }
+
     pub fn insert_effect_slot_in_other_track_patterns(&self, track: usize, slot_idx: usize) {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         scenes.edit_other_track_patterns(track, |data| data.insert_empty_effect_slot(slot_idx));

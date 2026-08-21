@@ -194,6 +194,10 @@ pub(crate) fn build_effects_value(
             let node_id = slot
                 .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
                 .unwrap_or(0);
+            slot_map.insert(
+                "target-node-id".to_string(),
+                Rc::new(RefCell::new(Value::Number(node_id as f64))),
+            );
             if desc.name == sequencer::effects::conv_reverb::NAME {
                 let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
                     .unwrap_or_else(|| "No IR".to_string());
