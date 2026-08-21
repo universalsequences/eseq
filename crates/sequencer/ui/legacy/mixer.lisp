@@ -1,6 +1,6 @@
-;; ui/legacy/mixer.lisp - retained predecessor to ui/mixer.lisp; NOT loaded by
-;; ui/main.lisp, and (unlike step-grid.lisp) not even in the metal_seq parse
-;; gate's file list. Renders to the *mixer* buffer when evaluated directly.
+;; ui/legacy/mixer.lisp - retained predecessor to ui/mixer.lisp; not loaded by
+;; ui/main.lisp. Its top-level structure and direct loading have a dedicated
+;; metal_seq regression test. Renders to the *mixer* buffer when evaluated.
 ;;
 ;; Converted in S3b wave 10. Notes specific to this file:
 ;;
@@ -17,13 +17,10 @@
 ;;     any other ui lisp file; ui/sequencer.lisp's lookalikes are the distinct
 ;;     `seqv-`-prefixed pair. No new clash is introduced.
 ;;   * The `:shader` bodies expand outside this module in a throwaway
-;;     implicit-module compiler (hazard g/h), so their `aqua-color` reference
-;;     stays FLAT through ui/materials.lisp's compat alias — likewise the
-;;     `(aqua-slider-material)` calls in the `:material` props. Do not import
-;;     eseq.materials and requalify them; that breaks them.
-;;   * `selected-bus` stays bare (including the `set!`s): it is
-;;     eseq.seq-core-state's `defstate`, and `defstate` resolves on the flat
-;;     key through `state_bindings`, so hazards (j)/(m) do not fire.
+;;     implicit-module compiler (hazard g/h). Material helpers therefore use
+;;     their explicit `eseq.materials/` names rather than module imports.
+;;   * Bus selection reads and writes use the explicit
+;;     `eseq.seq-core-state/selected-bus` state name.
 ;;   * No `import` lines at all — everything this file reads from outside is
 ;;     either a Rust native (`reactive-get`, the `seq-*` family) or a
 ;;     `defstate`. That also makes the file trivially safe under hazards
@@ -49,7 +46,7 @@
         (if selected (smoothstep 0 -0.1 d) 1)
         )
       )
-    )
+    ))
 
 ;; Record arm indicator (small circle)
 (defwidget rec-arm-dot
@@ -264,4 +261,4 @@
                     :value (nth SEQ.bus-volumes i)
                     :material (eseq.materials/slider-material)
                     :on-change (lambda (v) (seq-set-bus-volume i v))))
-                (label "" :width 1.6 :bg :transparent))))))))))
+                (label "" :width 1.6 :bg :transparent)))))))))

@@ -885,6 +885,69 @@
     }
 
     #[test]
+    fn legacy_mixer_definitions_are_top_level_and_source_loads() {
+        let path = "ui/legacy/mixer.lisp";
+        let src = std::fs::read_to_string(path).expect("read legacy mixer lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize legacy mixer lisp");
+        let expressions = ASTParser::new(tokens)
+            .parse()
+            .expect("parse legacy mixer lisp");
+        let signatures = expressions
+            .iter()
+            .map(|expression| match expression {
+                Expression::List(items) => match items.as_slice() {
+                    [Expression::Symbol(kind), Expression::Symbol(name), ..]
+                        if kind == "module" || kind == "def" || kind == "defwidget" =>
+                    {
+                        format!("{kind} {name}")
+                    }
+                    [Expression::Symbol(kind), ..] => kind.clone(),
+                    _ => panic!("unexpected top-level legacy mixer form: {expression:?}"),
+                },
+                _ => panic!("unexpected top-level legacy mixer expression: {expression:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            signatures,
+            [
+                "module eseq.legacy.mixer",
+                "def track-peak",
+                "defwidget track-container",
+                "defwidget rec-arm-dot",
+                "def mute-button-bg",
+                "def solo-button-bg",
+                "def button-border",
+                "defwidget mixer-track-meter",
+                "defwidget delete-track-icon",
+                "def bus-row-label",
+                "def has-mix-bus?",
+                "def display-bus-index",
+                "effect-buffer",
+            ]
+        );
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(0.0)),
+                ("bus-names", Value::List(vec![])),
+            ],
+            true,
+        );
+        let loaded = runtime
+            .eval_str(r#"(load "ui/legacy/mixer.lisp")"#)
+            .expect("load legacy mixer lisp")
+            .expect("load should return a value");
+        assert!(
+            !matches!(&loaded, Value::String(error) if error.starts_with("load:")),
+            "legacy mixer load failed: {loaded:?}"
+        );
+    }
+
+    #[test]
     fn complete_themes_define_every_registered_theme_slot_once() {
         let registered_keys = eseqlisp::theme::reactive_fields()
             .into_iter()
