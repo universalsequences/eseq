@@ -1,10 +1,10 @@
 ;; Jaki sequencer library — pure-Lisp evaluator core, pattern surface, and
 ;; generator wiring (docs/jaki-sequencer-spec.md §11 phases 1-3, bead eseq-5k5).
 ;;
-;; Patterns use the variadic `jaki/pat` macro:
+;; Patterns use the variadic `alec.jaki.core/pat` macro:
 ;;
-;;   (jaki/pat . . - (every 2 swap) (* (cyc 1 2)))
-;;   (jaki/pat (fig (. . -) (* 2)) (fig (. -) (/ 3)))
+;;   (alec.jaki.core/pat . . - (every 2 swap) (* (cyc 1 2)))
+;;   (alec.jaki.core/pat (fig (. . -) (* 2)) (fig (. -) (/ 3)))
 ;;
 ;; The tick body that builds patterns is authored on the UI VM but runs on the
 ;; scheduler VM: def-sequencer auto-quotes the body and re-serializes it as
@@ -17,10 +17,10 @@
 ;;
 ;; Evaluated event fields (dicts): :off rational, :sym :dot|:dash, :hit 1|2,
 ;; :hand :left|:right, :vel number, :accent bool, :fig index, :gate rational.
-;; `jaki/eval-at` returns (dict :events ... :len rational :end-hand hand
+;; `alec.jaki.core/eval-at` returns (dict :events ... :len rational :end-hand hand
 ;; :end-st velocity-state); velocity state is (dict :cur :pwd :streak).
 
-(module jaki)
+(module alec.jaki.core)
 
 (export pat from-list xform rev rot trunc every stac ghost swap
         shift filter for-hand fast slow
@@ -160,7 +160,7 @@
         :post (list)))
 
 (defmacro pat (&rest body)
-  `(jaki/from-list '(,@body)))
+  `(alec.jaki.core/from-list '(,@body)))
 
 ;; ── whole-pattern transform functions (spec §4.6) ───────────────────────────
 
@@ -195,10 +195,10 @@
 ;; rotate right by n units (post-evaluation phase shift)
 (def shift (p n) (add-post p (list :shift n) (str "shift:" (source n))))
 
-;; keyed filter over the evaluated events, e.g. (jaki/filter p '(:hand :left))
+;; keyed filter over the evaluated events, e.g. (alec.jaki.core/filter p '(:hand :left))
 (def filter (p spec) (add-post p (list :filter spec) (str "filter:" (source spec))))
 
-;; hand-scoped transform, e.g. (jaki/for-hand p :left '(stac))
+;; hand-scoped transform, e.g. (alec.jaki.core/for-hand p :left '(stac))
 (def for-hand (p hand t)
   (add-post p (list :for-hand hand (norm-xf t))
             (str "fh:" (source hand) ":" (source t))))
@@ -816,10 +816,10 @@
 
 ;; ── tier-2 route surface: (jak "name" :res events… -> track words…) ────────
 ;;
-;; The bare `jak` macro (jaki-surface.lisp, headerless so the name stays
-;; unqualified) expands to a def-sequencer whose tick calls (jaki/run body).
+;; The `jak` macro exported by alec.jaki.surface expands to a def-sequencer
+;; whose tick calls (alec.jaki.core/run body).
 ;; `run` interprets the body data: segments split at `->` symbols — segment
-;; zero is the pattern (same grammar as jaki/pat), each later segment is
+;; zero is the pattern (same grammar as alec.jaki.core/pat), each later segment is
 ;; `track word…`. Route words:
 ;;   left right accent rev stac ghost swap
 ;;   (shift n) (rot n) (trunc n) (every n t) (for-hand h t)

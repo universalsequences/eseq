@@ -364,6 +364,9 @@ impl ScratchControlRuntime {
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
         let process_chain_state = write_process_chain_state.then(|| Arc::clone(&state));
         let mut runtime = Runtime::new();
+        let app_paths = crate::app_paths::app_paths();
+        runtime.set_load_root(app_paths.factory_root());
+        runtime.set_scoped_module_load_path(app_paths.module_load_roots().0);
         runtime.set_theme_sync_enabled(false);
         runtime.register_native_with_docs(
             "eseq.seq-script-picker/seq-register-script-source-tab",

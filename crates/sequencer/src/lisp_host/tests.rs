@@ -8060,8 +8060,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     // ── jaki: pure-Lisp evaluator core + pattern surface + generator wiring ──
-    // (content/scripts/sequencers/jaki.lisp, spec docs/jaki-sequencer-spec.md,
-    // bead eseq-5k5)
+    // (content/packages/alec.jaki, spec docs/jaki-sequencer-spec.md)
 
     fn jaki_runtime() -> ScratchControlRuntime {
         let state = Arc::new(SequencerState::new(
@@ -8075,9 +8074,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let library = super::load_jaki_library_source();
-        assert!(!library.trim().is_empty(), "jaki library source resolves");
-        runtime.eval(&library).expect("evaluate jaki library");
+        runtime
+            .eval("(import alec.jaki.surface :refer (jak))")
+            .expect("import Jaki package");
         runtime
     }
 
@@ -8095,7 +8094,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     fn jaki_eval_nums(runtime: &mut ScratchControlRuntime, code: &str) -> Vec<f64> {
-        let value = runtime.eval(code).expect("eval jaki snippet").expect("value");
+        let source = format!("(import alec.jaki.core :as jaki)\n{code}");
+        let value = runtime
+            .eval(&source)
+            .expect("eval jaki snippet")
+            .expect("value");
         jaki_nums(&value)
     }
 
@@ -8366,8 +8369,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(def-sequencer "jaki-t1"
                  :resolution :16
                  :tick (do
-                   (jaki/init :16)
-                   (jaki/emit (jaki/pat . . . .) 0)))"#,
+                   (alec.jaki.core/init :16)
+                   (alec.jaki.core/emit (alec.jaki.core/pat . . . .) 0)))"#,
         )
         .expect("def-sequencer");
 
@@ -8413,8 +8416,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(def-sequencer "jaki-t2"
                  :resolution :16
                  :tick (do
-                   (jaki/init :16)
-                   (jaki/emit (jaki/pat . - (* 2)) 0)))"#,
+                   (alec.jaki.core/init :16)
+                   (alec.jaki.core/emit (alec.jaki.core/pat . - (* 2)) 0)))"#,
         )
         .expect("def-sequencer");
 
@@ -8449,12 +8452,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(def-sequencer "jaki-t3"
                  :resolution :16
                  :tick (do
-                   (jaki/init :16)
-                   (let ((base (jaki/pat . . - .)))
+                   (alec.jaki.core/init :16)
+                   (let ((base (alec.jaki.core/pat . . - .)))
                      (do
-                       (jaki/emit base 0)
-                       (jaki/emit (jaki/shift base 1) 1)
-                       (jaki/emit (jaki/filter base '(:hand :left)) 2)))))"#,
+                       (alec.jaki.core/emit base 0)
+                       (alec.jaki.core/emit (alec.jaki.core/shift base 1) 1)
+                       (alec.jaki.core/emit (alec.jaki.core/filter base '(:hand :left)) 2)))))"#,
         )
         .expect("def-sequencer");
 
@@ -8497,7 +8500,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // authored through the bare `jak` macro and the `->` route grammar
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(jak "kit" :16
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "kit" :16
                  . . - .
                  -> 0
                  -> 1 (shift 1)
@@ -8539,7 +8543,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn jaki_surface_no_routes_defaults_to_track_zero() {
         let mut rt = jaki_runtime();
-        rt.eval(r#"(jak "kick" :16 . . . .)"#).expect("jaki surface macro");
+        rt.eval(
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "kick" :16 . . . .)"#,
+        )
+        .expect("jaki surface macro");
 
         let mut generators = crate::generator::GeneratorRuntime::default();
         generators.sync_definitions(&rt.sequencer_defs(), 0.0);
@@ -8578,7 +8586,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // cycle via the (fast (cyc …)) route word. Per-pattern threading state
         // keeps the two routes from fighting over the shared cycle counter.
         rt.eval(
-            r#"(jak "snare" :16
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "snare" :16
                  . . - .
                  -> 0
                  -> 1 (fast (cyc 1 2)))"#,
@@ -8599,7 +8608,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
 
         let count = |t: usize| out.iter().filter(|e| e.event.track == Some(t)).count();
-                assert_eq!(count(0), 10);
+        assert_eq!(count(0), 10);
         // fast route: cycle 0 matches the straight route, cycle 1 is denser
         let cycle_boundary = 66_000; // cycle 0 spans samples 12k..=60k (first boundary at 0.25 beats)
         let t1_times: Vec<u64> = out
@@ -8615,8 +8624,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn jaki_surface_vel_route_word_scales_velocity() {
         let mut rt = jaki_runtime();
-        rt.eval(r#"(jak "soft" :16 . . . . -> 0 (vel 0.5))"#)
-            .expect("jaki surface macro");
+        rt.eval(
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "soft" :16 . . . . -> 0 (vel 0.5))"#,
+        )
+        .expect("jaki surface macro");
 
         let mut generators = crate::generator::GeneratorRuntime::default();
         generators.sync_definitions(&rt.sequencer_defs(), 0.0);
@@ -8639,7 +8651,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn jaki_surface_multi_voice_lines_each_carry_their_own_routes() {
         let mut rt = jaki_runtime();
         rt.eval(
-            r#"(jak "kit" :16
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "kit" :16
                  (. . - . -> 0)
                  (. . - . -> 1 (shift 1) -> 2 left))"#,
         )
@@ -8686,7 +8699,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         }
         // real-world shape: multi-fig, cyc'd velocity params, every/align, 5 routes
         rt.eval(
-            r#"(jak "hit" :16
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "hit" :16
                  (fig . - . .)
                  (fig . - - (minvel 0) (dashdecay 0.1) (dotdecay (cyc 0.1 0)) (/ 2))
                  (fig . - - (every 4 rev) (minvel 0.0) (dotdecay 0.1)
@@ -8697,7 +8711,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         )
         .expect("jaki surface macro");
         rt.eval(
-            r#"(jak "hats" :16
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "hats" :16
                  . . - . - . . (dashdecay 0) (minvel 0.1)
                  (dotdecay (cyc 0.1 0.8)) (/ (cyc 1 2))
                  -> 3 left
@@ -8710,7 +8725,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         for i in 0..stale {
-            rt.eval(&format!(r#"(jak "stale-{i}" :16 . . - . -> 0)"#))
+            rt.eval(&format!(
+                r#"(import alec.jaki.surface :refer (jak))
+                   (jak "stale-{i}" :16 . . - . -> 0)"#,
+            ))
                 .expect("stale def");
         }
 
@@ -8755,15 +8773,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             );
             out.clear();
         }
-    }
-
-    #[test]
-    fn jaki_library_gate_prepends_only_when_referenced() {
-        let plain = super::jaki_library_source_with_user_source("(def x 1)");
-        assert_eq!(plain, "(def x 1)");
-        let gated = super::jaki_library_source_with_user_source(r#"(jak "kit" :16 . .)"#);
-        assert!(gated.contains("jaki.lisp") || gated.contains("(module jaki)"));
-        assert!(gated.ends_with(r#"(jak "kit" :16 . .)"#));
     }
 
     #[test]

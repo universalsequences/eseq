@@ -236,6 +236,10 @@ impl AppPaths {
         self.user_lisp_root().join("packages")
     }
 
+    pub fn factory_packages_dir(&self) -> PathBuf {
+        self.factory_root().join("packages")
+    }
+
     /// Validated module roots in shadowing order, plus one message per
     /// package that failed validation. Package roots carry their owned
     /// namespace so `src/ui.lisp` resolves `author.package.ui` without
@@ -243,13 +247,16 @@ impl AppPaths {
     /// packages are excluded and reported — like a failed user init, a broken
     /// third-party clone never aborts application boot.
     pub fn module_load_roots(&self) -> (Vec<eseqlisp::ModuleLoadRoot>, Vec<String>) {
-        let (catalog, errors) =
-            eseqlisp::package::PackageCatalog::scan_reporting(self.packages_dir());
+        let (packages, errors) = eseqlisp::package::PackageCatalog::scan_layered_reporting(&[
+            self.packages_dir(),
+            self.factory_packages_dir(),
+        ]);
+
         let mut roots = vec![eseqlisp::ModuleLoadRoot {
             path: self.user_modules_dir(),
             module_prefix: None,
         }];
-        roots.extend(catalog.module_roots().into_iter().map(|(path, module_prefix)| {
+        roots.extend(packages.module_roots().into_iter().map(|(path, module_prefix)| {
             eseqlisp::ModuleLoadRoot { path, module_prefix: Some(module_prefix) }
         }));
         roots.push(eseqlisp::ModuleLoadRoot {
@@ -726,12 +733,25 @@ mod tests {
         // failing load-path construction (same contract as a failed user init).
         std::fs::create_dir_all(paths.packages_dir().join("broken")).unwrap();
         std::fs::write(paths.packages_dir().join("broken/manifest.json"), "not json").unwrap();
+        let factory_package = workspace.join("content/packages/dev.factory");
+        std::fs::create_dir_all(factory_package.join("src")).unwrap();
+        std::fs::write(
+            factory_package.join("src/main.lisp"),
+            "(module dev.factory.main)",
+        )
+        .unwrap();
+        std::fs::write(
+            factory_package.join("manifest.json"),
+            r#"{"name":"dev/factory","version":"1","entry":"dev.factory.main"}"#,
+        )
+        .unwrap();
         assert_eq!(
             paths.load_path().unwrap(),
             vec![
                 config.join("modules"),
                 config.join("packages/alpha/src"),
                 config.join("packages/zeta/src"),
+                workspace.join("content/packages/dev.factory/src"),
                 workspace.join("content"),
             ]
         );

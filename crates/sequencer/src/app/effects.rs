@@ -231,9 +231,7 @@ impl App {
         );
         let evaluated_source = self.state.scratch_source();
         let scratch_source = lisp_host::midi_fx_library_source_with_user_source(
-            &lisp_host::process_library_source_with_user_source(
-                &lisp_host::jaki_library_source_with_user_source(&evaluated_source),
-            ),
+            &lisp_host::process_library_source_with_user_source(&evaluated_source),
         );
         if !scratch_source.trim().is_empty() {
             runtime.eval(&scratch_source)?;

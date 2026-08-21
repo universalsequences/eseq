@@ -2178,6 +2178,26 @@
     }
 
     #[test]
+    fn scheduler_runtime_imports_jaki_package_without_source_injection() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let runtime = super::build_scheduler_scratch_runtime(
+            state,
+            r#"(import alec.jaki.surface :refer (jak))
+               (jak "package-import" :16 . . - . -> 0)"#,
+            false,
+        )
+        .expect("imported Jaki sequencer should keep the scheduler runtime alive");
+
+        assert!(
+            runtime
+                .sequencer_defs()
+                .iter()
+                .any(|definition| definition.name == "package-import"),
+            "the scheduler VM must compile the imported macro itself"
+        );
+    }
+
+    #[test]
     fn scheduler_runtime_keeps_builtin_midi_fx_when_project_scratch_fails() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let runtime = super::build_scheduler_scratch_runtime(

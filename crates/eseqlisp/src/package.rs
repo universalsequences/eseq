@@ -49,6 +49,7 @@ pub struct InstalledPackage {
 #[derive(Debug, Clone, Default)]
 pub struct PackageCatalog {
     packages: BTreeMap<String, InstalledPackage>,
+    load_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,38 +89,52 @@ impl PackageCatalog {
     /// while every valid package stays loadable. A broken third-party clone
     /// must never take the factory tier down with it.
     pub fn scan_reporting(root: impl AsRef<Path>) -> (Self, Vec<PackageError>) {
-        let root = root.as_ref();
-        let entries = match fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return (Self::default(), Vec::new());
-            }
-            Err(error) => return (Self::default(), vec![package_error(root, error)]),
-        };
-        let mut directories = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.is_dir() && !is_hidden(path))
-            .collect::<Vec<_>>();
-        directories.sort();
+        Self::scan_layered_reporting(&[root.as_ref().to_path_buf()])
+    }
 
+    /// Scan package tiers in shadowing order. An identity in an earlier tier
+    /// shadows the same identity in later tiers, while dependencies resolve
+    /// across the complete selected catalog. Duplicate identities within one
+    /// tier remain invalid.
+    pub fn scan_layered_reporting(roots: &[PathBuf]) -> (Self, Vec<PackageError>) {
         let mut packages = BTreeMap::new();
+        let mut package_tiers = BTreeMap::new();
         let mut errors = Vec::new();
-        for directory in directories {
-            match InstalledPackage::load(&directory) {
-                Ok(package) => {
-                    if packages.contains_key(&package.manifest.name) {
-                        errors.push(PackageError {
-                            path: directory,
-                            message: format!(
-                                "duplicate package identity `{}`",
-                                package.manifest.name
-                            ),
-                        });
-                    } else {
-                        packages.insert(package.manifest.name.clone(), package);
-                    }
+        for (tier, root) in roots.iter().enumerate() {
+            let entries = match fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    errors.push(package_error(root, error));
+                    continue;
                 }
-                Err(error) => errors.push(error),
+            };
+            let mut directories = entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir() && !is_hidden(path))
+                .collect::<Vec<_>>();
+            directories.sort();
+
+            for directory in directories {
+                match InstalledPackage::load(&directory) {
+                    Ok(package) => match package_tiers.get(&package.manifest.name) {
+                        Some(existing_tier) if *existing_tier == tier => {
+                            errors.push(PackageError {
+                                path: directory,
+                                message: format!(
+                                    "duplicate package identity `{}`",
+                                    package.manifest.name
+                                ),
+                            });
+                        }
+                        Some(_) => {}
+                        None => {
+                            package_tiers.insert(package.manifest.name.clone(), tier);
+                            packages.insert(package.manifest.name.clone(), package);
+                        }
+                    },
+                    Err(error) => errors.push(error),
+                }
             }
         }
 
@@ -146,7 +161,14 @@ impl PackageCatalog {
                 message: format!("dependency `{dependency}` is not installed"),
             });
         }
-        (Self { packages }, errors)
+        let mut load_order = packages.keys().cloned().collect::<Vec<_>>();
+        load_order.sort_by(|left, right| {
+            package_tiers
+                .get(left)
+                .cmp(&package_tiers.get(right))
+                .then_with(|| left.cmp(right))
+        });
+        (Self { packages, load_order }, errors)
     }
 
     pub fn packages(&self) -> &BTreeMap<String, InstalledPackage> {
@@ -154,8 +176,9 @@ impl PackageCatalog {
     }
 
     pub fn module_roots(&self) -> Vec<(PathBuf, String)> {
-        self.packages
-            .values()
+        self.load_order
+            .iter()
+            .filter_map(|name| self.packages.get(name))
             .map(|package| (package.source_root.clone(), package.module_prefix.clone()))
             .collect()
     }
@@ -483,6 +506,53 @@ mod tests {
         assert_eq!(errors.len(), 3, "broken manifest + both cascading dep exclusions");
         assert!(errors.iter().any(|e| e.to_string().contains("`alec/absent` is not installed")));
         assert!(errors.iter().any(|e| e.to_string().contains("`alec/mid` is not installed")));
+    }
+
+    #[test]
+    fn layered_catalog_resolves_dependencies_across_package_tiers() {
+        let root = temp_root("layered");
+        let user = root.join("user");
+        let factory = root.join("factory");
+        for (package_root, identity, module, deps) in [
+            (
+                user.join("alec.app"),
+                "alec/app",
+                "alec.app.main",
+                r#", "deps":["alec/base"]"#,
+            ),
+            (
+                factory.join("alec.base"),
+                "alec/base",
+                "alec.base.main",
+                "",
+            ),
+        ] {
+            fs::create_dir_all(package_root.join("src")).unwrap();
+            fs::write(
+                package_root.join("src/main.lisp"),
+                format!("(module {module})"),
+            )
+            .unwrap();
+            fs::write(
+                package_root.join("manifest.json"),
+                format!(
+                    r#"{{"name":"{identity}","version":"1","entry":"{module}"{deps}}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let (catalog, errors) =
+            PackageCatalog::scan_layered_reporting(&[user.clone(), factory.clone()]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            catalog.module_roots(),
+            vec![
+                (user.join("alec.app/src"), "alec.app".into()),
+                (factory.join("alec.base/src"), "alec.base".into()),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

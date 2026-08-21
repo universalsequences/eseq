@@ -2447,16 +2447,6 @@ pub(crate) fn init_runtime(
     if !process_library.trim().is_empty() {
         let _ = runtime.eval_str(&process_library);
     }
-    // The *scratch* buffer evaluates on this runtime (eval_source_transactional),
-    // so the bare `jak` macro + jaki module must be resident here for jaki
-    // sequencers to author. Loaded unconditionally: this runtime is built once
-    // at startup, unlike the per-source scheduler runtime with its usage gate.
-    let jaki_library = sequencer::lisp_host::load_jaki_library_source();
-    if !jaki_library.trim().is_empty() {
-        if let Err(error) = runtime.eval_str(&jaki_library) {
-            eprintln!("metal_seq: jaki library eval failed on UI runtime: {error:?}");
-        }
-    }
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();

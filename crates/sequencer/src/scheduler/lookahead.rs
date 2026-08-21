@@ -109,23 +109,6 @@ pub(super) fn build_scheduler_scratch_runtime(
         }
     }
 
-    // Pre-package stopgap for the pure-Lisp jaki library (eseq-5k5): sequencer
-    // tick bodies run on this scheduler VM, so the library must be resident
-    // here. Gated on actual use until `import jaki` lands with the package
-    // system (eseq-jo7).
-    // bare `(jak …)` macro calls count too, hence "jak" not "jaki/"
-    if user_source.contains("jak") {
-        let jaki_source = lisp_host::load_jaki_library_source();
-        if !jaki_source.trim().is_empty() {
-            if let Err(err) = runtime.eval(&jaki_source) {
-                if debug_accum || debug_routing_enabled() {
-                    let status = runtime.take_status_message();
-                    eprintln!("[scheduler-runtime] jaki library eval err={err} status={status:?}");
-                }
-            }
-        }
-    }
-
     if !process_source.trim().is_empty() {
         match runtime.eval(&process_source) {
             Ok(_) => {

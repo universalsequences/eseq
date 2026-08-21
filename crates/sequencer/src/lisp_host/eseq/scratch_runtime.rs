@@ -235,57 +235,6 @@ pub fn load_process_library_source() -> String {
     }
 }
 
-pub fn load_jaki_library_source() -> String {
-    // jaki.lisp is the (module jaki) evaluator core; jaki-surface.lisp is the
-    // headerless file that defines the bare `jak` macro. Evaluate through
-    // `load` so the module keeps its real source path for navigation;
-    // embedded fallback for packaged builds.
-    let sequencers = crate::app_paths::app_paths().scripts_dir().join("sequencers");
-    let mut parts = Vec::new();
-    for (file, embedded) in [
-        (
-            "jaki.lisp",
-            include_str!("../../../../../content/scripts/sequencers/jaki.lisp"),
-        ),
-        (
-            "jaki-surface.lisp",
-            include_str!("../../../../../content/scripts/sequencers/jaki-surface.lisp"),
-        ),
-    ] {
-        let path = sequencers.join(file);
-        match std::fs::read_to_string(&path) {
-            Ok(source) if source.trim().is_empty() => {}
-            Ok(_) => {
-                let path = std::fs::canonicalize(&path).unwrap_or(path);
-                parts.push(format!("(load {:?})", path.to_string_lossy()));
-            }
-            Err(_) => {
-                if !embedded.trim().is_empty() {
-                    parts.push(format!("; embedded scripts/sequencers/{file}\n{embedded}\n"));
-                }
-            }
-        }
-    }
-    parts.join("\n")
-}
-
-/// Prepend the jaki library when the scratch buffer uses it — the bare `jak`
-/// macro must exist in the authoring runtime before the user source compiles.
-/// Same pre-package stopgap gate as the scheduler runtime (eseq-5k5).
-pub fn jaki_library_source_with_user_source(user_source: &str) -> String {
-    if !user_source.contains("jak") {
-        return user_source.to_string();
-    }
-    let library = load_jaki_library_source();
-    if library.trim().is_empty() {
-        user_source.to_string()
-    } else if user_source.trim().is_empty() {
-        library
-    } else {
-        format!("{library}\n; *scratch*\n{user_source}")
-    }
-}
-
 pub(in crate::lisp_host) fn load_midi_fx_descriptors_from_source(source: String) -> Vec<EffectDescriptor> {
     if source.trim().is_empty() {
         return Vec::new();
