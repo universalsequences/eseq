@@ -1,6 +1,7 @@
 # Content Tiers — Directory Layout, the Load Path, and the Extensibility Vision
 
-Status: rev 1 draft, 2026-08-11 — for discussion. Companion to
+Status: rev 2, 2026-08-20 — §7 questions 2 and 4 resolved, §3 corrected
+against a measured inventory (§3.1, §3.2). Companion to
 `docs/module-system-spec.md` (which owns symbols, `import`, hooks, and
 `override`); this spec owns **where files live** — in the repo, in the
 installed app, and on the user's machine — and how the tiers layer.
