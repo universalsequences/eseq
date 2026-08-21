@@ -903,7 +903,8 @@
                     {
                         format!("{kind} {name}")
                     }
-                    [Expression::Symbol(kind), ..] => kind.clone(),
+                    [Expression::Symbol(kind)] if kind == "export" => kind.clone(),
+                    [Expression::Symbol(kind), ..] if kind == "effect-buffer" => kind.clone(),
                     _ => panic!("unexpected top-level legacy mixer form: {expression:?}"),
                 },
                 _ => panic!("unexpected top-level legacy mixer expression: {expression:?}"),
@@ -913,6 +914,7 @@
             signatures,
             [
                 "module eseq.legacy.mixer",
+                "export",
                 "def track-peak",
                 "defwidget track-container",
                 "defwidget rec-arm-dot",

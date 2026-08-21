@@ -31,6 +31,8 @@
 
 (module eseq.legacy.mixer)
 
+(export)
+
 (def track-peak (i)
   (reactive-get "SEQ" (str "track-peak-" i)))
 
