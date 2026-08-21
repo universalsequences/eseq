@@ -1148,7 +1148,25 @@ impl App {
 
     pub fn queue_project_load_named(&mut self, name: &str) -> Result<(), String> {
         eprintln!("project-load: queue requested name={name}");
-        let mut project = project::load_project(name).map_err(|error| error.to_string())?;
+        let project = project::load_project(name).map_err(|error| error.to_string())?;
+        self.queue_loaded_project(name, project)
+    }
+
+    pub fn queue_project_load_from_path(&mut self, name: &str, path: &Path) -> Result<(), String> {
+        eprintln!(
+            "project-load: queue requested name={name} path={}",
+            path.display()
+        );
+        let project = project::load_project_from_path(path)
+            .map_err(|error| format!("Failed to load project '{}': {error}", path.display()))?;
+        self.queue_loaded_project(name, project)
+    }
+
+    fn queue_loaded_project(
+        &mut self,
+        name: &str,
+        mut project: project::ProjectFile,
+    ) -> Result<(), String> {
         eprintln!(
             "project-load: file loaded name={} version={} tracks={} patterns={} custom_effect_tracks={}",
             name,
@@ -1164,6 +1182,11 @@ impl App {
         if project.version < 2 {
             migrate_legacy_dgen_param_node_indices(&mut project);
         }
+        project
+            .map_instrument_ids(|name| {
+                crate::lisp_host::qualify_instrument_id(name).map_err(|error| error.to_string())
+            })
+            .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
         project.normalize_device_instances()?;
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
@@ -1188,6 +1211,9 @@ impl App {
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
         wav_path: &Path,
     ) -> Result<ProjectSampleAsset, String> {
+        // Content-addressed references ("samples/<sha>.wav") resolve against
+        // the sample store before canonicalization.
+        let wav_path = &crate::app_paths::resolve_sample_ref(wav_path);
         // Canonical paths collapse relative, absolute, and symlinked references
         // before any decode, graph allocation, or analyzer submission occurs.
         let canonical_path = wav_path.canonicalize().map_err(|error| {
@@ -2622,6 +2648,16 @@ impl App {
                                             engine_id
                                         )
                                     })?;
+                                let instrument_name = crate::lisp_host::qualify_instrument_id(
+                                    &instrument_name,
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "Could not qualify instrument for rack track '{}' slot {}: {error}",
+                                        name,
+                                        slot_idx + 1
+                                    )
+                                })?;
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                                     sample_path: None,
@@ -2695,6 +2731,12 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
+                    let instrument_name = crate::lisp_host::qualify_instrument_id(
+                        &instrument_name,
+                    )
+                    .map_err(|error| {
+                        format!("Could not qualify instrument for track '{}': {error}", name)
+                    })?;
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),
@@ -3026,7 +3068,7 @@ impl App {
             None
         }
 
-        walk(Path::new("samples"), sample_name)
+        walk(&crate::app_paths::app_paths().samples_dir(), sample_name)
     }
 
     /// Resolve a saved Convolution Reverb IR reference to an absolute path: the
@@ -5194,6 +5236,44 @@ mod tests {
                 node_param_idx: 15,
             }
         );
+    }
+
+    #[test]
+    fn bus_backed_filter_table_preset_survives_project_roundtrip() {
+        let _registry = crate::effects::filter_table::tests::registry_lock();
+        let node_id = 843_001;
+        let reference = "fltab:vowel-drift";
+        crate::effects::filter_table::record_prepared_table(
+            node_id,
+            reference,
+            "vowel-drift",
+            std::sync::Arc::new(crate::effects::filter_table::default_table()),
+        );
+
+        let mut descriptor = EffectDescriptor::builtin_filter();
+        descriptor.name = crate::effects::filter_table::NAME.to_string();
+        let mut bus = BusChannelState::new(BusId::DEFAULT_A, "Group / rack bus".to_string());
+        bus.effect_descriptors = vec![descriptor.clone()];
+        bus.effect_slots = vec![crate::effects::EffectSlotSnapshot::new_default(
+            &descriptor,
+            node_id as u32,
+        )];
+        bus.custom_effect_names[0] = Some(crate::effects::filter_table::NAME.to_string());
+
+        // Bus, group, and drum-rack owners all serialize their effects through
+        // ProjectBusChannel. The live table reference is registry-owned and is
+        // intentionally absent from the long-lived bus slot snapshot here.
+        assert_eq!(bus.effect_slots[0].table, None);
+        let saved = ProjectBusChannel::from(bus);
+        assert_eq!(saved.effect_slots[0].table.as_deref(), Some(reference));
+
+        let json = serde_json::to_string(&saved).expect("serialize bus-backed Filter Table");
+        let decoded: ProjectBusChannel =
+            serde_json::from_str(&json).expect("deserialize bus-backed Filter Table");
+        let restored = BusChannelState::from(decoded);
+        assert_eq!(restored.effect_slots[0].table.as_deref(), Some(reference));
+
+        crate::effects::filter_table::clear_instance(node_id);
     }
 
     #[test]

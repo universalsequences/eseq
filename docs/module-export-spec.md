@@ -11,7 +11,7 @@ semantics (§4), and `override` (§6.1) are unchanged except where noted.
 
 The `%`-prefix convention did its job during migration — it forced a
 visibility decision onto every one of the ~1,176 internal symbols
-(≈3,848 occurrences in `crates/sequencer/ui`) — but it puts the ugliness
+(≈3,848 occurrences in `content/ui`) — but it puts the ugliness
 at every definition *and* call site, permanently. In Common Lisp, where
 the convention originates, `%` marks "low-level, unsafe, holding the
 knife by the blade," and its visual hostility is the point; using it for

@@ -2025,7 +2025,7 @@
     fn adding_sampler_rack_slot_refreshes_live_topology_signature() {
         let graph = TestLiveGraph::new("rack-append-signature-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("one-slot rack should load");
@@ -2087,7 +2087,7 @@
     fn rack_slot_edits_publish_the_bumped_transport_epochs() {
         let graph = TestLiveGraph::new("rack-slot-epoch-publish-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("one-slot rack should load");
@@ -2559,7 +2559,7 @@
             |app| app.graph_controller().replace_rack_slot_with_sampler(
                 0,
                 0,
-                Path::new("assets/ir/lexicon-300-rich-plate.wav"),
+                Path::new("../../content/impulses/lexicon-300-rich-plate.wav"),
             ),
         )
             .expect("expanded rack instrument should be replaceable");
@@ -2630,7 +2630,7 @@
     fn rack_preset_save_load_and_sound_promotion_preserve_slot_fx() {
         let graph = TestLiveGraph::new("rack-preset-promotion-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -2692,7 +2692,7 @@
     fn rack_preset_round_trips_dgen_hosted_builtins() {
         let graph = TestLiveGraph::new("rack-preset-dgen-builtin-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -2779,7 +2779,7 @@
     fn deleting_rack_slot_with_fx_removes_chain_state_and_lease_host() {
         let graph = TestLiveGraph::new("delete-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -2810,7 +2810,7 @@
     fn recorded_rack_slot_delete_undoes_with_identity_fx_and_macro_state() {
         let graph = TestLiveGraph::new("recorded-delete-rack-slot-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf(), sample.to_path_buf()])
             .expect("rack samples should load");
@@ -3076,7 +3076,7 @@
     fn two_slot_rack_hosts_builtin_and_compiled_fx_independently() {
         let graph = TestLiveGraph::new("two-rack-slot-fx-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav").to_path_buf();
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav").to_path_buf();
         app.graph_controller()
             .add_sampler_rack_track(&[sample.clone(), sample])
             .expect("two-slot rack should load");
@@ -3110,7 +3110,7 @@
     fn rack_slot_effect_reorder_moves_occupied_neighbors_and_leases_together() {
         let graph = TestLiveGraph::new("rack-slot-fx-reorder-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -3144,7 +3144,7 @@
     fn deleting_rack_slot_effect_compacts_state_and_lease_slots() {
         let graph = TestLiveGraph::new("rack-slot-fx-delete-compaction-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -3194,7 +3194,7 @@
     fn recorded_rack_slot_effect_delete_restores_identity_values_and_macro_mapping() {
         let graph = TestLiveGraph::new("rack-slot-fx-history-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -3258,7 +3258,7 @@
     fn inserting_rack_slot_effect_before_existing_effect_shifts_state_and_leases() {
         let graph = TestLiveGraph::new("rack-slot-fx-insert-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -3289,7 +3289,7 @@
     fn rack_slot_effect_plocks_preserve_defaults_and_node_identity() {
         let graph = TestLiveGraph::new("rack-slot-fx-plock-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -3319,7 +3319,7 @@
     fn rack_slot_effect_options_resolve_descriptor_labels() {
         let graph = TestLiveGraph::new("rack-slot-fx-option-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack sample should load");
@@ -3383,7 +3383,7 @@
                     routing: crate::project::ProjectRackRouting::Broadcast,
                     slots: vec![crate::project::ProjectRackTrackSlot {
                         instrument_type: crate::project::ProjectInstrumentType::Sampler,
-                        sample_path: Some("assets/ir/lexicon-300-rich-plate.wav".to_string()),
+                        sample_path: Some("../../content/impulses/lexicon-300-rich-plate.wav".to_string()),
                         sample_name: Some("plate".to_string()),
                         instrument_name: None,
                     }],
@@ -3407,7 +3407,7 @@
                     effect_slots: vec![crate::project::ProjectEffectSlot::from(&ott_snapshot)],
                     custom_effects: vec![Some("builtin:OTT".to_string())],
                     track_sound_state: crate::project::ProjectTrackSoundState::default(),
-                    sample_path: Some("assets/ir/lexicon-300-rich-plate.wav".to_string()),
+                    sample_path: Some("../../content/impulses/lexicon-300-rich-plate.wav".to_string()),
                     sample_name: Some("plate".to_string()),
                 }],
             },
@@ -3482,7 +3482,7 @@
     fn loading_sound_over_rack_undoes_as_one_container_replacement() {
         let graph = TestLiveGraph::new("sound-rack-replacement-history-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample_path = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample_path = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample_path.to_path_buf()])
             .expect("target rack should be created");
@@ -3615,7 +3615,7 @@
         let track_id = app.track_registry.id_at(0).expect("track id");
         let original_name = app.tracks[0].clone();
 
-        let sample_path = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample_path = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         let sound = crate::project::ProjectSoundPreset {
             version: crate::project::project_file_version(),
             metadata: crate::project::ProjectSoundMetadata {
@@ -3715,7 +3715,7 @@
         let graph = TestLiveGraph::new("rack-to-saved-instrument-history-test");
         let manifest = test_instrument_manifest();
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample_path = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample_path = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample_path.to_path_buf()])
             .expect("rack should be created");
@@ -3768,7 +3768,7 @@
     fn rack_to_sampler_conversion_keeps_rack_binding_when_voice_build_fails() {
         let graph = TestLiveGraph::new("rack-to-sampler-conversion-rollback-test");
         let mut app = test_app_with_track_count(&graph, 0);
-        let sample = Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         app.graph_controller()
             .add_sampler_rack_track(&[sample.to_path_buf()])
             .expect("rack should be created");
@@ -3911,7 +3911,7 @@
         );
 
         let sample_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ir/lexicon-300-rich-plate.wav");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/impulses/lexicon-300-rich-plate.wav");
         app.sampler_paths.push(Some(sample_path.clone()));
         app.register_loaded_sample_path("snare", buffer_id, sample_path.clone());
         let nonce = std::time::SystemTime::now()
@@ -3991,7 +3991,7 @@
         let manifest = test_instrument_manifest();
         let lib = lisp_host::test_loaded_dgen_lib();
         let mut app = test_app_with_track_count(&graph, 1);
-        for (expected_id, name) in ["old", "new"].into_iter().enumerate() {
+        for (expected_id, name) in ["core/drift", "core/operator"].into_iter().enumerate() {
             let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
                 name: name.to_string(),
                 source: format!("{name}.lisp"),
@@ -4008,7 +4008,7 @@
 
         app.apply_recorded_instrument_binding_mutation(0, "Replace instrument", |app| {
             app.graph_controller().swap_custom_track_instrument(
-                0, "new", 1, &manifest, &lib, CustomInstrumentRunMode::Instrument,
+                0, "core/operator", 1, &manifest, &lib, CustomInstrumentRunMode::Instrument,
             )
         })
             .expect("track should swap before saving");
@@ -4039,7 +4039,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
-            }] if instrument_name == "old"
+            }] if instrument_name == "factory:core/drift"
         ));
         assert!(matches!(
             crate::app::edit::redo(&mut app),
@@ -4063,7 +4063,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
-            }] if instrument_name == "new"
+            }] if instrument_name == "factory:core/operator"
         ));
         graph.process_block();
     }

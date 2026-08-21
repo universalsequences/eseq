@@ -2374,10 +2374,7 @@
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-project-performance-lanes-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-project-performance-lanes-demo.lisp");
         let source = std::fs::read_to_string(&script_path)
             .expect("read project process performance lanes demo");
         scratch
@@ -2765,10 +2762,7 @@
                 0,
                 0,
             );
-            let script_path = format!(
-                "{}/scripts/processes/process-phase7-reads-demo.lisp",
-                env!("CARGO_MANIFEST_DIR")
-            );
+            let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase7-reads-demo.lisp");
             let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
             scratch
                 .eval_source_at_path(script_path, &source)
@@ -3036,10 +3030,7 @@
                 0,
                 0,
             );
-            let script_path = format!(
-                "{}/scripts/processes/process-conductor-demo.lisp",
-                env!("CARGO_MANIFEST_DIR")
-            );
+            let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-conductor-demo.lisp");
             let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
             scratch
                 .eval_source_at_path(script_path, &source)
@@ -3713,10 +3704,7 @@
                 0,
                 0,
             );
-            let script_path = format!(
-                "{}/scripts/processes/process-phase3a-ports-demo.lisp",
-                env!("CARGO_MANIFEST_DIR")
-            );
+            let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase3a-ports-demo.lisp");
             let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
             scratch
                 .eval_source_at_path(script_path, &source)
@@ -6376,7 +6364,7 @@
                 offset_steps,
             };
             // Row starts and drone offsets lifted verbatim from
-            // projects/arrtest3.json (track 6), through beat 28.
+            // tests/fixtures/projects/arrtest3.json (track 6), through beat 28.
             let rows = vec![
                 song_mode_row(437, 0.0, 0, Vec::new()),
                 {

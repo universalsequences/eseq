@@ -104,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     sequencer::paths::enter_sequencer_dir()?;
     sequencer::app_paths::init_dev()?;
+    sequencer::app_paths::app_paths().ensure_user_tier()?;
     sequencer::crash::install()?;
 
     if let Some(args) = capture_args {

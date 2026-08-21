@@ -3,7 +3,7 @@
 Status: implemented
 Author: design pass, 2026-07-14
 Related: `crates/eseqlisp/src/widget_render/adsr_editor.rs` (widget + Metal
-shader), `crates/sequencer/ui/effects/custom-ui-lego.lisp` (adsr lego
+shader), `content/ui/effects/custom-ui-lego.lisp` (adsr lego
 layouts)
 
 ## 1. Goal

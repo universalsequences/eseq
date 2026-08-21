@@ -205,7 +205,7 @@ pub fn run_metal() -> Result<(), eseqlisp::backend::BackendError> {
 }
 
 fn bootstrap_editor() -> (Editor, Rc<RefCell<PatternHost>>) {
-    let init_src = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let init_src = eseqlisp::factory_init_source();
     let host = Rc::new(RefCell::new(PatternHost::new()));
 
     let mut runtime = Runtime::new();

@@ -1321,10 +1321,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install script sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-neural-8x8-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-8x8-demo.lisp"))
         .expect("read graph 8x8 demo script");
         runtime.eval_str(&source).expect("evaluate graph 8x8 demo");
         assert_eq!(
@@ -1906,10 +1903,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install script sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-neural-8x8-reset-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-8x8-reset-demo.lisp"))
         .expect("read graph 8x8 reset demo script");
         runtime
             .eval_str(&source)
@@ -2326,10 +2320,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install script sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-neural-variable-reset-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-variable-reset-demo.lisp"))
         .expect("read graph variable reset demo script");
         runtime
             .eval_str(&source)
@@ -2647,10 +2638,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install script sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-neural-group-matrix-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-group-matrix-demo.lisp"))
         .expect("read graph group matrix demo script");
         runtime
             .eval_str(&source)
@@ -2813,10 +2801,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install script sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-markov-8x8-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-markov-8x8-demo.lisp"))
         .expect("read markov 8x8 demo script");
         runtime.eval_str(&source).expect("evaluate markov 8x8 demo");
         assert!(
@@ -2982,10 +2967,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-neural-16-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-16-demo.lisp"))
         .expect("read graph 16 demo script");
         runtime.eval_str(&source).expect("evaluate graph 16 demo");
         assert_eq!(
@@ -3235,10 +3217,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("install sequencer tab registration test stub");
 
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/graph-neural-16-cycle-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/graph-neural-16-cycle-demo.lisp"))
         .expect("read graph 16 cycle demo script");
         runtime
             .eval_str(&source)
@@ -3482,7 +3461,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"
             (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
             (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
-            (load "crates/sequencer/scripts/sequencers/graph-neural-8x8-demo.lisp")
+            (load "content/scripts/sequencers/graph-neural-8x8-demo.lisp")
             "#,
             Vec::new(),
         );
@@ -4742,7 +4721,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         }
 
         let mut failures = Vec::new();
-        visit(std::path::Path::new(super::INSTRUMENTS_DIR), &mut failures);
+        visit(&crate::app_paths::app_paths().instruments_dir(), &mut failures);
 
         assert!(
             failures.is_empty(),
@@ -5417,10 +5396,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn neural_lisp_track_router_script_is_idempotent_and_routes_tracks() {
         let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
         .expect("read neural router script");
 
         let first = runtime.eval_str(&source).unwrap();
@@ -5506,10 +5482,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn neural_lisp_track_router_route_dropdown_supports_track_16() {
         let (state, mut runtime) = neural_test_runtime(16);
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
         .expect("read neural router script");
 
         runtime.eval_str(&source).unwrap();
@@ -5555,10 +5528,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn neural_lisp_track_router_reuses_existing_named_network() {
         let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
         .expect("read neural router script");
 
         runtime.eval_str(&source).unwrap();
@@ -5611,10 +5581,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn neural_lisp_track_router_reactive_refresh_loads_model_state() {
         let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
         .expect("read neural router script");
 
         runtime.eval_str(&source).unwrap();
@@ -5774,10 +5741,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         }
 
         let (state, mut runtime) = neural_test_runtime(8);
-        let source = std::fs::read_to_string(format!(
-            "{}/scripts/sequencers/neural-8x8-track-router.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let source = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("sequencers/neural-8x8-track-router.lisp"))
         .expect("read neural router script");
 
         runtime.eval_str(&source).unwrap();
@@ -7249,8 +7213,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn builtin_midi_fx_source_resolves_crate_local_library() {
-        let manifest_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("midi-fx")
+        let manifest_root = crate::app_paths::app_paths().midi_fx_dir()
             .canonicalize()
             .expect("crate-local midi-fx directory");
         assert!(
@@ -8336,7 +8299,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Arc::clone(&state),
             Arc::clone(&ui_epoch),
         );
-        let source = include_str!("../../scripts/ui/inline-code-widgets-demo.lisp");
+        let source = include_str!("../../../../content/scripts/ui/inline-code-widgets-demo.lisp");
 
         runtime
             .eval_str(source)
@@ -8388,10 +8351,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Arc::clone(&ui_epoch),
         );
 
-        let script_path = format!(
-            "{}/scripts/processes/process-chain-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-chain-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read process chain demo script");
         authoring
             .eval_source_at_path(script_path.into(), &source)
@@ -8481,10 +8441,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-transpose-wander-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-transpose-wander-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read process transpose demo script");
         scratch
@@ -8547,10 +8504,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Arc::clone(&ui_epoch),
         );
 
-        let script_path = format!(
-            "{}/scripts/processes/process-transpose-wander-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-transpose-wander-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read process transpose demo script");
         authoring
@@ -9446,10 +9400,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             [crate::graph::GraphControlCommand::Clear { .. }]
         ));
 
-        let demo = std::fs::read_to_string(format!(
-            "{}/scripts/processes/graph-homeostat-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        ))
+        let demo = std::fs::read_to_string(crate::app_paths::app_paths().scripts_dir().join("processes/graph-homeostat-demo.lisp"))
         .expect("read graph homeostat demo");
         scratch.eval(&demo).expect("evaluate graph homeostat demo");
         let names = scratch
@@ -9751,10 +9702,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase3a-ports-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
 
         scratch
@@ -9815,10 +9763,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-phase3b-mappable-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase3b-mappable-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3B mappable demo");
 
         scratch
@@ -9886,10 +9831,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-phase4-verdict-ratchet-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase4-verdict-ratchet-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read Phase 4 verdict/ratchet demo");
 
@@ -9945,10 +9887,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-phase7-reads-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase7-reads-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read Phase 7 reads demo");
 
         scratch
@@ -10005,10 +9944,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         scratch
             .eval(&super::load_process_library_source())
             .expect("load builtin process library");
-        let script_path = format!(
-            "{}/scripts/processes/process-fields-band-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-fields-band-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read fields band demo");
 
         scratch
@@ -10039,10 +9975,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-conductor-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-conductor-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read conductor demo");
 
         scratch
@@ -10083,10 +10016,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-project-layer-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-project-layer-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read project layer demo");
 
         scratch
@@ -10190,10 +10120,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/processes/process-inlet-patch-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-inlet-patch-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read process-inlet demo");
 
         scratch
@@ -10318,10 +10245,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn scheduler_scratch_load_does_not_replace_ui_authored_process_chain_slots() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let script_path = format!(
-            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase3a-ports-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
 
         let mut ui_runtime = Runtime::new();
@@ -10371,10 +10295,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn project_scratch_reattach_preserves_saved_process_slot_settings() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let script_path = format!(
-            "{}/scripts/processes/process-phase3a-ports-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-phase3a-ports-demo.lisp");
         let source = std::fs::read_to_string(&script_path).expect("read Phase 3A process demo");
 
         let eval_demo = |state: Arc<SequencerState>| {
@@ -10640,10 +10561,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Arc::clone(&ui_epoch),
         );
 
-        let script_path = format!(
-            "{}/scripts/processes/process-ui-control-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-ui-control-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read process UI control demo script");
         authoring
@@ -10827,10 +10745,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Arc::clone(&ui_epoch),
         );
 
-        let script_path = format!(
-            "{}/scripts/sequencers/band-coupling-matrix-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("sequencers/band-coupling-matrix-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read band coupling matrix demo script");
         authoring
@@ -10940,10 +10855,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        let script_path = format!(
-            "{}/scripts/sequencers/band-coupling-matrix-demo.lisp",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let script_path = crate::app_paths::app_paths().scripts_dir().join("sequencers/band-coupling-matrix-demo.lisp");
         let source =
             std::fs::read_to_string(&script_path).expect("read band coupling matrix demo script");
         // The script defines the processes before any UI form; only the
@@ -11660,8 +11572,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_writeback_for_real_instrument_compiles() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let path = crate::app_paths::app_paths().instruments_dir().join("bass/bad-subbass1/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
         let emitted = eseqlisp::widget_render::patcher::emit_patch_writeback_source(
             &source,
@@ -11676,8 +11587,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_insert_unity_gain_before_real_instrument_output_compiles() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let path = crate::app_paths::app_paths().instruments_dir().join("bass/bad-subbass1/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_inserted_node_before_first_output(
@@ -11698,8 +11608,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_edit_gemini_piano_svf_literal_compiles() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("instruments/wips/gemini-piano/dsp.lisp");
+        let path = crate::app_paths::app_paths().instruments_dir().join("wips/gemini-piano/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read gemini-piano dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_first_node_text_edit(
@@ -11719,8 +11628,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn patcher_insert_created_phasor_multiply_before_real_instrument_output_compiles() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let path = crate::app_paths::app_paths().instruments_dir().join("bass/bad-subbass1/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
         let emitted =
             eseqlisp::widget_render::patcher::emit_patch_writeback_with_created_phasor_multiply_before_first_output(
@@ -11768,8 +11676,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn save_folder_instrument_writes_dsp_lisp_even_when_folder_is_new() {
         let name = format!("__test-agent-folder-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
-        let legacy_file = std::path::Path::new(super::INSTRUMENTS_DIR)
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
+        let legacy_file = crate::app_paths::app_paths().user_instruments_dir()
             .join(format!("{}.lisp", name.trim_end_matches('/')));
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_file(&legacy_file);
@@ -11791,7 +11699,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn missing_instrument_metadata_defaults_to_instrument_run_mode() {
         let name = format!("__test-run-mode-missing-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
         let _ = std::fs::remove_dir_all(&folder);
 
         super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
@@ -11808,7 +11716,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn folder_instrument_run_mode_roundtrips_to_instrument_json() {
         let name = format!("__test-run-mode-folder-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
         let _ = std::fs::remove_dir_all(&folder);
 
         super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
@@ -11836,7 +11744,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn legacy_file_instrument_run_mode_roundtrips_to_sidecar_json() {
         let name = format!("__test-run-mode-legacy-{}", std::process::id());
-        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let root = crate::app_paths::app_paths().user_instruments_dir();
         let source_path = root.join(format!("{name}.lisp"));
         let metadata_path = root.join(format!("{name}.instrument.json"));
         let _ = std::fs::remove_file(&source_path);
@@ -11862,7 +11770,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn invalid_instrument_run_mode_reports_error() {
         let name = format!("__test-run-mode-invalid-{}/", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let folder = crate::app_paths::app_paths().user_instruments_dir().join(name.trim_end_matches('/'));
         let _ = std::fs::remove_dir_all(&folder);
 
         super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
@@ -11885,11 +11793,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn moved_folder_instrument_resolves_by_unique_leaf_name() {
         let leaf = format!("__test-moved-folder-{}", std::process::id());
-        let folder = std::path::Path::new(super::INSTRUMENTS_DIR)
+        let folder = crate::app_paths::app_paths().user_instruments_dir()
             .join("__test-resolve-category")
             .join(&leaf);
-        let direct_folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(&leaf);
-        let legacy_file = std::path::Path::new(super::INSTRUMENTS_DIR).join(format!("{leaf}.lisp"));
+        let direct_folder = crate::app_paths::app_paths().user_instruments_dir().join(&leaf);
+        let legacy_file = crate::app_paths::app_paths().user_instruments_dir().join(format!("{leaf}.lisp"));
         let _ = std::fs::remove_dir_all(folder.parent().unwrap());
         let _ = std::fs::remove_dir_all(&direct_folder);
         let _ = std::fs::remove_file(&legacy_file);
@@ -11923,7 +11831,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn moved_folder_instrument_leaf_match_requires_unique_source() {
         let leaf = format!("__test-ambiguous-folder-{}", std::process::id());
-        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let root = crate::app_paths::app_paths().user_instruments_dir();
         let first = root.join("__test-ambiguous-a").join(&leaf);
         let second = root.join("__test-ambiguous-b").join(&leaf);
         let _ = std::fs::remove_dir_all(root.join("__test-ambiguous-a"));
@@ -12245,8 +12153,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn spectral_cumsum_soothe_amount_zero_full_wet_preserves_stereo_energy() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let path = crate::app_paths::app_paths().effects_dir().join("spectral-cumsum-soothe/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
         let asset_base = path.parent();
         let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
@@ -12298,15 +12205,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "effect picker list should include {effect_name:?}; listed={listed:?}"
         );
 
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let path = crate::app_paths::app_paths().effects_dir().join("spectral-cumsum-soothe/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
         let asset_base = path.parent();
         let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
             .expect("effect should compile");
         let ui_source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("effects/spectral-cumsum-soothe/ui.lisp"),
+            crate::app_paths::app_paths().effects_dir().join("spectral-cumsum-soothe/ui.lisp"),
         )
         .expect("read spectral cumsum soothe ui");
         crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
@@ -12322,15 +12227,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "effect picker list should include {effect_name:?}; listed={listed:?}"
         );
 
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("effects/spectral-notch-phaser/dsp.lisp");
+        let path = crate::app_paths::app_paths().effects_dir().join("spectral-notch-phaser/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read spectral notch phaser effect");
         let asset_base = path.parent();
         let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
             .expect("effect should compile");
         let ui_source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("effects/spectral-notch-phaser/ui.lisp"),
+            crate::app_paths::app_paths().effects_dir().join("spectral-notch-phaser/ui.lisp"),
         )
         .expect("read spectral notch phaser ui");
         crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
@@ -12339,8 +12242,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
     #[test]
     fn spectral_notch_phaser_depth_changes_signal() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("effects/spectral-notch-phaser/dsp.lisp");
+        let path = crate::app_paths::app_paths().effects_dir().join("spectral-notch-phaser/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read spectral notch phaser effect");
         let asset_base = path.parent();
         let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)

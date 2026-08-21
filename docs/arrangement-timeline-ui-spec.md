@@ -3,7 +3,7 @@
 Status: draft / design (rev 2 — verified against widget + piano-roll wiring)
 Author: design pass, 2026-07-20
 Related: `docs/song-mode-spec.md`, `crates/eseqlisp/src/widget_render/timeline.rs`,
-`crates/sequencer/ui/piano-roll.lisp`, `crates/sequencer/ui/sequencer.lisp`
+`content/ui/piano-roll.lisp`, `content/ui/sequencer.lisp`
 
 ## 1. Summary
 
@@ -25,7 +25,7 @@ clips alongside them without a different architecture.
   per track lane rather than building a new mega-widget for the whole
   arrangement.
 - Reuse the existing track-header composition (`seqv-track-header` and
-  friends in `crates/sequencer/ui/sequencer.lisp`) unchanged.
+  friends in `content/ui/sequencer.lisp`) unchanged.
 - Keep every lane instance a pure, stateless, prop-driven view, so many
   instances stay time-synced by construction.
 - Support sparse per-track display (a track with nothing playing shows an
@@ -52,7 +52,7 @@ clips alongside them without a different architecture.
 
 ## 4. Why per-lane composition, not one mega-widget
 
-`crates/sequencer/ui/sequencer.lisp:1730` already does this for the step
+`content/ui/sequencer.lisp:1730` already does this for the step
 grid:
 
 ```lisp

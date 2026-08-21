@@ -618,7 +618,7 @@ Command on any `Sampler`/`Custom` track: **"Group to Instrument Rack"**.
 ### A10. Open questions
 
 1. Sound preset location: instrument-style directory
-   (`crates/sequencer/instruments/…`) vs a user-level sounds dir? Sounds tab
+   (`content/instruments/…`) vs a user-level sounds dir? Sounds tab
    likely wants both (factory + user), mirroring the sample DB split.
 2. Does "Group to Instrument Rack" also move *builtin* mixer stages (filter/
    delay in `TrackShell`) into the slot chain, or only chain inserts? (Start:

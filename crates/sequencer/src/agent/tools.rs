@@ -292,20 +292,23 @@ impl AgentToolRegistry {
     }
 
     pub fn read_patch_source(&self, kind: ExampleKind, name: &str) -> Result<ToolResult, String> {
-        let dir = match kind {
-            ExampleKind::Instrument => "instruments",
-            ExampleKind::Effect => "effects",
+        let roots = match kind {
+            ExampleKind::Instrument => crate::app_paths::app_paths().instrument_dirs(),
+            ExampleKind::Effect => crate::app_paths::app_paths().effect_dirs(),
             ExampleKind::Any => {
                 return Err("read_patch_source requires an explicit example kind.".to_string())
             }
         };
-        let flat_path = Path::new(dir).join(format!("{name}.lisp"));
-        let folder_dsp_path = Path::new(dir).join(name).join("dsp.lisp");
-        let path = if flat_path.exists() {
-            flat_path
-        } else {
-            folder_dsp_path
-        };
+        let path = roots
+            .iter()
+            .flat_map(|root| {
+                [
+                    root.join(format!("{name}.lisp")),
+                    root.join(name).join("dsp.lisp"),
+                ]
+            })
+            .find(|path| path.exists())
+            .unwrap_or_else(|| roots[0].join(name).join("dsp.lisp"));
         let source = std::fs::read_to_string(&path)
             .map_err(|error| format!("Failed to read '{}': {error}", path.display()))?;
         let content = if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
@@ -326,17 +329,22 @@ impl AgentToolRegistry {
 
     fn live_examples(&self) -> Result<Vec<DocExample>, String> {
         let mut examples = Vec::new();
-        for (dir, kind) in [("instruments", "instrument"), ("effects", "effect")] {
-            let base = Path::new(dir);
-            if !base.exists() {
-                continue;
-            }
+        let roots = [
+            (crate::app_paths::app_paths().instrument_dirs(), "instrument"),
+            (crate::app_paths::app_paths().effect_dirs(), "effect"),
+        ];
+        for (dirs, kind) in roots {
+            for base in dirs {
+                if !base.exists() {
+                    continue;
+                }
 
-            let mut paths = collect_patch_source_files(base)?;
+                let mut paths = collect_patch_source_files(&base)?;
             paths.sort();
 
-            for path in paths {
-                examples.push(build_live_example(path, kind)?);
+                for path in paths {
+                    examples.push(build_live_example(path, kind)?);
+                }
             }
         }
         Ok(examples)

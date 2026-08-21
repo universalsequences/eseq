@@ -44,6 +44,7 @@ pub enum OpCode {
     Push,
     PushConst(usize), // const idx
     PushStr(usize),   // string const idx
+    Dup,
     Pop,
     Load(usize),
     LoadGlobal(usize),
@@ -784,6 +785,56 @@ impl Compiler {
         let global_idx = self.use_global_for_definition(name);
         self.emit(OpCode::StoreGlobal(global_idx));
         self.emit(OpCode::PushNil);
+        Ok(())
+    }
+
+    fn compile_custom_definition(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        let Expression::Symbol(name) = list.get(1).ok_or(CompilerError::InvalidArg)? else {
+            return Err(CompilerError::InvalidArg);
+        };
+        let initial = list.get(2).ok_or(CompilerError::InvalidArg)?;
+        let mut type_name = None;
+        let mut doc = None;
+        let mut index = 3;
+        while index < list.len() {
+            match list.get(index) {
+                Some(Expression::Keyword(key)) if key == "type" => {
+                    let value = list.get(index + 1).ok_or(CompilerError::InvalidArg)?;
+                    type_name = match value {
+                        Expression::Keyword(value) | Expression::Symbol(value) => Some(value.clone()),
+                        _ => return Err(CompilerError::InvalidArg),
+                    };
+                    index += 2;
+                }
+                Some(Expression::Keyword(key)) if key == "doc" => {
+                    let Expression::String(value) = list.get(index + 1).ok_or(CompilerError::InvalidArg)? else {
+                        return Err(CompilerError::InvalidArg);
+                    };
+                    doc = Some(value.clone());
+                    index += 2;
+                }
+                _ => return Err(CompilerError::Message(
+                    "defcustom syntax is (defcustom name default :type TYPE :doc \"…\")".into()
+                )),
+            }
+        }
+        let type_name = type_name.ok_or_else(|| CompilerError::Message("defcustom requires :type".into()))?;
+        let doc = doc.ok_or_else(|| CompilerError::Message("defcustom requires :doc".into()))?;
+
+        let key = self.qualify_registration_name(name);
+        let node_id = self.state_bindings.get(&key).copied().unwrap_or_else(|| self.alloc_node_id());
+        self.state_bindings.insert(key, node_id);
+        self.compile_expression(initial)?;
+        self.emit(OpCode::Dup);
+        self.emit(OpCode::InitState(node_id));
+        let global_idx = self.use_global_for_definition(name);
+        self.emit(OpCode::StoreGlobal(global_idx));
+        for value in [name, type_name.as_str(), doc.as_str()] {
+            let index = self.use_string_constant(value);
+            self.emit(OpCode::PushStr(index));
+        }
+        self.emit_symbol_load("__register-defcustom");
+        self.emit(OpCode::Call(4));
         Ok(())
     }
 
@@ -2231,6 +2282,12 @@ impl Compiler {
                     return Err(CompilerError::InvalidArg);
                 };
                 return self.compile_named_state_definition(name, &list[2]);
+            }
+            if s == "defcustom" {
+                return self.compile_custom_definition(list);
+            }
+            if s == "setopt" && list.len() == 3 {
+                return self.compile_set_statement(&list[1], &list[2]);
             }
             if s == "effect" {
                 return self.compile_effect_form(&list[1..]);

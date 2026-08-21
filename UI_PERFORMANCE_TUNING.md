@@ -239,9 +239,10 @@ The important ownership boundaries discovered by this probe are:
 
 ## Arrangement interaction probe
 
-`arrangement_view_interactions_end_to_end_perf` loads
-`projects/pianohold.json` (7 tracks, 137 clips, 18 scene events, end beat
-708.75), Tab-toggles into the Arr view through the real binding at 180×160,
+`arrangement_view_interactions_end_to_end_perf` loads the checked-in
+`crates/sequencer/tests/fixtures/projects/pianohold.json` fixture (7 tracks,
+137 clips, 18 scene events, end beat 708.75), Tab-toggles into the Arr view
+through the real binding at 180×160,
 and times six real-input actions through host commands, song publish, the
 reactive cycle, tiled-frame construction, and retained Metal refresh, with
 correctness assertions (selection state, ghost channels, in-frame retained

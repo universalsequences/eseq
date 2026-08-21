@@ -247,7 +247,7 @@ fn default_window_split_bindings_survive_runtime_sync() {
 
 #[test]
 fn ctrl_x_ctrl_f_opens_find_file_minibuffer() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -6061,7 +6061,7 @@ fn reevaluating_defstate_and_effect_rebuilds_each_layout() {
 
 #[test]
 fn dired_mode_loads_and_refreshes() {
-    let init = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let init = std::fs::read_to_string(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/core/init.lisp")).unwrap_or_default();
     let runtime = Runtime::new();
     let mut editor = Editor::new(
         runtime,
@@ -6719,6 +6719,16 @@ fn ui_only_buffer_can_still_hide_status_bar() {
 fn hidden_ui_only_status_bar_reappears_for_chord_and_minibuffer_input() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
+    let dir = std::env::temp_dir().join(format!(
+        "eseqlisp-hidden-ui-minibuffer-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("font-demo.lisp"), "(demo)\n").unwrap();
+    editor.active_buffer_mut().path = Some(dir.join("anchor.lisp"));
     editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
     editor.active_leaf_mut().show_status = false;
     let tile_id = editor.active_tile;
@@ -7298,7 +7308,7 @@ fn inspect_source_span_opens_sampler_base_knob_fixture() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/ui/effects/sampler-panel.lisp")
+        .join("../../content/ui/effects/sampler-panel.lisp")
         .canonicalize()
         .unwrap();
     let source = std::fs::read_to_string(&path).unwrap();
@@ -9043,7 +9053,7 @@ fn first_layout_buffer_stays_interactive_after_second_layout_buffer_eval() {
 
 #[test]
 fn first_layout_buffer_stays_interactive_after_buffer_list_switch() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -9116,7 +9126,7 @@ fn first_layout_buffer_stays_interactive_after_buffer_list_switch() {
 
 #[test]
 fn buffer_list_mode_accepts_filter_input_while_read_only() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -9234,7 +9244,7 @@ fn named_buffer_text_natives_replace_append_and_create_buffers() {
 
 #[test]
 fn buffer_list_mode_shows_previous_buffer_first() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -9265,7 +9275,7 @@ fn buffer_list_mode_shows_previous_buffer_first() {
 
 #[test]
 fn buffer_list_mode_backspace_updates_filter() {
-    let init = include_str!("../../init.lisp").to_string();
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
     let mut editor = Editor::new(
         runtime,
@@ -13596,7 +13606,7 @@ fn real_choose_model_dropdown_row_click_selects() {
             Ok(Value::Nil)
         });
     let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/ui/choose-model.lisp");
+        .join("../../content/ui/choose-model.lisp");
     let source = std::fs::read_to_string(&source_path).expect("read real choose-model.lisp");
     editor
         .runtime_mut()

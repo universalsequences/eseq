@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tune the dispersive spring reverb (crates/sequencer/src/effects/spring.rs) against
-a reference IR (default: spring_reverb_impulse.wav; see impulses/prepared/ for
+a reference IR (default: spring_reverb_impulse.wav; see content/impulses/prepared/ for
 the other spring types).
 
 Usage:
@@ -9,7 +9,7 @@ Usage:
   python3 scripts/spring_tune.py optimize --stage A|B|C [--ref F] [--params F] [--maxiter N]
 
 References must be 16-bit / 44.1 kHz / mono wav — scripts/prepare_spring_refs.py
-converts the raw impulses/ captures.
+converts the raw content/impulses/ captures.
 
 The Rust render binary (target/release/spring_tune) is the single source of
 truth for the candidate DSP; this script only analyzes and optimizes.

@@ -242,10 +242,8 @@ pub(super) fn apply_agent_draft_to_owned_instrument(
 }
 
 pub(super) fn finalized_instrument_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
-    (
-        Path::new("instruments").join(slug),
-        Path::new("instruments").join(format!("{slug}.lisp")),
-    )
+    let root = sequencer::app_paths::app_paths().user_instruments_dir();
+    (root.join(slug), root.join(format!("{slug}.lisp")))
 }
 
 pub(super) fn patcher_layout_sidecar_path_for_dsp(dsp_path: &Path) -> PathBuf {
@@ -311,10 +309,8 @@ pub(super) fn apply_compiled_effect_edit_session(
 }
 
 pub(super) fn finalized_effect_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
-    (
-        Path::new("effects").join(slug),
-        Path::new("effects").join(format!("{slug}.lisp")),
-    )
+    let root = sequencer::app_paths::app_paths().user_effects_dir();
+    (root.join(slug), root.join(format!("{slug}.lisp")))
 }
 
 pub(super) fn display_instrument_name(name: &str) -> String {
@@ -332,7 +328,8 @@ pub(super) fn cleanup_agent_draft_storage(name: &str) {
     if !slug.starts_with("agent-draft-") {
         return;
     }
-    let dir = Path::new("instruments").join(slug);
+    let root = sequencer::app_paths::app_paths().user_instruments_dir();
+    let dir = root.join(slug);
     if dir.is_dir() {
         if let Err(error) = std::fs::remove_dir_all(&dir) {
             eprintln!(
@@ -341,7 +338,7 @@ pub(super) fn cleanup_agent_draft_storage(name: &str) {
             );
         }
     }
-    let legacy_file = Path::new("instruments").join(format!("{slug}.lisp"));
+    let legacy_file = root.join(format!("{slug}.lisp"));
     if legacy_file.exists() {
         if let Err(error) = std::fs::remove_file(&legacy_file) {
             eprintln!(
@@ -357,7 +354,8 @@ pub(super) fn cleanup_agent_effect_draft_storage(name: &str) {
     if !slug.starts_with("agent-effect-draft-") {
         return;
     }
-    let dir = Path::new("effects").join(slug);
+    let root = sequencer::app_paths::app_paths().user_effects_dir();
+    let dir = root.join(slug);
     if dir.is_dir() {
         if let Err(error) = std::fs::remove_dir_all(&dir) {
             eprintln!(
@@ -366,7 +364,7 @@ pub(super) fn cleanup_agent_effect_draft_storage(name: &str) {
             );
         }
     }
-    let legacy_file = Path::new("effects").join(format!("{slug}.lisp"));
+    let legacy_file = root.join(format!("{slug}.lisp"));
     if legacy_file.exists() {
         if let Err(error) = std::fs::remove_file(&legacy_file) {
             eprintln!(

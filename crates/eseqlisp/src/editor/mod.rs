@@ -6978,10 +6978,13 @@ impl Editor {
     fn load_init(&mut self, override_source: Option<&str>, source_path: Option<&std::path::Path>) {
         let init_src = override_source
             .map(ToOwned::to_owned)
-            .unwrap_or_else(|| std::fs::read_to_string("init.lisp").unwrap_or_default());
+            .unwrap_or_else(|| crate::factory_init_source());
         if init_src.trim().is_empty() {
             return;
         }
+        let factory_path = (override_source.is_none() && source_path.is_none())
+            .then(crate::factory_init_path);
+        let source_path = source_path.or(factory_path.as_deref());
         if let Some(path) = source_path {
             let report = self.runtime.eval_source_transactional(
                 Some(path.to_path_buf()),

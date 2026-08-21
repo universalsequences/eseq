@@ -19,7 +19,19 @@
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    fn perf_probe_project_fixture(name: &str) -> PathBuf {
+        let path = sequencer::app_paths::app_paths()
+            .perf_probe_projects_dir()
+            .join(format!("{name}.json"));
+        assert!(
+            path.is_file(),
+            "perf probe fixture not found: {}",
+            path.display()
+        );
+        path
+    }
 
     fn history_test_app() -> (
         std::sync::Arc<sequencer::sequencer::SequencerState>,
@@ -1771,7 +1783,7 @@
     }
 
     #[test]
-    #[ignore = "eseq-4tl: perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    #[ignore = "eseq-4tl: perf probe: initializes the real metal_seq app graph and loads the checked-in project-92 fixture"]
     fn project_92_mixer_track_badge_switch_reports_layout_work() {
         std::thread::Builder::new()
             .name("project-92-track-switch-probe".to_string())
@@ -1800,10 +1812,7 @@
         }
 
         let _dir = SequencerDirGuard::enter();
-        assert!(
-            Path::new("projects/92.json").exists(),
-            "project 92 must be available at crates/sequencer/projects/92.json"
-        );
+        let project_fixture = perf_probe_project_fixture("92");
 
         let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
         let lg_raw = eng.lg_ptr.0;
@@ -1892,11 +1901,11 @@
             },
         );
         reload_custom_instrument_ui(&mut editor);
-        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let _ = editor.open_or_create_file_buffer(ui_entrypoint_path());
         let grid_source = editor.active_buffer().text();
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            Some(ui_entrypoint_path()),
             &grid_source,
             overlays,
         );
@@ -1912,8 +1921,8 @@
         editor.update_tile_rects(180, 70);
         let _ = editor.drain_host_commands();
 
-        app.queue_project_load_named("92")
-            .expect("queue project 92 load");
+        app.queue_project_load_from_path("92", &project_fixture)
+            .expect("queue project 92 fixture load");
         for _ in 0..512 {
             if !app.has_pending_project_load() {
                 break;
@@ -2202,7 +2211,7 @@
     }
 
     #[test]
-    #[ignore = "eseq-4tl: perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    #[ignore = "eseq-4tl: perf probe: initializes the real metal_seq app graph and loads the checked-in project-92 fixture"]
     fn project_92_scene_switch_reports_layout_work() {
         std::thread::Builder::new()
             .name("project-92-scene-switch-probe".to_string())
@@ -2496,10 +2505,7 @@
         } else {
             "92"
         };
-        assert!(
-            Path::new(&format!("projects/{project_name}.json")).exists(),
-            "project {project_name} must be available at crates/sequencer/projects/{project_name}.json"
-        );
+        let project_fixture = perf_probe_project_fixture(project_name);
 
         let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
         let lg_raw = eng.lg_ptr.0;
@@ -2596,11 +2602,11 @@
             },
         );
         reload_custom_instrument_ui(&mut editor);
-        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let _ = editor.open_or_create_file_buffer(ui_entrypoint_path());
         let grid_source = editor.active_buffer().text();
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            Some(ui_entrypoint_path()),
             &grid_source,
             overlays,
         );
@@ -2623,8 +2629,8 @@
         editor.update_tile_rects(vp_cols, vp_rows);
         let _ = editor.drain_host_commands();
 
-        app.queue_project_load_named(project_name)
-            .expect("queue probe project load");
+        app.queue_project_load_from_path(project_name, &project_fixture)
+            .expect("queue probe project fixture load");
         for _ in 0..512 {
             if !app.has_pending_project_load() {
                 break;
@@ -2743,9 +2749,10 @@
             // members include a 1-slot instrument-rack track and a plain
             // sampler track, a 5-effect chain on the group's backing bus, and
             // 6 tracks outside the group. All groups stay expanded.
-            let fixture_sample = std::path::PathBuf::from(
-                "samples/9151328ca89bbcef0d606a644e14d93d263e7ddfd1f9221cf5542353fe4565cc.wav",
-            );
+            let fixture_sample =
+                sequencer::app_paths::resolve_sample_ref(std::path::Path::new(
+                    "samples/9151328ca89bbcef0d606a644e14d93d263e7ddfd1f9221cf5542353fe4565cc.wav",
+                ));
             assert!(
                 fixture_sample.exists(),
                 "group-selection fixture sample must ship with project 92"
@@ -10897,7 +10904,7 @@
     /// application, song read-surface publish, reactive cycle, tiled-frame
     /// build and retained Metal primitive refresh.
     #[test]
-    #[ignore = "eseq-4tl: release-mode perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/pianohold.json"]
+    #[ignore = "eseq-4tl: release-mode perf probe: initializes the real metal_seq app graph and loads the checked-in pianohold fixture"]
     fn arrangement_view_interactions_end_to_end_perf() {
         std::thread::Builder::new()
             .name("arrangement-interactions-probe".to_string())
@@ -10932,10 +10939,7 @@
         const WARMUPS: usize = 5;
         const SAMPLES: usize = 20;
         let _dir = SequencerDirGuard::enter();
-        assert!(
-            Path::new("projects/pianohold.json").exists(),
-            "project pianohold must be available at crates/sequencer/projects/pianohold.json"
-        );
+        let project_fixture = perf_probe_project_fixture(PROJECT);
         let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
         let lg_raw = eng.lg_ptr.0;
         let state = eng.state.clone();
@@ -11020,11 +11024,11 @@
             },
         );
         reload_custom_instrument_ui(&mut editor);
-        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let _ = editor.open_or_create_file_buffer(ui_entrypoint_path());
         let grid_source = editor.active_buffer().text();
         let overlays = editor.snapshot_file_backed_sources();
         let report = editor.runtime_mut().eval_source_transactional(
-            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            Some(ui_entrypoint_path()),
             &grid_source,
             overlays,
         );
@@ -11039,8 +11043,8 @@
         editor.set_layout_viewport(VIEW_W as u16, VIEW_H as u16);
         editor.update_tile_rects(VIEW_W as u16, VIEW_H as u16);
         let _ = editor.drain_host_commands();
-        app.queue_project_load_named(PROJECT)
-            .expect("queue pianohold load");
+        app.queue_project_load_from_path(PROJECT, &project_fixture)
+            .expect("queue pianohold fixture load");
         for _ in 0..2048 {
             if !app.has_pending_project_load() {
                 break;

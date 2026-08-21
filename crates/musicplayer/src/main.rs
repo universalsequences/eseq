@@ -312,16 +312,10 @@ fn eseqlisp_init_candidates() -> Vec<PathBuf> {
             paths.push(PathBuf::from(root).join("init.lisp"));
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        paths.push(cwd.join("../eseqlisp/init.lisp"));
-        paths.push(cwd.join("crates/eseqlisp/init.lisp"));
-    }
-    for root in repo_roots_from_current_exe() {
-        paths.push(root.join("crates/eseqlisp/init.lisp"));
-    }
-    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eseqlisp/init.lisp"));
-    paths.push(PathBuf::from("../eseqlisp/init.lisp"));
-    paths.push(PathBuf::from("init.lisp"));
+    paths.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/core/init.lisp"),
+    );
     paths
 }
 

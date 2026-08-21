@@ -238,14 +238,14 @@ The test writes `/tmp/eseqlisp-patcher-lexilush.png`. Open that image and inspec
 (effect
   (patcher
     :intent :effect
-    :path "crates/sequencer/effects/lexilush/dsp.lisp"))
+    :path "content/effects/lexilush/dsp.lisp"))
 ```
 
 For custom one-off captures, run `eseqlisp_capture` directly:
 
 ```sh
 cargo run -p eseqlisp --bin eseqlisp_capture -- \
-  --source '(effect (patcher :intent :effect :path "crates/sequencer/effects/lexilush/dsp.lisp"))' \
+  --source '(effect (patcher :intent :effect :path "content/effects/lexilush/dsp.lisp"))' \
   --width 2050 \
   --height 1218 \
   --out /tmp/eseqlisp-patcher.png

@@ -27,7 +27,7 @@ ignores it.
 */
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]
@@ -39,6 +39,7 @@ pub enum AppPaths {
         sequencer_dir: PathBuf,
         workspace_root: PathBuf,
         temp_dir: PathBuf,
+        user_lisp_root: PathBuf,
         /// `ESEQ_DGEN_TOOLCHAIN_ROOT` override, captured at construction (see
         /// module doc). `None` = the default per-checkout stage.
         dgen_toolchain_override: Option<PathBuf>,
@@ -55,25 +56,35 @@ pub enum AppPaths {
         contents_resources: PathBuf,
         application_support: PathBuf,
         caches: PathBuf,
+        user_lisp_root: PathBuf,
     },
 }
 
 impl AppPaths {
-    pub fn dev(sequencer_dir: PathBuf, workspace_root: PathBuf) -> Self {
+    pub fn dev(
+        sequencer_dir: PathBuf,
+        workspace_root: PathBuf,
+        user_lisp_root: PathBuf,
+    ) -> Self {
         AppPaths::Dev {
             sequencer_dir,
             workspace_root,
             temp_dir: std::env::temp_dir(),
+            user_lisp_root,
             dgen_toolchain_override: None,
         }
     }
 
-    /// Dev construction that also captures the `ESEQ_DGEN_TOOLCHAIN_ROOT`
-    /// override from the environment (see module doc). Used by [`init_dev`]
-    /// and the [`app_paths`] fallback; [`Self::dev`] stays env-free for
-    /// tests.
-    pub fn dev_from_env(sequencer_dir: PathBuf, workspace_root: PathBuf) -> Self {
-        let mut paths = Self::dev(sequencer_dir, workspace_root);
+    /// Dev construction that captures user and toolchain overrides from the
+    /// environment. `ESEQ_CONFIG_DIR` redirects the hand-edited user Lisp
+    /// tier; otherwise it is `~/.eseq.d`. Both roots are captured once so no
+    /// filesystem query can observe a different environment mid-process.
+    pub fn dev_from_env(sequencer_dir: PathBuf, workspace_root: PathBuf) -> io::Result<Self> {
+        let mut paths = Self::dev(
+            sequencer_dir,
+            workspace_root,
+            user_lisp_root_from_env()?,
+        );
         if let Some(override_root) = dev_toolchain_override_from_env() {
             let AppPaths::Dev {
                 dgen_toolchain_override,
@@ -84,7 +95,7 @@ impl AppPaths {
             };
             *dgen_toolchain_override = Some(override_root);
         }
-        paths
+        Ok(paths)
     }
 
     /// Phase 5 only: deriving these roots (bundle location, `<bundle-id>`
@@ -94,12 +105,14 @@ impl AppPaths {
         contents_resources: PathBuf,
         application_support: PathBuf,
         caches: PathBuf,
+        user_lisp_root: PathBuf,
     ) -> Self {
         AppPaths::Release {
             contents_macos,
             contents_resources,
             application_support,
             caches,
+            user_lisp_root,
         }
     }
 
@@ -173,35 +186,206 @@ impl AppPaths {
         self.dgen_toolchain_root().join("abi")
     }
 
-    /// Saved effect sources ("effects" tree; the user-visible/serialized
-    /// names stay relative to this root).
-    pub fn effects_dir(&self) -> PathBuf {
+    /// Checked-in project fixtures used by the end-to-end performance probes.
+    /// These are deliberately separate from the user's mutable project library.
+    pub fn perf_probe_projects_dir(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("effects"),
+            AppPaths::Dev { sequencer_dir, .. } => {
+                sequencer_dir.join("tests/fixtures/projects")
+            }
             AppPaths::Release {
-                application_support,
-                ..
-            } => application_support.join("effects"),
+                contents_resources, ..
+            } => contents_resources.join("test-fixtures/projects"),
         }
     }
 
-    /// Saved instrument sources ("instruments" tree).
-    pub fn instruments_dir(&self) -> PathBuf {
+    /// Read-only factory content root.
+    pub fn factory_root(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("instruments"),
+            AppPaths::Dev { workspace_root, .. } => workspace_root.join("content"),
             AppPaths::Release {
-                application_support,
-                ..
-            } => application_support.join("instruments"),
+                contents_resources, ..
+            } => contents_resources.clone(),
         }
+    }
+
+    /// Mutable, machine-managed user data.
+    pub fn user_data_root(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { workspace_root, .. } => workspace_root.join(".local"),
+            AppPaths::Release {
+                application_support, ..
+            } => application_support.clone(),
+        }
+    }
+
+    /// Hand-edited user Lisp root. Dev honors `ESEQ_CONFIG_DIR`; release
+    /// construction receives the resolved `~/.eseq.d` path explicitly.
+    pub fn user_lisp_root(&self) -> &Path {
+        match self {
+            AppPaths::Dev { user_lisp_root, .. }
+            | AppPaths::Release { user_lisp_root, .. } => user_lisp_root,
+        }
+    }
+
+    pub fn user_modules_dir(&self) -> PathBuf {
+        self.user_lisp_root().join("modules")
+    }
+
+    pub fn packages_dir(&self) -> PathBuf {
+        self.user_lisp_root().join("packages")
+    }
+
+    /// Validated module roots in shadowing order, plus one message per
+    /// package that failed validation. Package roots carry their owned
+    /// namespace so `src/ui.lisp` resolves `author.package.ui` without
+    /// allowing that package to satisfy somebody else's import. Invalid
+    /// packages are excluded and reported — like a failed user init, a broken
+    /// third-party clone never aborts application boot.
+    pub fn module_load_roots(&self) -> (Vec<eseqlisp::ModuleLoadRoot>, Vec<String>) {
+        let (catalog, errors) =
+            eseqlisp::package::PackageCatalog::scan_reporting(self.packages_dir());
+        let mut roots = vec![eseqlisp::ModuleLoadRoot {
+            path: self.user_modules_dir(),
+            module_prefix: None,
+        }];
+        roots.extend(catalog.module_roots().into_iter().map(|(path, module_prefix)| {
+            eseqlisp::ModuleLoadRoot { path, module_prefix: Some(module_prefix) }
+        }));
+        roots.push(eseqlisp::ModuleLoadRoot {
+            path: self.factory_root(),
+            module_prefix: None,
+        });
+        (roots, errors.into_iter().map(|error| error.to_string()).collect())
+    }
+
+    pub fn load_path(&self) -> io::Result<Vec<PathBuf>> {
+        Ok(self.module_load_roots().0.into_iter().map(|root| root.path).collect())
+    }
+
+    /// Create the complete mutable user-tier directory shape. This is safe to
+    /// call on every startup and never creates or overwrites `init.lisp`.
+    pub fn ensure_user_tier(&self) -> io::Result<()> {
+        for directory in [
+            self.user_data_root(),
+            self.projects_dir(),
+            self.recordings_dir(),
+            self.samples_dir(),
+            self.sounds_dir(),
+            self.user_instruments_dir(),
+            self.user_effects_dir(),
+            self.sample_assets_dir(),
+            self.user_filter_tables_dir(),
+            self.user_presets_dir(),
+            self.user_rack_presets_dir(),
+            self.user_kits_dir(),
+            self.user_lisp_root().to_path_buf(),
+            self.user_modules_dir(),
+            self.packages_dir(),
+        ] {
+            std::fs::create_dir_all(directory)?;
+        }
+        Ok(())
+    }
+
+    /// Core eseqlisp shipped with the application.
+    pub fn core_dir(&self) -> PathBuf {
+        self.factory_root().join("core")
+    }
+
+    pub fn ui_dir(&self) -> PathBuf {
+        self.factory_root().join("ui")
+    }
+    pub fn defmacros_dir(&self) -> PathBuf {
+        self.factory_root().join("defmacros")
+    }
+    pub fn midi_fx_dir(&self) -> PathBuf {
+        self.factory_root().join("midi-fx")
+    }
+    pub fn presets_dir(&self) -> PathBuf {
+        self.factory_root().join("presets")
+    }
+    pub fn rack_presets_dir(&self) -> PathBuf {
+        self.presets_dir().join("racks")
+    }
+    pub fn kits_dir(&self) -> PathBuf {
+        self.factory_root().join("kits")
+    }
+    pub fn processes_dir(&self) -> PathBuf {
+        self.factory_root().join("processes")
+    }
+    pub fn scripts_dir(&self) -> PathBuf {
+        self.factory_root().join("scripts")
+    }
+    pub fn impulses_dir(&self) -> PathBuf {
+        self.factory_root().join("impulses")
+    }
+    pub fn filter_tables_dir(&self) -> PathBuf {
+        self.factory_root().join("filter-tables")
+    }
+
+    pub fn projects_dir(&self) -> PathBuf {
+        self.user_data_root().join("projects")
+    }
+    pub fn recordings_dir(&self) -> PathBuf {
+        self.user_data_root().join("recordings")
+    }
+    pub fn samples_dir(&self) -> PathBuf {
+        self.user_data_root().join("samples")
+    }
+    pub fn sample_db_path(&self) -> PathBuf {
+        self.user_data_root().join("samples.db")
+    }
+    pub fn sample_facts_path(&self) -> PathBuf {
+        self.user_data_root().join("samples.jsonl")
+    }
+    pub fn sounds_dir(&self) -> PathBuf {
+        self.user_data_root().join("sounds")
+    }
+    pub fn sample_assets_dir(&self) -> PathBuf {
+        self.user_data_root().join("sample-assets")
+    }
+    pub fn user_filter_tables_dir(&self) -> PathBuf {
+        self.user_data_root().join("filter-tables")
+    }
+    pub fn user_presets_dir(&self) -> PathBuf {
+        self.user_data_root().join("presets")
+    }
+    pub fn user_rack_presets_dir(&self) -> PathBuf {
+        self.user_presets_dir().join("racks")
+    }
+    pub fn user_kits_dir(&self) -> PathBuf {
+        self.user_data_root().join("kits")
+    }
+
+    /// Factory effect and instrument trees are immutable. Authoring paths are
+    /// always in the mutable user-data tier.
+    pub fn effects_dir(&self) -> PathBuf {
+        self.factory_root().join("effects")
+    }
+    pub fn instruments_dir(&self) -> PathBuf {
+        self.factory_root().join("instruments")
+    }
+    pub fn user_effects_dir(&self) -> PathBuf {
+        self.user_data_root().join("effects")
+    }
+    pub fn user_instruments_dir(&self) -> PathBuf {
+        self.user_data_root().join("instruments")
+    }
+
+    pub fn effect_dirs(&self) -> Vec<PathBuf> {
+        distinct_paths([self.effects_dir(), self.user_effects_dir()])
+    }
+
+    pub fn instrument_dirs(&self) -> Vec<PathBuf> {
+        distinct_paths([self.instruments_dir(), self.user_instruments_dir()])
     }
 
     /// Base for resolving relative `@file` asset references when a compile
-    /// supplies no explicit asset base. Dev: the sequencer crate dir (what
-    /// `current_dir()` was after `enter_sequencer_dir()`).
+    /// supplies no explicit asset base.
     pub fn dgen_asset_fallback_base(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.clone(),
+            AppPaths::Dev { .. } => self.factory_root(),
             AppPaths::Release {
                 application_support,
                 ..
@@ -253,6 +437,48 @@ impl AppPaths {
 /// Always loud: an active override is logged, and a set-but-missing path is
 /// reported (and still honored, so the compile preflight hard-errors against
 /// the path the user asked for instead of silently using another toolchain).
+fn distinct_paths<const N: usize>(paths: [PathBuf; N]) -> Vec<PathBuf> {
+    distinct_vec_paths(paths.into_iter().collect())
+}
+
+fn distinct_vec_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    for path in paths {
+        if !result.contains(&path) {
+            result.push(path);
+        }
+    }
+    result
+}
+
+fn user_lisp_root_from_env() -> io::Result<PathBuf> {
+    let config_override = std::env::var_os("ESEQ_CONFIG_DIR");
+    let root = resolve_user_lisp_root(config_override.clone(), std::env::var_os("HOME"))?;
+    if config_override.is_some_and(|value| !value.is_empty()) {
+        eprintln!(
+            "[app_paths] ESEQ_CONFIG_DIR override active: user Lisp root = {}",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+fn resolve_user_lisp_root(
+    config_override: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> io::Result<PathBuf> {
+    if let Some(root) = config_override.filter(|root| !root.is_empty()) {
+        return Ok(PathBuf::from(root));
+    }
+    let home = home.filter(|home| !home.is_empty()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is not set; set ESEQ_CONFIG_DIR to choose the user Lisp root",
+        )
+    })?;
+    Ok(PathBuf::from(home).join(".eseq.d"))
+}
+
 fn dev_toolchain_override_from_env() -> Option<PathBuf> {
     let raw = std::env::var_os("ESEQ_DGEN_TOOLCHAIN_ROOT")?;
     if raw.is_empty() {
@@ -274,6 +500,25 @@ fn dev_toolchain_override_from_env() -> Option<PathBuf> {
     Some(root)
 }
 
+/// Resolve a possibly-relative, content-addressed sample reference
+/// (`samples/<sha256>.wav`, per docs/content-tiers-spec.md §5) against the
+/// sample store: strip the directory prefix and look the file name up under
+/// [`AppPaths::samples_dir`]. Absolute paths and paths that already exist
+/// from the current working directory pass through untouched, so external
+/// files and test fixtures are unaffected.
+pub fn resolve_sample_ref(path: &std::path::Path) -> PathBuf {
+    if path.is_absolute() || path.exists() {
+        return path.to_path_buf();
+    }
+    if let Some(name) = path.file_name() {
+        let candidate = app_paths().samples_dir().join(name);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
 
 /// Install the dev-layout `AppPaths` for this process. Called at startup next
@@ -283,9 +528,25 @@ pub fn init_dev() -> io::Result<()> {
     let paths = AppPaths::dev_from_env(
         crate::paths::sequencer_dir()?,
         crate::paths::workspace_root(),
-    );
+    )?;
+    configure_eseqlisp_roots(&paths);
     let _ = APP_PATHS.set(paths);
     Ok(())
+}
+
+/// Hand eseqlisp the roots it cannot derive itself: the defmacro library and
+/// the relative-`(load …)` fallback roots. User scratch buffers load factory
+/// scripts with paths like `scripts/sequencers/x.lisp` (or the migrated
+/// `content/scripts/…` form); those resolved against the crate-dir cwd before
+/// the content/ split and must now fall back to the factory content root.
+fn configure_eseqlisp_roots(paths: &AppPaths) {
+    eseqlisp::defmacro_library::set_default_library_root(paths.defmacros_dir());
+    let factory_root = paths.factory_root();
+    let mut roots = vec![factory_root.clone()];
+    if let Some(parent) = factory_root.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    eseqlisp::hot_reload::set_global_load_fallback_roots(roots);
 }
 
 /// Process-wide accessor. Falls back to a dev-layout construction when
@@ -296,7 +557,10 @@ pub fn app_paths() -> &'static AppPaths {
     APP_PATHS.get_or_init(|| {
         let sequencer_dir = crate::paths::sequencer_dir()
             .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root())
+        let paths = AppPaths::dev_from_env(sequencer_dir, crate::paths::workspace_root())
+            .expect("resolve user Lisp root from HOME or ESEQ_CONFIG_DIR");
+        configure_eseqlisp_roots(&paths);
+        paths
     })
 }
 
@@ -306,7 +570,11 @@ mod tests {
 
     #[test]
     fn dev_paths_resolve_from_captured_roots_only() {
-        let paths = AppPaths::dev(PathBuf::from("/ws/crates/sequencer"), PathBuf::from("/ws"));
+        let paths = AppPaths::dev(
+            PathBuf::from("/ws/crates/sequencer"),
+            PathBuf::from("/ws"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
         assert_eq!(
             paths.dgenlisp_tool(),
             PathBuf::from("/ws/crates/sequencer/tools/DGenLisp")
@@ -320,16 +588,30 @@ mod tests {
             PathBuf::from("/ws/crates/sequencer/tools/dgen-toolchain/abi")
         );
         assert_eq!(
-            paths.effects_dir(),
-            PathBuf::from("/ws/crates/sequencer/effects")
+            paths.perf_probe_projects_dir(),
+            PathBuf::from("/ws/crates/sequencer/tests/fixtures/projects")
+        );
+        assert_eq!(paths.factory_root(), PathBuf::from("/ws/content"));
+        assert_eq!(paths.user_data_root(), PathBuf::from("/ws/.local"));
+        assert_eq!(paths.user_lisp_root(), Path::new("/home/test/.eseq.d"));
+        assert_eq!(paths.core_dir(), PathBuf::from("/ws/content/core"));
+        assert_eq!(paths.ui_dir(), PathBuf::from("/ws/content/ui"));
+        assert_eq!(paths.effects_dir(), PathBuf::from("/ws/content/effects"));
+        assert_eq!(paths.instruments_dir(), PathBuf::from("/ws/content/instruments"));
+        assert_eq!(paths.projects_dir(), PathBuf::from("/ws/.local/projects"));
+        assert_eq!(paths.sample_db_path(), PathBuf::from("/ws/.local/samples.db"));
+        assert_eq!(paths.sample_facts_path(), PathBuf::from("/ws/.local/samples.jsonl"));
+        assert_eq!(
+            paths.effect_dirs(),
+            vec![PathBuf::from("/ws/content/effects"), PathBuf::from("/ws/.local/effects")]
         );
         assert_eq!(
-            paths.instruments_dir(),
-            PathBuf::from("/ws/crates/sequencer/instruments")
+            paths.instrument_dirs(),
+            vec![PathBuf::from("/ws/content/instruments"), PathBuf::from("/ws/.local/instruments")]
         );
         assert_eq!(
             paths.dgen_asset_fallback_base(),
-            PathBuf::from("/ws/crates/sequencer")
+            PathBuf::from("/ws/content")
         );
         assert_eq!(
             paths.dgen_cache_root(),
@@ -350,8 +632,168 @@ mod tests {
     }
 
     #[test]
+    fn perf_probe_project_fixtures_are_present_and_parse() {
+        let fixture_dir = app_paths().perf_probe_projects_dir();
+        for name in ["92", "pianohold", "arrtest3"] {
+            let path = fixture_dir.join(format!("{name}.json"));
+            assert!(
+                path.is_file(),
+                "perf probe fixture not found: {}",
+                path.display()
+            );
+            crate::project::load_project_from_path(&path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to load perf probe fixture '{}': {error}",
+                    path.display()
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn release_content_and_user_data_resolve_to_separate_tiers() {
+        let paths = AppPaths::release(
+            PathBuf::from("/App/Contents/MacOS"),
+            PathBuf::from("/App/Contents/Resources"),
+            PathBuf::from("/Support"),
+            PathBuf::from("/Caches"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        assert_eq!(
+            paths.perf_probe_projects_dir(),
+            PathBuf::from("/App/Contents/Resources/test-fixtures/projects")
+        );
+        assert_eq!(paths.core_dir(), PathBuf::from("/App/Contents/Resources/core"));
+        assert_eq!(paths.ui_dir(), PathBuf::from("/App/Contents/Resources/ui"));
+        assert_eq!(
+            paths.instruments_dir(),
+            PathBuf::from("/App/Contents/Resources/instruments")
+        );
+        assert_eq!(
+            paths.user_instruments_dir(),
+            PathBuf::from("/Support/instruments")
+        );
+        assert_eq!(paths.projects_dir(), PathBuf::from("/Support/projects"));
+        assert_eq!(paths.samples_dir(), PathBuf::from("/Support/samples"));
+        assert_eq!(paths.sample_db_path(), PathBuf::from("/Support/samples.db"));
+        assert_eq!(paths.sample_facts_path(), PathBuf::from("/Support/samples.jsonl"));
+        assert_eq!(paths.user_lisp_root(), Path::new("/home/test/.eseq.d"));
+    }
+
+    #[test]
+    fn user_tier_initialization_and_load_path_are_complete_and_ordered() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseq-user-tier-{unique}"));
+        let workspace = root.join("workspace");
+        let config = root.join("config");
+        let paths = AppPaths::dev(
+            workspace.join("crates/sequencer"),
+            workspace.clone(),
+            config.clone(),
+        );
+
+        paths.ensure_user_tier().expect("initialize user tier");
+        for directory in [
+            paths.projects_dir(),
+            paths.recordings_dir(),
+            paths.samples_dir(),
+            paths.sounds_dir(),
+            paths.user_instruments_dir(),
+            paths.user_effects_dir(),
+            paths.user_modules_dir(),
+            paths.packages_dir(),
+        ] {
+            assert!(directory.is_dir(), "missing {}", directory.display());
+        }
+        assert!(!config.join("init.lisp").exists());
+
+        for (dir, identity, module) in [
+            ("zeta", "dev/zeta", "dev.zeta.main"),
+            ("alpha", "dev/alpha", "dev.alpha.main"),
+        ] {
+            let package = paths.packages_dir().join(dir);
+            std::fs::create_dir_all(package.join("src")).unwrap();
+            std::fs::write(package.join("src/main.lisp"), format!("(module {module})")).unwrap();
+            std::fs::write(package.join("manifest.json"), format!(
+                r#"{{"name":"{identity}","version":"1","entry":"{module}"}}"#
+            )).unwrap();
+        }
+        std::fs::create_dir_all(paths.packages_dir().join(".ignored-no-src")).unwrap();
+        // An invalid clone must be reported and skipped, never abort boot by
+        // failing load-path construction (same contract as a failed user init).
+        std::fs::create_dir_all(paths.packages_dir().join("broken")).unwrap();
+        std::fs::write(paths.packages_dir().join("broken/manifest.json"), "not json").unwrap();
+        assert_eq!(
+            paths.load_path().unwrap(),
+            vec![
+                config.join("modules"),
+                config.join("packages/alpha/src"),
+                config.join("packages/zeta/src"),
+                workspace.join("content"),
+            ]
+        );
+        let (_, errors) = paths.module_load_roots();
+        assert_eq!(errors.len(), 1, "the broken package is reported exactly once");
+        assert!(errors[0].contains("broken"), "error names the offending package: {}", errors[0]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn release_user_tier_initialization_uses_application_support() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseq-release-user-tier-{unique}"));
+        let support = root.join("Library/Application Support/eseq");
+        let config = root.join("home/.eseq.d");
+        let paths = AppPaths::release(
+            root.join("ESeq.app/Contents/MacOS"),
+            root.join("ESeq.app/Contents/Resources"),
+            support.clone(),
+            root.join("Library/Caches/eseq"),
+            config.clone(),
+        );
+
+        paths.ensure_user_tier().expect("initialize release user tier");
+        assert!(support.is_dir());
+        assert!(support.join("projects").is_dir());
+        assert!(support.join("instruments").is_dir());
+        assert!(config.join("modules").is_dir());
+        assert!(config.join("packages").is_dir());
+        assert!(!config.join("init.lisp").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_lisp_root_honors_override_without_reading_or_writing_real_home() {
+        assert_eq!(
+            resolve_user_lisp_root(
+                Some(std::ffi::OsString::from("/tmp/eseq-config")),
+                Some(std::ffi::OsString::from("/real-home")),
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/eseq-config")
+        );
+        assert_eq!(
+            resolve_user_lisp_root(None, Some(std::ffi::OsString::from("/home/test"))).unwrap(),
+            PathBuf::from("/home/test/.eseq.d")
+        );
+        assert!(resolve_user_lisp_root(None, None).is_err());
+    }
+
+    #[test]
     fn toolchain_override_redirects_root_and_preflight_reports_it() {
-        let mut paths = AppPaths::dev(PathBuf::from("/ws/crates/sequencer"), PathBuf::from("/ws"));
+        let mut paths = AppPaths::dev(
+            PathBuf::from("/ws/crates/sequencer"),
+            PathBuf::from("/ws"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
         let AppPaths::Dev {
             dgen_toolchain_override,
             ..
@@ -376,6 +818,7 @@ mod tests {
         let paths = AppPaths::dev(
             PathBuf::from("/nonexistent/crates/sequencer"),
             PathBuf::from("/nonexistent"),
+            PathBuf::from("/home/test/.eseq.d"),
         );
         let err = paths
             .dgen_toolchain_root_checked()

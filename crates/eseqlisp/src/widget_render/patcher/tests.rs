@@ -5134,7 +5134,7 @@ fn dgenlisp_gather_projects_as_documented_tensor_operator() {
 fn spectral_bloom_mod_gather_nodes_are_known_to_patcher() {
     let source = fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../sequencer/effects/spectral-bloom-mod/dsp.lisp"
+        "/../../content/effects/spectral-bloom-mod/dsp.lisp"
     ))
     .expect("read spectral-bloom-mod dsp");
     let patch = parse_patch_source(&source, PatcherIntent::Effect).unwrap();
@@ -17654,7 +17654,7 @@ fn layout_keeps_collapsed_history_near_feedback_loop_body() {
 #[test]
 fn layout_keeps_lexilush_history_nodes_near_feedback_writers() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/effects/lexilush/dsp.lisp");
+        .join("../../content/effects/lexilush/dsp.lisp");
     let source = std::fs::read_to_string(path).unwrap();
     let patch = parse_patch_source(&source, PatcherIntent::Effect).unwrap();
     let id_to_node = patch
@@ -17688,7 +17688,7 @@ fn layout_keeps_lexilush_history_nodes_near_feedback_writers() {
 #[test]
 fn fixture_videogame_arp_projects_without_parse_failure() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/instruments/arcade/videogame-arp/dsp.lisp");
+        .join("../../content/instruments/arcade/videogame-arp/dsp.lisp");
     let source = std::fs::read_to_string(path).unwrap();
     let patch = parse_patch_source(&source, PatcherIntent::Instrument).unwrap();
     assert!(!patch.nodes.is_empty());
@@ -17697,7 +17697,7 @@ fn fixture_videogame_arp_projects_without_parse_failure() {
 #[test]
 fn fixture_lexilush_projects_without_parse_failure() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/effects/lexilush/dsp.lisp");
+        .join("../../content/effects/lexilush/dsp.lisp");
     let source = std::fs::read_to_string(path).unwrap();
     let patch = parse_patch_source(&source, PatcherIntent::Effect).unwrap();
     assert!(!patch.nodes.is_empty());
@@ -19234,7 +19234,7 @@ fn generation_roundtrip_starter_instrument() {
 #[test]
 fn generation_roundtrip_lexilush_effect() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../sequencer/effects/lexilush/dsp.lisp");
+        .join("../../content/effects/lexilush/dsp.lisp");
     let source = fs::read_to_string(&path).unwrap();
     assert_generation_roundtrip("lexilush", &source, PatcherIntent::Effect, None);
 }

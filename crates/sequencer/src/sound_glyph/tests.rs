@@ -5,8 +5,8 @@ use crate::effects::EffectDescriptor;
 use super::*;
 
 fn instrument_source(rel: &str) -> String {
-    let path = format!("{}/instruments/{}", env!("CARGO_MANIFEST_DIR"), rel);
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    let path = crate::app_paths::app_paths().instruments_dir().join(rel);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 fn cluster_names(skeleton: &Skeleton) -> Vec<&str> {

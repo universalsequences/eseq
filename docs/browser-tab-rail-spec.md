@@ -117,7 +117,7 @@ layout, or that logic silently breaks. There are tests around this in
 
 ## Code seams
 
-All in `crates/sequencer/ui/browser.lisp` unless noted:
+All in `content/ui/browser.lisp` unless noted:
 
 - `sbrowser-tab-button` (~line 618): the whole restyle happens here — every
   tab renders through this one function. Rewrite as a source-list row

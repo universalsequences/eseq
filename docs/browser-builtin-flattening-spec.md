@@ -111,7 +111,7 @@ before shipping; the old button labels don't disambiguate which is which.
 
 ### UI (eseqlisp)
 
-- `crates/sequencer/ui/browser.lisp`
+- `content/ui/browser.lisp`
   - `sbrowser-create-toolbar` (~line 565): delete (the four buttons move into
     the tree). Keep `sbrowser-add-*-track` functions — they become the
     activation targets.

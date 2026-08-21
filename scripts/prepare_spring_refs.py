@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Convert the raw spring IR captures in impulses/ into tuner-ready references
+"""Convert factory spring IR captures into tuner-ready references
 (16-bit / 44.1 kHz / mono wav, peak-trimmed, peak-normalized) under
-impulses/prepared/, for scripts/spring_tune.py --ref.
+content/impulses/prepared/, for scripts/spring_tune.py --ref.
 
 Decoding goes through ffmpeg so wav/aif at any bit depth work.
 """
@@ -13,7 +13,7 @@ import wave
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMP = os.path.join(ROOT, "impulses")
+IMP = os.path.join(ROOT, "content", "impulses")
 OUT = os.path.join(IMP, "prepared")
 SR = 44100
 PRE_S = 0.010  # keep a little pre-ring before the peak

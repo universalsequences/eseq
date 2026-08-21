@@ -10,7 +10,7 @@ fn capture_patcher_lexilush_png() {
         .parent()
         .and_then(|path| path.parent())
         .expect("workspace root");
-    let dsp_path = workspace_root.join("crates/sequencer/effects/lexilush/dsp.lisp");
+    let dsp_path = workspace_root.join("content/effects/lexilush/dsp.lisp");
     let source = format!(
         r#"(effect
              (patcher

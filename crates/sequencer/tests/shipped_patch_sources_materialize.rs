@@ -21,7 +21,7 @@ fn collect_dsp_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn shipped_patch_sources_materialize_defmacro_imports() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = sequencer::app_paths::app_paths().factory_root();
     let mut sources = Vec::new();
     collect_dsp_sources(&root.join("effects"), &mut sources);
     collect_dsp_sources(&root.join("instruments"), &mut sources);

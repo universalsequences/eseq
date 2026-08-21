@@ -138,11 +138,13 @@ pub fn compile_and_load_uncached_with_asset_base(
 
 // ── Effect library storage ──
 
-pub(in crate::lisp_host) const EFFECTS_DIR: &str = "effects";
-pub(in crate::lisp_host) const INSTRUMENTS_DIR: &str = "instruments";
-
 pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
-    let path = effect_source_path(name);
+    let root = crate::app_paths::app_paths().user_effects_dir();
+    let path = if name.ends_with('/') {
+        root.join(name.trim_end_matches('/')).join("dsp.lisp")
+    } else {
+        root.join(format!("{name}.lisp"))
+    };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -150,7 +152,10 @@ pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn save_effect_ui(name: &str, source: &str) -> io::Result<()> {
-    let path = effect_ui_path(name);
+    let path = crate::app_paths::app_paths()
+        .user_effects_dir()
+        .join(name.trim_end_matches('/'))
+        .join("ui.lisp");
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -191,9 +196,10 @@ pub fn list_saved_effects() -> Vec<String> {
         }
     }
 
-    let dir = crate::app_paths::app_paths().effects_dir();
     let mut names = Vec::new();
-    collect(&dir, &dir, &mut names);
+    for dir in crate::app_paths::app_paths().effect_dirs() {
+        collect(&dir, &dir, &mut names);
+    }
     names.sort();
     names.dedup();
     names
@@ -209,23 +215,33 @@ pub fn load_effect_ui_source(name: &str) -> io::Result<String> {
 }
 
 pub fn effect_source_path(name: &str) -> PathBuf {
-    let root = crate::app_paths::app_paths().effects_dir();
-    if name.ends_with('/') {
-        return root.join(name.trim_end_matches('/')).join("dsp.lisp");
+    let roots = crate::app_paths::app_paths().effect_dirs();
+    for root in &roots {
+        let path = if name.ends_with('/') {
+            root.join(name.trim_end_matches('/')).join("dsp.lisp")
+        } else {
+            let folder_dsp = root.join(name).join("dsp.lisp");
+            if folder_dsp.exists() {
+                folder_dsp
+            } else {
+                root.join(format!("{name}.lisp"))
+            }
+        };
+        if path.exists() {
+            return path;
+        }
     }
-    let folder_dsp = root.join(name).join("dsp.lisp");
-    if folder_dsp.exists() {
-        folder_dsp
-    } else {
-        root.join(format!("{name}.lisp"))
-    }
+    roots[0].join(format!("{name}.lisp"))
 }
 
 pub fn effect_ui_path(name: &str) -> PathBuf {
+    let relative = Path::new(name.trim_end_matches('/')).join("ui.lisp");
     crate::app_paths::app_paths()
-        .effects_dir()
-        .join(name.trim_end_matches('/'))
-        .join("ui.lisp")
+        .effect_dirs()
+        .into_iter()
+        .map(|root| root.join(&relative))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| crate::app_paths::app_paths().effects_dir().join(relative))
 }
 
 // ── Editor flow ──

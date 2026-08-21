@@ -19,6 +19,8 @@ pub(crate) struct SampleTreeNode {
     label: String,
     label_lower: String,
     path: Option<String>,
+    origins: Vec<String>,
+    available: bool,
     children: Vec<SampleTreeNode>,
 }
 
@@ -104,6 +106,8 @@ pub(crate) fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNod
             label_lower: label.to_lowercase(),
             label,
             path: None,
+            origins: Vec::new(),
+            available: true,
             children,
         });
     }
@@ -113,6 +117,8 @@ pub(crate) fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNod
             label_lower: label.to_lowercase(),
             label,
             path: Some(full_path),
+            origins: Vec::new(),
+            available: true,
             children: Vec::new(),
         });
     }
@@ -134,6 +140,30 @@ pub(crate) fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
                     map.insert(
                         "children".to_string(),
                         Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children))),
+                    );
+                }
+                if !item.origins.is_empty() || !item.available {
+                    let mut badges = item
+                        .origins
+                        .iter()
+                        .map(|origin| match origin.as_str() {
+                            "user" => "Yours".to_string(),
+                            "factory" => "Factory".to_string(),
+                            _ => origin.strip_prefix("pkg:").unwrap_or(origin).to_string(),
+                        })
+                        .collect::<Vec<_>>();
+                    if !item.available {
+                        badges.push("Unavailable".to_string());
+                    }
+                    map.insert(
+                        "detail".to_string(),
+                        Rc::new(RefCell::new(Value::String(badges.join(" · ")))),
+                    );
+                    map.insert(
+                        "origins".to_string(),
+                        Rc::new(RefCell::new(list_value(
+                            item.origins.iter().cloned().map(Value::String),
+                        ))),
                     );
                 }
                 if let Some(path) = &item.path {
@@ -160,6 +190,7 @@ pub(crate) fn build_sample_tree_nodes_from_db(
         exclude_tags,
         (!query.is_empty()).then_some(query),
         false,
+        &[],
     )?;
     let grouped = query.is_empty() && include_tags.is_empty() && exclude_tags.is_empty();
     Ok(sample_rows_to_tree_nodes(rows, grouped))
@@ -180,17 +211,33 @@ pub(crate) fn build_sample_browser_value_from_db(
     query: &str,
     selected_tags: &[&str],
 ) -> rusqlite::Result<Value> {
+    build_sample_browser_value_with_origins_from_db(db, query, selected_tags, &[])
+}
+
+pub(crate) fn build_sample_browser_value_with_origins_from_db(
+    db: &SampleDb,
+    query: &str,
+    selected_tags: &[&str],
+    selected_origins: &[&str],
+) -> rusqlite::Result<Value> {
     let query = query.trim();
-    let has_active_filter =
-        !query.is_empty() || selected_tags.iter().any(|tag| !tag.trim().is_empty());
+    let has_active_filter = !query.is_empty()
+        || selected_tags.iter().any(|tag| !tag.trim().is_empty())
+        || selected_origins.iter().any(|origin| !origin.trim().is_empty());
     let tags = if has_active_filter {
-        db.adjacent_tags(selected_tags, (!query.is_empty()).then_some(query), 32)?
+        db.adjacent_tags_with_origins(
+            selected_tags,
+            selected_origins,
+            (!query.is_empty()).then_some(query),
+            32,
+        )?
     } else {
         default_sample_tag_facets(db, 16)?
     };
     let items = if has_active_filter {
-        let rows = db.query_samples_for_browser_limited(
+        let rows = db.query_samples_for_browser_with_origins(
             selected_tags,
+            selected_origins,
             (!query.is_empty()).then_some(query),
             SAMPLE_BROWSER_MAX_RESULTS,
         )?;
@@ -198,8 +245,17 @@ pub(crate) fn build_sample_browser_value_from_db(
     } else {
         Value::List(vec![])
     };
+    let selected_origin_names: HashSet<_> = selected_origins
+        .iter()
+        .map(|origin| origin.to_lowercase())
+        .collect();
+    let mut origins = db.list_origins()?;
+    for origin in &mut origins {
+        origin.selected = selected_origin_names.contains(&origin.name.to_lowercase());
+    }
     Ok(map_value([
         ("tags", tag_facets_to_value(&tags)),
+        ("origins", tag_facets_to_value(&origins)),
         ("items", items),
     ]))
 }
@@ -208,10 +264,11 @@ pub(crate) fn build_sample_browser_value_from_db(
 struct SampleBrowserRequest {
     query: String,
     selected_tags: Vec<String>,
+    selected_origins: Vec<String>,
 }
 
 impl SampleBrowserRequest {
-    fn new(query: &str, selected_tags: &[&str]) -> Self {
+    fn new(query: &str, selected_tags: &[&str], selected_origins: &[&str]) -> Self {
         Self {
             query: query.trim().to_string(),
             selected_tags: selected_tags
@@ -219,11 +276,20 @@ impl SampleBrowserRequest {
                 .map(|tag| tag.trim().to_string())
                 .filter(|tag| !tag.is_empty())
                 .collect(),
+            selected_origins: selected_origins
+                .iter()
+                .map(|origin| origin.trim().to_string())
+                .filter(|origin| !origin.is_empty())
+                .collect(),
         }
     }
 
     fn selected_tag_refs(&self) -> Vec<&str> {
         self.selected_tags.iter().map(String::as_str).collect()
+    }
+
+    fn selected_origin_refs(&self) -> Vec<&str> {
+        self.selected_origins.iter().map(String::as_str).collect()
     }
 }
 
@@ -251,7 +317,16 @@ impl DebouncedSampleBrowser {
     }
 
     pub(crate) fn query(&mut self, query: &str, selected_tags: &[&str]) -> rusqlite::Result<Value> {
-        self.query_at(query, selected_tags, Instant::now())
+        self.query_with_origins(query, selected_tags, &[])
+    }
+
+    pub(crate) fn query_with_origins(
+        &mut self,
+        query: &str,
+        selected_tags: &[&str],
+        selected_origins: &[&str],
+    ) -> rusqlite::Result<Value> {
+        self.query_at(query, selected_tags, selected_origins, Instant::now())
     }
 
     pub(crate) fn poll_ready(&mut self) -> rusqlite::Result<bool> {
@@ -278,9 +353,10 @@ impl DebouncedSampleBrowser {
         &mut self,
         query: &str,
         selected_tags: &[&str],
+        selected_origins: &[&str],
         now: Instant,
     ) -> rusqlite::Result<Value> {
-        let request = SampleBrowserRequest::new(query, selected_tags);
+        let request = SampleBrowserRequest::new(query, selected_tags, selected_origins);
         let previous_request = self.last_requested.as_ref();
         let request_changed = previous_request != Some(&request);
         let query_changed =
@@ -314,8 +390,10 @@ impl DebouncedSampleBrowser {
 
     fn execute_request(&mut self, request: SampleBrowserRequest) -> rusqlite::Result<Value> {
         let selected_tag_refs = request.selected_tag_refs();
-        let value =
-            build_sample_browser_value_from_db(&self.db, &request.query, &selected_tag_refs)?;
+        let selected_origin_refs = request.selected_origin_refs();
+        let value = build_sample_browser_value_with_origins_from_db(
+            &self.db, &request.query, &selected_tag_refs, &selected_origin_refs,
+        )?;
         self.last_executed = Some(request);
         self.cached_value = Some(value.deep_clone());
         self.pending_text_query = false;
@@ -326,6 +404,7 @@ impl DebouncedSampleBrowser {
 fn empty_sample_browser_value() -> Value {
     map_value([
         ("tags", Value::List(vec![])),
+        ("origins", Value::List(vec![])),
         ("items", Value::List(vec![])),
     ])
 }
@@ -392,6 +471,8 @@ fn sample_rows_to_tree_nodes(rows: Vec<SampleRow>, grouped: bool) -> Vec<SampleT
                 label_lower: label.to_lowercase(),
                 label,
                 path: Some(format!("samples/{}.wav", row.hash)),
+                origins: row.origins,
+                available: row.available,
                 children: Vec::new(),
             };
             (category.to_string(), node)
@@ -422,6 +503,8 @@ fn sample_rows_to_tree_nodes(rows: Vec<SampleRow>, grouped: bool) -> Vec<SampleT
             label: (*category).to_string(),
             label_lower: (*category).to_string(),
             path: None,
+            origins: Vec::new(),
+            available: true,
             children,
         });
     }
@@ -682,8 +765,10 @@ fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
 
 pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String]) -> Value {
     let query_lower = query.trim().to_lowercase();
-    let root = std::path::Path::new("instruments");
-    let top = build_instrument_tree_nodes(root, root);
+    let mut top = Vec::new();
+    for root in sequencer::app_paths::app_paths().instrument_dirs() {
+        top.extend(build_instrument_tree_nodes(&root, &root));
+    }
     let custom = list_items(instrument_tree_nodes_to_value(
         &filter_instrument_tree_nodes(&top, &query_lower),
     ));
@@ -734,12 +819,7 @@ pub(crate) fn project_instrument_engine_names(app: &app::App) -> Vec<String> {
 }
 
 pub(crate) fn script_root_dir() -> std::path::PathBuf {
-    let local = std::path::PathBuf::from("scripts");
-    if local.is_dir() {
-        local
-    } else {
-        std::path::PathBuf::from("crates/sequencer/scripts")
-    }
+    sequencer::app_paths::app_paths().scripts_dir()
 }
 
 fn build_script_tree_nodes(dir: &std::path::Path, root: &std::path::Path) -> Vec<ScriptTreeNode> {
@@ -894,6 +974,8 @@ pub(crate) fn filter_sample_tree_nodes(
                 label: item.label.clone(),
                 label_lower: item.label_lower.clone(),
                 path: None,
+                origins: Vec::new(),
+                available: true,
                 children,
             });
         }
@@ -1180,6 +1262,8 @@ mod tests {
             title: title.map(str::to_string),
             favorited: false,
             tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+            origins: Vec::new(),
+            available: true,
         }
     }
 
@@ -1415,11 +1499,11 @@ mod tests {
         let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
         let start = Instant::now();
 
-        let initial = browser.query_at("", &[], start).expect("initial browser");
+        let initial = browser.query_at("", &[], &[], start).expect("initial browser");
         assert!(sample_browser_item_labels(&initial).is_empty());
 
         let pending_first_char = browser
-            .query_at("k", &[], start + Duration::from_millis(10))
+            .query_at("k", &[], &[], start + Duration::from_millis(10))
             .expect("pending first char");
         assert!(
             sample_browser_item_labels(&pending_first_char).is_empty(),
@@ -1427,7 +1511,7 @@ mod tests {
         );
 
         let pending_second_char = browser
-            .query_at("ki", &[], start + Duration::from_millis(50))
+            .query_at("ki", &[], &[], start + Duration::from_millis(50))
             .expect("pending second char");
         assert!(
             sample_browser_item_labels(&pending_second_char).is_empty(),
@@ -1435,7 +1519,7 @@ mod tests {
         );
 
         let ready = browser
-            .query_at("ki", &[], start + Duration::from_millis(151))
+            .query_at("ki", &[], &[], start + Duration::from_millis(151))
             .expect("debounced query");
         assert_eq!(
             sample_browser_item_labels(&ready),
@@ -1449,9 +1533,9 @@ mod tests {
         let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(1));
         let start = Instant::now();
 
-        browser.query_at("", &[], start).expect("initial browser");
+        browser.query_at("", &[], &[], start).expect("initial browser");
         let pending = browser
-            .query_at("ki", &[], start + Duration::from_millis(1))
+            .query_at("ki", &[], &[], start + Duration::from_millis(1))
             .expect("pending query");
         assert!(sample_browser_item_labels(&pending).is_empty());
 
@@ -1461,7 +1545,7 @@ mod tests {
             "poll_ready should execute a matured pending text query"
         );
         let cached = browser
-            .query_at("ki", &[], start + Duration::from_millis(2))
+            .query_at("ki", &[], &[], start + Duration::from_millis(2))
             .expect("cached debounced query");
         assert_eq!(
             sample_browser_item_labels(&cached),
@@ -1475,9 +1559,9 @@ mod tests {
         let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
         let start = Instant::now();
 
-        browser.query_at("", &[], start).expect("initial browser");
+        browser.query_at("", &[], &[], start).expect("initial browser");
         let tagged = browser
-            .query_at("", &["kick"], start + Duration::from_millis(1))
+            .query_at("", &["kick"], &[], start + Duration::from_millis(1))
             .expect("tagged browser");
 
         assert_eq!(

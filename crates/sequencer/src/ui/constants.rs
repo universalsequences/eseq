@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-pub(crate) const UI_ENTRYPOINT_PATH: &str = "ui/main.lisp";
+pub(crate) fn ui_entrypoint_path() -> std::path::PathBuf {
+    sequencer::app_paths::app_paths().ui_dir().join("main.lisp")
+}
 pub(crate) const PAGE_SIZE: usize = 16;
 pub(crate) const AUTO_FOLLOW_COOLDOWN: Duration = Duration::from_secs(5);
 pub(crate) const METER_POLL_INTERVAL: Duration = Duration::from_millis(50);

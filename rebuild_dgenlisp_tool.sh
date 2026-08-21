@@ -7,7 +7,7 @@ PRODUCT_NAME="DGenLisp"
 SOURCE_BIN="$DGEN_REPO/.build/release/$PRODUCT_NAME"
 DEST_BIN="$ROOT_DIR/crates/sequencer/tools/$PRODUCT_NAME"
 TOOLCHAIN_DEST="$ROOT_DIR/crates/sequencer/tools/dgen-toolchain"
-LOCK_FILE="$ROOT_DIR/crates/sequencer/tools/dgen-toolchain.lock"
+LOCK_FILE="$ROOT_DIR/content/dgen-toolchain.lock"
 ALLOW_UNCHANGED=0
 UPDATE_LOCK=0
 

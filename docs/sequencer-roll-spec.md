@@ -274,7 +274,7 @@ Notes:
 
 ### Phase 3 — lisp demo + UI (no new Rust)
 
-1. `crates/sequencer/scripts/processes/process-roll-demo.lisp`: the
+1. `content/scripts/processes/process-roll-demo.lisp`: the
    `roll-gate` / `roll-clock` pair above + a script tab with a momentary
    roll button and a 1–8 timebase strip (eight small buttons or a
    number-picker), wired per the process-ui-control-demo pattern.

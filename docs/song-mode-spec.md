@@ -4,7 +4,7 @@ Status: draft / design (revised 2026-07-18: timeline-readiness pass)
 Author: design pass, 2026-07-10
 Related: `crates/sequencer/src/sequencer/state.rs`,
 `crates/sequencer/src/scheduler.rs`,
-`crates/sequencer/ui/transport.lisp`,
+`content/ui/transport.lisp`,
 `crates/sequencer/docs/undo-redo-system-spec.md`
 
 ## 1. Summary

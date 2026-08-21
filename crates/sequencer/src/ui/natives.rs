@@ -8,6 +8,59 @@ pub(crate) struct RuntimeInit {
     pub(crate) piano_roll_clipboard: PianoRollClipboard,
 }
 
+pub(super) fn register_factory_path_native(runtime: &mut Runtime) {
+    runtime.register_native("seq-factory-path", |args, _ctx| {
+        let Some(Value::String(relative)) = args.first() else {
+            return Err("seq-factory-path expects one relative path string".to_string());
+        };
+        let relative = std::path::Path::new(&relative);
+        if relative.components().any(|component| !matches!(
+            component,
+            std::path::Component::Normal(_)
+        )) {
+            return Err("seq-factory-path requires a normalized relative path".to_string());
+        }
+        Ok(Value::String(
+            sequencer::app_paths::app_paths()
+                .factory_root()
+                .join(relative)
+                .to_string_lossy()
+                .into_owned(),
+        ))
+    });
+    runtime.register_native("seq-project-content-path", |args, _ctx| {
+        let Some(Value::String(path)) = args.first() else {
+            return Err("seq-project-content-path expects one path string".to_string());
+        };
+        let path = std::path::Path::new(&path);
+        let factory_root = sequencer::app_paths::app_paths().factory_root();
+        let relative = if path.is_absolute() {
+            match path.strip_prefix(&factory_root) {
+                Ok(relative) => relative,
+                // Paths outside factory content (user scripts, temp files)
+                // have no portable content form: pass them through verbatim.
+                Err(_) => {
+                    return Ok(Value::String(path.to_string_lossy().into_owned()));
+                }
+            }
+        } else {
+            path.strip_prefix("content").unwrap_or(path)
+        };
+        if relative.components().any(|component| !matches!(
+            component,
+            std::path::Component::Normal(_)
+        )) {
+            return Err("seq-project-content-path requires a normalized content path".to_string());
+        }
+        Ok(Value::String(
+            std::path::Path::new("content")
+                .join(relative)
+                .to_string_lossy()
+                .into_owned(),
+        ))
+    });
+}
+
 fn value_number_field(value: &Value, field: &str) -> Option<usize> {
     let Value::Map(map) = value else {
         return None;
@@ -1712,7 +1765,7 @@ fn toggle_master_recording_capture(
     toggle_master_recording_capture_in(
         master_recording,
         master_recorder,
-        std::path::Path::new("recordings"),
+        &sequencer::app_paths::app_paths().recordings_dir(),
     )
 }
 
@@ -2377,6 +2430,7 @@ pub(crate) fn init_runtime(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
+    register_factory_path_native(&mut runtime);
     sequencer::lisp_host::register_neural_authoring_natives_with_selection(
         &mut runtime,
         Arc::clone(&state),
@@ -6134,8 +6188,10 @@ pub(crate) fn init_runtime(
     });
 
     let sample_db = Rc::new(
-        sequencer::sample_db::SampleDb::open(std::path::Path::new("samples.db"))
-            .expect("metal_seq requires crates/sequencer/samples.db for sample browsing"),
+        sequencer::sample_db::SampleDb::open(
+            &sequencer::app_paths::app_paths().sample_db_path(),
+        )
+        .expect("metal_seq requires the AppPaths sample database for sample browsing"),
     );
     eprintln!("metal_seq: sample db opened");
 
@@ -6180,9 +6236,11 @@ pub(crate) fn init_runtime(
         };
         let selected_tags = value_string_list(args.get(1));
         let selected_tag_refs: Vec<&str> = selected_tags.iter().map(String::as_str).collect();
+        let selected_origins = value_string_list(args.get(2));
+        let selected_origin_refs: Vec<&str> = selected_origins.iter().map(String::as_str).collect();
         sample_browser_for_native
             .borrow_mut()
-            .query(query, &selected_tag_refs)
+            .query_with_origins(query, &selected_tag_refs, &selected_origin_refs)
             .map_err(|error| format!("failed to query samples.db browser state: {error}"))
     });
 

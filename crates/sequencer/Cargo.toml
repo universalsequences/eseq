@@ -22,6 +22,7 @@ libc = "0.2"
 eseqlisp = { path = "../eseqlisp" }
 arrayvec = "0.7"
 notify = "6"
+fs2 = "0.4"
 
 [lib]
 name = "sequencer"
@@ -30,6 +31,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "metal_seq"
 path = "src/ui/main.rs"
+
+[[bin]]
+name = "eseq"
+path = "src/bin/eseq.rs"
 
 [build-dependencies]
 cc = "1.0"

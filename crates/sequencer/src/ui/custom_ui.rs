@@ -354,9 +354,10 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
         }
     }
 
-    let root = Path::new("instruments");
     let mut ui_sources = Vec::new();
-    collect(root, root, &mut ui_sources);
+    for root in sequencer::app_paths::app_paths().instrument_dirs() {
+        collect(&root, &root, &mut ui_sources);
+    }
 
     let mut functions = r#"
 (def custom-ui-string-ends-with? (value suffix)
@@ -482,9 +483,14 @@ pub(crate) fn custom_ui_source_paths() -> Vec<PathBuf> {
         }
     }
 
+    let app_paths = sequencer::app_paths::app_paths();
     let mut paths = Vec::new();
-    for root in ["instruments", "midi-fx", "effects"] {
-        collect(Path::new(root), &mut paths);
+    for root in app_paths.instrument_dirs() {
+        collect(&root, &mut paths);
+    }
+    collect(&app_paths.midi_fx_dir(), &mut paths);
+    for root in app_paths.effect_dirs() {
+        collect(&root, &mut paths);
     }
     paths.sort();
     paths.dedup();
@@ -529,9 +535,9 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
         }
     }
 
-    let root = Path::new("midi-fx");
+    let root = sequencer::app_paths::app_paths().midi_fx_dir();
     let mut ui_sources = Vec::new();
-    collect(root, root, &mut ui_sources);
+    collect(&root, &root, &mut ui_sources);
 
     if let Some((fx_name, ui_path, src)) = overlay {
         if let Some(existing) = ui_sources.iter_mut().find(|(name, _, _)| name == &fx_name) {
@@ -630,9 +636,10 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
         }
     }
 
-    let root = Path::new("effects");
     let mut ui_sources = Vec::new();
-    collect(root, root, &mut ui_sources);
+    for root in sequencer::app_paths::app_paths().effect_dirs() {
+        collect(&root, &root, &mut ui_sources);
+    }
 
     if let Some((fx_name, ui_path, src)) = overlay {
         if let Some(existing) = ui_sources.iter_mut().find(|(name, _, _)| name == &fx_name) {
@@ -979,8 +986,10 @@ fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, S
     if !folder.join("dsp.lisp").exists() {
         return None;
     }
-    let root = Path::new("instruments");
-    let rel = folder.strip_prefix(root).ok()?;
+    let rel = sequencer::app_paths::app_paths()
+        .instrument_dirs()
+        .into_iter()
+        .find_map(|root| folder.strip_prefix(root).ok().map(Path::to_path_buf))?;
     let instrument_name = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
     Some((instrument_name, path.display().to_string(), buffer.text()))
 }
@@ -995,7 +1004,7 @@ fn active_custom_midi_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, S
     if !folder.join("dsp.lisp").exists() {
         return None;
     }
-    let root = Path::new("midi-fx");
+    let root = sequencer::app_paths::app_paths().midi_fx_dir();
     let rel = folder.strip_prefix(root).ok()?;
     let fx_name = rel.to_string_lossy().replace('\\', "/");
     Some((fx_name, path.display().to_string(), buffer.text()))
@@ -1011,8 +1020,10 @@ fn active_custom_audio_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, 
     if !folder.join("dsp.lisp").exists() {
         return None;
     }
-    let root = Path::new("effects");
-    let rel = folder.strip_prefix(root).ok()?;
+    let rel = sequencer::app_paths::app_paths()
+        .effect_dirs()
+        .into_iter()
+        .find_map(|root| folder.strip_prefix(root).ok().map(Path::to_path_buf))?;
     let fx_name = rel.to_string_lossy().replace('\\', "/");
     Some((fx_name, path.display().to_string(), buffer.text()))
 }

@@ -8,12 +8,12 @@ without opening the app.
 
 Library use:
     from audition import Instrument, partials, t60, report
-    inst = Instrument("crates/sequencer/instruments/drums/membrane-tabla")
+    inst = Instrument("content/instruments/drums/membrane-tabla")
     y = inst.render(2.0, pitch=220.0, params={"stroke": 1.0})
     report("na", y)
 
 CLI use (from repo root):
-    python3 tools/audition/audition.py crates/sequencer/instruments/drums/membrane-tabla \
+    python3 tools/audition/audition.py content/instruments/drums/membrane-tabla \
         --pitch a2 --set stroke=1.0 --wav /tmp/na.wav
 
 See docs/instrument-audition-harness.md for the full method.

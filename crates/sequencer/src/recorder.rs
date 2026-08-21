@@ -111,7 +111,7 @@ pub fn resolve_recording_path(input: &str) -> PathBuf {
         path.set_extension("wav");
     }
     if path.components().count() == 1 {
-        PathBuf::from("recordings").join(path)
+        crate::app_paths::app_paths().recordings_dir().join(path)
     } else {
         path
     }

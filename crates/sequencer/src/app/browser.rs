@@ -23,8 +23,8 @@ pub struct BrowserNode {
 
 impl BrowserNode {
     /// Recursively scan a directory, including only dirs that contain .wav descendants and .wav files.
-    pub fn scan_root(root: &str) -> Vec<BrowserNode> {
-        let root_path = std::path::Path::new(root);
+    pub fn scan_root(root: impl AsRef<std::path::Path>) -> Vec<BrowserNode> {
+        let root_path = root.as_ref();
         if !root_path.is_dir() {
             return Vec::new();
         }

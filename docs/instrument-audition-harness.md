@@ -45,21 +45,21 @@ From the repo root:
 
 ```sh
 # quick report: peak, NaN check, T60, partial ratios
-python3 tools/audition/audition.py crates/sequencer/instruments/drums/membrane-tabla
+python3 tools/audition/audition.py content/instruments/drums/membrane-tabla
 
 # see the instrument's params and ranges
 python3 tools/audition/audition.py <instrument> --list-params
 
 # render a specific articulation to WAV
-python3 tools/audition/audition.py crates/sequencer/instruments/drums/membrane-tabla \
+python3 tools/audition/audition.py content/instruments/drums/membrane-tabla \
     --pitch a2 --set stroke=1.0 --seconds 2 --wav /tmp/na.wav
 
 # p-lock style automation: bayan press gliss (ramp press 0->1 over 0.2..0.8s)
-python3 tools/audition/audition.py crates/sequencer/instruments/drums/membrane-tabla \
+python3 tools/audition/audition.py content/instruments/drums/membrane-tabla \
     --pitch g2 --set gliss_range=0.5 --ramp "press=0.2:0,0.8:1" --wav /tmp/ga.wav
 
 # melodic instruments: note names, gate release, retriggers
-python3 tools/audition/audition.py crates/sequencer/instruments/core/drift \
+python3 tools/audition/audition.py content/instruments/core/drift \
     --pitch c#3 --gate-off 0.6 --retrig 0.3,0.6
 ```
 
@@ -76,7 +76,7 @@ per-partial decay — are written as short scripts on top of the module:
 import sys; sys.path.insert(0, "tools/audition")
 from audition import Instrument, partials, t60, report, write_wav
 
-inst = Instrument("crates/sequencer/instruments/drums/membrane-tabla")
+inst = Instrument("content/instruments/drums/membrane-tabla")
 inst.manifest          # full compile manifest (cellIds, tensor offsets, io)
 
 # render() returns (audio, state_memory) — keep mem to inspect internal state

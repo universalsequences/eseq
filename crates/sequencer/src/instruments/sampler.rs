@@ -1615,6 +1615,9 @@ pub fn sampler_vtable() -> NodeVTable {
 /// Load a WAV file into an audiograph buffer and retain the trimmed mono data
 /// needed by the offline analyzer.
 pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<LoadedSample, String> {
+    // Content-addressed references ("samples/<sha>.wav") resolve against the
+    // sample store; absolute and cwd-reachable paths pass through.
+    let wav_path = &crate::app_paths::resolve_sample_ref(wav_path);
     let decoded = eseqlisp::audio::sample::load_wav_file(wav_path).map_err(|e| {
         let file_len = std::fs::metadata(wav_path).map(|meta| meta.len()).ok();
         eprintln!(

@@ -31,7 +31,7 @@ fn layout_label_node<'a>(node: &'a LayoutNode, text: &str) -> Option<&'a LayoutN
 #[test]
 fn mk_ui_evaluates() {
     let ui =
-        std::fs::read_to_string("../sequencer/instruments/drums/membrane-kick/ui.lisp").unwrap();
+        std::fs::read_to_string("../../content/instruments/drums/membrane-kick/ui.lisp").unwrap();
     let mut rt = Runtime::new();
     rt.eval_str(P).expect("preamble");
     rt.eval_str(&ui).expect("ui evaluates");
@@ -39,7 +39,7 @@ fn mk_ui_evaluates() {
 
 #[test]
 fn membrane_snare_rim_ui_evaluates_and_measures_stroke_panel() {
-    let ui = std::fs::read_to_string("../sequencer/instruments/drums/membrane-snare-rim/ui.lisp")
+    let ui = std::fs::read_to_string("../../content/instruments/drums/membrane-snare-rim/ui.lisp")
         .unwrap();
     let mut rt = Runtime::new();
     rt.eval_str(P).expect("preamble");

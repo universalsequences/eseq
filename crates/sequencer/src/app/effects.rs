@@ -6046,7 +6046,7 @@ mod tests {
         let mut app = test_app_for_live_graph(&graph, 0);
         app.graph_controller()
             .add_sampler_rack_track(&[std::path::Path::new(
-                "assets/ir/lexicon-300-rich-plate.wav",
+                "../../content/impulses/lexicon-300-rich-plate.wav",
             )
             .to_path_buf()])
             .expect("sampler rack should be created");
@@ -6470,7 +6470,7 @@ mod tests {
 
         let (group_id, track) = app
             .create_drum_rack_with_pad_recorded(Some(std::path::Path::new(
-                "assets/ir/lexicon-300-rich-plate.wav",
+                "../../content/impulses/lexicon-300-rich-plate.wav",
             )))
             .expect("drum rack with a sample");
         let track = track.expect("the sample claims the rack's first pad");
@@ -6651,7 +6651,7 @@ mod tests {
     fn a_drum_rack_round_trips_through_a_saved_kit() {
         let graph = TestLiveGraph::new("drum-rack-kit-roundtrip-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
-        let sample = std::path::Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         let (group_id, _) = app
             .create_drum_rack_recorded(Some("Test Kit".to_string()))
             .expect("drum rack should be created");
@@ -6728,7 +6728,7 @@ mod tests {
     fn selected_drum_rack_kit_audition_replaces_contents_and_undoes() {
         let graph = TestLiveGraph::new("drum-rack-selected-kit-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
-        let sample = std::path::Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         let (group_id, _) = app.create_drum_rack_recorded(Some("Old Kit".to_string())).unwrap();
         let kick = app.graph_controller().add_track(sample).unwrap();
         let snare = app.graph_controller().add_track(sample).unwrap();
@@ -6793,7 +6793,7 @@ mod tests {
     fn selected_drum_rack_sound_audition_swaps_to_one_track_and_undoes() {
         let graph = TestLiveGraph::new("drum-rack-selected-sound-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
-        let sample = std::path::Path::new("assets/ir/lexicon-300-rich-plate.wav");
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
         let (group_id, _) = app.create_drum_rack_recorded(Some("Kit".to_string())).unwrap();
         let kick = app.graph_controller().add_track(sample).unwrap();
         let snare = app.graph_controller().add_track(sample).unwrap();

@@ -3,7 +3,7 @@
 Status: draft spec, 2026-07-20. Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (process engine, normative),
 `docs/cirklon-endgame-trajectory.md` (landed-slice inventory), and
-`crates/sequencer/scripts/sequencers/graph-neural-variable-reset-demo.lisp`
+`content/scripts/sequencers/graph-neural-variable-reset-demo.lisp`
 (the graph sequencer this regulates).
 
 ## 1. Motivation
@@ -230,7 +230,7 @@ persistence, `def-conductor` determinism tier, autocomplete/hover tooling
 
 ## 7. The demo, sketched
 
-Target script: `crates/sequencer/scripts/processes/graph-homeostat-demo.lisp`
+Target script: `content/scripts/processes/graph-homeostat-demo.lisp`
 (not yet written — this section is the design sketch). Assumes the
 variable-reset graph loaded and routed to track 0, per its own demo file.
 

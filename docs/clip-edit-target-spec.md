@@ -62,8 +62,8 @@ its safe write path),
 `crates/sequencer/src/app/edit.rs` (`StepGestureTransaction`),
 `crates/sequencer/src/sequencer/state/sequencer_state/step_edit.rs`,
 `crates/sequencer/src/sequencer/state/takes.rs`,
-`crates/sequencer/ui/piano-roll.lisp`,
-`crates/sequencer/ui/arrangement.lisp`,
+`content/ui/piano-roll.lisp`,
+`content/ui/arrangement.lisp`,
 `crates/eseqlisp/src/widget_render/timeline.rs`
 
 ## 1. Summary
