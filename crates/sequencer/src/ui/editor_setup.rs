@@ -43,7 +43,8 @@ pub(crate) fn create_editor_with_user_init_path(
     // process working directory. Module imports use the tiered user → package
     // → factory search path instead of this raw-load root.
     runtime.set_load_root(app_paths.factory_root());
-    runtime.set_scoped_module_load_path(app_paths.module_load_roots()?);
+    let (module_load_roots, package_errors) = app_paths.module_load_roots();
+    runtime.set_scoped_module_load_path(module_load_roots);
     // The checked-in UI modules contain intentional module-local bare names
     // and historical alias declarations. Authored instruments/effects/scripts
     // stay outside this exclusion and are always preflighted.
@@ -57,6 +58,13 @@ pub(crate) fn create_editor_with_user_init_path(
             vim_mode: true,
         },
     );
+
+    // Invalid packages were excluded from the load path; surface each one the
+    // same way a failed user init is surfaced instead of aborting boot.
+    for message in package_errors {
+        eprintln!("metal_seq: {message}");
+        editor.handle_host_event(eseqlisp::HostEvent::Error(message));
+    }
 
     reload_custom_instrument_ui(&mut editor);
     let ui_entrypoint = ui_entrypoint_path();

@@ -71,14 +71,30 @@ impl fmt::Display for PackageError {
 impl std::error::Error for PackageError {}
 
 impl PackageCatalog {
+    /// Strict scan: any invalid package rejects the whole catalog. Used where
+    /// a caller needs a guarantee (installation validates one package with
+    /// [`InstalledPackage::load`], tests assert exact error sets).
     pub fn scan(root: impl AsRef<Path>) -> Result<Self, Vec<PackageError>> {
+        let (catalog, errors) = Self::scan_reporting(root);
+        if errors.is_empty() {
+            Ok(catalog)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Lenient scan for application startup: invalid packages (and packages
+    /// whose dependencies are missing or invalid) are excluded and reported,
+    /// while every valid package stays loadable. A broken third-party clone
+    /// must never take the factory tier down with it.
+    pub fn scan_reporting(root: impl AsRef<Path>) -> (Self, Vec<PackageError>) {
         let root = root.as_ref();
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
+                return (Self::default(), Vec::new());
             }
-            Err(error) => return Err(vec![package_error(root, error)]),
+            Err(error) => return (Self::default(), vec![package_error(root, error)]),
         };
         let mut directories = entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -107,22 +123,30 @@ impl PackageCatalog {
             }
         }
 
-        let names = packages.keys().cloned().collect::<BTreeSet<_>>();
-        for package in packages.values() {
-            for dependency in &package.manifest.deps {
-                if !names.contains(dependency) {
-                    errors.push(PackageError {
-                        path: package.root.join("manifest.json"),
-                        message: format!("dependency `{dependency}` is not installed"),
-                    });
-                }
-            }
+        // Exclude packages with missing dependencies, cascading so that a
+        // package depending on an excluded package is excluded too.
+        loop {
+            let names = packages.keys().cloned().collect::<BTreeSet<_>>();
+            let missing = packages
+                .iter()
+                .find_map(|(name, package)| {
+                    package
+                        .manifest
+                        .deps
+                        .iter()
+                        .find(|dependency| !names.contains(*dependency))
+                        .map(|dependency| (name.clone(), dependency.clone()))
+                });
+            let Some((name, dependency)) = missing else {
+                break;
+            };
+            let package = packages.remove(&name).expect("package present");
+            errors.push(PackageError {
+                path: package.root.join("manifest.json"),
+                message: format!("dependency `{dependency}` is not installed"),
+            });
         }
-        if errors.is_empty() {
-            Ok(Self { packages })
-        } else {
-            Err(errors)
-        }
+        (Self { packages }, errors)
     }
 
     pub fn packages(&self) -> &BTreeMap<String, InstalledPackage> {
@@ -414,6 +438,51 @@ mod tests {
                 .to_string()
                 .contains("required external asset `samples/kick.wav` is missing")
         }));
+    }
+
+    #[test]
+    fn lenient_scan_keeps_valid_packages_and_reports_invalid_ones() {
+        let root = temp_root("lenient");
+        let good = root.join("good");
+        fs::create_dir_all(good.join("src")).unwrap();
+        fs::write(good.join("src/main.lisp"), "(module alec.good.main)").unwrap();
+        fs::write(
+            good.join("manifest.json"),
+            r#"{"name":"alec/good","version":"1","entry":"alec.good.main"}"#,
+        )
+        .unwrap();
+        // Broken manifest, plus a chain whose root dependency is missing:
+        // leaf -> mid -> absent. Both links must cascade out of the catalog.
+        fs::create_dir_all(root.join("broken")).unwrap();
+        fs::write(root.join("broken/manifest.json"), "not json").unwrap();
+        for (dir, name, dep) in [
+            ("mid", "alec/mid", "alec/absent"),
+            ("leaf", "alec/leaf", "alec/mid"),
+        ] {
+            let package = root.join(dir);
+            fs::create_dir_all(package.join("src")).unwrap();
+            let module = format!("alec.{dir}.main");
+            fs::write(
+                package.join("src/main.lisp"),
+                format!("(module {module})"),
+            )
+            .unwrap();
+            fs::write(
+                package.join("manifest.json"),
+                format!(r#"{{"name":"{name}","version":"1","entry":"{module}","deps":["{dep}"]}}"#),
+            )
+            .unwrap();
+        }
+
+        let (catalog, errors) = PackageCatalog::scan_reporting(&root);
+        assert_eq!(
+            catalog.packages().keys().collect::<Vec<_>>(),
+            vec!["alec/good"],
+            "only the valid dependency-complete package stays loadable"
+        );
+        assert_eq!(errors.len(), 3, "broken manifest + both cascading dep exclusions");
+        assert!(errors.iter().any(|e| e.to_string().contains("`alec/absent` is not installed")));
+        assert!(errors.iter().any(|e| e.to_string().contains("`alec/mid` is not installed")));
     }
 
     #[test]

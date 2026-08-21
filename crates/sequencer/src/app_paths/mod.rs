@@ -236,15 +236,15 @@ impl AppPaths {
         self.user_lisp_root().join("packages")
     }
 
-    /// Validated module roots in shadowing order. Package roots carry their
-    /// owned namespace so `src/ui.lisp` resolves `author.package.ui` without
-    /// allowing that package to satisfy somebody else's import.
-    pub fn module_load_roots(&self) -> io::Result<Vec<eseqlisp::ModuleLoadRoot>> {
-        let catalog = eseqlisp::package::PackageCatalog::scan(self.packages_dir())
-            .map_err(|errors| io::Error::new(
-                io::ErrorKind::InvalidData,
-                errors.into_iter().map(|error| error.to_string()).collect::<Vec<_>>().join("\n"),
-            ))?;
+    /// Validated module roots in shadowing order, plus one message per
+    /// package that failed validation. Package roots carry their owned
+    /// namespace so `src/ui.lisp` resolves `author.package.ui` without
+    /// allowing that package to satisfy somebody else's import. Invalid
+    /// packages are excluded and reported — like a failed user init, a broken
+    /// third-party clone never aborts application boot.
+    pub fn module_load_roots(&self) -> (Vec<eseqlisp::ModuleLoadRoot>, Vec<String>) {
+        let (catalog, errors) =
+            eseqlisp::package::PackageCatalog::scan_reporting(self.packages_dir());
         let mut roots = vec![eseqlisp::ModuleLoadRoot {
             path: self.user_modules_dir(),
             module_prefix: None,
@@ -256,11 +256,11 @@ impl AppPaths {
             path: self.factory_root(),
             module_prefix: None,
         });
-        Ok(roots)
+        (roots, errors.into_iter().map(|error| error.to_string()).collect())
     }
 
     pub fn load_path(&self) -> io::Result<Vec<PathBuf>> {
-        Ok(self.module_load_roots()?.into_iter().map(|root| root.path).collect())
+        Ok(self.module_load_roots().0.into_iter().map(|root| root.path).collect())
     }
 
     /// Create the complete mutable user-tier directory shape. This is safe to
@@ -722,6 +722,10 @@ mod tests {
             )).unwrap();
         }
         std::fs::create_dir_all(paths.packages_dir().join(".ignored-no-src")).unwrap();
+        // An invalid clone must be reported and skipped, never abort boot by
+        // failing load-path construction (same contract as a failed user init).
+        std::fs::create_dir_all(paths.packages_dir().join("broken")).unwrap();
+        std::fs::write(paths.packages_dir().join("broken/manifest.json"), "not json").unwrap();
         assert_eq!(
             paths.load_path().unwrap(),
             vec![
@@ -731,6 +735,9 @@ mod tests {
                 workspace.join("content"),
             ]
         );
+        let (_, errors) = paths.module_load_roots();
+        assert_eq!(errors.len(), 1, "the broken package is reported exactly once");
+        assert!(errors[0].contains("broken"), "error names the offending package: {}", errors[0]);
 
         std::fs::remove_dir_all(root).unwrap();
     }
