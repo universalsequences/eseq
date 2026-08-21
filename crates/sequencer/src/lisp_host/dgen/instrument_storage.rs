@@ -426,8 +426,36 @@ pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Pat
     }
 }
 
+/// Preset banks are user data, not instrument source: saving presets on a
+/// factory instrument must not require forking it. Factory-qualified ids keep
+/// their bank in the user tier under the same logical path — exactly where
+/// legacy bare names wrote it — so a factory id without a factory-shipped
+/// bank falls through to that user-tier location on load.
+fn user_tier_preset_path(paths: &crate::app_paths::AppPaths, logical_name: &str) -> PathBuf {
+    paths
+        .user_instruments_dir()
+        .join(format!("{logical_name}.presets"))
+}
+
 pub(in crate::lisp_host) fn instrument_preset_path(name: &str) -> io::Result<PathBuf> {
-    resolve_instrument_storage_path(name, "presets")
+    instrument_preset_path_with_paths(crate::app_paths::app_paths(), name)
+}
+
+fn instrument_preset_path_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<PathBuf> {
+    let resolved = resolve_instrument_storage_path_with_paths(paths, name, "presets")?;
+    if resolved.is_file() {
+        return Ok(resolved);
+    }
+    if let Some((InstrumentTier::Factory, logical_name)) = parse_instrument_id(name)? {
+        let user = user_tier_preset_path(paths, logical_name);
+        if user.is_file() {
+            return Ok(user);
+        }
+    }
+    Ok(resolved)
 }
 
 pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
@@ -447,13 +475,23 @@ pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> 
     }
 }
 
-pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
-    let source = writable_instrument_source_path(name)?;
-    let path = if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
-        source.parent().unwrap_or(&source).with_extension("presets")
+fn instrument_preset_save_path_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<PathBuf> {
+    if let Some((InstrumentTier::Factory, logical_name)) = parse_instrument_id(name)? {
+        return Ok(user_tier_preset_path(paths, logical_name));
+    }
+    let source = writable_instrument_source_path_with_paths(paths, name)?;
+    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        Ok(source.parent().unwrap_or(&source).with_extension("presets"))
     } else {
-        source.with_extension("presets")
-    };
+        Ok(source.with_extension("presets"))
+    }
+}
+
+pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
+    let path = instrument_preset_save_path_with_paths(crate::app_paths::app_paths(), name)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -692,7 +730,13 @@ pub fn build_init_message_for_voice(
 // ── Instrument storage ──
 
 fn writable_instrument_source_path(name: &str) -> io::Result<PathBuf> {
-    let paths = crate::app_paths::app_paths();
+    writable_instrument_source_path_with_paths(crate::app_paths::app_paths(), name)
+}
+
+fn writable_instrument_source_path_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<PathBuf> {
     let logical_name = match parse_instrument_id(name)? {
         Some((InstrumentTier::Factory, _)) => {
             return Err(io::Error::new(
@@ -701,7 +745,7 @@ fn writable_instrument_source_path(name: &str) -> io::Result<PathBuf> {
             ));
         }
         Some((InstrumentTier::User, logical_name)) => {
-            let existing = resolve_instrument_storage_path(name, "lisp")?;
+            let existing = resolve_instrument_storage_path_with_paths(paths, name, "lisp")?;
             if existing.is_file() {
                 return Ok(existing);
             }
@@ -1004,6 +1048,43 @@ mod tier_id_tests {
             )
             .unwrap(),
             "factory"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn factory_instrument_presets_are_user_data_saved_and_loaded_from_the_user_tier() {
+        let (paths, root) = test_paths("factory-presets");
+        write_folder_instrument(&paths.instruments_dir(), "core/drift", "factory");
+
+        let save_path = instrument_preset_save_path_with_paths(&paths, "factory:core/drift")
+            .expect("saving presets on a factory instrument must not require forking it");
+        assert_eq!(
+            save_path,
+            paths.user_instruments_dir().join("core/drift.presets")
+        );
+        std::fs::create_dir_all(save_path.parent().unwrap()).unwrap();
+        std::fs::write(&save_path, "user bank").unwrap();
+        assert_eq!(
+            instrument_preset_path_with_paths(&paths, "factory:core/drift").unwrap(),
+            save_path
+        );
+
+        // A factory-shipped bank still wins on load, matching the legacy
+        // factory-first root order for bare names.
+        let factory_bank = paths.instruments_dir().join("core/drift.presets");
+        std::fs::write(&factory_bank, "factory bank").unwrap();
+        assert_eq!(
+            instrument_preset_path_with_paths(&paths, "factory:core/drift").unwrap(),
+            factory_bank
+        );
+
+        // User-tier instruments keep their bank next to the source.
+        write_folder_instrument(&paths.user_instruments_dir(), "mine", "user");
+        assert_eq!(
+            instrument_preset_save_path_with_paths(&paths, "user:mine").unwrap(),
+            paths.user_instruments_dir().join("mine.presets")
         );
 
         std::fs::remove_dir_all(root).unwrap();
