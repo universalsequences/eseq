@@ -171,6 +171,36 @@ pub struct ProjectFile {
     pub track_sounds: Vec<ProjectTrackSounds>,
 }
 
+impl ProjectFile {
+    /// Rewrite every serialized custom-instrument reference in place. This
+    /// covers both ordinary tracks and the source descriptors inside racks;
+    /// pattern slots refer to those descriptors by position and carry no
+    /// duplicate instrument id.
+    pub(crate) fn map_instrument_ids<E>(
+        &mut self,
+        mut map: impl FnMut(&str) -> Result<String, E>,
+    ) -> Result<(), E> {
+        for track in &mut self.tracks {
+            match &mut track.kind {
+                ProjectTrackKind::Custom { instrument_name } => {
+                    *instrument_name = map(instrument_name)?;
+                }
+                ProjectTrackKind::Rack { slots, .. } => {
+                    for slot in slots {
+                        if matches!(slot.instrument_type, ProjectInstrumentType::Custom) {
+                            if let Some(instrument_name) = &mut slot.instrument_name {
+                                *instrument_name = map(instrument_name)?;
+                            }
+                        }
+                    }
+                }
+                ProjectTrackKind::Sampler { .. } | ProjectTrackKind::Modulator => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One referent's sound refs (takes spec 17.2), as file-local entity ids.
 /// Ids are scoped per track and carry identity only — entity CONTENT rides
 /// the dense pattern bank / take chunks exactly as before, which stays the
@@ -5016,6 +5046,51 @@ mod tests {
 
         assert_eq!(project.patterns[0].track_params[0].mute_group, 0);
         assert!(project.patterns[0].instrument_run_modes.is_empty());
+    }
+
+    #[test]
+    fn project_instrument_id_migration_covers_custom_tracks_and_rack_slots() {
+        let mut project = sample_project();
+        project.tracks.push(ProjectTrack {
+            id: TrackId(3),
+            name: Some("Rack".to_string()),
+            name_user_authored: false,
+            color: None,
+            collapsed: false,
+            kind: ProjectTrackKind::Rack {
+                routing: ProjectRackRouting::Broadcast,
+                slots: vec![
+                    ProjectRackTrackSlot {
+                        instrument_type: ProjectInstrumentType::Custom,
+                        sample_path: None,
+                        sample_name: None,
+                        instrument_name: Some("user-lead".to_string()),
+                    },
+                    ProjectRackTrackSlot {
+                        instrument_type: ProjectInstrumentType::Sampler,
+                        sample_path: Some("samples/kick.wav".to_string()),
+                        sample_name: Some("kick".to_string()),
+                        instrument_name: None,
+                    },
+                ],
+            },
+        });
+
+        project
+            .map_instrument_ids(|name| Ok::<_, ()>(format!("qualified:{name}")))
+            .unwrap();
+
+        assert!(matches!(
+            &project.tracks[0].kind,
+            ProjectTrackKind::Custom { instrument_name }
+                if instrument_name == "qualified:prophet-5"
+        ));
+        assert!(matches!(
+            &project.tracks[2].kind,
+            ProjectTrackKind::Rack { slots, .. }
+                if slots[0].instrument_name.as_deref() == Some("qualified:user-lead")
+                    && slots[1].instrument_name.is_none()
+        ));
     }
 
     #[test]

@@ -3991,7 +3991,7 @@
         let manifest = test_instrument_manifest();
         let lib = lisp_host::test_loaded_dgen_lib();
         let mut app = test_app_with_track_count(&graph, 1);
-        for (expected_id, name) in ["old", "new"].into_iter().enumerate() {
+        for (expected_id, name) in ["core/drift", "core/operator"].into_iter().enumerate() {
             let engine_id = app.editor.engine_registry.upsert(EngineDescriptor {
                 name: name.to_string(),
                 source: format!("{name}.lisp"),
@@ -4008,7 +4008,7 @@
 
         app.apply_recorded_instrument_binding_mutation(0, "Replace instrument", |app| {
             app.graph_controller().swap_custom_track_instrument(
-                0, "new", 1, &manifest, &lib, CustomInstrumentRunMode::Instrument,
+                0, "core/operator", 1, &manifest, &lib, CustomInstrumentRunMode::Instrument,
             )
         })
             .expect("track should swap before saving");
@@ -4039,7 +4039,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
-            }] if instrument_name == "old"
+            }] if instrument_name == "factory:core/drift"
         ));
         assert!(matches!(
             crate::app::edit::redo(&mut app),
@@ -4063,7 +4063,7 @@
             [crate::project::ProjectTrack {
                 kind: crate::project::ProjectTrackKind::Custom { instrument_name },
                 ..
-            }] if instrument_name == "new"
+            }] if instrument_name == "factory:core/operator"
         ));
         graph.process_block();
     }

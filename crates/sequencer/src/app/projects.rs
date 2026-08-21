@@ -1182,6 +1182,11 @@ impl App {
         if project.version < 2 {
             migrate_legacy_dgen_param_node_indices(&mut project);
         }
+        project
+            .map_instrument_ids(|name| {
+                crate::lisp_host::qualify_instrument_id(name).map_err(|error| error.to_string())
+            })
+            .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
         project.normalize_device_instances()?;
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
@@ -2643,6 +2648,16 @@ impl App {
                                             engine_id
                                         )
                                     })?;
+                                let instrument_name = crate::lisp_host::qualify_instrument_id(
+                                    &instrument_name,
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "Could not qualify instrument for rack track '{}' slot {}: {error}",
+                                        name,
+                                        slot_idx + 1
+                                    )
+                                })?;
                                 slots.push(crate::project::ProjectRackTrackSlot {
                                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                                     sample_path: None,
@@ -2716,6 +2731,12 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
+                    let instrument_name = crate::lisp_host::qualify_instrument_id(
+                        &instrument_name,
+                    )
+                    .map_err(|error| {
+                        format!("Could not qualify instrument for track '{}': {error}", name)
+                    })?;
                     Ok(ProjectTrack {
                         id,
                         name: Some(name.clone()),

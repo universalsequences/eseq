@@ -56,7 +56,61 @@ fn resolved_walk_cache(
     CACHE.get_or_init(Default::default)
 }
 
-pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstrumentTier {
+    Factory,
+    User,
+}
+
+impl InstrumentTier {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Factory => "factory",
+            Self::User => "user",
+        }
+    }
+
+    fn root(self, paths: &crate::app_paths::AppPaths) -> PathBuf {
+        match self {
+            Self::Factory => paths.instruments_dir(),
+            Self::User => paths.user_instruments_dir(),
+        }
+    }
+}
+
+fn parse_instrument_id(name: &str) -> io::Result<Option<(InstrumentTier, &str)>> {
+    let trimmed = name.trim_end_matches('/');
+    let qualified = if let Some(path) = trimmed.strip_prefix("factory:") {
+        Some((InstrumentTier::Factory, path))
+    } else if let Some(path) = trimmed.strip_prefix("user:") {
+        Some((InstrumentTier::User, path))
+    } else if trimmed.contains(':') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported instrument id '{name}'"),
+        ));
+    } else {
+        None
+    };
+    let path = qualified.map(|(_, path)| path).unwrap_or(trimmed);
+    if path.is_empty()
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid instrument id '{name}'"),
+        ));
+    }
+    Ok(qualified)
+}
+
+fn resolve_instrument_storage_path_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+    extension: &str,
+) -> io::Result<PathBuf> {
     fn is_hidden(path: &Path) -> bool {
         path.file_name()
             .and_then(|name| name.to_str())
@@ -81,77 +135,128 @@ pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extensio
         }
     }
 
-    let roots = crate::app_paths::app_paths().instrument_dirs();
-    let trimmed = name.trim_end_matches('/');
-    for root in &roots {
-        if extension == "lisp" && name.ends_with('/') {
-            let dsp = root.join(trimmed).join("dsp.lisp");
-            if dsp.exists() {
-                return Ok(dsp);
-            }
-        }
-        let exact = root.join(format!("{name}.{extension}"));
+    fn resolve_in_root(
+        root: &Path,
+        logical_name: &str,
+        extension: &str,
+        allow_leaf_fallback: bool,
+    ) -> io::Result<Option<PathBuf>> {
+        let trimmed = logical_name.trim_end_matches('/');
+        let exact = root.join(format!("{trimmed}.{extension}"));
         if exact.exists() {
-            return Ok(exact);
+            return Ok(Some(exact));
         }
         if extension == "lisp" {
-            let dsp = root.join(name).join("dsp.lisp");
+            let dsp = root.join(trimmed).join("dsp.lisp");
             if dsp.exists() {
-                return Ok(dsp);
+                return Ok(Some(dsp));
             }
         }
+
+        if !allow_leaf_fallback {
+            return Ok(None);
+        }
+
+        let basename = Path::new(trimmed)
+            .file_name()
+            .and_then(|part| part.to_str())
+            .unwrap_or(trimmed);
+        let mut matches = Vec::new();
+        if extension == "lisp" {
+            collect_folder_source_matches(root, basename, &mut matches);
+        }
+        collect_file_matches(root, &format!("{basename}.{extension}"), &mut matches);
+        matches.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+        matches.dedup();
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Ambiguous instrument '{logical_name}': found multiple matching instrument sources under {}",
+                    root.display()
+                ),
+            )),
+        }
     }
-    let exact = roots
-        .first()
-        .expect("AppPaths always supplies a factory instrument root")
-        .join(format!("{name}.{extension}"));
+
+    let qualified = parse_instrument_id(name)?;
+    let logical_name = qualified
+        .map(|(_, logical_name)| logical_name)
+        .unwrap_or_else(|| name.trim_end_matches('/'));
+    let tiers: &[InstrumentTier] = match qualified {
+        Some((InstrumentTier::Factory, _)) => &[InstrumentTier::Factory],
+        Some((InstrumentTier::User, _)) => &[InstrumentTier::User],
+        None => &[InstrumentTier::Factory, InstrumentTier::User],
+    };
 
     let cache_key = (name.to_string(), extension.to_string());
-    if let Some(cached) = resolved_walk_cache()
-        .lock()
-        .unwrap()
-        .get(&cache_key)
-        .cloned()
-    {
+    if let Some(cached) = resolved_walk_cache().lock().unwrap().get(&cache_key).cloned() {
         if cached.exists() {
             return Ok(cached);
         }
         resolved_walk_cache().lock().unwrap().remove(&cache_key);
     }
 
-    let basename = Path::new(trimmed)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(trimmed);
-    let mut matches = Vec::new();
-    let file_name = format!("{basename}.{extension}");
-    for root in &roots {
-        if extension == "lisp" {
-            collect_folder_source_matches(root, basename, &mut matches);
-        }
-        collect_file_matches(root, &file_name, &mut matches);
-    }
-    matches.sort_by_key(|path| path.to_string_lossy().to_lowercase());
-    matches.dedup();
-
-    match matches.len() {
-        0 => Ok(exact),
-        1 => {
-            let resolved = matches.remove(0);
+    for tier in tiers {
+        if let Some(resolved) = resolve_in_root(
+            &tier.root(paths),
+            logical_name,
+            extension,
+            qualified.is_none(),
+        )? {
             resolved_walk_cache()
                 .lock()
                 .unwrap()
                 .insert(cache_key, resolved.clone());
-            Ok(resolved)
+            return Ok(resolved);
         }
-        _ => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "Ambiguous instrument '{name}': found multiple matching instrument sources under {}",
-                roots.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
-            ),
-        )),
     }
+
+    Ok(tiers[0]
+        .root(paths)
+        .join(format!("{logical_name}.{extension}")))
+}
+
+pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
+    resolve_instrument_storage_path_with_paths(crate::app_paths::app_paths(), name, extension)
+}
+
+/// Return the stable project id for an instrument. Legacy bare names prefer
+/// factory content when both tiers contain the same name; only a missing
+/// factory source falls through to the user tier.
+pub fn qualify_instrument_id(name: &str) -> io::Result<String> {
+    qualify_instrument_id_with_paths(crate::app_paths::app_paths(), name)
+}
+
+fn qualify_instrument_id_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<String> {
+    let source = resolve_instrument_storage_path_with_paths(paths, name, "lisp")?;
+    if !source.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("instrument '{name}' does not exist"),
+        ));
+    }
+    for tier in [InstrumentTier::Factory, InstrumentTier::User] {
+        let root = tier.root(paths);
+        if let Ok(relative) = source.strip_prefix(&root) {
+            let logical = if relative.file_name().and_then(|part| part.to_str()) == Some("dsp.lisp") {
+                relative.parent().unwrap_or(relative).to_path_buf()
+            } else {
+                relative.with_extension("")
+            };
+            let logical = logical.to_string_lossy().replace('\\', "/");
+            return Ok(format!("{}:{logical}", tier.prefix()));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("instrument source '{}' is outside the configured tiers", source.display()),
+    ))
 }
 
 pub(in crate::lisp_host) fn collect_folder_source_matches(dir: &Path, folder_name: &str, out: &mut Vec<PathBuf>) {
@@ -246,7 +351,7 @@ pub fn load_instrument_run_mode(name: &str) -> io::Result<CustomInstrumentRunMod
 }
 
 pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -> io::Result<()> {
-    let source = writable_instrument_source_path(name);
+    let source = writable_instrument_source_path(name)?;
     let path = instrument_metadata_path_for_source_path(&source)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -343,15 +448,11 @@ pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> 
 }
 
 pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
-    let path = if name.ends_with('/') {
-        crate::app_paths::app_paths()
-            .user_instruments_dir()
-            .join(name.trim_end_matches('/'))
-            .with_extension("presets")
+    let source = writable_instrument_source_path(name)?;
+    let path = if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        source.parent().unwrap_or(&source).with_extension("presets")
     } else {
-        crate::app_paths::app_paths()
-            .user_instruments_dir()
-            .join(format!("{name}.presets"))
+        source.with_extension("presets")
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -590,17 +691,34 @@ pub fn build_init_message_for_voice(
 
 // ── Instrument storage ──
 
-fn writable_instrument_source_path(name: &str) -> PathBuf {
-    let root = crate::app_paths::app_paths().user_instruments_dir();
+fn writable_instrument_source_path(name: &str) -> io::Result<PathBuf> {
+    let paths = crate::app_paths::app_paths();
+    let logical_name = match parse_instrument_id(name)? {
+        Some((InstrumentTier::Factory, _)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("factory instrument '{name}' is read-only; fork it before editing"),
+            ));
+        }
+        Some((InstrumentTier::User, logical_name)) => {
+            let existing = resolve_instrument_storage_path(name, "lisp")?;
+            if existing.is_file() {
+                return Ok(existing);
+            }
+            logical_name
+        }
+        None => name.trim_end_matches('/'),
+    };
+    let root = paths.user_instruments_dir();
     if name.ends_with('/') {
-        root.join(name.trim_end_matches('/')).join("dsp.lisp")
+        Ok(root.join(logical_name).join("dsp.lisp"))
     } else {
-        root.join(format!("{name}.lisp"))
+        Ok(root.join(format!("{logical_name}.lisp")))
     }
 }
 
 pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
-    let path = writable_instrument_source_path(name);
+    let path = writable_instrument_source_path(name)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -608,15 +726,11 @@ pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
-    let path = if name.ends_with('/') {
-        crate::app_paths::app_paths()
-            .user_instruments_dir()
-            .join(name.trim_end_matches('/'))
-            .join("ui.lisp")
+    let instrument_source = writable_instrument_source_path(name)?;
+    let path = if instrument_source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        instrument_source.parent().unwrap_or(&instrument_source).join("ui.lisp")
     } else {
-        writable_instrument_source_path(name)
-            .with_extension("")
-            .join("ui.lisp")
+        instrument_source.with_extension("").join("ui.lisp")
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -722,7 +836,7 @@ pub(in crate::lisp_host) fn validate_instrument_relative_dir(path: &str) -> io::
 
 pub fn move_saved_instrument(name: &str, target_folder: &str) -> io::Result<String> {
     let root = crate::app_paths::app_paths().user_instruments_dir();
-    let source = writable_instrument_source_path(name);
+    let source = writable_instrument_source_path(name)?;
     if !source.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -831,6 +945,85 @@ pub fn move_saved_instrument(name: &str, target_folder: &str) -> io::Result<Stri
 pub fn load_instrument_source(name: &str) -> io::Result<String> {
     let path = resolve_instrument_storage_path(name, "lisp")?;
     std::fs::read_to_string(&path)
+}
+
+#[cfg(test)]
+mod tier_id_tests {
+    use super::*;
+
+    fn test_paths(label: &str) -> (crate::app_paths::AppPaths, PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseq-instrument-id-{label}-{unique}"));
+        let paths = crate::app_paths::AppPaths::dev(
+            root.join("crates/sequencer"),
+            root.clone(),
+            root.join("config"),
+        );
+        (paths, root)
+    }
+
+    fn write_folder_instrument(root: &Path, name: &str, marker: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dsp.lisp"), marker).unwrap();
+    }
+
+    #[test]
+    fn bare_instrument_ids_prefer_factory_and_qualified_ids_select_exact_tier() {
+        let (paths, root) = test_paths("collision");
+        write_folder_instrument(&paths.instruments_dir(), "shared/lead", "factory");
+        write_folder_instrument(&paths.user_instruments_dir(), "shared/lead", "user");
+
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "shared/lead").unwrap(),
+            "factory:shared/lead"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                resolve_instrument_storage_path_with_paths(
+                    &paths,
+                    "user:shared/lead",
+                    "lisp",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            "user"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                resolve_instrument_storage_path_with_paths(
+                    &paths,
+                    "factory:shared/lead",
+                    "lisp",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            "factory"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bare_instrument_id_falls_back_to_user_and_rejects_unknown_tiers() {
+        let (paths, root) = test_paths("user-fallback");
+        write_folder_instrument(&paths.user_instruments_dir(), "mine", "user");
+
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "mine/").unwrap(),
+            "user:mine"
+        );
+        let error = qualify_instrument_id_with_paths(&paths, "pkg:someone/mine")
+            .expect_err("package ids are not part of the T3 tier resolver");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 // ── Instrument compilation ──
