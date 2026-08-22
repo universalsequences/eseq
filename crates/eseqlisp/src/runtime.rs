@@ -1769,6 +1769,7 @@ impl Runtime {
             ("str", "(str value ...)", "Concatenate values as display strings."),
             ("substring", "(substring string start [end])", "Return a character-indexed substring."),
             ("str-contains?", "(str-contains? haystack needle)", "Return whether haystack contains needle, case-insensitively."),
+            ("gensym", "(gensym base)", "Return a deterministic symbol unique to the current macro expansion site."),
             ("source", "(source value ...)", "Concatenate values as Lisp source text."),
             ("fmt", "(fmt template value ...)", "Format values into {} placeholders in template."),
             ("abs", "(abs x)", "Return the absolute value."),

@@ -1,6 +1,6 @@
 use super::SOURCE_ORIGIN_NATIVE;
 use crate::compiler::{
-    Chunk, Compiler, CompilerError, MacroCompilerState, MacroDef, OpCode,
+    Chunk, Compiler, CompilerError, MacroCompilerState, MacroDef, MacroExpansionSite, OpCode,
 };
 use crate::host::BufferId;
 use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
@@ -1775,6 +1775,22 @@ fn stamp_source_origin_value(value: &Value, start: usize, end: usize, revision: 
     }
 }
 
+fn gensym_native(args: Vec<Value>, vm: &mut VM) -> Value {
+    let [base] = args.as_slice() else {
+        return Value::Nil;
+    };
+    let base = match base {
+        Value::String(base) | Value::Symbol(base) | Value::Keyword(base) if !base.is_empty() => base,
+        _ => return Value::Nil,
+    };
+    let Some(site) = vm.active_expansion_site.as_mut() else {
+        return Value::Nil;
+    };
+    let counter = site.next_gensym;
+    site.next_gensym += 1;
+    Value::Symbol(format!("{base}__g{:016x}_{counter}", site.identity_hash))
+}
+
 fn source_origin_native(args: Vec<Value>) -> Value {
     let [start, end, revision, value] = args.as_slice() else {
         return args.last().cloned().unwrap_or(Value::Nil);
@@ -2102,6 +2118,11 @@ fn annotate_widget_tree_stable_ids(
     Value::Map(annotated)
 }
 
+struct ActiveExpansionSite {
+    identity_hash: u64,
+    next_gensym: usize,
+}
+
 struct Frame {
     locals: Vec<Option<Rc<RefCell<Value>>>>,
     upvalues: Vec<Rc<RefCell<Value>>>,
@@ -2177,6 +2198,7 @@ pub struct VM {
     /// Present only while a procedural macro is executing. Native dispatch and
     /// stateful bytecodes consult this as the VM-level sandbox backstop.
     active_expander: Option<String>,
+    active_expansion_site: Option<ActiveExpansionSite>,
     /// Some callback-oriented natives historically turn callback errors into
     /// Lisp `nil`. Sandbox violations must never be swallowed that way.
     expansion_violation: Option<VMError>,
@@ -3101,6 +3123,10 @@ pub fn register_core_natives(vm: &mut VM) {
         )
     });
 
+    // Only meaningful while a procedural expander is running. The site and
+    // counter live in the VM rather than Lisp state so Rule 2 remains pure.
+    vm.register_native_with_vm("gensym", gensym_native);
+
     // (source val ...) → concatenated evaluable Lisp source
     vm.register_native("source", |args| {
         let mut s = String::new();
@@ -3144,7 +3170,7 @@ pub fn register_core_natives(vm: &mut VM) {
         "dict", "get", "merge", "keys", "first", "rest", "cons", "len",
         "append", "list", "empty?", "set-nth", "map", "filter", "reduce",
         "zip", "nth", "reverse", "chunks", "range", "not", "str", "substring",
-        "str-contains?", "source", "fmt",
+        "str-contains?", "gensym", "source", "fmt",
     ]);
 }
 
@@ -3864,6 +3890,7 @@ impl VM {
             imported_at_epoch: HashMap::new(),
             import_pass_epoch: 1,
             active_expander: None,
+            active_expansion_site: None,
             expansion_violation: None,
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
@@ -4213,10 +4240,46 @@ impl VM {
         }
     }
 
+    fn macro_expansion_site_hash(&self, macro_name: &str, site: &MacroExpansionSite) -> u64 {
+        // FNV-1a is fixed across Rust versions and processes. `DefaultHasher`
+        // is intentionally unsuitable for source identity because its output
+        // is not a stability contract.
+        fn add(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+            *hash ^= 0xff;
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+
+        let mut hash = 0xcbf29ce484222325;
+        match self.current_effect_source_buffer_id {
+            Some(buffer_id) => add(&mut hash, &buffer_id.to_le_bytes()),
+            None => add(&mut hash, b"no-buffer"),
+        }
+        if let Some(source_file) = self.source_manager.current_source_file() {
+            add(&mut hash, source_file.to_string_lossy().as_bytes());
+        }
+        add(&mut hash, macro_name.as_bytes());
+        match &site.explicit_key {
+            Some(key) => {
+                add(&mut hash, b"key");
+                add(&mut hash, key.as_bytes());
+            }
+            None => {
+                add(&mut hash, b"ordinal");
+                add(&mut hash, &site.ordinal.to_le_bytes());
+            }
+        }
+        hash
+    }
+
     fn evaluate_compiled_macro(
         &mut self,
         mac: &MacroDef,
         args: Vec<Expression>,
+        site: &MacroExpansionSite,
         state: &mut MacroCompilerState,
     ) -> Result<Expression, String> {
         let mut values = args
@@ -4243,13 +4306,19 @@ impl VM {
             .get(mac.function_chunk)
             .and_then(|chunk| chunk.source_symbol.clone())
             .unwrap_or_else(|| "<macro>".to_string());
+        let identity_hash = self.macro_expansion_site_hash(&macro_name, site);
         let previous_expander = self.active_expander.replace(macro_name);
+        let previous_site = self.active_expansion_site.replace(ActiveExpansionSite {
+            identity_hash,
+            next_gensym: 0,
+        });
         let previous_violation = self.expansion_violation.take();
         let result = self
             .validate_expander_chunk(mac.function_chunk, &mut HashSet::new())
             .and_then(|_| self.invoke(Value::Closure(mac.function_chunk, Vec::new()), values));
         let violation = self.expansion_violation.take();
         self.active_expander = previous_expander;
+        self.active_expansion_site = previous_site;
         self.expansion_violation = previous_violation;
         state.chunks = std::mem::take(&mut self.chunks);
         state.global_symbols = std::mem::take(&mut self.global_names);
@@ -4286,8 +4355,8 @@ impl VM {
             self.macros.clone(),
             self.source_manager.current_source_file(),
         );
-        compiler.set_macro_evaluator(|mac, args, state| {
-            self.evaluate_compiled_macro(mac, args, state)
+        compiler.set_macro_evaluator(|mac, args, site, state| {
+            self.evaluate_compiled_macro(mac, args, site, state)
         });
         let result = compiler
             .expand_macros(expr, 0)
@@ -4382,8 +4451,8 @@ impl VM {
                 if let Some(context) = module_context.take() {
                     compiler.set_module_context(context);
                 }
-                compiler.set_macro_evaluator(|mac, args, state| {
-                    self.evaluate_compiled_macro(mac, args, state)
+                compiler.set_macro_evaluator(|mac, args, site, state| {
+                    self.evaluate_compiled_macro(mac, args, site, state)
                 });
                 match compiler.compile() {
                     Ok(chunks) => {
@@ -4752,8 +4821,8 @@ impl VM {
                 source_file,
             );
             compiler.set_module_exports(self.module_exports.clone());
-            compiler.set_macro_evaluator(|mac, args, state| {
-                self.evaluate_compiled_macro(mac, args, state)
+            compiler.set_macro_evaluator(|mac, args, site, state| {
+                self.evaluate_compiled_macro(mac, args, site, state)
             });
             match compiler.compile() {
                 Ok(chunks) => Ok((
@@ -8962,6 +9031,72 @@ counter
                 Rc::new(RefCell::new(Value::Number(22.0))),
             ]))
         );
+    }
+
+    #[test]
+    fn procedural_macro_gensym_is_stable_per_site_and_unique_per_call() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.set_current_effect_context(Some(41));
+        vm.eval_str(
+            "(defmacro generated (&rest options) `(quote ,(gensym \"tmp\")))\n\
+             (defmacro generated-pair ()\n\
+               `(quote (,(gensym \"tmp\") ,(gensym \"tmp\"))))",
+        )
+        .expect("gensym macro definitions");
+
+        let first_run = vm
+            .eval_str("(list (generated) (generated))")
+            .expect("first expansion")
+            .expect("first expansion value");
+        let Value::List(first_symbols) = first_run else {
+            panic!("expected generated symbol list");
+        };
+        assert_ne!(*first_symbols[0].borrow(), *first_symbols[1].borrow());
+
+        let repeated = vm
+            .eval_str("(generated)")
+            .expect("repeat expansion")
+            .expect("repeat expansion value");
+        assert_eq!(repeated, *first_symbols[0].borrow());
+
+        let pair = vm
+            .eval_str("(generated-pair)")
+            .expect("counter expansion")
+            .expect("counter expansion value");
+        let Value::List(pair_symbols) = pair else {
+            panic!("expected pair of generated symbols");
+        };
+        assert_ne!(*pair_symbols[0].borrow(), *pair_symbols[1].borrow());
+    }
+
+    #[test]
+    fn procedural_macro_gensym_keys_survive_reordering_and_buffers_do_not_collide() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str("(defmacro generated (&rest options) `(quote ,(gensym \"tmp\")))")
+            .expect("gensym macro definition");
+
+        vm.set_current_effect_context(Some(7));
+        let keyed = vm
+            .eval_str("(generated :key \"fixed\")")
+            .expect("keyed expansion")
+            .expect("keyed expansion value");
+        let reordered = vm
+            .eval_str("(list (generated) (generated :key \"fixed\"))")
+            .expect("reordered expansion")
+            .expect("reordered expansion value");
+        let Value::List(reordered) = reordered else {
+            panic!("expected reordered expansion list");
+        };
+        assert_eq!(keyed, *reordered[1].borrow());
+
+        vm.set_current_effect_context(Some(8));
+        let other_buffer = vm
+            .eval_str("(generated :key \"fixed\")")
+            .expect("other-buffer expansion")
+            .expect("other-buffer expansion value");
+        assert_ne!(keyed, other_buffer);
     }
 
     #[test]

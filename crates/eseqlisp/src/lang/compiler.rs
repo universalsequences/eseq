@@ -101,6 +101,12 @@ pub enum OpCode {
     PushNil,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroExpansionSite {
+    pub ordinal: usize,
+    pub explicit_key: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MacroDef {
     pub params: Vec<String>,
@@ -119,6 +125,7 @@ pub struct MacroCompilerState {
 type MacroEvaluator<'a> = dyn FnMut(
         &MacroDef,
         Vec<Expression>,
+        &MacroExpansionSite,
         &mut MacroCompilerState,
     ) -> Result<Expression, String>
     + 'a;
@@ -132,6 +139,7 @@ pub struct ModuleCompileContext {
     import_aliases: HashMap<String, String>,
     refers: HashMap<String, String>,
     known_namespaces: HashSet<String>,
+    next_macro_expansion_ordinal: usize,
 }
 
 pub struct Compiler<'a> {
@@ -171,6 +179,7 @@ pub struct Compiler<'a> {
     errors: Vec<String>,
     pub macros: HashMap<String, MacroDef>,
     macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
+    next_macro_expansion_ordinal: usize,
     compiling_macro_body: usize,
 }
 
@@ -377,6 +386,7 @@ impl<'a> Compiler<'a> {
             errors: Vec::new(),
             macros: HashMap::new(),
             macro_evaluator: None,
+            next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
         }
     }
@@ -416,6 +426,7 @@ impl<'a> Compiler<'a> {
             errors: Vec::new(),
             macros,
             macro_evaluator: None,
+            next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
         }
     }
@@ -425,6 +436,7 @@ impl<'a> Compiler<'a> {
         evaluator: impl FnMut(
                 &MacroDef,
                 Vec<Expression>,
+                &MacroExpansionSite,
                 &mut MacroCompilerState,
             ) -> Result<Expression, String>
             + 'a,
@@ -449,6 +461,7 @@ impl<'a> Compiler<'a> {
             import_aliases: std::mem::take(&mut self.import_aliases),
             refers: std::mem::take(&mut self.refers),
             known_namespaces: std::mem::take(&mut self.known_namespaces),
+            next_macro_expansion_ordinal: self.next_macro_expansion_ordinal,
         }
     }
 
@@ -458,6 +471,7 @@ impl<'a> Compiler<'a> {
         self.import_aliases = context.import_aliases;
         self.refers = context.refers;
         self.known_namespaces = context.known_namespaces;
+        self.next_macro_expansion_ordinal = context.next_macro_expansion_ordinal;
     }
 
     pub fn take_warnings(&mut self) -> Vec<String> {
@@ -550,12 +564,22 @@ impl<'a> Compiler<'a> {
                         None => args.len() == mac.params.len(),
                     };
                     if arity_matches {
+                        let site = MacroExpansionSite {
+                            ordinal: self.next_macro_expansion_ordinal,
+                            explicit_key: args.windows(2).find_map(|pair| match pair {
+                                [Expression::Keyword(key), value] if key == "key" => {
+                                    Some(crate::parser::format_expression(value))
+                                }
+                                _ => None,
+                            }),
+                        };
+                        self.next_macro_expansion_ordinal += 1;
                         let mut state = MacroCompilerState {
                             chunks: std::mem::take(&mut self.chunks),
                             global_symbols: std::mem::take(&mut self.global_symbols),
                         };
                         let expansion = match self.macro_evaluator.as_mut() {
-                            Some(evaluator) => evaluator(&mac, args.to_vec(), &mut state)
+                            Some(evaluator) => evaluator(&mac, args.to_vec(), &site, &mut state)
                                 .map_err(|message| {
                                     CompilerError::Message(format!(
                                         "error expanding macro `{name}`: {message}"
