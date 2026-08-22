@@ -33,9 +33,10 @@ pub(super) fn handle(
     let gesture = map_string(&map, "gesture").unwrap_or_else(|| "sampler-slice".to_string());
     let label = map_string(&map, "label").unwrap_or_else(|| "Edit sampler slice".to_string());
 
-    // Marker indices address the list the panel rendered, so sensitivity has to
-    // resolve exactly the way the panel resolved it (p-locks and rack macros
-    // included) or an edit lands on a neighbouring marker.
+    // Marker indices address the list the panel rendered, so mode and
+    // sensitivity have to resolve exactly the way the panel resolved them
+    // (p-locks and rack macros included) or an edit lands on a neighbouring
+    // marker.
     let plock_step = ctx.shared.selected_steps.lock().unwrap().iter().copied().min();
     let target = if let Some(slot_idx) = rack_slot {
         let snapshot = app.state.latest_scheduler_snapshot();
@@ -61,15 +62,24 @@ pub(super) fn handle(
         }) else {
             return;
         };
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let mode = state_values::rack_panel::rack_slot_param_value(
+            rack,
+            slot_idx,
+            slot,
+            &desc,
+            sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
+            plock_step,
+        );
         let sensitivity = state_values::rack_panel::rack_slot_param_value(
             rack,
             slot_idx,
             slot,
-            &sequencer::effects::EffectDescriptor::builtin_sampler(),
+            &desc,
             sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
             plock_step,
         );
-        (*buffer_id, hash, sensitivity)
+        (*buffer_id, hash, mode, sensitivity)
     } else {
         let Some(&buffer_id) = app.graph.track_buffer_ids.get(track) else {
             return;
@@ -90,16 +100,25 @@ pub(super) fn handle(
             .get(track)
             .cloned()
             .unwrap_or_else(sequencer::effects::EffectDescriptor::builtin_sampler);
+        let Some(mode) = state_values::sampler_slice_mode(slot, &desc, plock_step) else {
+            return;
+        };
         let Some(sensitivity) = state_values::sampler_slice_sensitivity(slot, &desc, plock_step)
         else {
             return;
         };
-        (buffer_id, hash, sensitivity)
+        (buffer_id, hash, mode, sensitivity)
     };
+    // Beat-division slices are derived from analysis and are not authored
+    // markers. Ignore edit gestures rather than persisting overrides that the
+    // selected mode cannot consume.
+    if target.2.round() != 1.0 {
+        return;
+    }
     let Some(table) = app.sample_analysis.cache().table(target.0) else {
         return;
     };
-    let detected = table.slice_starts(target.2).collect::<Vec<_>>();
+    let detected = table.slice_starts(target.3).collect::<Vec<_>>();
     let frame = (time.max(0.0) * table.sample_rate as f64).round() as u32;
     let sample_len = table.sample_len_frames;
     let hash = target.1;

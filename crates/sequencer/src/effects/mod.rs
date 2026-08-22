@@ -7486,6 +7486,25 @@ impl EffectDescriptor {
                 host_control: None,
                 ui_metadata: None,
             },
+            ParamDescriptor {
+                name: "div".to_string(),
+                min: 0.0,
+                max: 3.0,
+                default: crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
+                kind: ParamKind::Enum {
+                    labels: vec![
+                        "1/4".to_string(),
+                        "1/8".to_string(),
+                        "1/16".to_string(),
+                        "1/32".to_string(),
+                    ],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            },
         ]);
         Self {
             name: "Sampler".to_string(),

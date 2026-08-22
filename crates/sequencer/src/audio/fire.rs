@@ -220,6 +220,10 @@ pub(super) fn fire_resolved(
                 .plocks
                 .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)
                 .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)),
+            slice_division: inst_slot
+                .plocks
+                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION)
+                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION)),
             start_point_locked: inst_slot.plocks.get(step, 2).is_some(),
             end_point_locked: inst_slot.plocks.get(step, 3).is_some(),
             warp_preserve: live_slot_resolved_node_param_value(
@@ -511,7 +515,7 @@ pub(super) fn fire_resolved(
                 {
                     continue;
                 }
-                if trigger_params.slice_mode.round() != 1.0 {
+                if trigger_params.slice_mode.round() == 0.0 {
                     trigger_transpose += base_note_offset;
                 }
                 let voice = data.voice_pools[track_idx]
@@ -732,7 +736,7 @@ pub(super) fn fire_resolved(
             {
                 return;
             }
-            if trigger_params.slice_mode.round() != 1.0 {
+            if trigger_params.slice_mode.round() == 0.0 {
                 trigger_transpose += base_note_offset;
             }
             let voice = data.voice_pools[track_idx]
@@ -1017,6 +1021,10 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
             0.5,
         ),
         slice_base: host_value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        slice_division: host_value(
+            crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
+            crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
+        ),
         start_point_locked: chop_inst_slot.plocks.get(event.step, 2).is_some(),
         end_point_locked: chop_inst_slot.plocks.get(event.step, 3).is_some(),
         ..ScheduledSamplerParams::default()
@@ -1031,7 +1039,7 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
     {
         return;
     }
-    if trigger_params.slice_mode.round() != 1.0 {
+    if trigger_params.slice_mode.round() == 0.0 {
         trigger_transpose += chop_base_note_offset;
     }
     let voice = data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);

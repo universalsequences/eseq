@@ -284,6 +284,7 @@
         (not (= name "slice"))
         (not (= name "sens"))
         (not (= name "slice base"))
+        (not (= name "div"))
         (not (sampler-base-note-param? p))
         (not (= name "attack"))
         (not (= name "release"))
@@ -346,7 +347,9 @@
         (sampler-param-control mode)
         (if (not (= (get mode :text-value) "off"))
           (h-stack :debug-name "sampler-slice-enabled-params" :gap 0.85 :align :start
-            (sampler-param-control (sampler-param-by-name params "sens"))
+            (if (= (get mode :text-value) "transient")
+              (sampler-param-control (sampler-param-by-name params "sens"))
+              (sampler-param-control (sampler-param-by-name params "div")))
             (sampler-param-control (sampler-param-by-name params "slice base")))
           (box :width 0.01 :height 0.01)))
       (box :width 0.01 :height 0.01))))

@@ -93,9 +93,7 @@ pub(super) fn resolve_slice(
     if mode == 0.0 {
         return SliceTriggerVerdict::Fire;
     }
-    // Division mode is introduced separately. Fail closed until its grid
-    // resolver exists rather than silently repitching the full sample.
-    if mode != 1.0 {
+    if mode != 1.0 && mode != 2.0 {
         return SliceTriggerVerdict::Ignore;
     }
     let Some(status) = state.runtime.sampler_analysis_status.get(pool_idx) else {
@@ -120,11 +118,18 @@ pub(super) fn resolve_slice(
         return SliceTriggerVerdict::Ignore;
     }
     let selector = selector as usize;
-    let mut starts = table.slice_starts(params.slice_sensitivity);
-    let Some(start_frame) = starts.nth(selector) else {
+    let bounds = if mode == 1.0 {
+        let mut starts = table.slice_starts(params.slice_sensitivity);
+        starts.nth(selector).map(|start| {
+            let end = starts.next().unwrap_or(table.sample_len_frames);
+            (start, end)
+        })
+    } else {
+        table.division_slice_bounds(selector, params.slice_division)
+    };
+    let Some((start_frame, end_frame)) = bounds else {
         return SliceTriggerVerdict::Ignore;
     };
-    let end_frame = starts.next().unwrap_or(table.sample_len_frames);
     let sample_len = table.sample_len_frames.max(1) as f32;
     if !params.start_point_locked {
         params.start_point = start_frame as f32 / sample_len;
@@ -851,6 +856,12 @@ pub(super) fn resolve_rack_slot_sampler_params(
         slice_base: resolved_sampler_host_param_value(
             slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0,
         ),
+        slice_division: resolved_sampler_host_param_value(
+            slot,
+            step_idx,
+            crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
+            crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
+        ),
         start_point_locked: slot_has_explicit_plock(slot, step_idx, 2),
         end_point_locked: slot_has_explicit_plock(slot, step_idx, 3),
         warp_preserve: resolved_slot_node_param_value(
@@ -897,6 +908,10 @@ pub(super) fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> S
             crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
         ),
         slice_base: value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        slice_division: value(
+            crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
+            crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
+        ),
         start_point_locked: false,
         end_point_locked: false,
         warp_preserve: default_slot_node_param_value(

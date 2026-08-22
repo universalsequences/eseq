@@ -8074,6 +8074,12 @@
                 )),
                 Value::Map(test_param_map("sens", 139, 0.5, 0.0, 1.0)),
                 Value::Map(test_param_map("slice base", 140, 0.0, -60.0, 67.0)),
+                Value::Map(test_enum_param_map(
+                    "div",
+                    141,
+                    2.0,
+                    vec!["1/4", "1/8", "1/16", "1/32"],
+                )),
             ]))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
@@ -11599,7 +11605,7 @@
                 _ => None,
             })
             .collect();
-        for expected in ["slice", "sens", "slice base"] {
+        for expected in ["slice", "sens", "slice base", "div"] {
             assert!(
                 names.iter().any(|name| name == expected),
                 "rack sampler panel should expose the host-only `{expected}` control, got {names:?}"

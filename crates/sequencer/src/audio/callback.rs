@@ -295,7 +295,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 {
                     continue;
                 }
-                if kb_sampler_params.slice_mode.round() != 1.0 {
+                if kb_sampler_params.slice_mode.round() == 0.0 {
                     trigger_transpose += base_note_offset;
                 }
                 let voice = data.voice_pools[kt.track]

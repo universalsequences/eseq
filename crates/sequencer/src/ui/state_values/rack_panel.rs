@@ -538,28 +538,57 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             "duration".to_string(),
             value_cell(Value::Number(sample_duration)),
         );
-        let sensitivity = rack_slot_param_value(
+        let slice_mode = rack_slot_param_value(
             rack,
             slot_idx,
             slot,
             &desc,
-            sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+            sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
             selected_step,
-        );
+        )
+        .round();
         let slices = app
             .sample_analysis
             .cache()
             .table(buffer_id)
             .map(|table| {
-                let table = table.with_edits(sequencer::analysis::edits_for_sample(
-                    slot.instrument_slot.sampler_slice_edits.as_ref(),
-                    sampler_path
-                        .as_ref()
-                        .map(|path| path.to_string_lossy())
-                        .as_deref(),
-                ));
-                table
-                    .slice_starts(sensitivity)
+                let frames: Vec<u32> = if slice_mode == 1.0 {
+                    let sensitivity = rack_slot_param_value(
+                        rack,
+                        slot_idx,
+                        slot,
+                        &desc,
+                        sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+                        selected_step,
+                    );
+                    table
+                        .with_edits(sequencer::analysis::edits_for_sample(
+                            slot.instrument_slot.sampler_slice_edits.as_ref(),
+                            sampler_path
+                                .as_ref()
+                                .map(|path| path.to_string_lossy())
+                                .as_deref(),
+                        ))
+                        .slice_starts(sensitivity)
+                        .collect()
+                } else if slice_mode == 2.0 {
+                    let division = rack_slot_param_value(
+                        rack,
+                        slot_idx,
+                        slot,
+                        &desc,
+                        sequencer::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
+                        selected_step,
+                    );
+                    table
+                        .division_slice_starts(division)
+                        .map(|starts| starts.collect())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                frames
+                    .into_iter()
                     .map(|frame| {
                         value_cell(Value::Number(
                             frame as f64 / table.sample_rate.max(1) as f64,

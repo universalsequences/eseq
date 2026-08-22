@@ -840,6 +840,12 @@ pub(super) fn resolve_sampler_params(
         slice_base: resolved_sampler_host_param_value(
             slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0,
         ),
+        slice_division: resolved_sampler_host_param_value(
+            slot,
+            step_idx,
+            crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
+            crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
+        ),
         start_point_locked: slot_has_explicit_plock(slot, step_idx, 2),
         end_point_locked: slot_has_explicit_plock(slot, step_idx, 3),
         warp_preserve: resolved_slot_node_param_value(

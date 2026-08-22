@@ -1215,6 +1215,8 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
         onsets_frames: vec![0, 22_050],
         sample_len_frames: 44_100,
         sample_rate: 44_100,
+        bpm: 120.0,
+        downbeat_frame: Some(0),
         manual_edits: None,
     };
     let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
@@ -1237,6 +1239,8 @@ fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks(
         onsets_frames: vec![0, 4_000, 8_000],
         sample_len_frames: 12_000,
         sample_rate: 8_000,
+        bpm: 120.0,
+        downbeat_frame: Some(0),
         manual_edits: None,
     };
     let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
@@ -1270,6 +1274,37 @@ fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks(
         resolve_slice(&state, 0, &mut out_of_range, &mut transpose),
         SliceTriggerVerdict::Ignore
     );
+}
+
+#[test]
+fn division_slice_resolution_uses_analysis_grid() {
+    let state = SequencerState::new(1, Vec::new());
+    state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
+    let table = OnsetTableShared {
+        onsets_frames: vec![],
+        sample_len_frames: 100_000,
+        sample_rate: 48_000,
+        bpm: 120.0,
+        downbeat_frame: Some(6_000),
+        manual_edits: None,
+    };
+    let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
+    state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
+    state.runtime.sampler_onset_ptr_hi[0].store(hi.to_bits(), Ordering::Relaxed);
+
+    let mut params = ScheduledSamplerParams {
+        slice_mode: 2.0,
+        slice_division: 0.0,
+        ..ScheduledSamplerParams::default()
+    };
+    let mut transpose = 2.0;
+    assert_eq!(
+        resolve_slice(&state, 0, &mut params, &mut transpose),
+        SliceTriggerVerdict::Fire
+    );
+    assert!((params.start_point - 30_000.0 / 100_000.0).abs() < 1.0e-6);
+    assert!((params.end_point - 54_000.0 / 100_000.0).abs() < 1.0e-6);
+    assert_eq!(transpose, 0.0);
 }
 
 #[test]

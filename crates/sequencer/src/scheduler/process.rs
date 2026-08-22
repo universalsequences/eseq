@@ -1496,6 +1496,10 @@ pub(super) fn resolve_sampler_defaults(
             crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
         ),
         slice_base: value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        slice_division: value(
+            crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
+            crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
+        ),
         start_point_locked: false,
         end_point_locked: false,
         warp_preserve: default_slot_node_param_value(
@@ -1766,6 +1770,9 @@ pub(super) fn apply_sampler_descriptor_param_override(
         }
         idx if idx == crate::instruments::sampler::SLOT_PARAM_SLICE_BASE as u64 => {
             params.slice_base = value;
+        }
+        idx if idx == crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION as u64 => {
+            params.slice_division = value;
         }
         _ => return false,
     }
