@@ -9182,6 +9182,114 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn shipped_scene_references_resolve_from_the_selected_scheduler_snapshot() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        let publish_state = Arc::clone(&state);
+        authoring.register_native("def-sequencer", move |args, _ctx| {
+            let published = super::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            publish_state.publish_sequencer(published);
+            Ok(Value::String(name))
+        });
+        authoring
+            .eval_str(
+                r#"(defscene figures 0.25)
+                   (def-sequencer "scene-reader" :resolution :16
+                     :tick (seq-emit :track 0 :vel figures))
+                   (def-sequencer "shadow-reader" :resolution :16
+                     :tick ((lambda (figures)
+                              (seq-emit :track 0 :vel figures))
+                            0.7))
+                   (set! figures 0.8)"#,
+            )
+            .expect("publish scene-driven sequencers");
+
+        let published = state.published_sequencers();
+        let scene_reader = published
+            .iter()
+            .find(|definition| definition.name == "scene-reader")
+            .expect("scene reader publication");
+        assert!(
+            scene_reader
+                .tick_source
+                .contains("(__defscene-resolve \"figures\")"),
+            "a free scene reference must ship by canonical name: {}",
+            scene_reader.tick_source
+        );
+        let shadow_reader = published
+            .iter()
+            .find(|definition| definition.name == "shadow-reader")
+            .expect("shadow reader publication");
+        assert!(
+            !shadow_reader.tick_source.contains("__defscene-resolve"),
+            "a lambda parameter must shadow the scene declaration: {}",
+            shadow_reader.tick_source
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scheduler
+            .eval("(defscene figures 0.25)")
+            .expect("register the declaration default in the scheduler VM");
+        for definition in &published {
+            scheduler
+                .register_published_sequencer(
+                    definition.id,
+                    definition.name.clone(),
+                    Timebase::from_index(definition.resolution as u32),
+                    definition.tick_source.clone(),
+                )
+                .expect("compile published sequencer");
+        }
+        let invoke_velocity = |scheduler: &mut ScratchControlRuntime, name: &str| {
+            let definitions = scheduler.sequencer_defs();
+            let index = definitions
+                .iter()
+                .position(|definition| definition.name == name)
+                .expect("registered sequencer");
+            let result = scheduler
+                .invoke_sequencer_tick(
+                    index,
+                    crate::generator::GeneratorTickInput {
+                        id: definitions[index].id,
+                        generator_index: index,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("invoke sequencer tick");
+            result.emitted[0].resolved.velocity
+        };
+
+        assert!((invoke_velocity(&mut scheduler, "scene-reader") - 0.8).abs() < 1e-6);
+        assert!((invoke_velocity(&mut scheduler, "shadow-reader") - 0.7).abs() < 1e-6);
+
+        authoring
+            .eval_str("(set! figures 0.4)")
+            .expect("publish a newer scene-slot snapshot");
+        assert!(
+            (invoke_velocity(&mut scheduler, "scene-reader") - 0.8).abs() < 1e-6,
+            "a callback must retain its selected boundary snapshot"
+        );
+        scheduler.set_scene_slot_snapshot(state.latest_scheduler_snapshot().scene_slots.clone());
+        assert!(
+            (invoke_velocity(&mut scheduler, "scene-reader") - 0.4).abs() < 1e-6,
+            "the next boundary must observe the newly published snapshot"
+        );
+    }
+
+    #[test]
     fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut authoring = jaki_authoring_runtime(Arc::clone(&state));
@@ -10406,6 +10514,58 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 value: 5.0,
             }]
         );
+    }
+
+    #[test]
+    fn process_run_scene_references_ship_by_name() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"(defscene amount 2)
+                   (def-process scene-process
+                     :target (step-param :transpose)
+                     :run (target-set! amount))"#,
+            )
+            .expect("define scene-driven process");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "scene-process")
+            .expect("scene process definition");
+        let source = def.run_source.expect("run source");
+        assert!(
+            source.contains("(__defscene-resolve \"amount\")"),
+            "process body must carry the scene reference by name: {source}"
+        );
+
+        state
+            .write_current_scene_slot("amount", crate::process::ProcessLiteral::Number(5.0))
+            .expect("write scene override");
+        scratch.set_scene_slot_snapshot(state.latest_scheduler_snapshot().scene_slots.clone());
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 92,
+                source,
+                beat: 0.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke scene-driven process");
+        assert_eq!(result.target_writes[0].value, 5.0);
     }
 
     #[test]

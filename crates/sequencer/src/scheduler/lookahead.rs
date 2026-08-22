@@ -445,6 +445,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .as_deref()
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
+        if let Some(scratch) = scratch_runtime.as_ref() {
+            scratch.set_scene_slot_snapshot(snapshot.scene_slots.clone());
+        }
         let chunk_start_beats = clock.total_beats;
         // Control-thread channel writes land on the chunk boundary, in order,
         // with a defined beat (docs/jaki-live-channel-widgets-spec.md 7). This

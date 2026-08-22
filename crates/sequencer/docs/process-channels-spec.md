@@ -284,9 +284,9 @@ There are two ESeqLisp runtimes: the UI runtime (regular buffers, where authorin
 
 ### Capture rules (apply to ALL shipped bodies)
 
-At publish time (in the UI runtime), free variables of a shipped body are resolved and inlined **by value**. Portable values: numbers, strings, keywords, bools, nil, lists/maps of those, `pat` values, channel references (by name), process handles (by name). Anything else — functions, widgets, host handles, `Rc` values — is an immediate authoring-time error naming the variable and suggesting the fix ("reference a channel or make it a process inlet").
+At publish time (in the UI runtime), free variables of a shipped body are resolved and inlined **by value**. Portable values: numbers, strings, keywords, bools, nil, lists/maps of those, `pat` values, channel references (by name), process handles (by name), and scene-slot references (by name). Anything else — functions, widgets, host handles, `Rc` values — is an immediate authoring-time error naming the variable and suggesting the fix ("reference a channel or make it a process inlet").
 
-Capture is a snapshot; it does not track later mutation of the source binding. Live-tunable values belong in channels or process inlets — that is the sanctioned mutable capture.
+Literal capture is a snapshot; it does not track later mutation of the source binding. Channels and scene slots are deliberately late-bound by name: channels provide live control state, while scene slots resolve from the scheduler's selected pattern snapshot at each tick boundary. Other live-tunable values belong in channels or process inlets — that is the sanctioned mutable capture.
 
 ### Identity and ownership
 

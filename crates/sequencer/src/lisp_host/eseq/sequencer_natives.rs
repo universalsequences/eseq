@@ -49,6 +49,14 @@ pub fn register_scene_slot_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
 ) {
+    register_scene_slot_natives_with_snapshot(runtime, state, None);
+}
+
+pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    scheduler_slots: Option<SharedSceneSlotSnapshot>,
+) {
     let declarations = Arc::new(Mutex::new(HashMap::<
         String,
         crate::process::ProcessLiteral,
@@ -81,8 +89,15 @@ pub fn register_scene_slot_natives(
             .get(name)
             .cloned()
             .ok_or_else(|| format!("scene slot '{}' is not declared", name))?;
-        let (value, _epoch, _overridden) =
-            state_for_resolve.resolve_current_scene_slot(name, &default);
+        let (value, _epoch, _overridden) = if let Some(slots) = &scheduler_slots {
+            let slots = slots
+                .lock()
+                .map_err(|_| "failed to lock scheduler scene-slot snapshot".to_string())?;
+            let resolved = slots.resolve(name, &default);
+            (resolved.value.clone(), resolved.epoch, resolved.overridden)
+        } else {
+            state_for_resolve.resolve_current_scene_slot(name, &default)
+        };
         // The pattern edge repaints every scene-slot reader on a scene switch;
         // the qualified slot edge lets a write invalidate only this slot's
         // readers. NativeContext retains these edges only during rendering.

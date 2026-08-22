@@ -270,6 +270,18 @@ fn extract_function_definition(
     }
 }
 
+fn collect_pattern_symbols(pattern: &Expression, symbols: &mut Vec<String>) {
+    match pattern {
+        Expression::Symbol(name) => symbols.push(name.clone()),
+        Expression::List(items) => {
+            for item in items {
+                collect_pattern_symbols(item, symbols);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn extract_if_statement(list: &[Expression]) -> Option<(Expression, Expression, Expression)> {
     match (list.first(), list.get(1), list.get(2), list.get(3)) {
         (Some(Expression::Symbol(s)), Some(condition), Some(then_body), Some(else_body))
@@ -785,6 +797,125 @@ impl<'a> Compiler<'a> {
         let expanded = self.expand_macros(expression, 0)?;
         let residue = strip_source_origin_wrappers(expanded);
         self.compile_quoted_expression_preserving_quotes(&residue)
+    }
+
+    /// Expand a scheduler-bound body and lower free `defscene` references to
+    /// explicit by-name reads before quoting it as source data. The scheduler
+    /// compiler has its own declaration environment, so retaining a bare
+    /// authoring symbol here would either capture the declaration default or
+    /// fail to resolve after the body crosses the VM boundary.
+    fn compile_expanded_shipped_expression(
+        &mut self,
+        expression: &Expression,
+        preserve_quotes: bool,
+    ) -> Result<(), CompilerError> {
+        let expanded = self.expand_macros(expression, 0)?;
+        let residue = strip_source_origin_wrappers(expanded);
+        let lowered = self.lower_scene_references_for_shipping(&residue, &[]);
+        if preserve_quotes {
+            self.compile_quoted_expression_preserving_quotes(&lowered)
+        } else {
+            self.compile_quoted_expression(&lowered)
+        }
+    }
+
+    fn lower_scene_references_for_shipping(
+        &self,
+        expression: &Expression,
+        bound: &[String],
+    ) -> Expression {
+        let lower = |expression: &Expression, bound: &[String]| {
+            self.lower_scene_references_for_shipping(expression, bound)
+        };
+        match expression {
+            Expression::Symbol(name) if !bound.iter().any(|local| local == name) => {
+                match self.scene_binding_for(name) {
+                    Some(key) => Expression::List(vec![
+                        Expression::Symbol("__defscene-resolve".to_string()),
+                        Expression::String(key),
+                    ]),
+                    None => expression.clone(),
+                }
+            }
+            // Quoted symbols are literal data, not free reads. This includes
+            // explicit quote forms produced by macros as well as parser quote
+            // variants.
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "quote") =>
+            {
+                expression.clone()
+            }
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "lambda")
+                    && matches!(items.get(1), Some(Expression::List(_))) =>
+            {
+                let Expression::List(params) = &items[1] else {
+                    unreachable!()
+                };
+                let mut body_bound = bound.to_vec();
+                for param in params {
+                    collect_pattern_symbols(param, &mut body_bound);
+                }
+                let mut lowered = vec![items[0].clone(), items[1].clone()];
+                lowered.extend(items[2..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            // `let` is sequential (let*): each initializer can see the
+            // preceding bindings, while the body sees all of them.
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "let")
+                    && matches!(items.get(1), Some(Expression::List(_))) =>
+            {
+                let Expression::List(bindings) = &items[1] else {
+                    unreachable!()
+                };
+                let mut body_bound = bound.to_vec();
+                let lowered_bindings = bindings
+                    .iter()
+                    .map(|binding| match binding {
+                        Expression::List(pair) if pair.len() == 2 => {
+                            let lowered_value = lower(&pair[1], &body_bound);
+                            collect_pattern_symbols(&pair[0], &mut body_bound);
+                            Expression::List(vec![pair[0].clone(), lowered_value])
+                        }
+                        _ => lower(binding, &body_bound),
+                    })
+                    .collect();
+                let mut lowered = vec![items[0].clone(), Expression::List(lowered_bindings)];
+                lowered.extend(items[2..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            // `(def f (args...) body...)` is the language's named-function
+            // form. Its argument names shadow scene declarations just like
+            // lambda parameters do.
+            Expression::List(items)
+                if matches!(items.first(), Some(Expression::Symbol(name)) if name == "def")
+                    && matches!(items.get(1), Some(Expression::Symbol(_)))
+                    && matches!(items.get(2), Some(Expression::List(_))) =>
+            {
+                let Expression::List(params) = &items[2] else {
+                    unreachable!()
+                };
+                let mut body_bound = bound.to_vec();
+                for param in params {
+                    collect_pattern_symbols(param, &mut body_bound);
+                }
+                let mut lowered = items[..3].to_vec();
+                lowered.extend(items[3..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            Expression::List(items) => {
+                Expression::List(items.iter().map(|item| lower(item, bound)).collect())
+            }
+            Expression::QuoteList(_)
+            | Expression::QuoteSymbol(_)
+            | Expression::Quasiquote(_) => expression.clone(),
+            Expression::Unquote(inner) => Expression::Unquote(Box::new(lower(inner, bound))),
+            Expression::UnquoteSplicing(inner) => {
+                Expression::UnquoteSplicing(Box::new(lower(inner, bound)))
+            }
+            _ => expression.clone(),
+        }
     }
 
     /// Quote a form that ships as data without expanding it (`def-song` rows,
@@ -2871,7 +3002,16 @@ impl<'a> Compiler<'a> {
                 }
                 if quote_next {
                     if expand_quote_next {
-                        if quote_next_preserving {
+                        let ships_executable_body = is_def_sequencer
+                            || (is_def_process
+                                && matches!(list.get(i), Some(Expression::Keyword(key))
+                                    if key == "run" || key == "init" || key.starts_with("on-")));
+                        if ships_executable_body {
+                            self.compile_expanded_shipped_expression(
+                                elem,
+                                quote_next_preserving,
+                            )?;
+                        } else if quote_next_preserving {
                             self.compile_expanded_quoted_expression_preserving_quotes(elem)?;
                         } else {
                             self.compile_expanded_quoted_expression(elem)?;
@@ -2895,7 +3035,13 @@ impl<'a> Compiler<'a> {
                     // `def-process`'s `:every`/`:listen` clauses: the native
                     // parses it structurally in *this* VM, so leaving a macro
                     // call unexpanded there fails to parse rather than working.
-                    self.compile_expanded_quoted_expression(elem)?;
+                    // Remaining arguments are executable scheduler bodies and
+                    // therefore lower free scene references by name.
+                    if i == 0 {
+                        self.compile_expanded_quoted_expression(elem)?;
+                    } else {
+                        self.compile_expanded_shipped_expression(elem, false)?;
+                    }
                     continue;
                 }
                 if is_def_song {
