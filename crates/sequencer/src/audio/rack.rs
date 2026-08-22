@@ -599,9 +599,11 @@ pub(super) fn fire_live_keyboard_rack_note(
                 {
                     continue;
                 }
-                if sampler_params.slice_mode.round() == 0.0 {
-                    trigger_transpose += slot.instrument_base_note_offset;
-                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += slot.instrument_base_note_offset;
                 let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
                 let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
                 let loop_xfade_samples =
@@ -874,9 +876,11 @@ pub(super) fn fire_rack_slot_note(
             {
                 return;
             }
-            if sampler_params.slice_mode.round() == 0.0 {
-                trigger_transpose += slot_params.base_note_offset;
-            }
+            // `resolve_slice` consumes the note to pick the slice and zeroes the
+            // transpose, so adding the base-note offset unconditionally leaves
+            // classic mode untouched and makes `base` the pitch offset that every
+            // slice plays at.
+            trigger_transpose += slot_params.base_note_offset;
             let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
             let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
             let loop_xfade_samples =

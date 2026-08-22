@@ -77,6 +77,33 @@
         )
     }
 
+    /// `sens` re-derives the slice markers the waveform draws, so it must force
+    /// a panel rebuild like Boolean/Enum edits do. Continuous params otherwise
+    /// only refresh their bound knob readout, which left the flag colours stale
+    /// until an unrelated edit forced a rebuild.
+    #[test]
+    fn sampler_sensitivity_change_forces_a_panel_rebuild() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let param = |name: &str| {
+            desc.params
+                .iter()
+                .find(|param| param.name == name)
+                .unwrap_or_else(|| panic!("sampler should expose `{name}`"))
+        };
+        assert!(
+            super::history_commands::param_change_needs_fx_rebuild(param("sens")),
+            "sens changes the derived slice markers"
+        );
+        assert!(
+            super::history_commands::param_change_needs_fx_rebuild(param("slice")),
+            "the slice mode enum already forced a rebuild"
+        );
+        assert!(
+            !super::history_commands::param_change_needs_fx_rebuild(param("start")),
+            "ordinary continuous params still take the bound-display fast path"
+        );
+    }
+
     #[test]
     fn rename_group_host_command_trims_rejects_empty_and_is_undoable() {
         let (_state, mut app) = history_test_app();

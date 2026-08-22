@@ -118,7 +118,11 @@ pub(super) fn handle(
     let Some(table) = app.sample_analysis.cache().table(target.0) else {
         return;
     };
-    let detected = table.slice_starts(target.3).collect::<Vec<_>>();
+    // Marker indices address the full candidate list the panel renders, which
+    // is the raw onset list plus manual edits. Sensitivity only colours those
+    // markers, so resolving against `slice_starts` here would shift every index
+    // whenever the knob moved.
+    let detected = table.onsets_frames.clone();
     let frame = (time.max(0.0) * table.sample_rate as f64).round() as u32;
     let sample_len = table.sample_len_frames;
     let hash = target.1;
@@ -178,15 +182,20 @@ pub(super) fn handle(
             if operation != "move" {
                 app.publish_all_sampler_analysis_runtime();
             }
-            let dirty = editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(app, track, &ctx.shared.selected_steps),
-                )
-                .effects_dirty;
-            if dirty {
+            // `effects_dirty` means the reactive effects still have to be RUN;
+            // `refresh_runtime_side_effects` alone does not run them, so the
+            // new `:slices` never reached the widget tree and an applied,
+            // stored marker move stayed invisible until an unrelated edit
+            // (turning `sens`) forced a full cycle. Mirror
+            // `reactive_sync::flush_reactive_display_edit`: cycle, refresh,
+            // redraw.
+            let result = editor.runtime_mut().set_reactive(
+                "SEQ",
+                "instrument-panel",
+                build_instrument_panel_value(app, track, &ctx.shared.selected_steps),
+            );
+            if result.effects_dirty || result.widgets_dirty {
+                editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
             }

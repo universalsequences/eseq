@@ -285,6 +285,19 @@ pub(super) fn take_active_keyboard_note(
     None
 }
 
+/// Whether a live key-up should cut the voices it started.
+///
+/// Only gated tracks release on key-up. An ungated track is a one-shot: the
+/// sequenced path schedules no gate-off for it (`gate_mode` in audio/fire.rs),
+/// so cutting a live trigger would make jamming sound gated while the recording
+/// of that same jam plays back ungated.
+pub(super) fn live_key_release_cuts_voice(
+    state: &crate::sequencer::SequencerState,
+    track_idx: usize,
+) -> bool {
+    state.pattern.track_params[track_idx].is_gate_on()
+}
+
 pub(super) fn release_active_keyboard_voice(
     data: &mut AudioCallbackData,
     voice: ActiveKeyboardVoice,

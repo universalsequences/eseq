@@ -162,10 +162,40 @@ pub fn edits_for_sample<'a>(
     edits.filter(|item| item.sample_hash == hash)
 }
 
+/// Stable identity for "the sample these manual slice edits were authored
+/// against".
+///
+/// A content-addressed sample (`samples/<sha256>.wav`) is its own identity, and
+/// that spelling is preserved byte-for-byte so projects saved before this
+/// function grew a fallback keep matching.
+///
+/// Everything else falls back to a digest of the path. This is not cosmetic:
+/// every consumer treats `None` as "these edits belong to some other sample",
+/// so returning `None` for an ordinary `kick.wav` silently discarded the edit
+/// on write (`ui/host_commands/sampler_slices.rs`), on read
+/// (`edits_for_sample`), on sample rebind (`App::set_sampler_path_for_track`),
+/// and on project load (`discard_slice_edits_for_other_sample`) — i.e. manual
+/// slice editing did nothing at all unless the sample happened to live in the
+/// content-addressed store.
+///
+/// Path identity is weaker than content identity — editing the file in place
+/// keeps the same key — but it is the right granularity for the rule this
+/// serves (spec §2.7: *loading a different sample discards the edits*).
 pub fn sample_path_hash(path: &str) -> Option<String> {
     let stem = std::path::Path::new(path).file_stem()?.to_str()?;
-    (stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| stem.to_ascii_lowercase())
+    if stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(stem.to_ascii_lowercase());
+    }
+    if path.is_empty() {
+        return None;
+    }
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    // Domain-separated so a path digest can never be mistaken for the content
+    // hash of a sample in the store.
+    hasher.update(b"eseq-sampler-slice-path\0");
+    hasher.update(path.as_bytes());
+    Some(format!("path:{:x}", hasher.finalize()))
 }
 
 #[derive(Clone, Debug)]
@@ -195,6 +225,38 @@ impl SliceTableShared {
     /// the second half of transient filtering, minimum spacing. Manual edits
     /// are overlaid after that filtering, so authored markers survive every
     /// sensitivity value, including trigger-time parameter locks.
+    /// Every candidate marker (manual edits applied), paired with whether
+    /// sensitivity keeps it as a real slice boundary.
+    ///
+    /// Sensitivity does not delete markers — it *deactivates* them. Inactive
+    /// markers stay visible and stay editable, and playback runs straight
+    /// through them, so lowering sensitivity yields longer chops rather than a
+    /// marker list that silently shrinks. Marker indices therefore address this
+    /// full list and are stable as sensitivity moves.
+    pub fn slice_markers(&self, sensitivity: f32) -> (Vec<u32>, Vec<bool>) {
+        let all = match self.manual_edits.as_ref() {
+            Some(edits) => edits.resolved(&self.onsets_frames, self.sample_len_frames),
+            None => {
+                let mut all = self
+                    .onsets_frames
+                    .iter()
+                    .copied()
+                    .filter(|frame| *frame < self.sample_len_frames)
+                    .collect::<Vec<_>>();
+                all.push(0);
+                all.sort_unstable();
+                all.dedup();
+                all
+            }
+        };
+        let active = self.slice_starts(sensitivity).collect::<Vec<_>>();
+        let flags = all
+            .iter()
+            .map(|frame| active.binary_search(frame).is_ok())
+            .collect();
+        (all, flags)
+    }
+
     pub fn slice_starts(&self, sensitivity: f32) -> SliceStarts<'_> {
         let sensitivity = if sensitivity.is_finite() {
             sensitivity.clamp(0.0, 1.0)
@@ -704,6 +766,34 @@ mod tests {
         assert!(table.division_slice_starts(0.0).is_none());
     }
 
+    /// Sensitivity deactivates markers rather than removing them, so the
+    /// candidate list — and therefore every marker index — is stable as the
+    /// knob moves.
+    #[test]
+    fn sensitivity_deactivates_markers_without_changing_the_candidate_list() {
+        let table = SliceTableShared {
+            onsets_frames: vec![0, 4_410, 8_820, 44_100, 88_200],
+            sample_len_frames: 132_300,
+            sample_rate: 44_100,
+            bpm: 120.0,
+            downbeat_frame: None,
+            manual_edits: None,
+        };
+
+        // sens = 1.0 -> 40 ms minimum spacing: 100 ms apart, all survive.
+        let (loose_all, loose_flags) = table.slice_markers(1.0);
+        assert_eq!(loose_all, vec![0, 4_410, 8_820, 44_100, 88_200]);
+        assert_eq!(loose_flags, vec![true, true, true, true, true]);
+
+        // sens = 0.0 -> 500 ms minimum spacing: the 100 ms cluster collapses.
+        let (tight_all, tight_flags) = table.slice_markers(0.0);
+        assert_eq!(
+            tight_all, loose_all,
+            "the candidate list must not change with sensitivity"
+        );
+        assert_eq!(tight_flags, vec![true, false, false, true, true]);
+    }
+
     #[test]
     fn manual_slice_edits_resolve_sorted_deduped_and_keep_frame_zero() {
         let mut edits = SamplerSliceEdits::for_sample_hash("abc123");
@@ -768,6 +858,25 @@ mod tests {
         assert_eq!(edits_for_sample(Some(&edits), None), None);
     }
 
+    /// Regression: manual slice edits were silently discarded on every path
+    /// (write, read, rebind, load) for any sample not in the content-addressed
+    /// store, which is most of what a user actually drags in.
+    #[test]
+    fn manual_edits_apply_to_samples_outside_the_content_addressed_store() {
+        let path = "/Users/me/Break Squashed 82 bpm.wav";
+        let edits = SamplerSliceEdits::for_sample_hash(
+            sample_path_hash(path).expect("a plain sample still has an identity"),
+        );
+        assert!(
+            edits_for_sample(Some(&edits), Some(path)).is_some(),
+            "edits authored against a plain sample must apply to it"
+        );
+        assert!(
+            edits_for_sample(Some(&edits), Some("/Users/me/Other Break.wav")).is_none(),
+            "and must still be dropped for a different sample"
+        );
+    }
+
     #[test]
     fn sample_path_hash_accepts_only_content_addressed_references() {
         let hash = "a1".repeat(32);
@@ -775,7 +884,18 @@ mod tests {
             sample_path_hash(&format!("samples/{hash}.wav")),
             Some(hash),
         );
-        assert_eq!(sample_path_hash("samples/kick.wav"), None);
+        // A sample outside the content-addressed store still gets a stable
+        // identity — without one, every manual slice edit is silently dropped.
+        let plain = sample_path_hash("samples/kick.wav").expect("plain paths get an identity");
+        assert!(plain.starts_with("path:"), "got {plain}");
+        assert_eq!(sample_path_hash("samples/kick.wav").as_deref(), Some(plain.as_str()));
+        assert_ne!(sample_path_hash("samples/snare.wav"), Some(plain.clone()));
+        assert_ne!(
+            sample_path_hash("/other/dir/kick.wav"),
+            Some(plain),
+            "identity is the whole path, not just the file name"
+        );
+        assert_eq!(sample_path_hash(""), None);
     }
 
     #[test]

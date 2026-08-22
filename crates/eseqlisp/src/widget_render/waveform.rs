@@ -14,7 +14,7 @@ use super::{
 #[cfg(target_os = "macos")]
 use super::{
     MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
-    MetalWaveformPrimitive,
+    MetalTrianglePrimitive, MetalWaveformPrimitive,
 };
 use crate::audio::sample::{
     MinMaxPair as WaveformBucket, SampleBuffer, WaveformMipLevel as WaveformLevel,
@@ -32,6 +32,11 @@ const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
 const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
 const MARKER_FLAG_HEIGHT_NORM: f32 = 0.1575;
 const MARKER_LINE_SLOP_PX: f32 = 2.0;
+/// A slice flag is the grab handle for a slice division, so it is drawn as a
+/// downward triangle that is deliberately larger than the start/end squares —
+/// and hit-tested over that whole triangle, not just the hairline below it.
+const SLICE_FLAG_HALF_WIDTH: f32 = 0.45;
+const SLICE_FLAG_HEIGHT: f32 = 0.6;
 
 fn waveform_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "waveform-color", theme::WHITE())
@@ -99,7 +104,12 @@ struct WaveformView {
     marker_selection: bool,
     active_marker: Option<String>,
     slices: Vec<f64>,
+    /// Parallel to `slices`: whether sensitivity keeps that marker as a real
+    /// slice boundary. Inactive markers stay visible and editable, and playback
+    /// runs straight through them.
+    slice_active: Vec<bool>,
     active_slice: Option<usize>,
+    slice_select: bool,
     buffer: Option<WaveformBuffer>,
 }
 
@@ -341,7 +351,7 @@ impl WidgetDefinition for WaveformWidget {
 
         for (index, time) in view.visible_slices() {
             let col = view.col_for_time(time);
-            let color = if view.active_slice == Some(index) {
+            let color = if view.slice_is_active(index) {
                 active_marker_color(props)
             } else {
                 marker_color(props)
@@ -605,6 +615,10 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
 
     if let Some(buffer) = &view.buffer {
         let selection = view.normalized_selection();
+        // No selection props at all (slice mode drops them) means nothing is
+        // excluded, so the whole sample is active. Only an existing selection
+        // that has scrolled out of view greys everything out.
+        let has_selection = view.selection_range().is_some();
         let playhead = view.normalized_playhead();
         let level = view.best_level(buffer);
         primitives.push(MetalPrimitive::Waveform(MetalWaveformPrimitive {
@@ -616,7 +630,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             samples_per_bucket: level.samples_per_bucket as u32,
             bucket_count: level.buckets.len() as u32,
             selection_start: selection.map(|(start, _)| start).unwrap_or(0.0),
-            selection_end: selection.map(|(_, end)| end).unwrap_or(0.0),
+            selection_end: selection
+                .map(|(_, end)| end)
+                .unwrap_or(if has_selection { 0.0 } else { 1.0 }),
             show_selection_start: view.selection_start_visible(),
             show_selection_end: view.selection_end_visible(),
             playhead_position: playhead.unwrap_or(0.0),
@@ -632,7 +648,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     }
 
     for (index, time) in view.visible_slices() {
-        let color = if view.active_slice == Some(index) {
+        // Active boundaries take the accent; sensitivity-deactivated markers
+        // stay visible in the dim marker colour.
+        let color = if view.slice_is_active(index) {
             active_marker_color(&node.props)
         } else {
             marker_color(&node.props)
@@ -645,11 +663,13 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             height: content.height,
             color,
         }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: x - 0.25,
-            y: content.row,
-            width: 0.5,
-            height: 0.18_f32.min(content.height),
+        let flag_height = SLICE_FLAG_HEIGHT.min(content.height);
+        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+            points: [
+                [x - SLICE_FLAG_HALF_WIDTH, content.row],
+                [x + SLICE_FLAG_HALF_WIDTH, content.row],
+                [x, content.row + flag_height],
+            ],
             color,
         }));
     }
@@ -698,7 +718,15 @@ impl WaveformView {
             marker_selection: get_bool(props, "marker-selection", false),
             active_marker: props.get("active-marker").and_then(as_name),
             slices,
+            slice_active: props
+                .get("slice-active")
+                .map(parse_number_list)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| value != 0.0)
+                .collect(),
             active_slice,
+            slice_select: get_bool(props, "slice-select", false),
             buffer: props.get("buffer").and_then(parse_waveform_buffer),
         }
     }
@@ -821,13 +849,47 @@ impl WaveformView {
             .filter(|(_, time)| time.is_finite() && self.time_visible(*time))
     }
 
+    /// Markers default to active when no flag list is supplied.
+    fn slice_is_active(&self, index: usize) -> bool {
+        self.slice_active.get(index).copied().unwrap_or(true)
+    }
+
+    /// The slice a click lands in: the last division at or before `time`.
+    fn slice_index_at_time(&self, time: f64) -> Option<usize> {
+        self.slices
+            .iter()
+            .rposition(|slice| slice.is_finite() && *slice <= time)
+    }
+
+    fn select_slice_action(&self, index: usize) -> Option<Value> {
+        let time = self.slices.get(index).copied()?;
+        Some(action_map(vec![
+            ("type", keyword(":select-slice")),
+            ("index", Value::Number(index as f64)),
+            ("time", Value::Number(time)),
+        ]))
+    }
+
+    /// The audible chop around the selected marker: it runs between *active*
+    /// boundaries, playing through any deactivated markers in between.
     fn active_slice_range(&self) -> Option<(f64, f64)> {
         let index = self.active_slice?;
-        let start = *self.slices.get(index)?;
+        let selected = *self.slices.get(index)?;
+        let start = self
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(i, time)| self.slice_is_active(*i) && time.is_finite() && **time <= selected)
+            .map(|(_, time)| *time)
+            .next_back()
+            .unwrap_or(0.0);
         let end = self
             .slices
-            .get(index + 1)
-            .copied()
+            .iter()
+            .enumerate()
+            .filter(|(i, time)| self.slice_is_active(*i) && time.is_finite() && **time > start)
+            .map(|(_, time)| *time)
+            .next()
             .or_else(|| self.buffer.as_ref().map(|buffer| buffer.sample.duration_seconds))
             .unwrap_or(self.view_start + self.view_duration);
         (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
@@ -858,6 +920,17 @@ impl WaveformView {
             return Some(HitRegion::Header);
         }
         let waveform = self.waveform_body_rect();
+        // Slice flags are drawn from `content_rect().row`, which is
+        // WAVEFORM_BODY_TOP_INSET above the waveform body, so the triangle head
+        // — the obvious thing to grab — lands in a band the body hit test
+        // rejects. Claim slice markers there first.
+        let content = self.content_rect();
+        if local_row >= content.row
+            && local_row < waveform.row
+            && let Some((index, time)) = self.slice_marker_hit_test(local_col)
+        {
+            return Some(HitRegion::SliceMarker { index, time });
+        }
         if local_row < waveform.row || local_row >= waveform.row + waveform.height {
             return None;
         }
@@ -973,6 +1046,9 @@ impl WaveformView {
                     ("time", Value::Number(time)),
                 ]))
             }
+            // In slice mode the body is a slice picker, not a range selector,
+            // so a press on it starts no drag at all.
+            HitRegion::Content { .. } if self.slice_select => None,
             HitRegion::Content { time } => Some(map_value(vec![
                 ("kind", keyword(":select-range")),
                 ("time", Value::Number(time)),
@@ -993,6 +1069,15 @@ impl WaveformView {
                     ("time", Value::Number(time)),
                 ]))
             }
+            HitRegion::Content { time } if self.slice_select => self
+                .slice_index_at_time(time)
+                .and_then(|index| self.select_slice_action(index))
+                .or_else(|| {
+                    Some(action_map(vec![
+                        ("type", keyword(":set-cursor")),
+                        ("time", Value::Number(time)),
+                    ]))
+                }),
             HitRegion::Header | HitRegion::Content { .. } => Some(action_map(vec![
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
@@ -1012,10 +1097,16 @@ impl WaveformView {
                     ("time", Value::Number(time)),
                 ]))
             }
-            HitRegion::SliceMarker { time, .. } => Some(action_map(vec![
-                ("type", keyword(":set-cursor")),
-                ("time", Value::Number(time)),
-            ])),
+            HitRegion::SliceMarker { index, time } => {
+                if self.slice_select {
+                    self.select_slice_action(index)
+                } else {
+                    Some(action_map(vec![
+                        ("type", keyword(":set-cursor")),
+                        ("time", Value::Number(time)),
+                    ]))
+                }
+            }
         }
     }
 
@@ -1577,6 +1668,148 @@ mod tests {
         assert_eq!(
             map.get("type").map(|value| value.borrow().clone()),
             Some(Value::Keyword("set-selection".to_string()))
+        );
+    }
+
+    /// A deactivated marker is still drawn and still editable, but the chop
+    /// around it runs to the next *active* boundary — that is what "longer
+    /// chops at low sensitivity" means.
+    #[test]
+    fn deactivated_markers_are_played_through_by_the_selected_chop() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![
+                    number_value(0.0),
+                    number_value(0.25),
+                    number_value(0.5),
+                    number_value(0.75),
+                ]),
+            ),
+            // 0.25 and 0.75 are deactivated by sensitivity.
+            (
+                "slice-active".to_string(),
+                list_value_raw(vec![
+                    number_value(1.0),
+                    number_value(0.0),
+                    number_value(1.0),
+                    number_value(0.0),
+                ]),
+            ),
+            ("active-slice".to_string(), number_value(1.0)),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        assert!(view.slice_is_active(0) && !view.slice_is_active(1));
+        // Selecting the deactivated marker at 0.25 highlights the real chop,
+        // which starts at the active 0.0 and runs to the active 0.5.
+        let (start, end) = view.active_slice_range().expect("selected chop");
+        assert!((start - 0.0).abs() < 1e-9, "start {start}");
+        assert!((end - 0.5).abs() < 1e-9, "end {end}");
+    }
+
+    /// The flag head renders above the waveform body, in the top inset. It is
+    /// the obvious grab handle, so it must hit-test as the marker.
+    #[test]
+    fn slice_flag_head_above_the_waveform_body_is_grabbable() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            ("slice-select".to_string(), Value::Bool(true)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let content = view.content_rect();
+        let body = view.waveform_body_rect();
+        assert!(
+            content.row < body.row,
+            "this test is meaningless without a top inset"
+        );
+        // Right at the tip of the flag, above the waveform body.
+        let gesture = view
+            .begin_gesture(16.0, content.row, KeyModifiers::NONE)
+            .expect("the flag head must start a slice drag");
+        let Value::Map(gesture_map) = &gesture else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            gesture_map.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("drag-slice".to_string()))
+        );
+    }
+
+    /// Slice mode retargets a body press to slice selection, but the flags
+    /// themselves must stay draggable — that is the only way to edit a
+    /// division.
+    #[test]
+    fn slice_select_mode_still_drags_slice_flags() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            ("slice-select".to_string(), Value::Bool(true)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        // The second slice sits at 0.5 -> column 16.
+        let gesture = view
+            .begin_gesture(16.0, 2.0, KeyModifiers::NONE)
+            .expect("pressing a slice flag must start a drag gesture");
+        let Value::Map(action) = view
+            .handle_pointer_drag(20.0, 2.0, Some(&gesture))
+            .expect("dragging a slice flag must emit a move action")
+        else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("move-slice".to_string()))
+        );
+
+        // A press away from any flag selects instead, and starts no drag.
+        assert!(
+            view.begin_gesture(28.0, 2.0, KeyModifiers::NONE).is_none(),
+            "the waveform body must not start a range drag in slice mode"
+        );
+        let Value::Map(action) = view
+            .handle_pointer_down(28.0, 2.0, KeyModifiers::NONE)
+            .expect("body press action")
+        else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("select-slice".to_string()))
         );
     }
 

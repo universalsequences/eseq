@@ -495,7 +495,8 @@ pub(crate) fn build_sampler_panel_value(
     )
     .unwrap_or(0.0)
     .round();
-    let slice_values = app
+    let mut slice_active_values: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let slice_values: Vec<Rc<RefCell<Value>>> = app
         .sample_analysis
         .cache()
         .table(buffer_id)
@@ -504,10 +505,19 @@ pub(crate) fn build_sampler_panel_value(
                 let sensitivity = sampler_slice_sensitivity(slot, &desc, plock_step)
                     .unwrap_or(0.5);
                 let edits = slot.sampler_slice_edits.read().unwrap();
-                table
+                // Sensitivity deactivates markers rather than removing them, so
+                // the panel renders every candidate and carries a parallel
+                // active flag for colouring.
+                let (frames, active) = table
                     .with_edits(app.sampler_slice_edits_for_track(track, edits.as_ref()))
-                    .slice_starts(sensitivity)
-                    .collect()
+                    .slice_markers(sensitivity);
+                slice_active_values = active
+                    .into_iter()
+                    .map(|active| {
+                        Rc::new(RefCell::new(Value::Number(if active { 1.0 } else { 0.0 })))
+                    })
+                    .collect();
+                frames
             } else if slice_mode == 2.0 {
                 let division = sampler_slice_param_value(
                     slot,
@@ -589,9 +599,20 @@ pub(crate) fn build_sampler_panel_value(
         "onsets".to_string(),
         Rc::new(RefCell::new(Value::List(onset_values))),
     );
+    if slice_active_values.len() != slice_values.len() {
+        // Division slices are all active; keep the flag list in lockstep.
+        slice_active_values = slice_values
+            .iter()
+            .map(|_| Rc::new(RefCell::new(Value::Number(1.0))))
+            .collect();
+    }
     panel_map.insert(
         "slices".to_string(),
         Rc::new(RefCell::new(Value::List(slice_values))),
+    );
+    panel_map.insert(
+        "slice-active".to_string(),
+        Rc::new(RefCell::new(Value::List(slice_active_values))),
     );
     panel_map.insert(
         "params".to_string(),

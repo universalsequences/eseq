@@ -16,7 +16,8 @@ use super::{
     instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
     mute_group_winner_for_block_events, remap_route_after_track_delete,
     resolve_live_instrument_defaults,
-    resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
+    live_key_release_cuts_voice, resolve_live_keyboard_transpose,
+    resolve_snapshot_instrument_defaults,
     resolve_slice, resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
     select_output_channels, select_output_config, store_active_keyboard_note,
     swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
@@ -286,6 +287,24 @@ fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
     assert_eq!(param_value(&c4_params, 1), Some(-12.0));
     assert_eq!(param_value(&d4_params, 1), Some(-7.0));
     assert_eq!(param_value(&offset_params, 1), Some(7.0));
+}
+
+/// Live jamming and playback of the recorded jam must agree: an ungated track
+/// is a one-shot on both paths, so key-up cuts nothing.
+#[test]
+fn live_key_release_only_cuts_gated_tracks() {
+    let state = SequencerState::new(1, vec![crate::sequencer::default_empty_effect_chain()]);
+    assert!(
+        state.pattern.track_params[0].is_gate_on(),
+        "tracks default to gated"
+    );
+    assert!(live_key_release_cuts_voice(&state, 0));
+
+    state.pattern.track_params[0].toggle_gate();
+    assert!(
+        !live_key_release_cuts_voice(&state, 0),
+        "an ungated track must ring out past key-up, matching the sequenced path"
+    );
 }
 
 #[test]

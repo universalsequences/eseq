@@ -6156,6 +6156,114 @@ fn editable_widget_buffers_do_not_auto_focus_widgets() {
     assert_eq!(editor.focused_widget_id(), None);
 }
 
+/// A focused number picker owns digits from the *first* keypress, so digit-keyed
+/// global shortcuts (roll rates) must not consume the key that starts the edit.
+#[test]
+fn focused_numeric_widgets_capture_digits_before_the_edit_starts() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (v-stack
+                  (button "Go" :key "num-button" :width 8 :height 1.4)
+                  (number-picker
+                    :key "num-picker"
+                    :value 12 :min 0 :max 99 :decimals 0
+                    :width 8 :height 1.4))
+                "#,
+        )
+        .expect("build widget tree")
+        .expect("widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 10);
+    let _ = editor.widget_layout().expect("layout");
+
+    assert!(!editor.focused_widget_captures_numeric_input());
+
+    assert!(editor.focus_widget_by_stable_key("num-button", Some("button")));
+    assert!(
+        !editor.focused_widget_captures_numeric_input(),
+        "a button does not take numeric input"
+    );
+
+    assert!(editor.focus_widget_by_stable_key("num-picker", Some("number-picker")));
+    let picker_id = editor.focused_widget_id().expect("picker focus");
+    assert!(
+        !crate::widget_render::number_picker::number_picker_edit_state(picker_id).editing,
+        "the picker starts idle — the guard must not depend on it already editing"
+    );
+    assert!(
+        editor.focused_widget_captures_numeric_input(),
+        "a focused, idle number picker still owns the first digit"
+    );
+}
+
+/// A focused button must not swallow Backspace: destructive global shortcuts
+/// (select-all then Backspace over a step selection) defer to a focused widget
+/// only when that widget genuinely handles the key.
+#[test]
+fn focused_widget_consumes_key_only_for_real_key_handlers() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (v-stack
+                  (button "Go" :key "focus-button" :width 8 :height 1.4)
+                  (text-input :key "focus-text" :value "" :width 12 :height 1.4)
+                  (number-picker
+                    :key "focus-picker"
+                    :value 12 :min 0 :max 99 :decimals 0
+                    :width 8 :height 1.4))
+                "#,
+        )
+        .expect("build widget tree")
+        .expect("widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 10);
+    let _ = editor.widget_layout().expect("layout");
+
+    assert!(editor.focus_widget_by_stable_key("focus-button", Some("button")));
+    assert!(
+        !editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "a focused button must let Backspace through to the global shortcut"
+    );
+    assert!(
+        editor.focused_widget_consumes_key(KeyCode::Enter, KeyModifiers::NONE),
+        "a button does handle Enter"
+    );
+
+    assert!(editor.focus_widget_by_stable_key("focus-text", Some("text-input")));
+    assert!(
+        editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "a text input owns Backspace"
+    );
+
+    assert!(editor.focus_widget_by_stable_key("focus-picker", Some("number-picker")));
+    assert!(
+        !editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "an idle number picker does not own Backspace"
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    assert!(
+        editor.focused_widget_consumes_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "a number picker mid-edit does own Backspace"
+    );
+}
+
 #[test]
 fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
     let init = r#"

@@ -515,9 +515,11 @@ pub(super) fn fire_resolved(
                 {
                     continue;
                 }
-                if trigger_params.slice_mode.round() == 0.0 {
-                    trigger_transpose += base_note_offset;
-                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += base_note_offset;
                 let voice = data.voice_pools[track_idx]
                     .allocate_voice_retriggering_same_note(selector_transpose);
                 let voice_lid = voice.logical_id;
@@ -736,9 +738,11 @@ pub(super) fn fire_resolved(
             {
                 return;
             }
-            if trigger_params.slice_mode.round() == 0.0 {
-                trigger_transpose += base_note_offset;
-            }
+            // `resolve_slice` consumes the note to pick the slice and zeroes the
+            // transpose, so adding the base-note offset unconditionally leaves
+            // classic mode untouched and makes `base` the pitch offset that every
+            // slice plays at.
+            trigger_transpose += base_note_offset;
             let voice = data.voice_pools[track_idx]
                 .allocate_voice_retriggering_same_note(selector_transpose);
             let voice_lid = voice.logical_id;
@@ -1039,9 +1043,11 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
     {
         return;
     }
-    if trigger_params.slice_mode.round() == 0.0 {
-        trigger_transpose += chop_base_note_offset;
-    }
+    // `resolve_slice` consumes the note to pick the slice and zeroes the
+    // transpose, so adding the base-note offset unconditionally leaves
+    // classic mode untouched and makes `base` the pitch offset that every
+    // slice plays at.
+    trigger_transpose += chop_base_note_offset;
     let voice = data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
     let voice_lid = voice.logical_id;
     let sampler_lid = data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);

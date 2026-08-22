@@ -547,7 +547,8 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             selected_step,
         )
         .round();
-        let slices = app
+        let mut slice_active: Vec<Rc<RefCell<Value>>> = Vec::new();
+        let slices: Vec<Rc<RefCell<Value>>> = app
             .sample_analysis
             .cache()
             .table(buffer_id)
@@ -561,7 +562,9 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                         sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
                         selected_step,
                     );
-                    table
+                    // Sensitivity deactivates markers rather than removing
+                    // them; the parallel flag list carries which are live.
+                    let (frames, active) = table
                         .with_edits(sequencer::analysis::edits_for_sample(
                             slot.instrument_slot.sampler_slice_edits.as_ref(),
                             sampler_path
@@ -569,8 +572,14 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                                 .map(|path| path.to_string_lossy())
                                 .as_deref(),
                         ))
-                        .slice_starts(sensitivity)
-                        .collect()
+                        .slice_markers(sensitivity);
+                    slice_active = active
+                        .into_iter()
+                        .map(|active| {
+                            value_cell(Value::Number(if active { 1.0 } else { 0.0 }))
+                        })
+                        .collect();
+                    frames
                 } else if slice_mode == 2.0 {
                     let division = rack_slot_param_value(
                         rack,
@@ -597,7 +606,11 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                     .collect()
             })
             .unwrap_or_default();
+        if slice_active.len() != slices.len() {
+            slice_active = slices.iter().map(|_| value_cell(Value::Number(1.0))).collect();
+        }
         panel_map.insert("slices".to_string(), value_cell(Value::List(slices)));
+        panel_map.insert("slice-active".to_string(), value_cell(Value::List(slice_active)));
     }
 
     Some(Rc::new(RefCell::new(Value::Map(panel_map))))

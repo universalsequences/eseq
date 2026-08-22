@@ -130,7 +130,9 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             if let Some(active_note) =
                 take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose)
             {
-                release_active_keyboard_note(data, active_note, 0, block_end_sample);
+                if live_key_release_cuts_voice(&data.state, kt.track) {
+                    release_active_keyboard_note(data, active_note, 0, block_end_sample);
+                }
             }
         } else {
             // Note-on: allocate voice and trigger
@@ -295,9 +297,11 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 {
                     continue;
                 }
-                if kb_sampler_params.slice_mode.round() == 0.0 {
-                    trigger_transpose += base_note_offset;
-                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += base_note_offset;
                 let voice = data.voice_pools[kt.track]
                     .allocate_voice_retriggering_same_note(resolved_transpose);
                 let voice_lid = voice.logical_id;
