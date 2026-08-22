@@ -2315,7 +2315,16 @@
                          :resolution :4
                          :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))
                        (def drive (defchan drive 0))
-                       (tap drive (lambda (value) (send warp 0.8)))"#,
+                       (tap drive (lambda (value) (send warp 0.8)))
+                       (def wave (defchan wave 0))
+                       (def-process "wave-driver"
+                         :state ((phase 0))
+                         :every (beats 0.25)
+                         :run (do
+                           (send :wave phase)
+                           (set! phase (+ phase 1))))
+                       (def wave-driver-h (wave-driver))
+                       (start wave-driver-h)"#,
                 )
                 .expect("declare channel and generator");
 
@@ -2368,6 +2377,9 @@
                 before.iter().all(|vel| (vel - 0.25).abs() < 1e-6),
                 "expected the defchan initial before any write, got {before:?}"
             );
+            let wave_after_first = state
+                .process_channel_value("wave")
+                .expect("standalone process should publish its channel");
 
             // The stubbed handle used to swallow this call entirely.
             let handle = scratch_runtime
@@ -2382,6 +2394,13 @@
             assert!(
                 after.iter().all(|vel| (vel - 0.9).abs() < 1e-6),
                 "expected the written channel value, got {after:?}"
+            );
+            let wave_after_second = state
+                .process_channel_value("wave")
+                .expect("standalone process should keep publishing");
+            assert_ne!(
+                wave_after_second, wave_after_first,
+                "a started :every process must advance its mirrored value autonomously"
             );
             assert!(
                 state.take_process_channel_writes().is_empty(),

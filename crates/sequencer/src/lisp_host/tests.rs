@@ -8882,6 +8882,61 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 ),
             ]
         );
+
+        state.publish_process_channel_values(HashMap::from([(
+            "live.decay".to_string(),
+            crate::process::ProcessLiteral::Number(0.9),
+        )]));
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 120, 30);
+        let live_values = editor
+            .active_buffer()
+            .inline_code_widgets()
+            .iter()
+            .filter_map(|inline| match &inline.widget {
+                Value::Map(map) => map.get("value").map(|value| value.borrow().clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            live_values.contains(&Value::Number(0.9)),
+            "a render frame must poll the scheduler mirror into the slider: {live_values:?}"
+        );
+
+        // The sequencer UI commonly leaves the source visible in an inactive
+        // tile. Runtime polling must update that tile too; waiting until a
+        // click activates it is the visible "stuck, then snap" regression.
+        let source_buffer_name = editor.active_buffer().name.clone();
+        editor.open_scratch_buffer("*other*", "");
+        let other_buffer_idx = editor.active_buffer_idx();
+        editor
+            .runtime_mut()
+            .eval_str(&format!("(switch-to-buffer {source_buffer_name:?})"))
+            .expect("request source buffer switch");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, source_buffer_name);
+        let other_tile = editor
+            .split_active_tile(eseqlisp::tile::SplitDir::Vertical, other_buffer_idx)
+            .expect("split source and other buffer");
+        editor.switch_active_tile(other_tile);
+        state.publish_process_channel_values(HashMap::from([(
+            "live.decay".to_string(),
+            crate::process::ProcessLiteral::Number(0.6),
+        )]));
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 120, 30);
+        assert!(editor.switch_active_tile_to_buffer_named(&source_buffer_name));
+        let inactive_live_values = editor
+            .active_buffer()
+            .inline_code_widgets()
+            .iter()
+            .filter_map(|inline| match &inline.widget {
+                Value::Map(map) => map.get("value").map(|value| value.borrow().clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            inactive_live_values.contains(&Value::Number(0.6)),
+            "a visible inactive source tile must poll the scheduler mirror: {inactive_live_values:?}"
+        );
     }
 
     #[test]

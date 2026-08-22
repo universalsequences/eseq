@@ -4134,36 +4134,58 @@ impl Editor {
     }
 
     pub(crate) fn refresh_inline_widget_runtime_values(&mut self) {
-        let bindings = self.active_buffer().inline_widget_runtime_bindings();
-        if bindings.is_empty() {
-            return;
-        }
-        let mut updates = Vec::new();
-        for (anchor_id, target, inlet) in bindings {
-            if let Ok(Some(value)) = self.runtime.invoke(
-                target,
-                vec![
-                    Value::Keyword("__inline-read".to_string()),
-                    Value::Keyword(inlet),
-                ],
-            ) && !matches!(value, Value::Nil)
-            {
-                updates.push((anchor_id, value));
+        let mut visible_buffer_indices = Vec::new();
+        for tile_id in self.tile_root.leaf_ids() {
+            let Some(buffer_idx) = self.tile_root.find_leaf(tile_id).map(|leaf| leaf.buffer_idx)
+            else {
+                continue;
+            };
+            if !visible_buffer_indices.contains(&buffer_idx) {
+                visible_buffer_indices.push(buffer_idx);
             }
         }
-        let mut changed = false;
-        for (anchor_id, value) in updates {
-            changed |= self
-                .active_buffer_mut()
-                .set_inline_widget_live_value(anchor_id, value);
-        }
-        if changed {
-            let buffer_id = self.active_buffer().id;
-            if let Some(tree) = inline_widget_tree(self.active_buffer()) {
-                self.active_buffer_mut()
+
+        let active_buffer_idx = self.active_buffer_idx();
+        let mut changed_inactive_buffers = Vec::new();
+        for buffer_idx in visible_buffer_indices {
+            let bindings = self.buffers[buffer_idx].inline_widget_runtime_bindings();
+            if bindings.is_empty() {
+                continue;
+            }
+            let mut updates = Vec::new();
+            for (anchor_id, target, inlet) in bindings {
+                if let Ok(Some(value)) = self.runtime.invoke(
+                    target,
+                    vec![
+                        Value::Keyword("__inline-read".to_string()),
+                        Value::Keyword(inlet),
+                    ],
+                ) && !matches!(value, Value::Nil)
+                {
+                    updates.push((anchor_id, value));
+                }
+            }
+            let mut changed = false;
+            for (anchor_id, value) in updates {
+                changed |= self.buffers[buffer_idx]
+                    .set_inline_widget_live_value(anchor_id, value);
+            }
+            if !changed {
+                continue;
+            }
+            let buffer_id = self.buffers[buffer_idx].id;
+            if let Some(tree) = inline_widget_tree(&self.buffers[buffer_idx]) {
+                self.buffers[buffer_idx]
                     .set_widget_tree(Some(tree.deep_clone()), Some(buffer_id));
-                self.runtime.set_widget_tree(tree);
+                if buffer_idx == active_buffer_idx {
+                    self.runtime.set_widget_tree(tree);
+                } else {
+                    changed_inactive_buffers.push(buffer_idx);
+                }
             }
+        }
+        for buffer_idx in changed_inactive_buffers {
+            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
         }
     }
 
