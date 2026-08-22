@@ -49,6 +49,7 @@ impl SequencerState {
                 }
             }
         }
+        snapshot.scene_slots = self.current_scene_slots();
         snapshot.project_process_chain = self.project_process_chain();
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();

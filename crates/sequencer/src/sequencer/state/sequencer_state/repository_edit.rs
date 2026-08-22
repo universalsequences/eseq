@@ -304,6 +304,53 @@ impl SequencerState {
             .unwrap_or_default()
     }
 
+    pub fn current_scene_slots(&self) -> SceneSlotStore {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scenes
+            .get(self.current_pattern_index())
+            .map(|scene| scene.scene_slots.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn resolve_current_scene_slot(
+        &self,
+        name: &str,
+        declaration_default: &crate::process::ProcessLiteral,
+    ) -> (crate::process::ProcessLiteral, u64, bool) {
+        let slots = self.current_scene_slots();
+        let resolved = slots.resolve(name, declaration_default);
+        (resolved.value.clone(), resolved.epoch, resolved.overridden)
+    }
+
+    /// Persist one override into the current pattern and publish it to the
+    /// scheduler. `SceneSlotStore::write_literal` advances the per-slot epoch
+    /// before this method drops the scene lock and publishes the snapshot.
+    pub fn write_current_scene_slot(
+        &self,
+        name: impl Into<String>,
+        value: crate::process::ProcessLiteral,
+    ) -> Result<u64, String> {
+        let name = name.into();
+        let epoch = {
+            let mut scenes = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let current = self.current_pattern_index();
+            let scene = scenes
+                .scenes
+                .get_mut(current)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            scene.scene_slots.write_literal(name, value)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(epoch)
+    }
+
     pub fn current_mod_connections(&self) -> Vec<ModConnection> {
         self.current_scene_metadata().0
     }

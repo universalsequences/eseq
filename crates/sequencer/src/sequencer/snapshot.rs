@@ -11,7 +11,7 @@ use super::data::{
     CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
     TrackParamsSnapshot, TrackSendRuntimeTarget, TrackSendSnapshot, MAX_STEPS, NUM_PARAMS,
 };
-use super::state::{RackTrackSnapshot, SequencerState, TrackPatternData};
+use super::state::{RackTrackSnapshot, SceneSlotStore, SequencerState, TrackPatternData};
 
 #[derive(Clone, Debug)]
 pub struct SequencerTransportSnapshot {
@@ -96,6 +96,7 @@ pub struct SequencerSnapshot {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    pub scene_slots: SceneSlotStore,
     pub process_trace: bool,
 }
 
@@ -114,6 +115,7 @@ impl SequencerSnapshot {
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             process_trace: false,
         }
     }
@@ -157,6 +159,7 @@ impl SequencerSnapshot {
         apply_macro_overrides(&mut tracks, &state.live_macro_overrides());
         let tracks = tracks.into_iter().map(Arc::new).collect();
         let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
+        let scene_slots = state.current_scene_slots();
 
         Self {
             transport,
@@ -164,6 +167,7 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
             process_trace: state.process_trace_enabled(),
         }
     }
@@ -205,6 +209,7 @@ impl SequencerSnapshot {
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
         graph_overrides: Vec<ProjectGraphOverrides>,
+        scene_slots: SceneSlotStore,
         project_process_chain: crate::process::TrackProcessChain,
     ) -> Self {
         let num_tracks = tracks.len();
@@ -261,6 +266,7 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
             process_trace: state.process_trace_enabled(),
         }
     }

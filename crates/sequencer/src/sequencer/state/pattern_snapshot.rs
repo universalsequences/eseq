@@ -22,6 +22,7 @@ pub struct PatternSnapshot {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    pub scene_slots: SceneSlotStore,
     pub rack_tracks: Vec<Option<RackTrackSnapshot>>,
     pub process_chains: Vec<crate::process::TrackProcessChain>,
     pub project_process_lane_overrides: Vec<crate::process::ProjectLaneOverrides>,
@@ -937,6 +938,7 @@ impl PatternSnapshot {
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             rack_tracks,
             process_chains,
             project_process_lane_overrides: state
@@ -1291,6 +1293,7 @@ impl PatternSnapshot {
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             rack_tracks: Vec::with_capacity(num_tracks),
             process_chains: Vec::with_capacity(num_tracks),
             project_process_lane_overrides: Vec::with_capacity(num_tracks),

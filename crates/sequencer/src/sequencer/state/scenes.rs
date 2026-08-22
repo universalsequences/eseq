@@ -48,6 +48,7 @@ pub struct SceneTrackReferenceState {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    pub scene_slots: SceneSlotStore,
 }
 
 #[derive(Clone, Debug)]
@@ -263,6 +264,8 @@ pub struct Scene {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// Pattern-scoped portable values declared through `defscene`.
+    pub scene_slots: SceneSlotStore,
     /// Project-level default process chain: composed ahead of every track's
     /// own chain at snapshot capture, so present and future tracks inherit it.
     pub project_process_chain: crate::process::TrackProcessChain,
@@ -330,6 +333,7 @@ impl ProjectScenes {
                 mod_connections: snapshot.mod_connections.clone(),
                 neural_networks: snapshot.neural_networks.clone(),
                 graph_overrides: snapshot.graph_overrides.clone(),
+                scene_slots: snapshot.scene_slots.clone(),
                 project_process_chain: snapshot.project_process_chain.clone(),
             });
         }
@@ -351,6 +355,7 @@ impl ProjectScenes {
                 mod_connections: Vec::new(),
                 neural_networks: Vec::new(),
                 graph_overrides: Vec::new(),
+                scene_slots: SceneSlotStore::default(),
                 project_process_chain: crate::process::TrackProcessChain::default(),
             });
         }
@@ -499,6 +504,7 @@ impl ProjectScenes {
         snapshot.mod_connections = scene.mod_connections.clone();
         snapshot.neural_networks = scene.neural_networks.clone();
         snapshot.graph_overrides = scene.graph_overrides.clone();
+        snapshot.scene_slots = scene.scene_slots.clone();
         snapshot.project_process_chain = scene.project_process_chain.clone();
         for track in 0..self.track_pools.len() {
             let Some(id) = scene.cells.get(track).copied().flatten() else {
@@ -585,6 +591,7 @@ impl ProjectScenes {
         scene.mod_connections = snapshot.mod_connections.clone();
         scene.neural_networks = snapshot.neural_networks.clone();
         scene.graph_overrides = snapshot.graph_overrides.clone();
+        scene.scene_slots = snapshot.scene_slots.clone();
         // Deliberately NOT copied from the snapshot: the scene itself is the
         // live authority for `project_process_chain` (edited in place via
         // edit_current_project_process_chain), and several callers save
@@ -715,6 +722,13 @@ impl ProjectScenes {
             .get_mut(self.current_scene)
             .ok_or_else(|| "current scene out of range".to_string())?;
         edit(&mut scene.mod_connections)
+    }
+
+    pub fn current_scene_slots(&self) -> SceneSlotStore {
+        self.scenes
+            .get(self.current_scene)
+            .map(|scene| scene.scene_slots.clone())
+            .unwrap_or_default()
     }
 
     pub fn current_neural_networks(&self) -> Vec<ProjectNeuralNetwork> {
@@ -1066,6 +1080,7 @@ impl ProjectScenes {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
             project_process_chain,
         ) = source_scene
             .map(|scene| {
@@ -1074,6 +1089,7 @@ impl ProjectScenes {
                     scene.mod_connections,
                     scene.neural_networks,
                     scene.graph_overrides,
+                    scene.scene_slots,
                     scene.project_process_chain,
                 )
             })
@@ -1092,6 +1108,7 @@ impl ProjectScenes {
             mod_connections,
             neural_networks,
             graph_overrides,
+            scene_slots,
             project_process_chain,
         });
         self.current_scene = scene_idx;

@@ -278,6 +278,7 @@ impl SequencerState {
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
         graph_overrides: Vec<ProjectGraphOverrides>,
+        scene_slots: SceneSlotStore,
         project_process_chain: crate::process::TrackProcessChain,
     ) -> Arc<SequencerSnapshot> {
         self.publish_scheduler_snapshot_arc(Arc::new(
@@ -287,6 +288,7 @@ impl SequencerState {
                 mod_connections,
                 neural_networks,
                 graph_overrides,
+                scene_slots,
                 project_process_chain,
             ),
         ))

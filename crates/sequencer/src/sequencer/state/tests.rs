@@ -9,6 +9,59 @@
     use crate::sequencer::ModDestination;
 
     #[test]
+    fn scene_slot_write_publishes_value_and_epoch_to_scheduler_snapshot() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        let default = crate::process::ProcessLiteral::Number(1.0);
+
+        assert_eq!(
+            state.resolve_current_scene_slot("rate", &default),
+            (default.clone(), 0, false)
+        );
+        let first_epoch = state
+            .write_current_scene_slot(
+                "rate",
+                crate::process::ProcessLiteral::Number(2.0),
+            )
+            .unwrap();
+        let second_epoch = state
+            .write_current_scene_slot(
+                "rate",
+                crate::process::ProcessLiteral::Number(2.0),
+            )
+            .unwrap();
+        assert!(
+            second_epoch > first_epoch,
+            "an equal authored write must still invalidate consumers"
+        );
+
+        let snapshot = state.latest_scheduler_snapshot();
+        let resolved = snapshot.scene_slots.resolve("rate", &default);
+        assert_eq!(resolved.value, &crate::process::ProcessLiteral::Number(2.0));
+        assert_eq!(resolved.epoch, second_epoch);
+        assert!(resolved.overridden);
+    }
+
+    #[test]
+    fn scene_slot_values_duplicate_with_scene_and_ignore_track_remap() {
+        let mut first = PatternSnapshot::new_default(2, &[]);
+        first
+            .scene_slots
+            .write_literal("figures", crate::process::ProcessLiteral::Number(3.0))
+            .unwrap();
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first], 0);
+        let duplicate = scenes.new_scene();
+        let before_delete = scenes.scenes[duplicate].scene_slots.clone();
+
+        let mut snapshot = scenes.scene_snapshot(duplicate).unwrap();
+        snapshot.remove_track(0);
+        assert_eq!(snapshot.scene_slots, before_delete);
+        assert_eq!(
+            snapshot.scene_slots.get("figures"),
+            Some(&crate::process::ProcessLiteral::Number(3.0))
+        );
+    }
+
+    #[test]
     fn record_position_uses_the_track_timebase_not_global_sixteenths() {
         let state = SequencerState::new(1, vec![vec![]]);
         state.pattern.track_params[0].set_timebase(Timebase::Eighth);
@@ -408,6 +461,7 @@
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             rack_tracks: vec![None; num_tracks],
             process_chains: vec![crate::process::TrackProcessChain::default(); num_tracks],
             project_process_lane_overrides: vec![Default::default(); num_tracks],
@@ -2662,6 +2716,7 @@
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            scene_slots: SceneSlotStore::default(),
             rack_tracks: vec![None; 4],
             process_chains: vec![crate::process::TrackProcessChain::default(); 4],
             project_process_lane_overrides: vec![Default::default(); 4],
