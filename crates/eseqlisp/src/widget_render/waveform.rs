@@ -98,6 +98,8 @@ struct WaveformView {
     selection_end: Option<f64>,
     marker_selection: bool,
     active_marker: Option<String>,
+    slices: Vec<f64>,
+    active_slice: Option<usize>,
     buffer: Option<WaveformBuffer>,
 }
 
@@ -106,6 +108,7 @@ enum HitRegion {
     Header,
     StartMarker,
     EndMarker,
+    SliceMarker { index: usize, time: f64 },
     Content { time: f64 },
 }
 
@@ -119,7 +122,12 @@ impl WidgetDefinition for WaveformWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["playhead-time", "selection-start", "selection-end"]
+        &[
+            "playhead-time",
+            "selection-start",
+            "selection-end",
+            "active-slice",
+        ]
     }
 
     fn measure(
@@ -331,6 +339,20 @@ impl WidgetDefinition for WaveformWidget {
             }
         }
 
+        for (index, time) in view.visible_slices() {
+            let col = view.col_for_time(time);
+            let color = if view.active_slice == Some(index) {
+                active_marker_color(props)
+            } else {
+                marker_color(props)
+            };
+            for row_offset in 0..(content.height.round() as u16) {
+                let row = content.row.round() as u16 + row_offset;
+                buf.set(row, col, styled_cell('|', color, None));
+            }
+            buf.set(content_top, col, styled_cell('v', color, None));
+        }
+
         if let Some(cursor_col) = view.playhead_col(view.cursor_time) {
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
@@ -354,10 +376,10 @@ impl WidgetDefinition for WaveformWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
     ) -> Option<Value> {
         let view = WaveformView::from_props(&node.props, node.rect);
-        view.begin_gesture(local_col, local_row)
+        view.begin_gesture(local_col, local_row, modifiers)
     }
 
     fn mouse_event(
@@ -368,14 +390,14 @@ impl WidgetDefinition for WaveformWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
         let view = WaveformView::from_props(&node.props, node.rect);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => view
-                .handle_pointer_down(local_col, local_row)
+                .handle_pointer_down(local_col, local_row, modifiers)
                 .map(WidgetEvent::Custom)
                 .map(MouseEventOutcome::Dispatch)
                 .unwrap_or(MouseEventOutcome::Consume),
@@ -386,6 +408,11 @@ impl WidgetDefinition for WaveformWidget {
                 .unwrap_or(MouseEventOutcome::Consume),
             MouseEventKind::Up(MouseButton::Left) => view
                 .handle_pointer_up(local_col, local_row, gesture)
+                .map(WidgetEvent::Custom)
+                .map(MouseEventOutcome::Dispatch)
+                .unwrap_or(MouseEventOutcome::Consume),
+            MouseEventKind::Down(MouseButton::Right) => view
+                .handle_pointer_down(local_col, local_row, KeyModifiers::ALT)
                 .map(WidgetEvent::Custom)
                 .map(MouseEventOutcome::Dispatch)
                 .unwrap_or(MouseEventOutcome::Consume),
@@ -560,6 +587,22 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }));
     }
 
+    if let Some((start, end)) = view.active_slice_range() {
+        let start = start.max(view.view_start);
+        let end = end.min(view.view_start + view.view_duration);
+        if end > start {
+            let mut color = active_marker_color(&node.props);
+            color.a *= 0.14;
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: view.x_for_time(start),
+                y: content.row,
+                width: (view.x_for_time(end) - view.x_for_time(start)).max(0.0),
+                height: content.height,
+                color,
+            }));
+        }
+    }
+
     if let Some(buffer) = &view.buffer {
         let selection = view.normalized_selection();
         let playhead = view.normalized_playhead();
@@ -588,6 +631,29 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }));
     }
 
+    for (index, time) in view.visible_slices() {
+        let color = if view.active_slice == Some(index) {
+            active_marker_color(&node.props)
+        } else {
+            marker_color(&node.props)
+        };
+        let x = view.x_for_time(time);
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x: x - 0.0625,
+            y: content.row,
+            width: 0.125,
+            height: content.height,
+            color,
+        }));
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x: x - 0.25,
+            y: content.row,
+            width: 0.5,
+            height: 0.18_f32.min(content.height),
+            color,
+        }));
+    }
+
     primitives
 }
 
@@ -599,6 +665,17 @@ fn metal_header_text_row(rect: Rect, header_height: f32) -> f32 {
 
 impl WaveformView {
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
+        let slices = props.get("slices").map(parse_number_list).unwrap_or_default();
+        let playhead_time = props.get("playhead-time").and_then(as_number);
+        let active_slice = props
+            .get("active-slice")
+            .and_then(as_number)
+            .filter(|index| index.is_finite() && *index >= 0.0)
+            .map(|index| index.round() as usize)
+            .or_else(|| {
+                let playhead = playhead_time?;
+                slices.iter().rposition(|time| time.is_finite() && *time <= playhead)
+            });
         Self {
             rect,
             header_height: get_num(props, "header-height", 0.5).max(0.0) as f32,
@@ -614,12 +691,14 @@ impl WaveformView {
                 .or(Some(TimeRuler {
                     mode: TimeRulerMode::Seconds,
                 })),
-            playhead_time: props.get("playhead-time").and_then(as_number),
+            playhead_time,
             cursor_time: props.get("cursor-time").and_then(as_number),
             selection_start: props.get("selection-start").and_then(as_number),
             selection_end: props.get("selection-end").and_then(as_number),
             marker_selection: get_bool(props, "marker-selection", false),
             active_marker: props.get("active-marker").and_then(as_name),
+            slices,
+            active_slice,
             buffer: props.get("buffer").and_then(parse_waveform_buffer),
         }
     }
@@ -734,6 +813,26 @@ impl WaveformView {
         self.active_marker.as_deref() == Some(marker)
     }
 
+    fn visible_slices(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.slices
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, time)| time.is_finite() && self.time_visible(*time))
+    }
+
+    fn active_slice_range(&self) -> Option<(f64, f64)> {
+        let index = self.active_slice?;
+        let start = *self.slices.get(index)?;
+        let end = self
+            .slices
+            .get(index + 1)
+            .copied()
+            .or_else(|| self.buffer.as_ref().map(|buffer| buffer.sample.duration_seconds))
+            .unwrap_or(self.view_start + self.view_duration);
+        (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
+    }
+
     fn waveform_body_rect(&self) -> Rect {
         let content = self.content_rect();
         let top_inset = WAVEFORM_BODY_TOP_INSET.min(content.height.max(0.0));
@@ -767,9 +866,22 @@ impl WaveformView {
                 return Some(marker);
             }
         }
+        if let Some((index, time)) = self.slice_marker_hit_test(local_col) {
+            return Some(HitRegion::SliceMarker { index, time });
+        }
         Some(HitRegion::Content {
             time: self.time_at_col(local_col),
         })
+    }
+
+    fn slice_marker_hit_test(&self, local_col: f32) -> Option<(usize, f64)> {
+        self.visible_slices()
+            .filter_map(|(index, time)| {
+                let distance = (local_col - self.x_for_time(time)).abs();
+                (distance <= MARKER_LINE_SLOP_PX).then_some((index, time, distance))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(index, time, _)| (index, time))
     }
 
     fn marker_hit_test(&self, local_col: f32, local_row: f32, waveform: Rect) -> Option<HitRegion> {
@@ -828,7 +940,12 @@ impl WaveformView {
         line_hit || flag_hit
     }
 
-    fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        local_col: f32,
+        local_row: f32,
+        modifiers: KeyModifiers,
+    ) -> Option<Value> {
         match self.hit_test(local_col, local_row)? {
             HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
             HitRegion::StartMarker => {
@@ -845,6 +962,17 @@ impl WaveformView {
                     ("offset", Value::Number(self.time_at_col(local_col) - end)),
                 ]))
             }
+            HitRegion::SliceMarker { index, time } => Some(map_value(vec![
+                ("kind", keyword(":drag-slice")),
+                ("index", Value::Number(index as f64)),
+                ("offset", Value::Number(self.time_at_col(local_col) - time)),
+            ])),
+            HitRegion::Content { time } if modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(map_value(vec![
+                    ("kind", keyword(":add-slice")),
+                    ("time", Value::Number(time)),
+                ]))
+            }
             HitRegion::Content { time } => Some(map_value(vec![
                 ("kind", keyword(":select-range")),
                 ("time", Value::Number(time)),
@@ -852,8 +980,19 @@ impl WaveformView {
         }
     }
 
-    fn handle_pointer_down(&self, local_col: f32, local_row: f32) -> Option<Value> {
+    fn handle_pointer_down(
+        &self,
+        local_col: f32,
+        local_row: f32,
+        modifiers: KeyModifiers,
+    ) -> Option<Value> {
         match self.hit_test(local_col, local_row)? {
+            HitRegion::Content { time } if modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(action_map(vec![
+                    ("type", keyword(":add-slice")),
+                    ("time", Value::Number(time)),
+                ]))
+            }
             HitRegion::Header | HitRegion::Content { .. } => Some(action_map(vec![
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
@@ -865,6 +1004,17 @@ impl WaveformView {
             HitRegion::EndMarker => Some(action_map(vec![
                 ("type", keyword(":begin-marker-drag")),
                 ("marker", keyword(":end")),
+            ])),
+            HitRegion::SliceMarker { index, time } if modifiers.contains(KeyModifiers::ALT) => {
+                Some(action_map(vec![
+                    ("type", keyword(":delete-slice")),
+                    ("index", Value::Number(index as f64)),
+                    ("time", Value::Number(time)),
+                ]))
+            }
+            HitRegion::SliceMarker { time, .. } => Some(action_map(vec![
+                ("type", keyword(":set-cursor")),
+                ("time", Value::Number(time)),
             ])),
         }
     }
@@ -911,6 +1061,15 @@ impl WaveformView {
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
             ])),
+            Some(Value::Keyword(kind)) if kind == "drag-slice" => {
+                let index = as_number(gesture.get("index")?)?;
+                let offset = gesture.get("offset").and_then(as_number).unwrap_or(0.0);
+                Some(action_map(vec![
+                    ("type", keyword(":move-slice")),
+                    ("index", Value::Number(index)),
+                    ("time", Value::Number((self.time_at_col(local_col) - offset).max(0.0))),
+                ]))
+            }
             _ => None,
         }
     }
@@ -1038,6 +1197,13 @@ impl WaveformView {
             KeyCode::Esc if self.selection_range().is_some() => {
                 Some(action_map(vec![("type", keyword(":clear-selection"))]))
             }
+            KeyCode::Delete | KeyCode::Backspace => self.active_slice.map(|index| {
+                action_map(vec![
+                    ("type", keyword(":delete-slice")),
+                    ("index", Value::Number(index as f64)),
+                    ("time", Value::Number(self.slices.get(index).copied().unwrap_or(0.0))),
+                ])
+            }),
             _ => None,
         }
     }
@@ -1167,6 +1333,16 @@ fn as_name(value: &Value) -> Option<String> {
     }
 }
 
+fn parse_number_list(value: &Value) -> Vec<f64> {
+    match value {
+        Value::List(values) => values
+            .iter()
+            .filter_map(|value| as_number(&value.borrow()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn parse_waveform_buffer(value: &Value) -> Option<WaveformBuffer> {
     let map = get_map(value)?;
     for key_name in ["registry-key", "path", "id"] {
@@ -1285,7 +1461,12 @@ mod tests {
     fn marker_and_playhead_times_are_bindable() {
         assert_eq!(
             WAVEFORM_WIDGET.bindable_props(),
-            &["playhead-time", "selection-start", "selection-end"]
+            &[
+                "playhead-time",
+                "selection-start",
+                "selection-end",
+                "active-slice",
+            ]
         );
     }
 
@@ -1381,7 +1562,9 @@ mod tests {
                 height: 8.0,
             },
         );
-        let gesture = view.begin_gesture(4.0, 2.0).expect("gesture");
+        let gesture = view
+            .begin_gesture(4.0, 2.0, KeyModifiers::NONE)
+            .expect("gesture");
         let Value::Map(map) = view
             .handle_pointer_drag(20.0, 2.0, Some(&gesture))
             .expect("selection action")
@@ -1391,6 +1574,62 @@ mod tests {
         assert_eq!(
             map.get("type").map(|value| value.borrow().clone()),
             Some(Value::Keyword("set-selection".to_string()))
+        );
+    }
+
+    #[test]
+    fn slice_markers_emit_add_move_and_delete_actions() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let action_type = |action: Value| {
+            let Value::Map(action) = action else {
+                panic!("expected action map");
+            };
+            action
+                .get("type")
+                .map(|value| value.borrow().clone())
+                .expect("action type")
+        };
+
+        assert_eq!(
+            action_type(
+                view.handle_pointer_down(24.0, 2.0, KeyModifiers::SHIFT)
+                    .expect("add action")
+            ),
+            Value::Keyword("add-slice".to_string())
+        );
+        assert_eq!(
+            action_type(
+                view.handle_pointer_down(8.0, 2.0, KeyModifiers::ALT)
+                    .expect("delete action")
+            ),
+            Value::Keyword("delete-slice".to_string())
+        );
+
+        let gesture = view
+            .begin_gesture(8.0, 2.0, KeyModifiers::NONE)
+            .expect("slice drag gesture");
+        assert_eq!(
+            action_type(
+                view.handle_pointer_drag(12.0, 2.0, Some(&gesture))
+                    .expect("move action")
+            ),
+            Value::Keyword("move-slice".to_string())
         );
     }
 
@@ -1422,6 +1661,49 @@ mod tests {
             has_waveform,
             "expected waveform stroke cells to be rendered"
         );
+    }
+
+    #[test]
+    fn tui_render_highlights_the_active_slice_marker() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.75)]),
+            ),
+            ("active-slice".to_string(), number_value(1.0)),
+            (
+                "marker-color".to_string(),
+                Value::Keyword("green".to_string()),
+            ),
+            (
+                "active-marker-color".to_string(),
+                Value::Keyword("purple".to_string()),
+            ),
+        ]);
+        let mut buf = CellBuffer::new(40, 12);
+        WAVEFORM_WIDGET.tui_render(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 40.0,
+                height: 12.0,
+            },
+            &mut buf,
+        );
+
+        let marker_colors = buf
+            .cells
+            .iter()
+            .flatten()
+            .flatten()
+            .filter(|cell| cell.ch == 'v')
+            .map(|cell| cell.style.fg)
+            .collect::<Vec<_>>();
+        assert!(marker_colors.contains(&theme::GREEN()));
+        assert!(marker_colors.contains(&theme::PURPLE()));
     }
 
     #[test]

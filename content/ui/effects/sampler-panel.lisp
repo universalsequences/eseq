@@ -93,8 +93,24 @@
             (next-duration (sampler-clamp-duration (/ cur-duration event.factor) duration)))
         (set! sampler-view-duration next-duration)
         (set! sampler-view-start (sampler-clamp-start (- event.anchor-time (* anchor-ratio next-duration)) duration))))
+    :add-slice
+    (sampler-edit-slice inst :add event)
+    :move-slice
+    (sampler-edit-slice inst :move event)
+    :delete-slice
+    (sampler-edit-slice inst :delete event)
     _
     nil))
+
+(def sampler-edit-slice (inst operation event)
+  (host-command "edit-sampler-slice"
+    (dict :track (if (pc/instrument-rack-target? inst) (get inst :rack-track) (get inst :track))
+          :rack-slot (if (pc/instrument-rack-target? inst) (get inst :rack-slot) -1)
+          :operation operation
+          :index (if (get event :index) (get event :index) -1)
+          :time (get event :time)
+          :gesture "sampler-slice"
+          :label "Edit sampler slice")))
 
 (def sampler-panel-drop-types (inst)
   (list "sample" "instrument" "sound"))
@@ -253,6 +269,9 @@
         (not (= name "bpm"))
         (not (= name "preserve"))
         (not (= name "fill"))
+        (not (= name "slice"))
+        (not (= name "sens"))
+        (not (= name "slice base"))
         (not (sampler-base-note-param? p))
         (not (= name "attack"))
         (not (= name "release"))
@@ -308,17 +327,36 @@
     (each (sampler-small-params params) |p pi|
       (sampler-param-control-number-picker p))))
 
+(def sampler-slice-controls (params)
+  (let ((mode (sampler-param-by-name params "slice")))
+    (if mode
+      (h-stack :debug-name "sampler-slice-param-row" :gap 0.85 :align :start
+        (sampler-param-control mode)
+        (if (not (= (get mode :text-value) "off"))
+          (h-stack :debug-name "sampler-slice-enabled-params" :gap 0.85 :align :start
+            (sampler-param-control (sampler-param-by-name params "sens"))
+            (sampler-param-control (sampler-param-by-name params "slice base")))
+          (box :width 0.01 :height 0.01)))
+      (box :width 0.01 :height 0.01))))
+
 (def sampler-param-knobs (params inst)
   (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.15 :align :start
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))
+    (sampler-slice-controls params)
     (sampler-param-control (sampler-param-by-name params "warp"))
     (sampler-param-control (sampler-param-by-name params "mode"))
     (sampler-param-control (sampler-param-by-name params "preserve"))
     (sampler-param-control (sampler-param-by-name params "fill"))
     (sampler-param-control (sampler-param-by-name params "decay"))
     (sampler-bpm-control (sampler-param-by-name params "bpm"))))
+
+(def sampler-visible-slices (inst)
+  (let ((mode (sampler-param-by-name (get inst :synth) "slice")))
+    (if (and mode (not (= (get mode :text-value) "off")))
+      (get inst :slices)
+      (list))))
 
 (def sampler-selection-start-prop (inst)
   (if (get inst :start-time-field)
@@ -360,6 +398,7 @@
                       :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
                       :cursor-time sampler-cursor-time
                       :playhead-time (bind-seq "sampler-playhead")
+                      :slices (sampler-visible-slices inst)
                       :selection-start (sampler-selection-start-prop inst)
                       :selection-end (sampler-selection-end-prop inst)
                       :time-ruler (dict :mode :seconds)

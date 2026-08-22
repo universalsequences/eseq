@@ -8066,6 +8066,14 @@
                     vec!["off", "loop", "ping-pong"],
                 )),
                 Value::Map(test_param_map("decay", 16, 0.0, 0.0, 1.0)),
+                Value::Map(test_enum_param_map(
+                    "slice",
+                    138,
+                    0.0,
+                    vec!["off", "transient", "division"],
+                )),
+                Value::Map(test_param_map("sens", 139, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("slice base", 140, 0.0, -60.0, 67.0)),
             ]))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
@@ -34360,6 +34368,45 @@
                 sampler_selection_time_field(0, "end"),
             ))),
         );
+        instrument.insert(
+            "slices".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Number(0.0),
+                Value::Number(0.5),
+            ]))),
+        );
+        let synth = instrument.get("synth").expect("sampler synth").clone();
+        let slice_mode = {
+            let synth = synth.borrow();
+            let Value::List(params) = &*synth else {
+                panic!("sampler synth should be a list");
+            };
+            params
+                .iter()
+                .find(|param| {
+                    matches!(
+                        &*param.borrow(),
+                        Value::Map(map)
+                            if matches!(map.get("name"), Some(name) if *name.borrow() == Value::String("slice".to_string()))
+                    )
+                })
+                .expect("slice mode parameter")
+                .clone()
+        };
+        {
+            let mut slice_mode = slice_mode.borrow_mut();
+            let Value::Map(slice_mode) = &mut *slice_mode else {
+                unreachable!();
+            };
+            slice_mode.insert(
+                "value".to_string(),
+                Rc::new(RefCell::new(Value::Number(1.0))),
+            );
+            slice_mode.insert(
+                "text-value".to_string(),
+                Rc::new(RefCell::new(Value::String("transient".to_string()))),
+            );
+        }
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(160, 18);
@@ -34426,6 +34473,28 @@
         let waveform = find_layout_node_by_widget_type(&layout, "waveform")
             .expect("sampler waveform should render");
         assert_finite_nonzero_rect(waveform, "sampler waveform");
+        let slice_controls = find_layout_node_by_debug_name(&layout, "sampler-slice-enabled-params")
+            .expect("transient slice mode should reveal sensitivity and base controls");
+        assert_finite_nonzero_rect(slice_controls, "sampler slice controls");
+        assert!(
+            find_layout_node_by_stable_key(slice_controls, "sampler-param-139-base")
+                .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                .is_some(),
+            "slice sensitivity should render as a knob"
+        );
+        assert!(
+            find_layout_node_by_stable_key(slice_controls, "sampler-param-140-base")
+                .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                .is_some(),
+            "slice base should render as a knob"
+        );
+        assert!(
+            matches!(
+                waveform.props.get("slices"),
+                Some(Value::List(slices)) if slices.len() == 2
+            ),
+            "sampler waveform should receive resolved slice markers"
+        );
 
         let start_col = waveform.rect.col + waveform.rect.width * 0.2;
         let end_col = waveform.rect.col + waveform.rect.width * 0.35;
@@ -34503,6 +34572,41 @@
         );
         assert_eq!(end_param, Some(Value::Number(3.0)));
         assert_eq!(end_value, Some(Value::Number(80.0)));
+
+        let add_col = waveform.rect.col + waveform.rect.width * 0.7;
+        editor.handle_mouse_precise(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(
+                    crossterm::event::MouseButton::Left,
+                ),
+                column: add_col.floor() as u16,
+                row: row.floor() as u16,
+                modifiers: crossterm::event::KeyModifiers::SHIFT,
+            },
+            0,
+            0,
+            160,
+            18,
+            add_col,
+            row,
+        );
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("shift-click should emit one sampler slice edit command: {commands:?}");
+        };
+        assert_eq!(name, "edit-sampler-slice");
+        assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+        assert_eq!(
+            extract_string_from_payload(payload, "gesture").as_deref(),
+            Some("sampler-slice")
+        );
+        let Value::Map(payload) = payload else {
+            panic!("slice edit should have a map payload");
+        };
+        assert!(matches!(
+            payload.get("operation").map(|value| value.borrow().clone()),
+            Some(Value::Keyword(operation)) if operation == "add"
+        ));
     }
 
     #[test]

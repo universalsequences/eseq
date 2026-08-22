@@ -35,7 +35,10 @@ pub(crate) fn build_sampler_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
+        // u32::MAX marks host-only controls such as sampler slicing; it is not
+        // a packed voice-modulator source index.
+        node_param_idx != u32::MAX
+            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
@@ -432,6 +435,30 @@ pub(crate) fn build_sampler_panel_value(
         panel_map.insert("buffer".to_string(), Rc::new(RefCell::new(buf_val)));
     }
     let buffer_id = app.graph.track_buffer_ids.get(track).copied().unwrap_or(-1);
+    let sensitivity_idx = sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY;
+    let sensitivity_default = if sensitivity_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+        slot.defaults.get(sensitivity_idx)
+    } else {
+        desc.params[sensitivity_idx].default
+    };
+    let sensitivity = plock_step
+        .and_then(|step| slot.plocks.get(step, sensitivity_idx))
+        .unwrap_or(sensitivity_default);
+    let slice_values = app
+        .sample_analysis
+        .cache()
+        .table(buffer_id)
+        .map(|table| {
+            table
+                .slice_starts(sensitivity)
+                .map(|frame| {
+                    Rc::new(RefCell::new(Value::Number(
+                        frame as f64 / table.sample_rate.max(1) as f64,
+                    )))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let analysis_entry = app.sample_analysis.cache().get(buffer_id);
     let mut analysis_status = "none".to_string();
     let mut analysis_message = String::new();
@@ -487,6 +514,10 @@ pub(crate) fn build_sampler_panel_value(
     panel_map.insert(
         "onsets".to_string(),
         Rc::new(RefCell::new(Value::List(onset_values))),
+    );
+    panel_map.insert(
+        "slices".to_string(),
+        Rc::new(RefCell::new(Value::List(slice_values))),
     );
     panel_map.insert(
         "params".to_string(),
@@ -786,7 +817,10 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
+        // u32::MAX marks host-only controls; it is not a packed
+        // voice-modulator source index.
+        node_param_idx != u32::MAX
+            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {

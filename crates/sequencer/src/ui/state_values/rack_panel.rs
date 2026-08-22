@@ -535,6 +535,30 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             "duration".to_string(),
             value_cell(Value::Number(sample_duration)),
         );
+        let sensitivity = rack_slot_param_value(
+            rack,
+            slot_idx,
+            slot,
+            &desc,
+            sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+            selected_step,
+        );
+        let slices = app
+            .sample_analysis
+            .cache()
+            .table(buffer_id)
+            .map(|table| {
+                table
+                    .slice_starts(sensitivity)
+                    .map(|frame| {
+                        value_cell(Value::Number(
+                            frame as f64 / table.sample_rate.max(1) as f64,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        panel_map.insert("slices".to_string(), value_cell(Value::List(slices)));
     }
 
     Some(Rc::new(RefCell::new(Value::Map(panel_map))))
