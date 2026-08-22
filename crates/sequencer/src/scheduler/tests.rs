@@ -4755,6 +4755,46 @@
     }
 
     #[test]
+    fn resolve_sampler_params_carries_slice_controls_and_range_plock_precedence() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor::builtin_sampler();
+        assert_eq!(
+            desc.params[crate::instruments::sampler::SLOT_PARAM_SLICE_MODE].name,
+            "slice"
+        );
+        assert_eq!(
+            desc.params[crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY].name,
+            "sens"
+        );
+        assert_eq!(
+            desc.params[crate::instruments::sampler::SLOT_PARAM_SLICE_BASE].name,
+            "slice base"
+        );
+        state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
+        let slot = &state.pattern.instrument_slots[track];
+        slot.set_plock(
+            step,
+            crate::instruments::sampler::SLOT_PARAM_SLICE_MODE,
+            1.0,
+        );
+        slot.set_plock(
+            step,
+            crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+            0.8,
+        );
+        slot.set_plock(step, 2, 0.25);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_sampler_params(&snapshot, track, step);
+        assert_eq!(params.slice_mode, 1.0);
+        assert_eq!(params.slice_sensitivity, 0.8);
+        assert!(params.start_point_locked);
+        assert!(!params.end_point_locked);
+    }
+
+    #[test]
     fn resolve_sampler_params_carries_beats_warp_controls_by_node_param() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;

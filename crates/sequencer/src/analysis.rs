@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
@@ -28,24 +29,61 @@ pub enum AnalysisEntry {
 }
 
 #[derive(Clone, Debug)]
-pub struct OnsetTableShared {
+pub struct SliceTableShared {
     pub onsets_frames: Vec<u32>,
     pub sample_len_frames: u32,
+    pub sample_rate: u32,
 }
 
-impl OnsetTableShared {
-    pub fn from_result(result: &AnalysisResult, sample_len_frames: u32) -> Self {
+impl SliceTableShared {
+    pub fn from_result(result: &AnalysisResult, sample_len_frames: u32, sample_rate: u32) -> Self {
         Self {
             onsets_frames: result.onsets_frames.clone(),
             sample_len_frames,
+            sample_rate,
         }
     }
+
+    /// Iterate transient slice starts without allocating on the audio thread.
+    /// Aubio has already applied its strength threshold; sensitivity controls
+    /// the second half of transient filtering, minimum spacing. At maximum
+    /// sensitivity the spacing equals aubio's 40 ms minimum, while zero
+    /// sensitivity keeps transients at least 500 ms apart.
+    pub fn slice_starts(&self, sensitivity: f32) -> impl Iterator<Item = u32> + '_ {
+        let sensitivity = if sensitivity.is_finite() {
+            sensitivity.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let min_spacing_ms = 500.0 + (40.0 - 500.0) * sensitivity;
+        let min_spacing = (self.sample_rate as f32 * min_spacing_ms / 1000.0).round() as u32;
+        let mut last = Some(0_u32);
+        std::iter::once(0).chain(
+            self.onsets_frames
+                .iter()
+                .copied()
+                .filter(move |frame| {
+                    if *frame == 0 || *frame >= self.sample_len_frames {
+                        return false;
+                    }
+                    let keep = last.map_or(true, |previous| frame.saturating_sub(previous) >= min_spacing);
+                    if keep {
+                        last = Some(*frame);
+                    }
+                    keep
+                }),
+        )
+    }
 }
+
+/// Warp and slice resolution intentionally share the same immutable analysis table.
+pub type OnsetTableShared = SliceTableShared;
 
 #[derive(Clone, Default)]
 pub struct AnalysisCache {
     inner: Arc<RwLock<HashMap<i32, Arc<AnalysisEntry>>>>,
     tables: Arc<RwLock<HashMap<i32, Arc<OnsetTableShared>>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl AnalysisCache {
@@ -58,16 +96,22 @@ impl AnalysisCache {
             .write()
             .unwrap()
             .insert(buffer_id, Arc::new(AnalysisEntry::Pending));
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
-    pub fn insert_ready(&self, result: AnalysisResult, sample_len_frames: u32) {
+    pub fn insert_ready(&self, result: AnalysisResult, sample_len_frames: u32, sample_rate: u32) {
         let buffer_id = result.buffer_id;
-        let table = Arc::new(OnsetTableShared::from_result(&result, sample_len_frames));
+        let table = Arc::new(SliceTableShared::from_result(
+            &result,
+            sample_len_frames,
+            sample_rate,
+        ));
         self.tables.write().unwrap().insert(buffer_id, table);
         self.inner
             .write()
             .unwrap()
             .insert(buffer_id, Arc::new(AnalysisEntry::Ready(result)));
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     pub fn insert_failed(&self, buffer_id: i32, error: impl Into<String>) {
@@ -75,6 +119,7 @@ impl AnalysisCache {
             .write()
             .unwrap()
             .insert(buffer_id, Arc::new(AnalysisEntry::Failed(error.into())));
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     pub fn get(&self, buffer_id: i32) -> Option<Arc<AnalysisEntry>> {
@@ -83,6 +128,10 @@ impl AnalysisCache {
 
     pub fn table(&self, buffer_id: i32) -> Option<Arc<OnsetTableShared>> {
         self.tables.read().unwrap().get(&buffer_id).cloned()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 }
 
@@ -106,7 +155,11 @@ impl AnalysisService {
                         analyze(&job.samples, job.sample_rate, job.buffer_id)
                     }));
                     match result {
-                        Ok(Ok(result)) => worker_cache.insert_ready(result, sample_len_frames),
+                        Ok(Ok(result)) => worker_cache.insert_ready(
+                            result,
+                            sample_len_frames,
+                            job.sample_rate,
+                        ),
                         Ok(Err(error)) => worker_cache.insert_failed(job.buffer_id, error),
                         Err(_) => worker_cache.insert_failed(job.buffer_id, "analysis panicked"),
                     }
@@ -249,10 +302,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transient_sensitivity_filters_by_minimum_spacing() {
+        let table = SliceTableShared {
+            onsets_frames: vec![0, 400, 4_000, 4_400],
+            sample_len_frames: 8_000,
+            sample_rate: 8_000,
+        };
+        assert_eq!(table.slice_starts(0.0).collect::<Vec<_>>(), vec![0, 4_000]);
+        assert_eq!(
+            table.slice_starts(1.0).collect::<Vec<_>>(),
+            vec![0, 400, 4_000, 4_400]
+        );
+    }
+
+    #[test]
     fn pointer_pack_round_trips() {
         let table = OnsetTableShared {
             onsets_frames: vec![0, 128],
             sample_len_frames: 256,
+            sample_rate: 44_100,
         };
         let ptr = &table as *const OnsetTableShared;
         let (lo, hi) = pack_ptr(ptr);

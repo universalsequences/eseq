@@ -257,15 +257,15 @@ impl SequencerState {
                 rack_engine_ext_route_lids: (0..MAX_SAMPLER_POOLS)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),
-                sampler_analysis_buffer_ids: (0..MAX_TRACKS)
+                sampler_analysis_buffer_ids: (0..MAX_SAMPLER_POOLS)
                     .map(|_| AtomicU32::new(u32::MAX))
                     .collect(),
-                sampler_analysis_bpm: (0..MAX_TRACKS)
+                sampler_analysis_bpm: (0..MAX_SAMPLER_POOLS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
-                sampler_onset_ptr_lo: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
-                sampler_onset_ptr_hi: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
-                sampler_analysis_status: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_onset_ptr_lo: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_onset_ptr_hi: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_analysis_status: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
                 rack_choke_keys: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),

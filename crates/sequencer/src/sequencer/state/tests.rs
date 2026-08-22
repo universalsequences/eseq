@@ -4497,6 +4497,18 @@
         assert_eq!(state.runtime.voice_lids.len(), MAX_SAMPLER_POOLS);
         assert_eq!(state.runtime.synth_node_ids.len(), MAX_SAMPLER_POOLS);
         assert_eq!(
+            state.runtime.sampler_analysis_status.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_onset_ptr_lo.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_onset_ptr_hi.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
             state.runtime.sampler_gatepitch_node_ids.len(),
             MAX_SAMPLER_POOLS
         );

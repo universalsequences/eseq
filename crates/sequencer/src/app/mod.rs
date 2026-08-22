@@ -2014,45 +2014,75 @@ impl App {
     }
 
     pub fn publish_sampler_analysis_runtime(&self, track: usize) {
-        use std::sync::atomic::Ordering;
-
         let Some(&buffer_id) = self.graph.track_buffer_ids.get(track) else {
             return;
         };
+        self.publish_sampler_analysis_pool_runtime(track, buffer_id);
+    }
+
+    pub fn publish_sampler_analysis_pool_runtime(&self, pool: usize, buffer_id: i32) {
+        use std::sync::atomic::Ordering;
+
         let runtime = &self.state.runtime;
-        runtime.sampler_analysis_buffer_ids[track].store(buffer_id as u32, Ordering::Release);
+        let Some(buffer_id_cell) = runtime.sampler_analysis_buffer_ids.get(pool) else {
+            return;
+        };
+        buffer_id_cell.store(buffer_id as u32, Ordering::Release);
         match self.sample_analysis.cache().get(buffer_id) {
             Some(entry) => match entry.as_ref() {
                 crate::analysis::AnalysisEntry::Pending => {
-                    runtime.sampler_analysis_status[track].store(1, Ordering::Release);
-                    runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
-                    runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                    runtime.sampler_analysis_status[pool].store(1, Ordering::Release);
+                    runtime.sampler_onset_ptr_lo[pool].store(0, Ordering::Release);
+                    runtime.sampler_onset_ptr_hi[pool].store(0, Ordering::Release);
                 }
                 crate::analysis::AnalysisEntry::Ready(result) => {
-                    runtime.sampler_analysis_bpm[track]
+                    runtime.sampler_analysis_bpm[pool]
                         .store(result.bpm.to_bits(), Ordering::Release);
-                    if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
-                        if (slot.defaults.get(11) - 120.0).abs() < 0.001 && result.bpm > 0.0 {
-                            slot.defaults.set(11, result.bpm.clamp(20.0, 400.0));
+                    if pool < crate::sequencer::MAX_TRACKS {
+                        if let Some(slot) = self.state.pattern.instrument_slots.get(pool) {
+                            if (slot.defaults.get(11) - 120.0).abs() < 0.001 && result.bpm > 0.0 {
+                                slot.defaults.set(11, result.bpm.clamp(20.0, 400.0));
+                            }
                         }
                     }
                     if let Some(table) = self.sample_analysis.cache().table(buffer_id) {
                         let (lo, hi) = crate::analysis::pack_ptr(Arc::as_ptr(&table));
-                        runtime.sampler_onset_ptr_lo[track].store(lo.to_bits(), Ordering::Release);
-                        runtime.sampler_onset_ptr_hi[track].store(hi.to_bits(), Ordering::Release);
+                        runtime.sampler_onset_ptr_lo[pool].store(lo.to_bits(), Ordering::Release);
+                        runtime.sampler_onset_ptr_hi[pool].store(hi.to_bits(), Ordering::Release);
                     }
-                    runtime.sampler_analysis_status[track].store(2, Ordering::Release);
+                    runtime.sampler_analysis_status[pool].store(2, Ordering::Release);
                 }
                 crate::analysis::AnalysisEntry::Failed(_) => {
-                    runtime.sampler_analysis_status[track].store(3, Ordering::Release);
-                    runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
-                    runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                    runtime.sampler_analysis_status[pool].store(3, Ordering::Release);
+                    runtime.sampler_onset_ptr_lo[pool].store(0, Ordering::Release);
+                    runtime.sampler_onset_ptr_hi[pool].store(0, Ordering::Release);
                 }
             },
             None => {
-                runtime.sampler_analysis_status[track].store(0, Ordering::Release);
-                runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
-                runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                runtime.sampler_analysis_status[pool].store(0, Ordering::Release);
+                runtime.sampler_onset_ptr_lo[pool].store(0, Ordering::Release);
+                runtime.sampler_onset_ptr_hi[pool].store(0, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn publish_all_sampler_analysis_runtime(&self) {
+        for track in 0..self.graph.track_buffer_ids.len() {
+            self.publish_sampler_analysis_runtime(track);
+        }
+        let snapshot = self.state.latest_scheduler_snapshot();
+        for (track_idx, track) in snapshot.tracks.iter().enumerate() {
+            let Some(rack) = track.rack_track.as_ref() else {
+                continue;
+            };
+            for (slot_idx, slot) in rack.slots.iter().enumerate() {
+                let (Some(pool), Some(sample)) = (
+                    crate::sequencer::rack_slot_pool_index(track_idx, slot_idx),
+                    slot.sample_id.as_ref(),
+                ) else {
+                    continue;
+                };
+                self.publish_sampler_analysis_pool_runtime(pool, sample.0);
             }
         }
     }

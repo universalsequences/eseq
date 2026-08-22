@@ -10404,6 +10404,21 @@ mod tests {
             let data = scenes.track_pools[0].get(pattern).unwrap();
             assert_eq!(data.instrument_slot.num_params, live_num_params);
             assert_eq!(data.instrument_slot.defaults.get(2).copied(), Some(0.25));
+            assert_eq!(
+                data.instrument_slot
+                    .defaults
+                    .get(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
+                    .copied(),
+                Some(0.0),
+                "descriptor growth must seed old projects with slice mode off",
+            );
+            assert_eq!(
+                data.instrument_slot
+                    .defaults
+                    .get(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
+                    .copied(),
+                Some(0.5),
+            );
         });
     }
 

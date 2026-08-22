@@ -17,14 +17,14 @@ use super::{
     mute_group_winner_for_block_events, remap_route_after_track_delete,
     resolve_live_instrument_defaults,
     resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
-    resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
+    resolve_slice, resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
     select_output_channels, select_output_config, store_active_keyboard_note,
     swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
     ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
     BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
     FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
     HostTransportClockRuntime, MetronomeState, OutputDeviceConfig, OutputFormatRange,
-    RackSlotNoteOff, FALLBACK_SAMPLE_RATE,
+    RackSlotNoteOff, SliceTriggerVerdict, FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
 use crate::sequencer::MAX_TRACKS;
@@ -1214,6 +1214,7 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
     let table = OnsetTableShared {
         onsets_frames: vec![0, 22_050],
         sample_len_frames: 44_100,
+        sample_rate: 44_100,
     };
     let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
     state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
@@ -1225,6 +1226,48 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
     assert!((ratio - (160.0 / 120.0)).abs() < 0.0001);
     assert!((sample_bpm - 120.0).abs() < 0.0001);
     assert!((project_bpm - 160.0).abs() < 0.0001);
+}
+
+#[test]
+fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks() {
+    let state = SequencerState::new(1, Vec::new());
+    state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
+    let table = OnsetTableShared {
+        onsets_frames: vec![0, 4_000, 8_000],
+        sample_len_frames: 12_000,
+        sample_rate: 8_000,
+    };
+    let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
+    state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
+    state.runtime.sampler_onset_ptr_hi[0].store(hi.to_bits(), Ordering::Relaxed);
+
+    let mut params = ScheduledSamplerParams {
+        slice_mode: 1.0,
+        slice_sensitivity: 1.0,
+        slice_base: -1.0,
+        end_point: 0.9,
+        end_point_locked: true,
+        ..ScheduledSamplerParams::default()
+    };
+    let mut transpose = 0.0;
+    assert_eq!(
+        resolve_slice(&state, 0, &mut params, &mut transpose),
+        SliceTriggerVerdict::Fire
+    );
+    assert!((params.start_point - 4_000.0 / 12_000.0).abs() < 1.0e-6);
+    assert_eq!(params.end_point, 0.9, "explicit end p-lock must win");
+    assert_eq!(transpose, 0.0, "slice playback must not repitch");
+
+    let mut out_of_range = ScheduledSamplerParams {
+        slice_mode: 1.0,
+        slice_sensitivity: 1.0,
+        ..ScheduledSamplerParams::default()
+    };
+    let mut transpose = 3.0;
+    assert_eq!(
+        resolve_slice(&state, 0, &mut out_of_range, &mut transpose),
+        SliceTriggerVerdict::Ignore
+    );
 }
 
 #[test]

@@ -7415,6 +7415,57 @@ impl EffectDescriptor {
             host_control: None,
             ui_metadata: None,
         });
+        // Trigger-time host controls stay at the tail so adding them is a
+        // strict descriptor extension: every pre-existing sampler p-lock and
+        // modulation parameter keeps its saved positional index.
+        params.extend([
+            ParamDescriptor {
+                name: "slice".to_string(),
+                min: 0.0,
+                max: 2.0,
+                default: 0.0,
+                kind: ParamKind::Enum {
+                    labels: vec![
+                        "off".to_string(),
+                        "transient".to_string(),
+                        "division".to_string(),
+                    ],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            },
+            ParamDescriptor {
+                name: "sens".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous {
+                    unit: Some("%".to_string()),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            },
+            ParamDescriptor {
+                name: "slice base".to_string(),
+                min: -60.0,
+                max: 67.0,
+                default: 0.0,
+                kind: ParamKind::Continuous {
+                    unit: Some("st".to_string()),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            },
+        ]);
         Self {
             name: "Sampler".to_string(),
             input_channels: 0,

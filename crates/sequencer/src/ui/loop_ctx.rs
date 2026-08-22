@@ -142,6 +142,7 @@ pub(crate) struct FrameDiffState {
         BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     pub(crate) prev_agent_generation_watermark: u64,
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
+    pub(crate) prev_sampler_analysis_generation: u64,
     pub(crate) prev_auto_follow: bool,
     /// Browser sample preview: last published playing flag; the playhead
     /// republishes every tick while true.
