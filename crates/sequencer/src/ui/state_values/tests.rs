@@ -26737,6 +26737,45 @@
     }
 
     #[test]
+    fn metal_seq_narrow_sequencer_viewport_keeps_trailing_actions_inside_track_row() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(60, 20);
+        let layout = editor
+            .widget_layout()
+            .expect("narrow sequencer layout should build");
+        let track_row = find_layout_node_by_stable_key(&layout, "sequencer-track-0")
+            .expect("sequencer track row should exist");
+        let actions = find_layout_node_by_stable_key_suffix(&layout, "/expand-0")
+            .expect("sequencer track actions should exist");
+
+        assert!(
+            layout.rect.width > 60.0,
+            "fixture must overflow the narrow viewport to exercise horizontal scrolling: {:?}",
+            layout.rect
+        );
+        assert!(
+            (track_row.rect.width - layout.rect.width).abs() <= 0.05,
+            "fill track rows must share the widened root width; root={:?} row={:?}",
+            layout.rect,
+            track_row.rect
+        );
+        assert!(
+            actions.rect.col + actions.rect.width
+                <= track_row.rect.col + track_row.rect.width + 0.05,
+            "trailing track actions must remain inside the track row border; row={:?} actions={:?}",
+            track_row.rect,
+            actions.rect
+        );
+    }
+
+    #[test]
     fn metal_seq_sequencer_hides_step_shells_beyond_pattern_length() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor

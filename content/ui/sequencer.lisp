@@ -2263,7 +2263,7 @@
         (track-row i true)))))
 
 (effect-buffer "*sequencer*"
-  (v-stack :padding 0.00 :gap 0.0
+  (v-stack :width :fill :fill-content-style true :padding 0.00 :gap 0.0
     (each (eseq.drum-rack-v2/grid-render-items) |item|
       (grid-render-item item))
 

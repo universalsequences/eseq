@@ -78,14 +78,26 @@ fn with_cached_animation(mut node: LayoutNode) -> LayoutNode {
     node
 }
 
+const FILL_CONTENT_STYLE_PROP: &str = "fill-content-style";
+const NATURAL_CONTENT_WIDTH_PROP: &str = "__natural-content-width";
+
 pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -> bool {
     fn fills_axis(layout: &LayoutNode, prop: &str) -> bool {
         matches!(layout.props.get(prop), Some(Value::Keyword(value)) if value == "fill")
     }
 
-    fn width_valid(cached: f32, available: f32) -> bool {
+    fn width_valid(layout: &LayoutNode, available: f32) -> bool {
         const EPSILON: f32 = 0.05;
-        (cached - available).abs() <= EPSILON
+        let expected = match (
+            layout.props.get(FILL_CONTENT_STYLE_PROP),
+            layout.props.get(NATURAL_CONTENT_WIDTH_PROP),
+        ) {
+            (Some(Value::Bool(true)), Some(Value::Number(natural))) => {
+                available.max(*natural as f32)
+            }
+            _ => available,
+        };
+        (layout.rect.width - expected).abs() <= EPSILON
     }
 
     fn height_valid(cached: f32, available: f32, fills_axis: bool) -> bool {
@@ -97,7 +109,7 @@ pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -
         }
     }
 
-    width_valid(layout.rect.width, cols)
+    width_valid(layout, cols)
         && height_valid(layout.rect.height, rows, fills_axis(layout, "height"))
 }
 
@@ -286,10 +298,21 @@ impl<'a> LayoutEngine<'a> {
             self.cell_w,
             self.cell_h,
         );
-        let size = self.measure(tree, self.root_constraints(), DEFAULT_FONT_SIZE)?;
-        let root_rect = self.root_rect(tree, size, 0.0, 0.0);
+        let (root_max_width, natural_width) = self.root_layout_width(tree);
+        let size = self.measure(
+            tree,
+            self.root_constraints(root_max_width),
+            DEFAULT_FONT_SIZE,
+        )?;
+        let root_rect = self.root_rect(tree, size, root_max_width, 0.0, 0.0);
         let mut layout =
             self.build_layout_node(tree, root_rect, DEFAULT_FONT_SIZE, LayoutCtx::default());
+        if let Some(natural_width) = natural_width {
+            layout.props.insert(
+                NATURAL_CONTENT_WIDTH_PROP.to_string(),
+                Value::Number(natural_width as f64),
+            );
+        }
         let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
         Some(layout)
@@ -306,19 +329,28 @@ impl<'a> LayoutEngine<'a> {
         })
     }
 
-    fn root_constraints(&self) -> Constraints {
+    fn root_layout_width(&self, tree: &Value) -> (f32, Option<f32>) {
+        if prop_is_true(tree, FILL_CONTENT_STYLE_PROP) {
+            let natural_width = self.natural_content_width(tree);
+            (self.terminal_cols.max(natural_width), Some(natural_width))
+        } else {
+            (self.terminal_cols, None)
+        }
+    }
+
+    fn root_constraints(&self, max_width: f32) -> Constraints {
         Constraints {
             min_width: 0.0,
-            max_width: self.terminal_cols,
+            max_width,
             min_height: 0.0,
             max_height: f32::INFINITY,
             aspect: self.aspect,
         }
     }
 
-    fn root_rect(&self, tree: &Value, size: Size, row: f32, col: f32) -> Rect {
+    fn root_rect(&self, tree: &Value, size: Size, fill_width: f32, row: f32, col: f32) -> Rect {
         let root_width = if prop_is_keyword(tree, "width", "fill") {
-            self.terminal_cols
+            fill_width
         } else {
             size.width
         };
@@ -1379,15 +1411,22 @@ pub fn relayout_subtree_path_result(
     );
     let mut trace_path = Vec::new();
     let mut next_widget_id = max_layout_widget_id(existing).wrapping_add(1);
+    let (root_max_width, natural_width) = engine.root_layout_width(tree);
     let root_size = engine.measure_node_at_path(
         existing,
         tree,
-        engine.root_constraints(),
+        engine.root_constraints(root_max_width),
         DEFAULT_FONT_SIZE,
         child_path,
     )?;
-    let root_rect = engine.root_rect(tree, root_size, existing.rect.row, existing.rect.col);
-    engine.relayout_node_at_path(
+    let root_rect = engine.root_rect(
+        tree,
+        root_size,
+        root_max_width,
+        existing.rect.row,
+        existing.rect.col,
+    );
+    let mut layout = engine.relayout_node_at_path(
         existing,
         tree,
         root_rect,
@@ -1397,7 +1436,14 @@ pub fn relayout_subtree_path_result(
         dirty_widget_ids,
         &mut next_widget_id,
         &mut trace_path,
-    )
+    )?;
+    if let Some(natural_width) = natural_width {
+        layout.props.insert(
+            NATURAL_CONTENT_WIDTH_PROP.to_string(),
+            Value::Number(natural_width as f64),
+        );
+    }
+    Ok(layout)
 }
 
 fn validate_replacement_root_identity(existing: &LayoutNode, tree: &Value) -> Result<(), String> {
@@ -1996,6 +2042,16 @@ pub(crate) fn get_prop_keyword(v: &Value, key: &str) -> Option<String> {
 
 pub(crate) fn prop_is_keyword(v: &Value, key: &str, expected: &str) -> bool {
     get_prop_keyword(v, key).is_some_and(|value| value == expected)
+}
+
+fn prop_is_true(v: &Value, key: &str) -> bool {
+    let Value::Map(map) = v else {
+        return false;
+    };
+    matches!(
+        map.get(key).map(|value| value.borrow()),
+        Some(value) if matches!(&*value, Value::Bool(true))
+    )
 }
 
 pub(crate) fn get_prop_u64(v: &Value, key: &str) -> Option<u64> {
@@ -2620,6 +2676,17 @@ mod tests {
             args.push(child);
         }
         build_widget("h-stack", args)
+    }
+
+    fn fill_content_root(children: Vec<Value>) -> Value {
+        let mut args = vec![
+            kw("width"),
+            kw("fill"),
+            kw(FILL_CONTENT_STYLE_PROP),
+            Value::Bool(true),
+        ];
+        args.extend(children);
+        build_widget("v-stack", args)
     }
 
     /// Build a box: (box :flex f children...)
@@ -3848,6 +3915,110 @@ mod tests {
             body.rect.width >= 16.0,
             "body row should keep its natural knob row width, got {}",
             body.rect.width
+        );
+    }
+
+    #[test]
+    fn fill_content_root_widens_fill_rows_to_natural_content_width() {
+        let row = build_widget(
+            "box",
+            vec![
+                kw("width"),
+                kw("fill"),
+                hstack(
+                    1.0,
+                    vec![
+                        bx(Some(60.0), Some(2.0), vec![]),
+                        bx(Some(20.0), Some(2.0), vec![]),
+                    ],
+                ),
+            ],
+        );
+        let tree = fill_content_root(vec![row]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).expect("layout");
+        let row = &layout.children[0];
+        let trailing = &row.children[0].children[1];
+
+        assert_eq!(layout.rect.width, 81.0);
+        assert_eq!(row.rect.width, 81.0);
+        assert!(
+            trailing.rect.col + trailing.rect.width <= row.rect.col + row.rect.width,
+            "trailing row chrome must remain inside its fill container"
+        );
+        assert!(layout_root_matches_viewport(&layout, 80.0, 24.0));
+        assert!(layout_root_matches_viewport(&layout, 70.0, 24.0));
+        assert!(!layout_root_matches_viewport(&layout, 90.0, 24.0));
+    }
+
+    #[test]
+    fn fill_content_root_still_fills_viewport_when_content_is_narrower() {
+        let row = build_widget(
+            "box",
+            vec![kw("width"), kw("fill"), bx(Some(40.0), Some(2.0), vec![])],
+        );
+        let tree = fill_content_root(vec![row]);
+        let engine = LayoutEngine::new(100, 24, 1.0);
+        let layout = engine.layout(&tree).expect("layout");
+
+        assert_eq!(layout.rect.width, 100.0);
+        assert_eq!(layout.children[0].rect.width, 100.0);
+    }
+
+    #[test]
+    fn fill_content_root_targeted_relayout_keeps_widened_shared_width() {
+        fn fixed_keyed_box(stable_id: f64, width: f64, height: f64) -> Value {
+            build_widget(
+                "box",
+                vec![
+                    kw("__stable-widget-id"),
+                    num(stable_id),
+                    kw("width"),
+                    num(width),
+                    kw("height"),
+                    num(height),
+                ],
+            )
+        }
+
+        fn tree(target_height: f64) -> Value {
+            let row = build_widget(
+                "box",
+                vec![
+                    kw("width"),
+                    kw("fill"),
+                    hstack(
+                        1.0,
+                        vec![
+                            fixed_keyed_box(1.0, 60.0, target_height),
+                            fixed_keyed_box(2.0, 20.0, 2.0),
+                        ],
+                    ),
+                ],
+            );
+            fill_content_root(vec![row])
+        }
+
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let initial_tree = tree(1.0);
+        let initial = engine.layout(&initial_tree).expect("initial layout");
+        let changed_tree = tree(3.0);
+        let expected = engine.layout(&changed_tree).expect("fresh changed layout");
+        let mut dirty_widget_ids = Vec::new();
+        let updated = relayout_subtree_path_result(
+            &initial,
+            &changed_tree,
+            &[0, 0, 0],
+            &mut dirty_widget_ids,
+            &engine,
+        )
+        .expect("targeted relayout");
+
+        assert_eq!(updated.rect.width, 81.0);
+        assert_eq!(updated.children[0].rect.width, 81.0);
+        assert!(
+            same_layout_geometry(&updated, &expected),
+            "targeted relayout must use the gated root width from a full layout"
         );
     }
 
