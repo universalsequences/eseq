@@ -30,7 +30,7 @@
 (module alez.jaki.surface)
 
 (import alez.jaki.core)
-(export jak)
+(export jak register)
 
 ;; `jak` expands on the authoring VM while its quoted body executes on the
 ;; scheduler VM. Channel widgets therefore have to become plain `(chan ...)`
@@ -108,6 +108,17 @@
                       :decls (get walked :decls)
                       :bindings (get walked :bindings)
                       :next (get walked :next))))))))
+
+;; Publish a Jaki sequencer whose body is already a data value. Unlike `jak`,
+;; this entry does not quote or rewrite the body expression: a defscene-backed
+;; builder can publish once and let the shipped read resolve the active
+;; pattern's value at each scheduler boundary.
+(defmacro register (name res body)
+  `(def-sequencer ,name
+     :resolution ,res
+     :tick (do
+       (alez.jaki.core/init ,res)
+       (alez.jaki.core/run ,body))))
 
 (defmacro jak (name res &rest body)
   (let ((walked (channel-walk-list body name 0)))

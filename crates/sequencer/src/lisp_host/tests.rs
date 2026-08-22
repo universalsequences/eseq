@@ -9524,6 +9524,195 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_builder_uses_one_scene_driven_publication_and_plain_slot_edits() {
+        fn find_by_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_by_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+            assert!(node.rect.row >= 0.0 && node.rect.row < 18.0, "{:?}", node.rect);
+            assert!(node.rect.col >= 0.0 && node.rect.col < 34.0, "{:?}", node.rect);
+        }
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let mut runtime = jaki_authoring_runtime(Arc::clone(&state));
+        super::register_scene_slot_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime.register_reactive(
+            "SEQ",
+            vec![("current-pattern", Value::Number(0.0))],
+            true,
+        );
+        runtime
+            .eval_str(
+                "(def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab \
+                   (label buffer sequencer source-path) nil)",
+            )
+            .expect("install script-tab test stub");
+        let source = std::fs::read_to_string(
+            crate::app_paths::app_paths()
+                .scripts_dir()
+                .join("sequencers/jaki-builder-demo.lisp"),
+        )
+        .expect("read Jaki builder script");
+        runtime.eval_str(&source).expect("evaluate Jaki builder script");
+
+        let published = state.published_sequencers();
+        assert_eq!(published.len(), 1, "the builder publishes exactly once at load");
+        assert!(
+            published[0]
+                .tick_source
+                .contains("(alez.jaki.core/run (__defscene-resolve \"jb-figures\"))"),
+            "the tick must late-resolve body data by scene: {}",
+            published[0].tick_source,
+        );
+
+        let tree = runtime
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("builder should publish its panel");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((34.0, 18.0)))
+            .expect("builder panel should lay out");
+        for key in [
+            "jaki-builder-shape-0",
+            "jaki-builder-mod-0",
+            "jaki-builder-add",
+            "jaki-builder-bake",
+            "jaki-builder-code",
+        ] {
+            assert_measured(find_by_key(&layout, key).unwrap_or_else(|| panic!("missing {key}")));
+        }
+
+        let mod_change = find_by_key(&layout, "jaki-builder-mod-0")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("modifier edit callback");
+        runtime
+            .invoke(mod_change, vec![Value::String("stac".to_string())])
+            .expect("edit first scene through plain set!");
+        assert_eq!(state.published_sequencers().len(), 1, "editing must not republish");
+        assert!(
+            runtime
+                .eval_str("(source jb-figures)")
+                .expect("read first scene body")
+                .is_some_and(|value| matches!(value, Value::String(source) if source.contains("(stac)"))),
+            "the first scene must retain its modifier",
+        );
+        let first_scheduler_slots = state.latest_scheduler_snapshot().scene_slots.clone();
+
+        let snapshots = state.export_pattern_repository();
+        state.replace_pattern_repository(snapshots, 1);
+        runtime
+            .eval_str("(jb-set-shape 0 \"- . . .\")")
+            .expect("edit second scene shape");
+        assert!(
+            runtime
+                .eval_str("(source jb-figures)")
+                .expect("read second scene body")
+                .is_some_and(|value| matches!(value, Value::String(source) if source.contains("(- . . .)"))),
+            "the second scene must resolve its own body",
+        );
+        let second_scheduler_slots = state.latest_scheduler_snapshot().scene_slots.clone();
+        let snapshots = state.export_pattern_repository();
+        state.replace_pattern_repository(snapshots, 0);
+        assert!(
+            runtime
+                .eval_str("(source jb-figures)")
+                .expect("return to first scene body")
+                .is_some_and(|value| matches!(value, Value::String(source) if source.contains("(stac)"))),
+            "switching back must recover the first scene without republishing",
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scheduler
+            .eval("(import alez.jaki.surface) (defscene jb-figures '())")
+            .expect("load Jaki and declare the scheduler slot");
+        scheduler
+            .register_published_sequencer(
+                published[0].id,
+                published[0].name.clone(),
+                Timebase::from_index(published[0].resolution as u32),
+                published[0].tick_source.clone(),
+            )
+            .expect("compile the one published builder tick");
+        let invoke_duration = |scheduler: &mut ScratchControlRuntime| {
+            scheduler
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        id: published[0].id,
+                        generator_index: 0,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("run scene-driven Jaki tick")
+                .emitted[0]
+                .resolved
+                .duration
+        };
+        scheduler.set_scene_slot_snapshot(first_scheduler_slots);
+        let first_duration = invoke_duration(&mut scheduler);
+        scheduler.set_scene_slot_snapshot(second_scheduler_slots);
+        let second_duration = invoke_duration(&mut scheduler);
+        assert!((first_duration - 0.0625).abs() < 1e-6, "stac scene: {first_duration}");
+        assert!((second_duration - 0.2).abs() < 1e-6, "plain scene: {second_duration}");
+
+        runtime.eval_str("(jb-bake)").expect("bake current body");
+        let baked = runtime
+            .eval_str("jb-baked-code")
+            .expect("read baked source")
+            .expect("baked source value");
+        assert!(
+            matches!(&baked, Value::String(source) if source.starts_with("(jak \"jaki-builder\" :16") && source.contains("(stac)")),
+            "bake must export an authorable (jak ...) form, got {baked:?}",
+        );
+
+        let mut editor = eseqlisp::Editor::new(runtime, eseqlisp::EditorConfig::default());
+        assert!(
+            editor.drain_host_commands().iter().any(|command| {
+                matches!(command, eseqlisp::HostCommand::Custom { name, .. }
+                    if name == "scene-slot-history-write")
+            }),
+            "the panel's set! must enter the scene-slot undo path",
+        );
+    }
+
+    #[test]
     fn sig_surface_derives_transport_phase_per_tick() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
