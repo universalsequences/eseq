@@ -42,6 +42,39 @@
     }
 
     #[test]
+    fn scene_slot_overrides_survive_a_scene_switch_round_trip() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = PatternSnapshot::new_default(1, &[]);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        let default = crate::process::ProcessLiteral::Number(1.0);
+        let epoch = state
+            .write_current_scene_slot("rate", crate::process::ProcessLiteral::Number(2.0))
+            .unwrap();
+
+        state
+            .launch_scene(1, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+        assert_eq!(
+            state.resolve_current_scene_slot("rate", &default),
+            (default.clone(), 0, false),
+            "a sibling scene must fall back to the declaration default"
+        );
+
+        state
+            .launch_scene(0, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+        assert_eq!(
+            state.resolve_current_scene_slot("rate", &default),
+            (crate::process::ProcessLiteral::Number(2.0), epoch, true),
+            "switching away and back must not wipe the pattern's slot overrides"
+        );
+    }
+
+    #[test]
     fn scene_slot_values_duplicate_with_scene_and_ignore_track_remap() {
         let mut first = PatternSnapshot::new_default(2, &[]);
         first
