@@ -2451,12 +2451,17 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Map(map)
     });
 
-    // (keys map) → List of keywords
+    // (keys map) → List of keywords, sorted. Maps are hash maps, so an
+    // unsorted walk would vary per process; the same sort keeps `str`/`source`
+    // dict rendering stable, and expansion-safe natives must be deterministic
+    // for "same source → same expansion" to hold.
     vm.register_native("keys", |args| {
         if let Some(Value::Map(m)) = args.first() {
+            let mut keys = m.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
             Value::List(
-                m.keys()
-                    .map(|k| Rc::new(RefCell::new(Value::Keyword(k.clone()))))
+                keys.into_iter()
+                    .map(|k| Rc::new(RefCell::new(Value::Keyword(k))))
                     .collect(),
             )
         } else {
@@ -9073,6 +9078,74 @@ counter
         .expect("pure helper and macro definition");
 
         assert_eq!(vm.eval_str("(pure 4)"), Ok(Some(Value::Number(5.0))));
+    }
+
+    #[test]
+    fn expansion_safe_dict_iteration_is_deterministic() {
+        // Rule 2 buys "same source → same expansion"; a whitelisted native
+        // that leaked hash order would break that for every dict-driven macro.
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str("(def options (dict :d 4 :a 1 :c 3 :b 2))")
+            .expect("options definition");
+        vm.eval_str("(defmacro option-order () (cons 'list (keys options)))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(source (option-order))"),
+            Ok(Some(Value::String("(:a :b :c :d)".to_string())))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_violation_survives_error_swallowing_callback_natives() {
+        // `map` and friends log callback errors and substitute `nil`. The
+        // sandbox violation must not be laundered into a successful expansion.
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        let called = Rc::new(RefCell::new(false));
+        let called_by_native = called.clone();
+        vm.register_native("send", move |_args| {
+            *called_by_native.borrow_mut() = true;
+            Value::Nil
+        });
+        vm.eval_str("(def capabilities (dict :call send))")
+            .expect("capability table");
+        vm.eval_str(
+            "(defmacro mapped (form)\n\
+               (first (map (lambda (x) ((get capabilities :call) x)) (list form))))",
+        )
+        .expect("macro definition");
+
+        assert_eq!(vm.eval_str("(mapped 1)"), Err(VMError::CompileError));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("expansion-unsafe operation `send`")
+                && message.contains("macro `mapped`")
+        }));
+    }
+
+    #[test]
+    fn template_macro_may_emit_expansion_unsafe_residue() {
+        // The sandbox constrains what the expander *does*, never what it
+        // *emits*: quoted residue naming a stateful native or `set!` is
+        // ordinary generated code and must still compile and run.
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let sent_by_native = sent.clone();
+        vm.register_native("send", move |args| {
+            sent_by_native.borrow_mut().push(args[0].clone());
+            Value::Nil
+        });
+        vm.eval_str("(def counter 0)").expect("counter definition");
+        vm.eval_str(
+            "(defmacro emit-effects (value) `(do (send ,value) (set! counter ,value)))",
+        )
+        .expect("macro definition");
+
+        assert!(vm.eval_str("(emit-effects 7)").is_ok());
+        assert_eq!(vm.global_value("counter"), Some(Value::Number(7.0)));
+        assert_eq!(sent.borrow().len(), 1);
     }
 
     #[test]
