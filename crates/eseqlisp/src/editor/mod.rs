@@ -952,11 +952,13 @@ impl Editor {
         }
     }
 
+    pub fn active_vim_input_mode(&self) -> Option<VimInputMode> {
+        self.vim_applies_to_active_buffer()
+            .then_some(self.vim_input_mode)
+    }
+
     pub fn vim_status_label(&self) -> Option<&'static str> {
-        if !self.vim_applies_to_active_buffer() {
-            return None;
-        }
-        Some(match self.vim_input_mode {
+        Some(match self.active_vim_input_mode()? {
             VimInputMode::Normal => "NORMAL",
             VimInputMode::Insert => "INSERT",
         })
@@ -5632,7 +5634,13 @@ impl Editor {
 
         // Check direct keybinding before treating as chord prefix.
         // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
-        if self.run_direct_lisp_binding(&key_str(key)) {
+        // In Vim insert mode, literal characters and plain Tab retain their
+        // editing/completion meaning. Application bindings for those keys are
+        // normal-mode commands.
+        let vim_insert_literal = key.modifiers == KeyModifiers::NONE
+            && matches!(key.code, KeyCode::Char(_) | KeyCode::Tab)
+            && self.active_vim_input_mode() == Some(VimInputMode::Insert);
+        if !vim_insert_literal && self.run_direct_lisp_binding(&key_str(key)) {
             return;
         }
 

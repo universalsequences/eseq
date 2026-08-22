@@ -1327,9 +1327,11 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         }
     }
 
+    let vim_normal_plain_tab = is_plain_tab_shortcut(key)
+        && editor.active_vim_input_mode() == Some(eseqlisp::editor::VimInputMode::Normal);
     if editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
-        && active_buffer_accepts_global_ui_shortcuts(editor)
+        && (active_buffer_accepts_global_ui_shortcuts(editor) || vim_normal_plain_tab)
         && !focused_widget_captures_text_input(editor)
     {
         if let Some(shortcut) = pattern_length_shortcut(key) {
@@ -1383,6 +1385,9 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
             _ if is_plain_tab_shortcut(key) => {
                 if tab_locked_to_patch_editor(editor) {
                     return true;
+                }
+                if editor.active_vim_input_mode() == Some(eseqlisp::editor::VimInputMode::Insert) {
+                    return false;
                 }
                 let _ = if let Some(callable) = editor
                     .runtime_mut()
@@ -3408,6 +3413,80 @@ mod live_keyboard_tests {
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
             Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn plain_tab_and_character_bindings_retain_editor_behavior_in_vim_insert_mode() {
+        let mut editor = Editor::new(
+            Runtime::new(),
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*scratch*", "(if test\n:4t)");
+        editor.active_buffer_mut().cursor = (1, 0);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def eseq.seq-panels/seq-toggle-arrangement ()
+                  (set! tab-target "arrangement"))
+                (bind-key "Tab" "eseq.seq-panels/seq-toggle-arrangement")
+                (bind-key ";" "eseq.seq-panels/seq-toggle-arrangement")
+                "#,
+            )
+            .expect("install application Tab binding");
+        editor.refresh_runtime_side_effects();
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert_eq!(
+            editor.active_vim_input_mode(),
+            Some(eseqlisp::editor::VimInputMode::Insert)
+        );
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &tab,
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        editor.handle_key(tab);
+        editor.handle_key(KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "(if test\n  ;:4t)");
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(Value::String(String::new())),
+            "the application Tab command must not run while Vim is inserting text"
+        );
+
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            editor.active_vim_input_mode(),
+            Some(eseqlisp::editor::VimInputMode::Normal)
+        );
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &tab,
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(Value::String("arrangement".to_string())),
+            "the application Tab command should run in Vim normal mode"
         );
     }
 
