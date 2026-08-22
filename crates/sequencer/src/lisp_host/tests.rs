@@ -7973,14 +7973,14 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // No snapshot published yet: the channel is unset, the default wins.
         assert!((invoke(&mut runtime, 0).emitted[0].resolved.velocity - 0.25).abs() < 1e-6);
 
-        runtime.set_generator_channel_values(HashMap::from([(
-            "warp".to_string(),
-            Value::Number(0.9),
-        )]));
+        runtime.set_generator_channel_values(
+            1,
+            HashMap::from([("warp".to_string(), Value::Number(0.9))]),
+        );
         assert!((invoke(&mut runtime, 1).emitted[0].resolved.velocity - 0.9).abs() < 1e-6);
 
         // An unset channel still falls through to the default.
-        runtime.set_generator_channel_values(HashMap::new());
+        runtime.set_generator_channel_values(2, HashMap::new());
         assert!((invoke(&mut runtime, 2).emitted[0].resolved.velocity - 0.25).abs() < 1e-6);
     }
 
@@ -8426,6 +8426,66 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         // the assoc memo caps at 16 entries and repeated lookups agree
         assert_eq!(nums, vec![16.0, 1.0, 5.0]);
+    }
+
+    #[test]
+    fn jaki_payload_channel_rekeys_only_the_cycle_memo() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.core :as jaki)
+               (def payload-pattern (jaki/pat - (dashdecay (chan "decay" 0.5))))
+               (__register-sequencer "jaki-payload-channel"
+                 :resolution :16
+                 :tick (lambda ()
+                   (do
+                     (jaki/locate payload-pattern 0)
+                     (let ((r (jaki/eval-cycle payload-pattern 0 :left jaki/default-state)))
+                       (seq-emit
+                         :track 0
+                         :at :now
+                         :vel (get (nth (get r :events) 1) :vel)
+                         :note (len jaki/len-memo)
+                         :speed (len jaki/lens-memo)
+                         :pan (/ (len jaki/memo-store) 10))))))"#,
+        )
+        .expect("register payload-channel sequencer");
+        let definition = rt.sequencer_defs().remove(0);
+        let invoke = |runtime: &mut ScratchControlRuntime| {
+            runtime
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        id: definition.id,
+                        generator_index: 0,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: Default::default(),
+                    },
+                )
+                .expect("tick")
+                .emitted
+                .remove(0)
+                .resolved
+        };
+
+        let before = invoke(&mut rt);
+        assert!((before.velocity - 0.4).abs() < 1e-6);
+        assert_eq!(before.transpose, 1.0);
+        assert_eq!(before.speed, 1.0);
+        assert!((before.pan - 0.1).abs() < 1e-6);
+
+        rt.set_generator_channel_values(
+            1,
+            HashMap::from([("decay".to_string(), Value::Number(0.4))]),
+        );
+        let after = invoke(&mut rt);
+        assert!((after.velocity - 0.32).abs() < 1e-6, "{after:?}");
+        assert_eq!(after.transpose, 1.0, "len-memo must survive payload writes");
+        assert_eq!(after.speed, 1.0, "lens-memo must survive payload writes");
+        assert!((after.pan - 0.2).abs() < 1e-6, "eval-cycle must be rekeyed");
     }
 
     #[test]

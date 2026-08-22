@@ -110,10 +110,15 @@ pub(super) type SharedRegisteredSequencers = Arc<Mutex<Vec<RegisteredSequencer>>
 pub(super) type SharedGeneratorTickContext = Arc<Mutex<Option<GeneratorTickContext>>>;
 pub(super) type SharedProcessAuthoring = Arc<Mutex<ProcessAuthoringRegistry>>;
 pub(super) type SharedProcessEvalContext = Arc<Mutex<Option<ProcessEvalContext>>>;
-/// Snapshot of process-channel values readable by `chan-get` inside generator
-/// ticks. The scheduler refreshes it from the process runtime once per
-/// lookahead chunk, so a tick observes channel writes from earlier chunks.
-pub(super) type SharedGeneratorChannels = Arc<Mutex<Arc<HashMap<String, EValue>>>>;
+/// Process-channel values and their payload generation, published atomically
+/// for generator ticks once per lookahead chunk.
+#[derive(Clone, Default)]
+pub(super) struct GeneratorChannelSnapshot {
+    pub(super) payload_epoch: u32,
+    pub(super) values: Arc<HashMap<String, EValue>>,
+}
+
+pub(super) type SharedGeneratorChannels = Arc<Mutex<GeneratorChannelSnapshot>>;
 pub(super) type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,7 +395,7 @@ impl ScratchControlRuntime {
         let sequencers = Arc::new(Mutex::new(Vec::new()));
         let generator_tick = Arc::new(Mutex::new(None));
         let generator_channels: SharedGeneratorChannels =
-            Arc::new(Mutex::new(Arc::new(HashMap::new())));
+            Arc::new(Mutex::new(GeneratorChannelSnapshot::default()));
         let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::default()));
         let process_eval = Arc::new(Mutex::new(None));
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
@@ -477,9 +482,16 @@ impl ScratchControlRuntime {
     /// Publish the current process-channel values for `chan-get` reads inside
     /// generator `:tick` bodies. The scheduler refreshes this from the process
     /// runtime once per lookahead chunk, before ticking generators.
-    pub fn set_generator_channel_values(&self, values: HashMap<String, EValue>) {
+    pub fn set_generator_channel_values(
+        &self,
+        payload_epoch: u32,
+        values: HashMap<String, EValue>,
+    ) {
         if let Ok(mut guard) = self.generator_channels.lock() {
-            *guard = Arc::new(values);
+            *guard = GeneratorChannelSnapshot {
+                payload_epoch,
+                values: Arc::new(values),
+            };
         }
     }
 

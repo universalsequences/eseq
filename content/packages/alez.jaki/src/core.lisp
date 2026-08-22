@@ -203,7 +203,7 @@
   (add-post p (list :for-hand hand (norm-xf t))
             (str "fh:" (source hand) ":" (source t))))
 
-;; ── per-cycle argument resolution ((cyc ...) and expression fallback) ───────
+;; ── per-cycle argument resolution ((cyc ...), (chan ...), expressions) ──────
 
 (def resolve-arg (raw cycle)
   (if (= raw nil)
@@ -212,9 +212,10 @@
         (if (= h 'cyc)
             (let ((vals (rest raw)))
               (resolve-arg (nth vals (imod cycle (max 1 (len vals)))) cycle))
-            ;; numbers, symbols, and non-cyc forms all evaluate as source —
-            ;; the (param-get ...) escape hatch once that native lands
-            (eval (source raw))))))
+            (if (= h 'chan)
+                (chan-get (nth raw 1) (nth raw 2))
+                ;; numbers, symbols, and other forms evaluate as source
+                (eval (source raw)))))))
 
 (def round-int (x) (floor (+ x 0.5)))
 (def every-active? (n cycle) (and (> n 0) (= 0 (imod (+ cycle 1) n))))
@@ -671,8 +672,12 @@
           (memo-find (rest m) key))))
 
 (def eval-cycle (p cycle hand st)
+  ;; Payload channels can alter evaluated event data but never cycle length.
+  ;; Include their epoch here only: len-memo and lens-memo intentionally keep
+  ;; their structural keys across channel writes.
   (let ((key (list (get p :id) cycle hand
-                   (get st :cur) (get st :pwd) (get st :streak))))
+                   (get st :cur) (get st :pwd) (get st :streak)
+                   (chan-epoch))))
     (let ((hit (memo-find memo-store key)))
       (if (= hit nil)
           (let ((r (eval-at p cycle hand st)))

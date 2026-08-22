@@ -898,6 +898,23 @@ impl ProcessLiteral {
     }
 }
 
+fn channel_values_equal(a: &Value, b: &Value) -> bool {
+    match (ProcessLiteral::from_value(a), ProcessLiteral::from_value(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        // Channel payloads are data, but keep invalidation conservative if an
+        // opaque VM value reaches this lower-level runtime API.
+        _ => false,
+    }
+}
+
+fn channel_value_maps_equal(a: &HashMap<String, Value>, b: &HashMap<String, Value>) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(name, a_value)| {
+            b.get(name)
+                .is_some_and(|b_value| channel_values_equal(a_value, b_value))
+        })
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PublishedProcessAuthoringSnapshot {
     pub defs: Vec<PublishedProcessDef>,
@@ -1387,6 +1404,9 @@ pub struct ProcessRuntime {
     instances: Vec<ProcessInstance>,
     handle_to_runtime: HashMap<AuthoredHandleId, u64>,
     channels: HashMap<String, ChannelState>,
+    /// Monotonic generation for channel payload values. Generator-side Jaki
+    /// cycle memos include this epoch while length memos deliberately do not.
+    payload_epoch: u32,
     patches: Vec<AuthoredPatch>,
     pending_events: Vec<PendingProcessEvent>,
     step_process_states: HashMap<ProcessInstanceId, HashMap<String, Value>>,
@@ -1788,6 +1808,7 @@ impl ProcessRuntime {
     }
 
     fn sync_channels(&mut self, channels: Vec<AuthoredChannel>) {
+        let previous_values = self.channel_values();
         let mut next = HashMap::new();
         for channel in channels {
             let Some(name) = channel.name else {
@@ -1809,6 +1830,9 @@ impl ProcessRuntime {
             );
         }
         self.channels = next;
+        if !channel_value_maps_equal(&previous_values, &self.channel_values()) {
+            self.payload_epoch = self.payload_epoch.wrapping_add(1);
+        }
     }
 
     /// Last value of every value channel (seeded from `defchan` initials), for
@@ -1821,6 +1845,12 @@ impl ProcessRuntime {
                 channel.value.clone().map(|value| (name.clone(), value))
             })
             .collect()
+    }
+
+    /// Global generation for payload-bearing channel values. It changes only
+    /// when the value snapshot changes, not merely when it is republished.
+    pub fn payload_epoch(&self) -> u32 {
+        self.payload_epoch
     }
 
     fn sync_instances(&mut self, instances: Vec<AuthoredProcessInstance>, total_beats: f64) {
@@ -2255,7 +2285,14 @@ impl ProcessRuntime {
                 field_publications: VecDeque::new(),
             });
         if !channel.message_only {
+            let changed = channel
+                .value
+                .as_ref()
+                .is_none_or(|current| !channel_values_equal(current, &value));
             channel.value = Some(value.clone());
+            if changed {
+                self.payload_epoch = self.payload_epoch.wrapping_add(1);
+            }
         }
         self.propagate_source_at(
             ProcessSourceRef::Channel(name.to_string()),
@@ -2282,7 +2319,14 @@ impl ProcessRuntime {
                 message_only: false,
                 field_publications: VecDeque::new(),
             });
+        let changed = channel
+            .value
+            .as_ref()
+            .is_none_or(|current| !channel_values_equal(current, &value));
         channel.value = Some(value.clone());
+        if changed {
+            self.payload_epoch = self.payload_epoch.wrapping_add(1);
+        }
         channel.field_publications.push_back(TimedFieldValue {
             beat,
             value: value.clone(),
@@ -3814,9 +3858,17 @@ mod tests {
         let values = runtime.channel_values();
         assert_eq!(values.get("warp"), Some(&Value::Number(1.0)));
         assert!(!values.contains_key("retrig"));
+        assert_eq!(runtime.payload_epoch(), 1);
 
         runtime.send_channel_at("warp", Value::Number(2.0), 4.0, 1_000);
+        assert_eq!(runtime.payload_epoch(), 2);
+        runtime.send_channel_at("warp", Value::Number(2.0), 4.0, 1_000);
         runtime.send_channel_at("retrig", Value::Number(1.0), 4.0, 1_000);
+        assert_eq!(
+            runtime.payload_epoch(),
+            2,
+            "equal writes and message-only channels do not change the payload snapshot"
+        );
         let values = runtime.channel_values();
         assert_eq!(values.get("warp"), Some(&Value::Number(2.0)));
         assert!(!values.contains_key("retrig"));

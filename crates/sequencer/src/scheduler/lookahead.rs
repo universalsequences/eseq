@@ -1471,7 +1471,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 // Channel snapshot for chan-get: ticks in this chunk observe
                 // process-channel writes from earlier chunks (processes run
                 // after generators within a chunk).
-                scratch.set_generator_channel_values(process_runtime.channel_values());
+                scratch.set_generator_channel_values(
+                    process_runtime.payload_epoch(),
+                    process_runtime.channel_values(),
+                );
                 generator_runtime.process_block(
                     chunk_start_beats,
                     chunk_end_beats,

@@ -51,7 +51,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives(
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(Arc::new(HashMap::new()))),
+        Arc::new(Mutex::new(GeneratorChannelSnapshot::default())),
     );
 }
 
@@ -777,9 +777,24 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                 .map_err(|_| "failed to lock generator channel snapshot".to_string())?
                 .clone();
             Ok(channels
+                .values
                 .get(&name)
                 .cloned()
                 .unwrap_or_else(|| args.get(1).cloned().unwrap_or(EValue::Nil)))
+        },
+    );
+
+    let generator_channels_for_chan_epoch = Arc::clone(&generator_channels);
+    runtime.register_native_with_docs(
+        "chan-epoch",
+        "(chan-epoch)",
+        "Return the current process-channel payload generation.",
+        move |_args, _ctx| {
+            let epoch = generator_channels_for_chan_epoch
+                .lock()
+                .map_err(|_| "failed to lock generator channel snapshot".to_string())?
+                .payload_epoch;
+            Ok(EValue::Number(epoch as f64))
         },
     );
 
