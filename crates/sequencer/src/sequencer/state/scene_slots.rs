@@ -37,6 +37,13 @@ pub struct ResolvedSceneSlot<'a> {
 }
 
 impl SceneSlotStore {
+    pub(crate) fn validate_literal(
+        name: &str,
+        value: &ProcessLiteral,
+    ) -> Result<(), String> {
+        validate_scene_slot_literal(name, value)
+    }
+
     pub fn from_values(values: BTreeMap<String, ProcessLiteral>) -> Result<Self, String> {
         for (name, value) in &values {
             validate_scene_slot_literal(name, value)?;

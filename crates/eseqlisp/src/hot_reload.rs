@@ -621,6 +621,7 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
                 "def"
                     | "defn"
                     | "defstate"
+                    | "defscene"
                     | "defmacro"
                     | "defwidget"
                     | "def-process"
@@ -678,6 +679,13 @@ mod tests {
         .expect("extract symbols");
         assert!(symbols.contains("eseq.factory/view"));
         assert!(symbols.contains("eseq.factory/other"));
+    }
+
+    #[test]
+    fn defscene_is_a_defined_symbol_for_hot_reload() {
+        let symbols = extract_defined_symbols_from_source("(defscene figures '())")
+            .expect("extract symbols");
+        assert!(symbols.contains("figures"));
     }
 
     #[test]

@@ -2164,6 +2164,7 @@ pub struct VM {
     pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
     pub state_bindings: HashMap<String, NodeId>,
+    pub scene_bindings: HashSet<String>,
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
@@ -2238,6 +2239,7 @@ pub struct VmStateSnapshot {
     pending_reactive_sets: Vec<(String, String, Value)>,
     derived_bindings: HashMap<String, NodeId>,
     state_bindings: HashMap<String, NodeId>,
+    scene_bindings: HashSet<String>,
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
@@ -3889,6 +3891,7 @@ impl VM {
             pending_reactive_sets: Vec::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
+            scene_bindings: HashSet::new(),
             execution_depth: 0,
             processing_reactive: false,
             reactive_exec_timings: Vec::new(),
@@ -4378,6 +4381,7 @@ impl VM {
             self.reactive_namespaces.clone(),
             self.derived_bindings.clone(),
             self.state_bindings.clone(),
+            self.scene_bindings.clone(),
             self.dag.next_id,
             self.macros.clone(),
             self.source_manager.current_source_file(),
@@ -4455,6 +4459,7 @@ impl VM {
             let reactive_namespaces = self.reactive_namespaces.clone();
             let derived_bindings = self.derived_bindings.clone();
             let state_bindings = self.state_bindings.clone();
+            let scene_bindings = self.scene_bindings.clone();
             let next_node_id = self.dag.next_id;
 
             let macros = self.macros.clone();
@@ -4471,6 +4476,7 @@ impl VM {
                     reactive_namespaces,
                     derived_bindings,
                     state_bindings,
+                    scene_bindings,
                     next_node_id,
                     macros,
                     source_file,
@@ -4491,6 +4497,7 @@ impl VM {
                         let names = compiler.take_global_names();
                         let derived = compiler.take_derived_bindings();
                         let states = compiler.take_state_bindings();
+                        let scenes = compiler.take_scene_bindings();
                         let next_node_id = compiler.next_node_id();
                         let macros = compiler.take_macros();
                         let warnings = compiler.take_warnings();
@@ -4501,6 +4508,7 @@ impl VM {
                             names,
                             derived,
                             states,
+                            scenes,
                             next_node_id,
                             macros,
                             warnings,
@@ -4521,6 +4529,7 @@ impl VM {
                     names,
                     derived,
                     states,
+                    scenes,
                     next_node_id,
                     macros,
                     warnings,
@@ -4531,6 +4540,7 @@ impl VM {
                     self.global_names = names;
                     self.derived_bindings = derived;
                     self.state_bindings = states;
+                    self.scene_bindings = scenes;
                     self.dag.next_id = next_node_id;
                     self.macros = macros;
                     for warning in warnings {
@@ -4682,6 +4692,7 @@ impl VM {
             pending_reactive_sets: self.pending_reactive_sets.clone(),
             derived_bindings: self.derived_bindings.clone(),
             state_bindings: self.state_bindings.clone(),
+            scene_bindings: self.scene_bindings.clone(),
             execution_depth: self.execution_depth,
             processing_reactive: self.processing_reactive,
             reactive_exec_timings: self.reactive_exec_timings.clone(),
@@ -4768,6 +4779,7 @@ impl VM {
         self.pending_reactive_sets = snapshot.pending_reactive_sets;
         self.derived_bindings = snapshot.derived_bindings;
         self.state_bindings = snapshot.state_bindings;
+        self.scene_bindings = snapshot.scene_bindings;
         self.execution_depth = snapshot.execution_depth;
         self.processing_reactive = snapshot.processing_reactive;
         self.reactive_exec_timings = snapshot.reactive_exec_timings;
@@ -4835,6 +4847,7 @@ impl VM {
         let reactive_namespaces = self.reactive_namespaces.clone();
         let derived_bindings = self.derived_bindings.clone();
         let state_bindings = self.state_bindings.clone();
+        let scene_bindings = self.scene_bindings.clone();
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
@@ -4851,6 +4864,7 @@ impl VM {
                 reactive_namespaces,
                 derived_bindings,
                 state_bindings,
+                scene_bindings,
                 next_node_id,
                 macros,
                 source_file,
@@ -4866,6 +4880,7 @@ impl VM {
                     compiler.take_global_names(),
                     compiler.take_derived_bindings(),
                     compiler.take_state_bindings(),
+                    compiler.take_scene_bindings(),
                     compiler.next_node_id(),
                     compiler.take_macros(),
                     compiler.take_warnings(),
@@ -4878,11 +4893,12 @@ impl VM {
             }
         };
         match compile_result {
-            Ok((chunks, names, derived, states, next_node_id, macros, warnings)) => {
+            Ok((chunks, names, derived, states, scenes, next_node_id, macros, warnings)) => {
                 self.chunks = chunks;
                 self.global_names = names;
                 self.derived_bindings = derived;
                 self.state_bindings = states;
+                self.scene_bindings = scenes;
                 self.dag.next_id = next_node_id;
                 self.macros = macros;
                 for warning in warnings {

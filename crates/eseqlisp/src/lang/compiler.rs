@@ -179,6 +179,10 @@ pub struct Compiler<'a> {
     reactive_namespaces: HashSet<String>,
     derived_bindings: HashMap<String, u32>,
     state_bindings: HashMap<String, u32>,
+    /// Qualified declaration names registered by `defscene`. Unlike
+    /// `defstate`, these have no reactive node id: reads and writes lower to
+    /// host calls that resolve the current pattern at execution time.
+    scene_bindings: HashSet<String>,
     next_node_id: u32,
     next_temp_id: u32,
     source_file: Option<PathBuf>,
@@ -404,6 +408,7 @@ impl<'a> Compiler<'a> {
             reactive_namespaces: HashSet::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
+            scene_bindings: HashSet::new(),
             next_node_id: 0,
             next_temp_id: 0,
             source_file: None,
@@ -434,6 +439,7 @@ impl<'a> Compiler<'a> {
         reactive_namespaces: HashSet<String>,
         derived_bindings: HashMap<String, u32>,
         state_bindings: HashMap<String, u32>,
+        scene_bindings: HashSet<String>,
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
         source_file: Option<PathBuf>,
@@ -448,6 +454,7 @@ impl<'a> Compiler<'a> {
             reactive_namespaces,
             derived_bindings,
             state_bindings,
+            scene_bindings,
             next_node_id,
             next_temp_id: 0,
             source_file,
@@ -910,6 +917,10 @@ impl<'a> Compiler<'a> {
         std::mem::take(&mut self.state_bindings)
     }
 
+    pub fn take_scene_bindings(&mut self) -> HashSet<String> {
+        std::mem::take(&mut self.scene_bindings)
+    }
+
     pub fn take_macros(&mut self) -> HashMap<String, MacroDef> {
         std::mem::take(&mut self.macros)
     }
@@ -1015,6 +1026,30 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn compile_named_scene_definition(
+        &mut self,
+        name: &str,
+        default: &Expression,
+    ) -> Result<(), CompilerError> {
+        let key = self.qualify_registration_name(name);
+        self.scene_bindings.insert(key.clone());
+
+        let name_idx = self.use_string_constant(&key);
+        self.emit(OpCode::PushStr(name_idx));
+        self.compile_expression(default)?;
+        self.emit_symbol_load("__defscene-register");
+        self.emit(OpCode::Call(2));
+
+        // Intern a real global definition so module export/visibility and the
+        // ordinary symbol-resolution ladder treat defscene exactly like
+        // defstate. Reads never use this fallback cell while the declaration
+        // remains registered; they lower through `__defscene-resolve` below.
+        let global_idx = self.use_global_for_definition(name);
+        self.emit(OpCode::StoreGlobal(global_idx));
+        self.emit(OpCode::PushNil);
+        Ok(())
+    }
+
     fn compile_custom_definition(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         let Expression::Symbol(name) = list.get(1).ok_or(CompilerError::InvalidArg)? else {
             return Err(CompilerError::InvalidArg);
@@ -1072,6 +1107,17 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         match target {
             Expression::Symbol(name) => {
+                if let Some(key) = self.scene_binding_for(name)
+                    && matches!(self.resolve_symbol(name), SymbolResolution::Global(_))
+                {
+                    let name_idx = self.use_string_constant(&key);
+                    self.emit(OpCode::PushStr(name_idx));
+                    self.compile_expression(value)?;
+                    self.emit_symbol_load("__defscene-set");
+                    self.emit(OpCode::Call(2));
+                    return Ok(());
+                }
+
                 let parts = if super::modules::is_qualified(name) {
                     vec![name.as_str()]
                 } else {
@@ -1704,6 +1750,40 @@ impl<'a> Compiler<'a> {
         super::modules::qualify(&self.current_module, name)
     }
 
+    /// Scene-binding lookup mirroring the §3 resolution ladder over the
+    /// qualified declaration keyspace. Returns the canonical registration
+    /// name passed across the host boundary.
+    fn scene_binding_for(&self, name: &str) -> Option<String> {
+        if self.scene_bindings.contains(name) {
+            return Some(name.to_string());
+        }
+        if let Some((ns, base)) = super::modules::split_qualified(name) {
+            let full_ns = self
+                .import_aliases
+                .get(ns)
+                .map(String::as_str)
+                .unwrap_or(ns);
+            let key = if full_ns == super::modules::IMPLICIT_MODULE {
+                base.to_string()
+            } else {
+                super::modules::qualify(full_ns, base)
+            };
+            return self.scene_bindings.contains(&key).then_some(key);
+        }
+        if self.declared_module().is_some() {
+            let key = super::modules::qualify(&self.current_module, name);
+            if self.scene_bindings.contains(&key) {
+                return Some(key);
+            }
+        }
+        if let Some(key) = self.refers.get(name)
+            && self.scene_bindings.contains(key)
+        {
+            return Some(key.clone());
+        }
+        None
+    }
+
     /// State-binding lookup mirroring the §3 resolution ladder over the
     /// (possibly qualified) `state_bindings` keyspace: exact key →
     /// current-module key → `:refer` target.
@@ -1786,10 +1866,19 @@ impl<'a> Compiler<'a> {
 
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
-            SymbolResolution::Global(idx) => match self.state_binding_for(name) {
-                Some(node_id) => self.emit(OpCode::LoadState(node_id)),
-                None => self.emit(OpCode::LoadGlobal(idx)),
-            },
+            SymbolResolution::Global(idx) => {
+                if let Some(key) = self.scene_binding_for(name) {
+                    let name_idx = self.use_string_constant(&key);
+                    self.emit(OpCode::PushStr(name_idx));
+                    self.emit_symbol_load("__defscene-resolve");
+                    self.emit(OpCode::Call(1));
+                } else {
+                    match self.state_binding_for(name) {
+                        Some(node_id) => self.emit(OpCode::LoadState(node_id)),
+                        None => self.emit(OpCode::LoadGlobal(idx)),
+                    }
+                }
+            }
             SymbolResolution::Local(idx) => self.emit(OpCode::LoadLocal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::LoadUpvalue(idx)),
         }
@@ -2703,6 +2792,12 @@ impl<'a> Compiler<'a> {
                     return Err(CompilerError::InvalidArg);
                 };
                 return self.compile_named_state_definition(name, &list[2]);
+            }
+            if s == "defscene" && list.len() == 3 {
+                let Expression::Symbol(name) = &list[1] else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                return self.compile_named_scene_definition(name, &list[2]);
             }
             if s == "defcustom" {
                 return self.compile_custom_definition(list);

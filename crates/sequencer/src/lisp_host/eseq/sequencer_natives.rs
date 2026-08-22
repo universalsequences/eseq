@@ -33,6 +33,66 @@ pub const SEQ_EMIT_KEYWORDS: &[&str] = &[
     ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q",
 ];
 
+fn register_scene_slot_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    let declarations = Arc::new(Mutex::new(HashMap::<
+        String,
+        crate::process::ProcessLiteral,
+    >::new()));
+
+    let declarations_for_register = Arc::clone(&declarations);
+    runtime.register_native("__defscene-register", move |args, _ctx| {
+        let [EValue::String(name), default] = args.as_slice() else {
+            return Err("defscene expects a symbol name and default value".to_string());
+        };
+        let literal = crate::process::ProcessLiteral::from_value(default)
+            .map_err(|error| format!("scene slot '{}': {}", name, error))?;
+        crate::sequencer::SceneSlotStore::validate_literal(name, &literal)?;
+        declarations_for_register
+            .lock()
+            .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+            .insert(name.clone(), literal);
+        Ok(default.clone())
+    });
+
+    let declarations_for_resolve = Arc::clone(&declarations);
+    let state_for_resolve = Arc::clone(&state);
+    runtime.register_native("__defscene-resolve", move |args, _ctx| {
+        let [EValue::String(name)] = args.as_slice() else {
+            return Err("scene-slot read expects one declaration name".to_string());
+        };
+        let default = declarations_for_resolve
+            .lock()
+            .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("scene slot '{}' is not declared", name))?;
+        let (value, _epoch, _overridden) =
+            state_for_resolve.resolve_current_scene_slot(name, &default);
+        Ok(value.to_value())
+    });
+
+    let declarations_for_set = Arc::clone(&declarations);
+    runtime.register_native("__defscene-set", move |args, _ctx| {
+        let [EValue::String(name), value] = args.as_slice() else {
+            return Err("set! on a scene slot expects a declaration name and value".to_string());
+        };
+        if !declarations_for_set
+            .lock()
+            .map_err(|_| "failed to lock scene-slot declarations".to_string())?
+            .contains_key(name)
+        {
+            return Err(format!("scene slot '{}' is not declared", name));
+        }
+        let literal = crate::process::ProcessLiteral::from_value(value)
+            .map_err(|error| format!("scene slot '{}': {}", name, error))?;
+        state.write_current_scene_slot(name.clone(), literal)?;
+        Ok(value.clone())
+    });
+}
+
 pub(in crate::lisp_host) fn register_sequencer_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -580,6 +640,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.cursor_step).unwrap_or(0);
 
     let _ = install_runtime_globals(runtime, &context, &metadata, &[]);
+    register_scene_slot_natives(runtime, Arc::clone(&state));
 
     // `def-sequencer` is a plain variadic builtin (NOT a macro): eseqlisp macros are
     // fixed-arity with no unquote-splicing, and builtins already receive variadic

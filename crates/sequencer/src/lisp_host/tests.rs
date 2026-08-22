@@ -8,8 +8,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
-        new_eval_context, parse_manifest, parse_process_port_def, read_eseqlisp_init_source,
-        register_graph_authoring_natives, register_published_process_authoring_natives,
+        lisp_list, new_eval_context, parse_manifest, parse_process_port_def,
+        read_eseqlisp_init_source, register_graph_authoring_natives,
+        register_published_process_authoring_natives,
         register_sequencer_natives, scheduler_scratch_runtime_with_fallbacks,
         scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
         set_selected_neural_instrument_plocks, shared_native_metadata, AccumulatorNoteSpan,
@@ -5038,6 +5039,96 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             ),
         );
         (state, runtime)
+    }
+
+    fn scene_slot_test_runtime() -> (Arc<SequencerState>, Runtime) {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        register_sequencer_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            new_eval_context(0, 0),
+            shared_native_metadata(
+                fallback_effect_descriptors(1),
+                fallback_instrument_descriptors(1),
+            ),
+        );
+        (state, runtime)
+    }
+
+    #[test]
+    fn defscene_bare_read_and_set_lower_to_current_pattern_slot_storage() {
+        let (state, mut runtime) = scene_slot_test_runtime();
+
+        assert_eq!(
+            runtime
+                .eval_str("(defscene figures '(1 2))\nfigures")
+                .expect("declare and read scene slot"),
+            Some(lisp_list(vec![Value::Number(1.0), Value::Number(2.0)]))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(set! figures '(3 5))")
+                .expect("write scene slot"),
+            Some(lisp_list(vec![Value::Number(3.0), Value::Number(5.0)]))
+        );
+        assert_eq!(
+            state.current_scene_slots().get("figures"),
+            Some(&crate::process::ProcessLiteral::List(vec![
+                crate::process::ProcessLiteral::Number(3.0),
+                crate::process::ProcessLiteral::Number(5.0),
+            ]))
+        );
+
+        runtime
+            .eval_str("(defscene figures '(8 13))")
+            .expect("rebind declaration default");
+        assert_eq!(
+            runtime.eval_str("figures").expect("read retained override"),
+            Some(lisp_list(vec![Value::Number(3.0), Value::Number(5.0)])),
+            "re-evaluating a declaration must not overwrite a stored pattern override"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(set! figures (lambda () 1))")
+                .expect("native authoring diagnostics return false"),
+            Some(Value::Bool(false)),
+            "scene-slot writes must reject non-portable values"
+        );
+        assert_eq!(
+            state.current_scene_slots().get("figures"),
+            Some(&crate::process::ProcessLiteral::List(vec![
+                crate::process::ProcessLiteral::Number(3.0),
+                crate::process::ProcessLiteral::Number(5.0),
+            ])),
+            "a rejected value must not alter the stored override"
+        );
+    }
+
+    #[test]
+    fn defscene_uses_defstate_module_qualification_and_declaration_order() {
+        let (state, mut runtime) = scene_slot_test_runtime();
+        runtime
+            .eval_str("(def figures 41)\n(def before figures)\n(defscene figures 2)")
+            .expect("compile declaration-order fixture");
+        assert_eq!(runtime.eval_str("before").unwrap(), Some(Value::Number(41.0)));
+        assert_eq!(runtime.eval_str("figures").unwrap(), Some(Value::Number(2.0)));
+
+        runtime
+            .eval_str(
+                "(module test.scene-slots)\n(defscene rate 0.5)\n(set! rate 0.75)",
+            )
+            .expect("declare module-qualified scene slot");
+        assert_eq!(
+            state.current_scene_slots().get("test.scene-slots/rate"),
+            Some(&crate::process::ProcessLiteral::Number(0.75))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("test.scene-slots/rate")
+                .expect("qualified read"),
+            Some(Value::Number(0.75))
+        );
     }
 
     #[test]
