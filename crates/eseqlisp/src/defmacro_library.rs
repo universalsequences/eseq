@@ -756,6 +756,22 @@ fn lint_template_expression(
     }
 }
 
+/// True when a macro body contains a quasiquote, i.e. it is a substitution
+/// template rather than a plain DGenLisp body. Only these can depend on the
+/// legacy unquote fallback that `lint_template_macro_compatibility` reports.
+fn body_uses_quasiquote(expression: &Expression) -> bool {
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expression::Quasiquote(_) => return true,
+            Expression::Unquote(inner) | Expression::UnquoteSplicing(inner) => pending.push(inner),
+            Expression::List(items) | Expression::QuoteList(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    false
+}
+
 fn infer_macro_outputs(body: &[Expression]) -> Vec<String> {
     let Some(return_expr) = body.last() else {
         return Vec::new();
@@ -1181,6 +1197,26 @@ mod tests {
     }
 
     #[test]
+    fn template_macro_lint_reports_computed_unquote_splices() {
+        // The legacy expander refuses a splice of anything but a bound
+        // parameter, so the whole macro call is left unexpanded today;
+        // procedural expansion would evaluate and splice it instead.
+        let issues = lint_template_macro_compatibility(
+            "(defmacro spliced (x) `(list ,@(rest x) ,@globals))",
+        )
+        .unwrap();
+
+        assert_eq!(issues.len(), 2);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| issue.kind == TemplateMacroUnquoteKind::UnquoteSplicing)
+        );
+        assert!(issues.iter().any(|issue| issue.expression == "(rest x)"));
+        assert!(issues.iter().any(|issue| issue.expression == "globals"));
+    }
+
+    #[test]
     fn template_macro_lint_accepts_direct_parameter_unquotes() {
         let issues = lint_template_macro_compatibility(
             "(defmacro safe (head &rest tail) `(list ,head ,@tail))",
@@ -1209,21 +1245,50 @@ mod tests {
             files
         }
 
-        let content_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        // Every checked-in Lisp tree: `content/` covers packages, UI, scripts and
+        // the patcher's `content/defmacros` library (the only on-disk root
+        // `defmacro_library_root` resolves to), while `crates/` covers the
+        // examples, musicplayer and shipped effect sources that live next to
+        // the Rust.
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut audited_macros = 0usize;
+        let mut template_macros = 0usize;
         let mut failures = Vec::new();
-        for path in lisp_files_below(&content_root) {
-            let source = fs::read_to_string(&path).unwrap();
-            let exprs = parse_exprs(&source, Some(path.clone())).unwrap();
-            audited_macros += exprs.iter().filter_map(parse_defmacro).count();
-            for issue in lint_template_macro_compatibility(&source).unwrap() {
-                failures.push(format!("{}: {issue}", path.display()));
+        // `content` and `crates` must always carry macros; `docs` is linted too
+        // but legitimately holds only example programs.
+        for (root, expect_macros) in [("content", true), ("crates", true), ("docs", false)] {
+            let mut macros_in_root = 0usize;
+            for path in lisp_files_below(&repo_root.join(root)) {
+                let source = fs::read_to_string(&path).unwrap();
+                let exprs = parse_exprs(&source, Some(path.clone())).unwrap();
+                for macro_def in exprs.iter().filter_map(parse_defmacro) {
+                    macros_in_root += 1;
+                    if macro_def.body.iter().any(body_uses_quasiquote) {
+                        template_macros += 1;
+                    }
+                }
+                for issue in lint_template_macro_compatibility(&source).unwrap() {
+                    failures.push(format!("{}: {issue}", path.display()));
+                }
             }
+            assert!(
+                macros_in_root > 0 || !expect_macros,
+                "audit found no defmacros under {root}/ — has the tree moved?"
+            );
+            audited_macros += macros_in_root;
         }
 
         assert!(
-            audited_macros >= 100,
+            audited_macros >= 400,
             "audit unexpectedly found only {audited_macros} macros"
+        );
+        // Only quasiquote bodies can rely on the substitution fallback, so this
+        // is the population the lint actually clears; the rest are DGenLisp DSP
+        // macros with plain bodies. Guard it separately so a walk that silently
+        // stops reaching `content/ui` or `content/packages` still fails.
+        assert!(
+            template_macros >= 40,
+            "audit found only {template_macros} quasiquote-bodied macros"
         );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
