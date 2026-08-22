@@ -2017,10 +2017,21 @@ impl App {
         let Some(&buffer_id) = self.graph.track_buffer_ids.get(track) else {
             return;
         };
-        self.publish_sampler_analysis_pool_runtime(track, buffer_id);
+        let edits = self
+            .state
+            .pattern
+            .instrument_slots
+            .get(track)
+            .and_then(|slot| slot.sampler_slice_edits.read().unwrap().clone());
+        self.publish_sampler_analysis_pool_runtime(track, buffer_id, edits.as_ref());
     }
 
-    pub fn publish_sampler_analysis_pool_runtime(&self, pool: usize, buffer_id: i32) {
+    pub fn publish_sampler_analysis_pool_runtime(
+        &self,
+        pool: usize,
+        buffer_id: i32,
+        edits: Option<&crate::analysis::SamplerSliceEdits>,
+    ) {
         use std::sync::atomic::Ordering;
 
         let runtime = &self.state.runtime;
@@ -2045,7 +2056,11 @@ impl App {
                             }
                         }
                     }
-                    if let Some(table) = self.sample_analysis.cache().table(buffer_id) {
+                    if let Some(table) = self
+                        .sample_analysis
+                        .cache()
+                        .table_for_pool(pool, buffer_id, edits)
+                    {
                         let (lo, hi) = crate::analysis::pack_ptr(Arc::as_ptr(&table));
                         runtime.sampler_onset_ptr_lo[pool].store(lo.to_bits(), Ordering::Release);
                         runtime.sampler_onset_ptr_hi[pool].store(hi.to_bits(), Ordering::Release);
@@ -2082,7 +2097,11 @@ impl App {
                 ) else {
                     continue;
                 };
-                self.publish_sampler_analysis_pool_runtime(pool, sample.0);
+                self.publish_sampler_analysis_pool_runtime(
+                    pool,
+                    sample.0,
+                    slot.instrument_slot.sampler_slice_edits.as_ref(),
+                );
             }
         }
     }
@@ -3517,5 +3536,16 @@ impl App {
             .get(&buffer_id)
             .cloned()
             .or_else(|| self.sample_path_registry.get(sample_name).cloned());
+        let sample_hash = self.sampler_paths[track]
+            .as_ref()
+            .and_then(|path| crate::analysis::sample_path_hash(&path.to_string_lossy()));
+        if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
+            let mut edits = slot.sampler_slice_edits.write().unwrap();
+            if edits.as_ref().is_some_and(|edits| {
+                Some(edits.sample_hash.as_str()) != sample_hash.as_deref()
+            }) {
+                *edits = None;
+            }
+        }
     }
 }

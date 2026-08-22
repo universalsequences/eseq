@@ -469,15 +469,19 @@ impl GraphController<'_> {
                     &gatepitch_ids,
                     &modulator_ids,
                 );
-                if let Some(buffer_id) = scheduler_snapshot
+                if let Some(slot) = scheduler_snapshot
                     .tracks
                     .get(track_idx)
                     .and_then(|track| track.rack_track.as_ref())
                     .and_then(|rack| rack.slots.get(slot_idx))
-                    .and_then(|slot| slot.sample_id.as_ref())
-                    .map(|sample| sample.0)
                 {
-                    self.app.publish_sampler_analysis_pool_runtime(pool_id, buffer_id);
+                    if let Some(buffer_id) = slot.sample_id.as_ref().map(|sample| sample.0) {
+                        self.app.publish_sampler_analysis_pool_runtime(
+                            pool_id,
+                            buffer_id,
+                            slot.instrument_slot.sampler_slice_edits.as_ref(),
+                        );
+                    }
                 }
                 self.app.graph.track_node_ids[track_idx].rack_slots[slot_idx].sampler_pool_id =
                     Some(pool_id);

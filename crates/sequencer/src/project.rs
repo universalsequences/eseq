@@ -1696,6 +1696,7 @@ pub struct ProjectEffectSlot {
     /// Host-managed effect source references that are not numeric parameters.
     pub ir: Option<String>,
     pub table: Option<String>,
+    pub sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -2124,11 +2125,21 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
                 .or_else(|| value.ir.clone()),
             table: crate::effects::filter_table::persisted_table_ref_for(value.node_id as i32)
                 .or_else(|| value.table.clone()),
+            sampler_slice_edits: value.sampler_slice_edits.clone(),
         }
     }
 }
 
 impl ProjectEffectSlot {
+    pub fn discard_slice_edits_for_other_sample(&mut self, sample_path: Option<&str>) {
+        let expected_hash = sample_path.and_then(crate::analysis::sample_path_hash);
+        if self.sampler_slice_edits.as_ref().is_some_and(|edits| {
+            Some(edits.sample_hash.as_str()) != expected_hash.as_deref()
+        }) {
+            self.sampler_slice_edits = None;
+        }
+    }
+
     pub fn into_snapshot_with_node_id(self, node_id: u32) -> EffectSlotSnapshot {
         self.into_snapshot_with_node_ids(node_id, 0)
     }
@@ -2153,6 +2164,7 @@ impl ProjectEffectSlot {
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: self.ir,
             table: self.table,
+            sampler_slice_edits: self.sampler_slice_edits,
         }
     }
 }
@@ -2418,7 +2430,10 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
 }
 
 impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
-    fn from(value: ProjectRackSlotPattern) -> Self {
+    fn from(mut value: ProjectRackSlotPattern) -> Self {
+        value
+            .instrument_slot
+            .discard_slice_edits_for_other_sample(value.sample_path.as_deref());
         let sample_id = value
             .sample_name
             .filter(|name| !name.trim().is_empty())
@@ -3078,6 +3093,8 @@ struct SparseProjectEffectSlot {
     ir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 #[derive(Deserialize)]
@@ -3100,6 +3117,8 @@ struct DenseProjectEffectSlot {
     ir: Option<String>,
     #[serde(default)]
     table: Option<String>,
+    #[serde(default)]
+    sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 #[derive(Deserialize)]
@@ -3205,6 +3224,7 @@ impl Serialize for ProjectEffectSlot {
             && tensor_params.is_empty()
             && self.ir.is_none()
             && self.table.is_none()
+            && self.sampler_slice_edits.is_none()
         {
             return Option::<()>::None.serialize(serializer);
         }
@@ -3219,6 +3239,7 @@ impl Serialize for ProjectEffectSlot {
             param_node_spans: self.param_node_spans.clone(),
             ir: self.ir.clone(),
             table: self.table.clone(),
+            sampler_slice_edits: self.sampler_slice_edits.clone(),
         }
         .serialize(serializer)
     }
@@ -3271,6 +3292,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
                     table: slot.table,
+                    sampler_slice_edits: slot.sampler_slice_edits,
                 }
             }
             ProjectEffectSlotRepr::Dense(slot) => Self {
@@ -3289,6 +3311,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
                 table: slot.table,
+                sampler_slice_edits: slot.sampler_slice_edits,
             },
             ProjectEffectSlotRepr::Empty(_) => Self {
                 num_params: 0,
@@ -3302,6 +3325,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 param_node_spans: Vec::new(),
                 ir: None,
                 table: None,
+                sampler_slice_edits: None,
             },
         })
     }
@@ -3604,6 +3628,7 @@ mod tests {
                         tensor_params: Vec::new(),
                         ir: None,
                         table: None,
+                        sampler_slice_edits: None,
                     },
                     ProjectEffectSlot {
                         num_params: 0,
@@ -3617,6 +3642,7 @@ mod tests {
                         tensor_params: Vec::new(),
                         ir: None,
                         table: None,
+                        sampler_slice_edits: None,
                     },
                 ],
                 instrument_base_note_offsets: vec![0.0, 12.0],
@@ -5653,6 +5679,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: Some("lexicon-300-rich-plate".to_string()),
             table: Some("vowel-bank".to_string()),
+            sampler_slice_edits: None,
         };
         let json = serde_json::to_string(&slot).expect("serialize slot with assets");
         assert!(json.contains("\"ir\":\"lexicon-300-rich-plate\""), "{json}");
@@ -5660,6 +5687,39 @@ mod tests {
         let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip assets");
         assert_eq!(back.ir.as_deref(), Some("lexicon-300-rich-plate"));
         assert_eq!(back.table.as_deref(), Some("vowel-bank"));
+    }
+
+    #[test]
+    fn effect_slot_roundtrips_manual_slice_edits_without_detected_onsets() {
+        let mut slot = ProjectEffectSlot::default();
+        slot.sampler_slice_edits = Some(crate::analysis::SamplerSliceEdits {
+            sample_hash: "a".repeat(64),
+            user_added: vec![120],
+            user_deleted: vec![240],
+            user_moved: vec![crate::analysis::SliceMove { from: 360, to: 400 }],
+        });
+
+        let json = serde_json::to_string(&slot).expect("serialize slice edits");
+        assert!(json.contains("sampler_slice_edits"), "{json}");
+        assert!(!json.contains("onsets_frames"), "detected analysis must not persist: {json}");
+        let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip slice edits");
+        assert_eq!(back.sampler_slice_edits, slot.sampler_slice_edits);
+    }
+
+    #[test]
+    fn effect_slot_drops_manual_slice_edits_when_the_sample_hash_changes() {
+        let original_hash = "a".repeat(64);
+        let replacement_hash = "b".repeat(64);
+        let mut slot = ProjectEffectSlot::default();
+        slot.sampler_slice_edits = Some(crate::analysis::SamplerSliceEdits::for_sample_hash(
+            original_hash.clone(),
+        ));
+
+        slot.discard_slice_edits_for_other_sample(Some(&format!(
+            "samples/{replacement_hash}.wav"
+        )));
+
+        assert!(slot.sampler_slice_edits.is_none());
     }
 
     #[test]
@@ -5689,6 +5749,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let json = serde_json::to_string(&slot).expect("serialize key-lock slot");
@@ -5728,6 +5789,7 @@ mod tests {
             }],
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let json = serde_json::to_string(&slot).expect("serialize tensor slot");

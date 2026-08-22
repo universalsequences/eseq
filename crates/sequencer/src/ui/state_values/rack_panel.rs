@@ -551,6 +551,9 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             .cache()
             .table(buffer_id)
             .map(|table| {
+                let table = table.with_edits(
+                    slot.instrument_slot.sampler_slice_edits.as_ref(),
+                );
                 table
                     .slice_starts(sensitivity)
                     .map(|frame| {

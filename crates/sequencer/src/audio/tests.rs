@@ -1215,6 +1215,7 @@ fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
         onsets_frames: vec![0, 22_050],
         sample_len_frames: 44_100,
         sample_rate: 44_100,
+        manual_edits: None,
     };
     let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
     state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
@@ -1236,6 +1237,7 @@ fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks(
         onsets_frames: vec![0, 4_000, 8_000],
         sample_len_frames: 12_000,
         sample_rate: 8_000,
+        manual_edits: None,
     };
     let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
     state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);

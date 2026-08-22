@@ -140,6 +140,7 @@
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         }
     }
 
@@ -2637,6 +2638,7 @@
                     tensor_params: Vec::new(),
                     ir: None,
                     table: None,
+                    sampler_slice_edits: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],

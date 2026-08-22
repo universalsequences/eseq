@@ -99,6 +99,8 @@
     (sampler-edit-slice inst :move event)
     :delete-slice
     (sampler-edit-slice inst :delete event)
+    :end-slice-drag
+    (sampler-finish-slice-edit inst)
     _
     nil))
 
@@ -109,6 +111,16 @@
           :operation operation
           :index (if (get event :index) (get event :index) -1)
           :time (get event :time)
+          :gesture "sampler-slice"
+          :label "Edit sampler slice")))
+
+(def sampler-finish-slice-edit (inst)
+  (host-command "edit-sampler-slice"
+    (dict :track (if (pc/instrument-rack-target? inst) (get inst :rack-track) (get inst :track))
+          :rack-slot (if (pc/instrument-rack-target? inst) (get inst :rack-slot) -1)
+          :operation :commit
+          :index -1
+          :time 0
           :gesture "sampler-slice"
           :label "Edit sampler slice")))
 

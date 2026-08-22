@@ -49,7 +49,7 @@ pub(crate) mod tape;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
@@ -537,6 +537,26 @@ mod tests {
     }
 
     #[test]
+    fn sampler_slice_edits_participate_in_device_history_snapshots() {
+        let descriptor = EffectDescriptor::builtin_sampler();
+        let slot = EffectSlotState::new(&descriptor, 7);
+        let edits = crate::analysis::SamplerSliceEdits {
+            sample_hash: "a".repeat(64),
+            user_added: vec![120],
+            user_deleted: vec![240],
+            user_moved: vec![crate::analysis::SliceMove { from: 360, to: 400 }],
+        };
+        *slot.sampler_slice_edits.write().unwrap() = Some(edits.clone());
+        let saved = EffectSlotSnapshot::capture_authoring_values(&slot);
+        *slot.sampler_slice_edits.write().unwrap() = None;
+
+        EffectSlotSnapshot::restore_authoring_values(&slot, &saved)
+            .expect("restore slice edits through the device history memento");
+
+        assert_eq!(*slot.sampler_slice_edits.read().unwrap(), Some(edits));
+    }
+
+    #[test]
     fn sync_descriptor_restamps_lock_identity_under_the_new_node_id() {
         let desc = EffectDescriptor {
             name: "synth".to_string(),
@@ -930,6 +950,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
         snapshot.plocks[3][0] = Some(0.9);
         snapshot.plock_param_ids[3][0] = Some(ParamNodeId {
@@ -8635,6 +8656,7 @@ pub struct EffectSlotState {
     pub param_node_indices: Vec<AtomicU32>, // per-param: idx field for ParamMsg
     pub param_node_spans: Vec<AtomicU32>,   // per-param: contiguous DGen cells updated by idx
     pub transport_phase_param_idx: AtomicU32,
+    pub sampler_slice_edits: RwLock<Option<crate::analysis::SamplerSliceEdits>>,
 }
 
 pub fn capture_key_locks_by_param_name(
@@ -8728,6 +8750,7 @@ impl EffectSlotState {
                 desc.transport_phase_param_idx()
                     .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
             ),
+            sampler_slice_edits: RwLock::new(None),
         };
         state.tensor_params.apply_descriptor(&desc.tensor_params);
         state
@@ -8818,6 +8841,7 @@ impl EffectSlotState {
             param_node_indices: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(0)).collect(),
             param_node_spans: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(1)).collect(),
             transport_phase_param_idx: AtomicU32::new(NO_TRANSPORT_PHASE_PARAM),
+            sampler_slice_edits: RwLock::new(None),
         }
     }
 
@@ -9126,6 +9150,7 @@ impl EffectSlotState {
             }
         }
         self.key_locks.clear_all();
+        *self.sampler_slice_edits.write().unwrap() = None;
     }
 
     /// Copy all runtime slot payload from another slot.
@@ -9167,6 +9192,7 @@ pub struct EffectSlotValuesSnapshot {
     pub prepared_ir: Option<Arc<conv_reverb::StereoIr>>,
     pub table: Option<String>,
     pub prepared_table: Option<Arc<filter_table::MagnitudeTable>>,
+    pub sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 impl EffectSlotValuesSnapshot {
@@ -9181,6 +9207,7 @@ impl EffectSlotValuesSnapshot {
             prepared_ir: left_prepared_ir,
             table: left_table,
             prepared_table: left_prepared_table,
+            sampler_slice_edits: left_sampler_slice_edits,
         } = self;
         let Self {
             num_params: right_num_params,
@@ -9192,6 +9219,7 @@ impl EffectSlotValuesSnapshot {
             prepared_ir: right_prepared_ir,
             table: right_table,
             prepared_table: right_prepared_table,
+            sampler_slice_edits: right_sampler_slice_edits,
         } = other;
         left_num_params == right_num_params
             && f32_slice_bits_eq(left_defaults, right_defaults)
@@ -9210,6 +9238,7 @@ impl EffectSlotValuesSnapshot {
                 left_prepared_table.as_deref(),
                 right_prepared_table.as_deref(),
             )
+            && left_sampler_slice_edits == right_sampler_slice_edits
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -9223,6 +9252,7 @@ impl EffectSlotValuesSnapshot {
             prepared_ir,
             table,
             prepared_table,
+            sampler_slice_edits,
         } = self;
         std::mem::size_of::<Self>()
             + defaults.capacity() * std::mem::size_of::<f32>()
@@ -9249,6 +9279,12 @@ impl EffectSlotValuesSnapshot {
             + table.as_ref().map_or(0, String::capacity)
             + prepared_table.as_ref().map_or(0, |table| {
                 table.data.capacity() * std::mem::size_of::<f32>()
+            })
+            + sampler_slice_edits.as_ref().map_or(0, |edits| {
+                edits.sample_hash.capacity()
+                    + edits.user_added.capacity() * std::mem::size_of::<u32>()
+                    + edits.user_deleted.capacity() * std::mem::size_of::<u32>()
+                    + edits.user_moved.capacity() * std::mem::size_of::<crate::analysis::SliceMove>()
             })
     }
 }
@@ -9389,6 +9425,7 @@ pub struct EffectSlotSnapshot {
     /// Host-managed source references carried through save/restore.
     pub ir: Option<String>,
     pub table: Option<String>,
+    pub sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 impl EffectSlotSnapshot {
@@ -9417,6 +9454,7 @@ impl EffectSlotSnapshot {
             prepared_ir: conv_reverb::prepared_ir_for(self.node_id as i32),
             table: self.table.clone(),
             prepared_table: filter_table::prepared_table_for(self.node_id as i32),
+            sampler_slice_edits: self.sampler_slice_edits.clone(),
         }
     }
 
@@ -9448,6 +9486,7 @@ impl EffectSlotSnapshot {
         self.tensor_params.clone_from(&values.tensor_params);
         self.ir.clone_from(&values.ir);
         self.table.clone_from(&values.table);
+        self.sampler_slice_edits.clone_from(&values.sampler_slice_edits);
         self.rebuild_lock_param_ids();
         Ok(())
     }
@@ -9554,6 +9593,7 @@ impl EffectSlotSnapshot {
             // runs the non-default engine, so snapshots and the project file
             // both carry the engine choice.
             table: crate::effects::filter_table::persisted_table_ref_for(node_id as i32),
+            sampler_slice_edits: slot.sampler_slice_edits.read().unwrap().clone(),
         }
     }
 
@@ -9606,6 +9646,7 @@ impl EffectSlotSnapshot {
         slot.key_locks
             .restore_rows(&self.key_locks, &self.key_lock_param_ids, np);
         slot.tensor_params.restore_snapshots(&self.tensor_params);
+        *slot.sampler_slice_edits.write().unwrap() = self.sampler_slice_edits.clone();
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {
@@ -9655,6 +9696,7 @@ impl EffectSlotSnapshot {
                 .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         }
     }
 
@@ -9674,6 +9716,7 @@ impl EffectSlotSnapshot {
             transport_phase_param_idx: NO_TRANSPORT_PHASE_PARAM,
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         }
     }
 

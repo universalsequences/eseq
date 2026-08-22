@@ -1087,6 +1087,9 @@ impl WaveformView {
             {
                 Some(action_map(vec![("type", keyword(":end-marker-drag"))]))
             }
+            Some(Value::Keyword(kind)) if kind == "drag-slice" => Some(action_map(vec![
+                ("type", keyword(":end-slice-drag")),
+            ])),
             _ => None,
         }
     }
@@ -1630,6 +1633,13 @@ mod tests {
                     .expect("move action")
             ),
             Value::Keyword("move-slice".to_string())
+        );
+        assert_eq!(
+            action_type(
+                view.handle_pointer_up(12.0, 2.0, Some(&gesture))
+                    .expect("end drag action")
+            ),
+            Value::Keyword("end-slice-drag".to_string())
         );
     }
 

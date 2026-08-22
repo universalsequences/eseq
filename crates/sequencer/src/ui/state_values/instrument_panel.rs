@@ -452,6 +452,8 @@ pub(crate) fn build_sampler_panel_value(
     let slice_values = sensitivity
         .and_then(|sensitivity| {
             app.sample_analysis.cache().table(buffer_id).map(|table| {
+                let edits = slot.sampler_slice_edits.read().unwrap();
+                let table = table.with_edits(edits.as_ref());
                 table
                     .slice_starts(sensitivity)
                     .map(|frame| {
