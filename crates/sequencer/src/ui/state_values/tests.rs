@@ -11565,6 +11565,56 @@
     }
 
     #[test]
+    fn rack_sampler_panel_exposes_host_only_slice_controls() {
+        let app = test_app_with_rack_panel();
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        let Value::List(racks) = &panel else {
+            panic!("rack panel should be a list");
+        };
+        let Value::Map(rack) = &*racks[0].borrow() else {
+            panic!("rack panel entry should be a map");
+        };
+        let Value::Map(instrument) = &*rack
+            .get("selected-instrument")
+            .expect("rack panel should expose its selected sampler")
+            .borrow()
+        else {
+            panic!("selected rack instrument should be a map");
+        };
+        let Value::List(params) = &*instrument
+            .get("synth")
+            .expect("rack sampler should expose synth params")
+            .borrow()
+        else {
+            panic!("rack sampler synth params should be a list");
+        };
+        let names: Vec<String> = params
+            .iter()
+            .filter_map(|param| match &*param.borrow() {
+                Value::Map(map) => match map.get("name").map(|name| name.borrow().clone()) {
+                    Some(Value::String(name)) => Some(name),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        for expected in ["slice", "sens", "slice base"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "rack sampler panel should expose the host-only `{expected}` control, got {names:?}"
+            );
+        }
+        assert!(
+            matches!(
+                instrument.get("slices").map(|value| value.borrow().clone()),
+                Some(Value::List(_))
+            ),
+            "rack sampler panel should expose resolved slice markers"
+        );
+    }
+
+    #[test]
     fn rack_macro_value_binding_follows_selected_step_then_playhead() {
         let mut app = test_app_with_rack_panel();
         let macro_id = sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1 id");

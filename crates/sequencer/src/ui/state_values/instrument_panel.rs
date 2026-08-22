@@ -436,27 +436,31 @@ pub(crate) fn build_sampler_panel_value(
     }
     let buffer_id = app.graph.track_buffer_ids.get(track).copied().unwrap_or(-1);
     let sensitivity_idx = sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY;
+    // A sampler track can be backed by a descriptor that predates the slice
+    // controls (stale/converted tracks in particular), so resolve the default
+    // through `get` and skip slicing entirely when the tail is absent.
     let sensitivity_default = if sensitivity_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-        slot.defaults.get(sensitivity_idx)
+        Some(slot.defaults.get(sensitivity_idx))
     } else {
-        desc.params[sensitivity_idx].default
+        desc.params.get(sensitivity_idx).map(|param| param.default)
     };
-    let sensitivity = plock_step
-        .and_then(|step| slot.plocks.get(step, sensitivity_idx))
-        .unwrap_or(sensitivity_default);
-    let slice_values = app
-        .sample_analysis
-        .cache()
-        .table(buffer_id)
-        .map(|table| {
-            table
-                .slice_starts(sensitivity)
-                .map(|frame| {
-                    Rc::new(RefCell::new(Value::Number(
-                        frame as f64 / table.sample_rate.max(1) as f64,
-                    )))
-                })
-                .collect()
+    let sensitivity = sensitivity_default.map(|default| {
+        plock_step
+            .and_then(|step| slot.plocks.get(step, sensitivity_idx))
+            .unwrap_or(default)
+    });
+    let slice_values = sensitivity
+        .and_then(|sensitivity| {
+            app.sample_analysis.cache().table(buffer_id).map(|table| {
+                table
+                    .slice_starts(sensitivity)
+                    .map(|frame| {
+                        Rc::new(RefCell::new(Value::Number(
+                            frame as f64 / table.sample_rate.max(1) as f64,
+                        )))
+                    })
+                    .collect()
+            })
         })
         .unwrap_or_default();
     let analysis_entry = app.sample_analysis.cache().get(buffer_id);

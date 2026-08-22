@@ -320,7 +320,10 @@ pub(super) fn build_selected_rack_slot_instrument_value(
     ));
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        if sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx)
+        // u32::MAX marks host-only controls such as sampler slicing; it is not
+        // a packed voice-modulator source index.
+        if (pdesc.node_param_idx != u32::MAX
+            && sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx))
             || pdesc.name.starts_with("__host_mod__")
             || pdesc.name.starts_with("__dgen_mod_active__")
         {
