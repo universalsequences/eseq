@@ -7,9 +7,9 @@
 ;;   (alez.jaki.core/pat (fig (. . -) (* 2)) (fig (. -) (/ 3)))
 ;;
 ;; The tick body that builds patterns is authored on the UI VM but runs on the
-;; scheduler VM: def-sequencer auto-quotes the body and re-serializes it as
-;; source, so the macro call is expanded in the scheduler VM that owns the Jaki
-;; runtime.
+;; scheduler VM: def-sequencer expands `pat` on the authoring side before it
+;; auto-quotes and serializes the residue. The scheduler only runs the resulting
+;; `from-list` call and never needs the macro layer.
 ;;
 ;; Offsets and gates are exact rationals — normalized (numerator denominator)
 ;; 2-lists — so tuplet window membership never needs an epsilon (spec §8.3).

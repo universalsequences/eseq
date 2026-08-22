@@ -1,3 +1,4 @@
+use super::SOURCE_ORIGIN_NATIVE;
 use crate::parser::Expression;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -39,6 +40,32 @@ pub enum CompilerError {
     Message(String),
 }
 
+fn compiler_error_description(error: &CompilerError) -> &str {
+    match error {
+        CompilerError::UnknownOperator => "unknown operator",
+        CompilerError::InvalidArg => "invalid argument",
+        CompilerError::Message(message) => message,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpansionOrigin {
+    pub macro_name: String,
+    pub source: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub revision: String,
+}
+
+impl ExpansionOrigin {
+    pub fn diagnostic(&self) -> String {
+        format!(
+            "expanded from `{}` at {}:{} (revision {})",
+            self.macro_name, self.source, self.start_byte, self.revision
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum OpCode {
     Push,
@@ -68,6 +95,7 @@ pub enum OpCode {
     Lte,
     Gte,
     MakeList(usize),
+    ConcatLists(usize),
     Call(usize),
     MakeFunc(usize),
     MakeClosure(usize, usize),
@@ -97,14 +125,38 @@ pub enum OpCode {
     JumpIfFalse(usize),
     PushBool(bool),
     PushNil,
+    ExpansionOriginBegin(ExpansionOrigin),
+    ExpansionOriginEnd,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroExpansionSite {
+    pub ordinal: usize,
+    pub explicit_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MacroDef {
     pub params: Vec<String>,
     pub rest_param: Option<String>,
-    pub body: Expression,
+    /// Chunk containing the compiled expander function. Macro definitions are
+    /// compile-time declarations, so this closure does not need to be emitted
+    /// into or initialized by the unit's entry chunk.
+    pub function_chunk: usize,
 }
+
+pub struct MacroCompilerState {
+    pub chunks: Vec<Chunk>,
+    pub global_symbols: Vec<String>,
+}
+
+type MacroEvaluator<'a> = dyn FnMut(
+        &MacroDef,
+        Vec<Expression>,
+        &MacroExpansionSite,
+        &mut MacroCompilerState,
+    ) -> Result<Expression, String>
+    + 'a;
 
 /// Compiler-local module state carried across the segment compilers of one
 /// compile unit (see `Compiler::take_module_context`).
@@ -115,9 +167,10 @@ pub struct ModuleCompileContext {
     import_aliases: HashMap<String, String>,
     refers: HashMap<String, String>,
     known_namespaces: HashSet<String>,
+    next_macro_expansion_ordinal: usize,
 }
 
-pub struct Compiler {
+pub struct Compiler<'a> {
     expressions: Vec<Expression>,
     chunks: Vec<Chunk>,
     scopes: Vec<Scope>,
@@ -129,6 +182,7 @@ pub struct Compiler {
     next_node_id: u32,
     next_temp_id: u32,
     source_file: Option<PathBuf>,
+    source_label: Option<String>,
     /// The module bare global names qualify under: the implicit
     /// `eseq.vanilla` until a `(module …)` header switches it (spec §2).
     current_module: String,
@@ -153,6 +207,11 @@ pub struct Compiler {
     /// forms) recorded mid-compile and reported when `compile` finishes.
     errors: Vec<String>,
     pub macros: HashMap<String, MacroDef>,
+    macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
+    next_macro_expansion_ordinal: usize,
+    compiling_macro_body: usize,
+    active_expansion_origin: Option<ExpansionOrigin>,
+    compiling_source_origin_payload: bool,
 }
 
 fn is_widget_name(name: &str) -> bool {
@@ -273,7 +332,68 @@ fn extract_zip_sources(source: &Expression) -> Option<Vec<Expression>> {
     (name == "zip").then(|| items[1..].to_vec())
 }
 
-impl Compiler {
+/// Macro calls carry source-origin wrappers while they execute in the authoring VM so
+/// diagnostics can point back to the call site. Expanded forms captured as data run in a
+/// different VM, where those offsets and the authoring revision have no meaning and must not
+/// become part of the serialized expansion residue.
+fn strip_source_origin_wrappers(expression: Expression) -> Expression {
+    match expression {
+        Expression::List(mut items) => {
+            let is_source_origin = matches!(
+                items.as_slice(),
+                [Expression::Symbol(name), Expression::Number(_), Expression::Number(_), Expression::String(_), _]
+                    if name == SOURCE_ORIGIN_NATIVE
+            );
+            if is_source_origin {
+                return strip_source_origin_wrappers(items.pop().expect("matched wrapper payload"));
+            }
+            Expression::List(
+                items
+                    .into_iter()
+                    .map(strip_source_origin_wrappers)
+                    .collect(),
+            )
+        }
+        Expression::QuoteList(items) => Expression::QuoteList(
+            items
+                .into_iter()
+                .map(strip_source_origin_wrappers)
+                .collect(),
+        ),
+        Expression::Quasiquote(inner) => {
+            Expression::Quasiquote(Box::new(strip_source_origin_wrappers(*inner)))
+        }
+        Expression::Unquote(inner) => {
+            Expression::Unquote(Box::new(strip_source_origin_wrappers(*inner)))
+        }
+        Expression::UnquoteSplicing(inner) => {
+            Expression::UnquoteSplicing(Box::new(strip_source_origin_wrappers(*inner)))
+        }
+        other => other,
+    }
+}
+
+/// True when `expression` still carries a source-origin wrapper anywhere inside it, so the
+/// capture paths that quote an unexpanded form can skip cloning when there is nothing to strip.
+fn contains_source_origin_wrapper(expression: &Expression) -> bool {
+    match expression {
+        Expression::List(items) => {
+            let is_source_origin = matches!(
+                items.as_slice(),
+                [Expression::Symbol(name), Expression::Number(_), Expression::Number(_), Expression::String(_), _]
+                    if name == SOURCE_ORIGIN_NATIVE
+            );
+            is_source_origin || items.iter().any(contains_source_origin_wrapper)
+        }
+        Expression::QuoteList(items) => items.iter().any(contains_source_origin_wrapper),
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => contains_source_origin_wrapper(inner),
+        _ => false,
+    }
+}
+
+impl<'a> Compiler<'a> {
     pub fn new(expressions: Vec<Expression>) -> Self {
         Compiler {
             expressions,
@@ -287,6 +407,7 @@ impl Compiler {
             next_node_id: 0,
             next_temp_id: 0,
             source_file: None,
+            source_label: None,
             current_module: super::modules::IMPLICIT_MODULE.to_string(),
             module_declared: false,
             import_aliases: HashMap::new(),
@@ -296,6 +417,11 @@ impl Compiler {
             warnings: Vec::new(),
             errors: Vec::new(),
             macros: HashMap::new(),
+            macro_evaluator: None,
+            next_macro_expansion_ordinal: 0,
+            compiling_macro_body: 0,
+            active_expansion_origin: None,
+            compiling_source_origin_payload: false,
         }
     }
 
@@ -311,6 +437,7 @@ impl Compiler {
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
         source_file: Option<PathBuf>,
+        source_label: Option<String>,
     ) -> Self {
         Compiler {
             expressions,
@@ -324,6 +451,7 @@ impl Compiler {
             next_node_id,
             next_temp_id: 0,
             source_file,
+            source_label,
             current_module: super::modules::IMPLICIT_MODULE.to_string(),
             module_declared: false,
             import_aliases: HashMap::new(),
@@ -333,7 +461,25 @@ impl Compiler {
             warnings: Vec::new(),
             errors: Vec::new(),
             macros,
+            macro_evaluator: None,
+            next_macro_expansion_ordinal: 0,
+            compiling_macro_body: 0,
+            active_expansion_origin: None,
+            compiling_source_origin_payload: false,
         }
+    }
+
+    pub fn set_macro_evaluator(
+        &mut self,
+        evaluator: impl FnMut(
+                &MacroDef,
+                Vec<Expression>,
+                &MacroExpansionSite,
+                &mut MacroCompilerState,
+            ) -> Result<Expression, String>
+            + 'a,
+    ) {
+        self.macro_evaluator = Some(Box::new(evaluator));
     }
 
     /// The compiler-local module state a compile unit accumulates as its
@@ -353,6 +499,7 @@ impl Compiler {
             import_aliases: std::mem::take(&mut self.import_aliases),
             refers: std::mem::take(&mut self.refers),
             known_namespaces: std::mem::take(&mut self.known_namespaces),
+            next_macro_expansion_ordinal: self.next_macro_expansion_ordinal,
         }
     }
 
@@ -362,6 +509,7 @@ impl Compiler {
         self.import_aliases = context.import_aliases;
         self.refers = context.refers;
         self.known_namespaces = context.known_namespaces;
+        self.next_macro_expansion_ordinal = context.next_macro_expansion_ordinal;
     }
 
     pub fn take_warnings(&mut self) -> Vec<String> {
@@ -435,109 +583,62 @@ impl Compiler {
             .or_else(|| self.macros.get(name))
     }
 
-    pub fn expand_macros(&self, expr: &Expression, depth: usize) -> Expression {
+    pub fn expand_macros(
+        &mut self,
+        expr: &Expression,
+        depth: usize,
+    ) -> Result<Expression, CompilerError> {
         if depth > 100 {
-            return expr.clone();
+            return Ok(expr.clone());
         }
         match expr {
             Expression::List(items) if !items.is_empty() => {
-                if let Expression::Symbol(name) = &items[0] {
-                    if let Some(mac) = self.lookup_macro(name) {
-                        let args = &items[1..];
-                        let arity_matches = match &mac.rest_param {
-                            Some(_) => args.len() >= mac.params.len(),
-                            None => args.len() == mac.params.len(),
+                if let Expression::Symbol(name) = &items[0]
+                    && let Some(mac) = self.lookup_macro(name).cloned()
+                {
+                    let args = &items[1..];
+                    let arity_matches = match &mac.rest_param {
+                        Some(_) => args.len() >= mac.params.len(),
+                        None => args.len() == mac.params.len(),
+                    };
+                    if arity_matches {
+                        let site = MacroExpansionSite {
+                            ordinal: self.next_macro_expansion_ordinal,
+                            explicit_key: args.windows(2).find_map(|pair| match pair {
+                                [Expression::Keyword(key), value] if key == "key" => {
+                                    Some(crate::parser::format_expression(value))
+                                }
+                                _ => None,
+                            }),
                         };
-                        if arity_matches {
-                            // Build parameter bindings: expand macro args first.
-                            let mut bindings = HashMap::new();
-                            for (param, arg) in mac.params.iter().zip(args) {
-                                bindings.insert(param.clone(), self.expand_macros(arg, depth + 1));
-                            }
-                            if let Some(rest_param) = &mac.rest_param {
-                                bindings.insert(
-                                    rest_param.clone(),
-                                    Expression::List(
-                                        args[mac.params.len()..]
-                                            .iter()
-                                            .map(|arg| self.expand_macros(arg, depth + 1))
-                                            .collect(),
-                                    ),
-                                );
-                            }
-                            if let Some(expanded) = Self::expand_quasiquote(&mac.body, &bindings) {
-                                return self.expand_macros(&expanded, depth + 1);
-                            }
-                        }
+                        self.next_macro_expansion_ordinal += 1;
+                        let mut state = MacroCompilerState {
+                            chunks: std::mem::take(&mut self.chunks),
+                            global_symbols: std::mem::take(&mut self.global_symbols),
+                        };
+                        let expansion = match self.macro_evaluator.as_mut() {
+                            Some(evaluator) => evaluator(&mac, args.to_vec(), &site, &mut state)
+                                .map_err(|message| {
+                                    CompilerError::Message(format!(
+                                        "error expanding macro `{name}`: {message}"
+                                    ))
+                                }),
+                            None => Err(CompilerError::Message(format!(
+                                "cannot expand procedural macro `{name}` without a VM evaluator"
+                            ))),
+                        };
+                        self.chunks = state.chunks;
+                        self.global_symbols = state.global_symbols;
+                        return self.expand_macros(&expansion?, depth + 1);
                     }
                 }
-                // Not a macro call — recursively expand children
-                Expression::List(
-                    items
-                        .iter()
-                        .map(|item| self.expand_macros(item, depth + 1))
-                        .collect(),
-                )
-            }
-            _ => expr.clone(),
-        }
-    }
-
-    fn expand_quasiquote(
-        expr: &Expression,
-        bindings: &HashMap<String, Expression>,
-    ) -> Option<Expression> {
-        match expr {
-            Expression::Quasiquote(inner) => Self::expand_quasiquote_inner(inner, bindings),
-            // If the macro body isn't quasiquoted, just return it as-is.
-            _ => Some(expr.clone()),
-        }
-    }
-
-    fn expand_quasiquote_inner(
-        expr: &Expression,
-        bindings: &HashMap<String, Expression>,
-    ) -> Option<Expression> {
-        match expr {
-            Expression::Unquote(inner) => {
-                // Substitute if the unquoted expression is a bound parameter.
-                if let Expression::Symbol(name) = inner.as_ref() {
-                    if let Some(replacement) = bindings.get(name) {
-                        return Some(replacement.clone());
-                    }
-                }
-                // Not a bound parameter — return inner as-is.
-                Some(*inner.clone())
-            }
-            Expression::UnquoteSplicing(_) => None,
-            Expression::List(items) | Expression::QuoteList(items) => {
                 let mut expanded = Vec::with_capacity(items.len());
                 for item in items {
-                    if let Expression::UnquoteSplicing(inner) = item {
-                        let Expression::Symbol(name) = inner.as_ref() else {
-                            return None;
-                        };
-                        let Some(replacement) = bindings.get(name) else {
-                            return None;
-                        };
-                        match replacement {
-                            Expression::List(values) | Expression::QuoteList(values) => {
-                                expanded.extend(values.iter().cloned());
-                            }
-                            _ => return None,
-                        }
-                    } else {
-                        expanded.push(Self::expand_quasiquote_inner(item, bindings)?);
-                    }
+                    expanded.push(self.expand_macros(item, depth + 1)?);
                 }
-                Some(if matches!(expr, Expression::QuoteList(_)) {
-                    Expression::QuoteList(expanded)
-                } else {
-                    Expression::List(expanded)
-                })
+                Ok(Expression::List(expanded))
             }
-            // Everything else inside quasiquote is literal.
-            _ => Some(expr.clone()),
+            _ => Ok(expr.clone()),
         }
     }
 
@@ -659,6 +760,51 @@ impl Compiler {
                 rest,
             ]),
         ]))
+    }
+
+    fn compile_expanded_quoted_expression(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        let expanded = self.expand_macros(expression, 0)?;
+        let residue = strip_source_origin_wrappers(expanded);
+        self.compile_quoted_expression(&residue)
+    }
+
+    fn compile_expanded_quoted_expression_preserving_quotes(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        let expanded = self.expand_macros(expression, 0)?;
+        let residue = strip_source_origin_wrappers(expanded);
+        self.compile_quoted_expression_preserving_quotes(&residue)
+    }
+
+    /// Quote a form that ships as data without expanding it (`def-song` rows,
+    /// `def-accumulator` bodies, `:shader`/`:doc`-style auto-quoted values). Expansion is
+    /// deliberately not run here, but the authoring VM's source-origin wrappers must still be
+    /// stripped: they embed authoring byte offsets and a per-revision hash, which would make
+    /// the shipped text depend on where in the buffer the form happened to sit.
+    fn compile_captured_quoted_expression(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        if !contains_source_origin_wrapper(expression) {
+            return self.compile_quoted_expression(expression);
+        }
+        let residue = strip_source_origin_wrappers(expression.clone());
+        self.compile_quoted_expression(&residue)
+    }
+
+    fn compile_captured_quoted_expression_preserving_quotes(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        if !contains_source_origin_wrapper(expression) {
+            return self.compile_quoted_expression_preserving_quotes(expression);
+        }
+        let residue = strip_source_origin_wrappers(expression.clone());
+        self.compile_quoted_expression_preserving_quotes(&residue)
     }
 
     fn compile_quoted_expression(&mut self, expression: &Expression) -> Result<(), CompilerError> {
@@ -1272,7 +1418,7 @@ impl Compiler {
                     self.emit(OpCode::PushKeyword(kw_idx));
                     arity += 1;
                     if let Some(val) = list.get(idx + 1) {
-                        self.compile_quoted_expression(val)?;
+                        self.compile_captured_quoted_expression(val)?;
                         arity += 1;
                     }
                     idx += 2;
@@ -1607,6 +1753,11 @@ impl Compiler {
     }
 
     pub fn new_chunk(&mut self, mut chunk: Chunk) -> (usize, usize) {
+        // Generated function/effect chunks can execute long after the top-level expansion has
+        // returned. Give each such chunk its own balanced provenance scope.
+        if let Some(origin) = self.active_expansion_origin.clone() {
+            chunk.ops.push(OpCode::ExpansionOriginBegin(origin));
+        }
         // Stamp every chunk with the module current at its creation
         // (None = implicit eseq.vanilla). The entry chunk of a unit whose
         // (module …) form appears mid-file is re-stamped by that form.
@@ -1627,6 +1778,9 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: OpCode) {
+        if matches!(&op, OpCode::Return) && self.active_expansion_origin.is_some() {
+            self.chunk_mut().unwrap().ops.push(OpCode::ExpansionOriginEnd);
+        }
         self.chunk_mut().unwrap().ops.push(op);
     }
 
@@ -1700,6 +1854,93 @@ impl Compiler {
         let idx = self.global_symbols.len();
         self.global_symbols.push(qualified);
         idx
+    }
+
+    fn compile_macro_quasiquote(&mut self, expr: &Expression) -> Result<(), CompilerError> {
+        match expr {
+            Expression::Unquote(inner) => self.compile_expression(inner),
+            Expression::UnquoteSplicing(_) => Err(CompilerError::InvalidArg),
+            Expression::List(items) => {
+                let has_splice = items
+                    .iter()
+                    .any(|item| matches!(item, Expression::UnquoteSplicing(_)));
+                if !has_splice {
+                    for item in items {
+                        self.compile_macro_quasiquote(item)?;
+                    }
+                    self.emit(OpCode::MakeList(items.len()));
+                    return Ok(());
+                }
+                for item in items {
+                    if let Expression::UnquoteSplicing(inner) = item {
+                        self.compile_expression(inner)?;
+                    } else {
+                        self.compile_macro_quasiquote(item)?;
+                        self.emit(OpCode::MakeList(1));
+                    }
+                }
+                self.emit(OpCode::ConcatLists(items.len()));
+                Ok(())
+            }
+            Expression::QuoteList(items) => {
+                let quote_idx = self.use_string_constant("quote");
+                self.emit(OpCode::PushSymbol(quote_idx));
+                self.compile_macro_quasiquote(&Expression::List(items.clone()))?;
+                self.emit(OpCode::MakeList(2));
+                Ok(())
+            }
+            Expression::Symbol(symbol) => {
+                let idx = self.use_string_constant(symbol);
+                self.emit(OpCode::PushSymbol(idx));
+                Ok(())
+            }
+            Expression::QuoteSymbol(symbol) => {
+                let quote_idx = self.use_string_constant("quote");
+                self.emit(OpCode::PushSymbol(quote_idx));
+                let symbol_idx = self.use_string_constant(symbol);
+                self.emit(OpCode::PushSymbol(symbol_idx));
+                self.emit(OpCode::MakeList(2));
+                Ok(())
+            }
+            Expression::Quasiquote(inner) => self.compile_macro_quasiquote(inner),
+            other => self.compile_expression(other),
+        }
+    }
+
+    fn compile_macro_function(
+        &mut self,
+        name: &str,
+        params: &[String],
+        rest_param: Option<&str>,
+        body: &Expression,
+    ) -> Result<usize, CompilerError> {
+        let mut symbols = params.to_vec();
+        if let Some(rest) = rest_param {
+            symbols.push(rest.to_string());
+        }
+        let (chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
+            ops: vec![],
+            constants: vec![],
+            strings: vec![],
+            symbols,
+            upvalues: vec![],
+            source_symbol: Some(name.to_string()),
+            source_file: self.source_file.clone(),
+            source_module: self.declared_module(),
+        });
+        self.compiling_macro_body += 1;
+        let compile_result = self.compile_expression(body);
+        self.compiling_macro_body -= 1;
+        compile_result?;
+        let scope = self.scopes.pop().unwrap();
+        self.emit(OpCode::Return);
+        self.current_chunk = previous_chunk_idx;
+        if !scope.upvalues.is_empty() {
+            return Err(CompilerError::Message(format!(
+                "macro `{name}` unexpectedly captured lexical bindings"
+            )));
+        }
+        Ok(chunk_idx)
     }
 
     pub fn compile_function(
@@ -1888,6 +2129,71 @@ impl Compiler {
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        // Cleared on entry so it only suppresses re-interception of the single form the
+        // branch below re-wraps; nested macro calls inside it are still intercepted.
+        let reentered_source_origin = std::mem::take(&mut self.compiling_source_origin_payload);
+        // Calls parsed from authored source are wrapped with their byte range and revision.
+        // Keep the wrapper around the expansion while compiling so both compile-time failures
+        // and later execution of generated closures retain the macro call site's provenance.
+        if !reentered_source_origin
+            && let [
+                Expression::Symbol(origin_native),
+                Expression::Number(start),
+                Expression::Number(end),
+                Expression::String(revision),
+                payload @ Expression::List(payload_items),
+            ] = list
+            && origin_native == SOURCE_ORIGIN_NATIVE
+            && let Some(Expression::Symbol(macro_name)) = payload_items.first()
+            && self.lookup_macro(macro_name).is_some()
+        {
+            let source = self
+                .source_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .or_else(|| self.source_label.clone())
+                .unwrap_or_else(|| "scratch".to_string());
+            let origin = ExpansionOrigin {
+                macro_name: macro_name.clone(),
+                source,
+                start_byte: *start as usize,
+                end_byte: *end as usize,
+                revision: revision.clone(),
+            };
+            let expanded = self.expand_macros(payload, 0).map_err(|error| {
+                CompilerError::Message(format!(
+                    "{}; {}",
+                    compiler_error_description(&error),
+                    origin.diagnostic()
+                ))
+            })?;
+            // Re-wrap the expansion in the runtime `__source-origin` call: it is what stamps
+            // widget maps produced by the residue with the macro call site's span/revision.
+            let rewrapped = Expression::List(vec![
+                Expression::Symbol(SOURCE_ORIGIN_NATIVE.to_string()),
+                Expression::Number(*start),
+                Expression::Number(*end),
+                Expression::String(revision.clone()),
+                expanded,
+            ]);
+            let previous_origin = self.active_expansion_origin.replace(origin.clone());
+            self.emit(OpCode::ExpansionOriginBegin(origin.clone()));
+            self.compiling_source_origin_payload = true;
+            let result = self.compile_expression(&rewrapped);
+            self.compiling_source_origin_payload = false;
+            if result.is_ok() {
+                self.emit(OpCode::ExpansionOriginEnd);
+            }
+            self.active_expansion_origin = previous_origin;
+            return result.map_err(|error| {
+                CompilerError::Message(format!(
+                    "{}; {}",
+                    compiler_error_description(&error),
+                    origin.diagnostic()
+                ))
+            });
+        }
+
         // Macro expansion: if the head is a macro name, expand and compile the result
         if let Some(Expression::Symbol(name)) = list.first() {
             if let Some(mac) = self.lookup_macro(name) {
@@ -1900,7 +2206,7 @@ impl Compiler {
                     return Err(CompilerError::InvalidArg);
                 }
                 let call_expr = Expression::List(list.to_vec());
-                let expanded = self.expand_macros(&call_expr, 0);
+                let expanded = self.expand_macros(&call_expr, 0)?;
                 if expanded == call_expr {
                     return Err(CompilerError::InvalidArg);
                 }
@@ -2332,12 +2638,18 @@ impl Compiler {
                 } else {
                     name.clone()
                 };
+                let function_chunk = self.compile_macro_function(
+                    &key,
+                    &params,
+                    rest_param.as_deref(),
+                    &list[3],
+                )?;
                 self.macros.insert(
                     key,
                     MacroDef {
                         params,
                         rest_param,
-                        body: list[3].clone(),
+                        function_chunk,
                     },
                 );
                 self.emit(OpCode::PushNil);
@@ -2364,7 +2676,7 @@ impl Compiler {
                             && i + 1 < list.len()
                         {
                             // Auto-quote shader, state, and bindable expressions.
-                            self.compile_quoted_expression(&list[i + 1])?;
+                            self.compile_captured_quoted_expression(&list[i + 1])?;
                         } else if i + 1 < list.len() {
                             self.compile_expression(&list[i + 1])?;
                         }
@@ -2453,30 +2765,46 @@ impl Compiler {
                 });
             let mut quote_next = false;
             let mut quote_next_preserving = false;
+            let mut expand_quote_next = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
                 if is_graph_sequencer {
                     match elem {
                         Expression::Unquote(inner) => self.compile_expression(inner)?,
-                        _ => self.compile_quoted_expression(elem)?,
+                        _ => self.compile_expanded_quoted_expression(elem)?,
                     }
                     continue;
                 }
                 if quote_next {
-                    if quote_next_preserving {
-                        self.compile_quoted_expression_preserving_quotes(elem)?;
+                    if expand_quote_next {
+                        if quote_next_preserving {
+                            self.compile_expanded_quoted_expression_preserving_quotes(elem)?;
+                        } else {
+                            self.compile_expanded_quoted_expression(elem)?;
+                        }
+                    } else if quote_next_preserving {
+                        self.compile_captured_quoted_expression_preserving_quotes(elem)?;
                     } else {
-                        self.compile_quoted_expression(elem)?;
+                        self.compile_captured_quoted_expression(elem)?;
                     }
                     quote_next = false;
                     quote_next_preserving = false;
+                    expand_quote_next = false;
                     continue;
                 }
                 if is_def_accumulator && list.len() == 3 && i == 1 {
-                    self.compile_quoted_expression(elem)?;
+                    self.compile_captured_quoted_expression(elem)?;
                     continue;
                 }
-                if is_process_sugar || is_def_song {
-                    self.compile_quoted_expression(elem)?;
+                if is_process_sugar {
+                    // The trigger/source argument expands too, matching
+                    // `def-process`'s `:every`/`:listen` clauses: the native
+                    // parses it structurally in *this* VM, so leaving a macro
+                    // call unexpanded there fails to parse rather than working.
+                    self.compile_expanded_quoted_expression(elem)?;
+                    continue;
+                }
+                if is_def_song {
+                    self.compile_captured_quoted_expression(elem)?;
                     continue;
                 }
                 match elem {
@@ -2524,6 +2852,7 @@ impl Compiler {
                         if is_def_sequencer && (k == "tick" || k == "init") {
                             quote_next = true;
                             quote_next_preserving = true;
+                            expand_quote_next = true;
                         }
                         if is_def_process
                             && (k == "in"
@@ -2541,6 +2870,7 @@ impl Compiler {
                                 || k.starts_with("on-"))
                         {
                             quote_next = true;
+                            expand_quote_next = true;
                         }
                         if is_def_accumulator
                             && (k == "target"
@@ -2673,8 +3003,12 @@ impl Compiler {
                 self.emit(OpCode::MakeList(items.len()));
             }
             Expression::Quasiquote(inner) => {
-                // Outside of macro context, quasiquote behaves like quote
-                self.compile_quoted_expression(inner)?;
+                if self.compiling_macro_body > 0 {
+                    self.compile_macro_quasiquote(inner)?;
+                } else {
+                    // Outside of macro context, quasiquote behaves like quote.
+                    self.compile_quoted_expression(inner)?;
+                }
             }
             Expression::Unquote(_) | Expression::UnquoteSplicing(_) => {
                 // Unquote outside quasiquote is an error.

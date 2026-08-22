@@ -9012,6 +9012,50 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn sig_and_jaki_macros_expand_to_captured_forms_without_source_string_paths() {
+        let mut rt = jaki_runtime();
+        let jaki = rt
+            .eval(
+                r#"(source (macroexpand
+                     '(alez.jaki.surface/jak "kit" :16 . - -> 0)))"#,
+            )
+            .expect("expand jak")
+            .expect("jak expansion");
+        let Value::String(jaki) = jaki else {
+            panic!("expected jak source, got {jaki:?}");
+        };
+        assert!(jaki.contains("def-sequencer"), "{jaki}");
+        assert!(jaki.contains(":tick "), "{jaki}");
+        assert!(!jaki.contains(":tick-source"), "{jaki}");
+        assert!(!jaki.contains("channel-register"), "{jaki}");
+
+        let sig = rt
+            .eval(
+                r#"(import alez.sig.surface :refer (sig))
+                   (source (macroexpand
+                     '(alez.sig.surface/sig "ramp" :over (beats 4) :rate :16 phase)))"#,
+            )
+            .expect("expand sig")
+            .expect("sig expansion");
+        let Value::String(sig) = sig else {
+            panic!("expected sig source, got {sig:?}");
+        };
+        assert!(sig.contains("def-process"), "{sig}");
+        assert!(!sig.contains("sig-register"), "{sig}");
+        assert!(!sig.contains("(eval "), "{sig}");
+
+        let pat = rt
+            .eval("(source (macroexpand '(alez.jaki.core/pat . -)))")
+            .expect("expand pat")
+            .expect("pat expansion");
+        let Value::String(pat) = pat else {
+            panic!("expected pat source, got {pat:?}");
+        };
+        assert!(pat.contains("alez.jaki.core/from-list"), "{pat}");
+        assert!(!pat.contains("alez.jaki.core/pat"), "{pat}");
+    }
+
+    #[test]
     fn sig_surface_derives_transport_phase_per_tick() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
@@ -10123,7 +10167,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
-    fn process_run_callback_cache_invalidates_after_macro_redefinition() {
+    fn process_run_source_is_expanded_before_shipping() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -10162,18 +10206,79 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             reads: crate::process::ProcessReadSnapshot::default(),
             seed: 1,
         };
+        assert!(
+            !invocation.source.contains("cached-process-write"),
+            "shipped source must contain only expansion residue: {}",
+            invocation.source
+        );
+        assert!(
+            invocation.source.contains("(target-set! 1)"),
+            "shipped source must contain the expanded kernel form: {}",
+            invocation.source
+        );
+        assert!(
+            !invocation.source.contains("__source-origin"),
+            "shipped source must not contain authoring provenance: {}",
+            invocation.source
+        );
         let first = scratch
             .invoke_process_run(invocation.clone())
-            .expect("invoke initially compiled process");
+            .expect("invoke expanded process source");
         assert_eq!(first.target_writes[0].value, 1.0);
 
         scratch
             .eval("(defmacro cached-process-write () `(target-set! 2))")
-            .expect("redefine process macro");
-        let recompiled = scratch
+            .expect("redefine authoring-side macro");
+        let unchanged = scratch
             .invoke_process_run(invocation)
-            .expect("invoke process after macro redefinition");
-        assert_eq!(recompiled.target_writes[0].value, 2.0);
+            .expect("invoke already-shipped process after macro redefinition");
+        assert_eq!(unchanged.target_writes[0].value, 1.0);
+    }
+
+    #[test]
+    fn process_declaration_clauses_parse_expanded_macros_without_authoring_provenance() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def c (defchan c 0))
+                (defmacro process-rate () `(beats 5))
+                (defmacro process-target () `(step-param :transpose))
+                (defmacro process-listens () `((event (channel c))))
+                (def-process expanded-declarations
+                  :every (process-rate)
+                  :target (process-target)
+                  :listen (process-listens)
+                  :on-event (lambda (value) value)
+                  :run (target-set! 1))
+                "#,
+            )
+            .expect("define process with expanded declaration clauses");
+
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "expanded-declarations")
+            .expect("expanded process definition");
+        assert_eq!(def.every, Some(crate::process::ProcessTimeExpr::Beats(5.0)));
+        assert_eq!(
+            def.ports,
+            vec![crate::process::ProcessPortDef::default_with_target(
+                crate::process::ProcessTargetHint::StepParam {
+                    param: "transpose".to_string(),
+                },
+            )],
+        );
+        assert_eq!(def.listens.len(), 1);
+        assert_eq!(def.listens[0].name, "event");
     }
 
     #[test]

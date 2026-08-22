@@ -1,4 +1,8 @@
-use crate::compiler::{Chunk, Compiler, CompilerError, MacroDef, OpCode};
+use super::SOURCE_ORIGIN_NATIVE;
+use crate::compiler::{
+    Chunk, Compiler, CompilerError, ExpansionOrigin, MacroCompilerState, MacroDef,
+    MacroExpansionSite, OpCode,
+};
 use crate::host::BufferId;
 use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
 use crate::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
@@ -25,9 +29,8 @@ pub const INLINE_VALUE_END_BYTE_PROP: &str = "__inline-value-end-byte";
 pub const INLINE_WRITEBACK_CALLBACK: &str = "__inline-code-widget-writeback";
 pub const INLINE_PARENT_CALLEE_PROP: &str = "__inline-parent-callee";
 pub const INLINE_PARENT_INLET_PROP: &str = "__inline-parent-inlet";
-const SOURCE_ORIGIN_NATIVE: &str = "__source-origin";
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VMError {
     UnknownConstant,
     UnknownOpcode,
@@ -39,9 +42,24 @@ pub enum VMError {
     ArityMismatch,
     ParseError,
     CompileError,
+    ExpansionUnsafe {
+        macro_name: String,
+        operation: String,
+    },
+    ExpandedFrom {
+        error: Box<VMError>,
+        diagnostic: String,
+    },
 }
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
+
+#[derive(Clone)]
+pub struct NativeFunction {
+    name: String,
+    callable: NativeFn,
+    expansion_safe: bool,
+}
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +204,7 @@ pub enum Value {
         kind: BindingKind,
         slot: Arc<AtomicU64>,
     },
-    NativeFunction(NativeFn),
+    NativeFunction(NativeFunction),
     /// Internal callables used by the §6.1 override layer. Dispatchers are
     /// returned by global reads; originals bypass that layer and resolve the
     /// current factory cell at call time.
@@ -1762,6 +1780,34 @@ fn stamp_source_origin_value(value: &Value, start: usize, end: usize, revision: 
     }
 }
 
+fn gensym_native(args: Vec<Value>, vm: &mut VM) -> Value {
+    let [base] = args.as_slice() else {
+        return Value::Nil;
+    };
+    let base = match base {
+        Value::String(base) | Value::Symbol(base) | Value::Keyword(base) if !base.is_empty() => base,
+        _ => return Value::Nil,
+    };
+    let Some(site) = vm.active_expansion_site.as_mut() else {
+        return Value::Nil;
+    };
+    let counter = site.next_gensym;
+    site.next_gensym += 1;
+    Value::Symbol(format!("{base}__g{:016x}_{counter}", site.identity_hash))
+}
+
+fn macroexpand_native(args: Vec<Value>, vm: &mut VM) -> Value {
+    let [form] = args.as_slice() else {
+        return Value::Nil;
+    };
+    let Ok(expression) = VM::macro_value_to_expression(form) else {
+        return Value::Nil;
+    };
+    vm.expand_macros_expression(&expression)
+        .map(|expansion| VM::expression_to_macro_value(&expansion))
+        .unwrap_or(Value::Nil)
+}
+
 fn source_origin_native(args: Vec<Value>) -> Value {
     let [start, end, revision, value] = args.as_slice() else {
         return args.last().cloned().unwrap_or(Value::Nil);
@@ -2089,6 +2135,11 @@ fn annotate_widget_tree_stable_ids(
     Value::Map(annotated)
 }
 
+struct ActiveExpansionSite {
+    identity_hash: u64,
+    next_gensym: usize,
+}
+
 struct Frame {
     locals: Vec<Option<Rc<RefCell<Value>>>>,
     upvalues: Vec<Rc<RefCell<Value>>>,
@@ -2161,6 +2212,14 @@ pub struct VM {
     /// Current import pass. Starts at 1 so entries from a plain
     /// `eval_module_source` (no transaction) still dedupe within that pass.
     pub import_pass_epoch: u64,
+    /// Present only while a procedural macro is executing. Native dispatch and
+    /// stateful bytecodes consult this as the VM-level sandbox backstop.
+    active_expander: Option<String>,
+    active_expansion_site: Option<ActiveExpansionSite>,
+    /// Some callback-oriented natives historically turn callback errors into
+    /// Lisp `nil`. Sandbox violations must never be swallowed that way.
+    expansion_violation: Option<VMError>,
+    active_execution_origins: Vec<ExpansionOrigin>,
 }
 
 pub struct VmStateSnapshot {
@@ -2432,12 +2491,17 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Map(map)
     });
 
-    // (keys map) → List of keywords
+    // (keys map) → List of keywords, sorted. Maps are hash maps, so an
+    // unsorted walk would vary per process; the same sort keeps `str`/`source`
+    // dict rendering stable, and expansion-safe natives must be deterministic
+    // for "same source → same expansion" to hold.
     vm.register_native("keys", |args| {
         if let Some(Value::Map(m)) = args.first() {
+            let mut keys = m.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
             Value::List(
-                m.keys()
-                    .map(|k| Rc::new(RefCell::new(Value::Keyword(k.clone()))))
+                keys.into_iter()
+                    .map(|k| Rc::new(RefCell::new(Value::Keyword(k))))
                     .collect(),
             )
         } else {
@@ -3077,6 +3141,15 @@ pub fn register_core_natives(vm: &mut VM) {
         )
     });
 
+    // Only meaningful while a procedural expander is running. The site and
+    // counter live in the VM rather than Lisp state so Rule 2 remains pure.
+    vm.register_native_with_vm("gensym", gensym_native);
+
+    // Expand a quoted form in the current authoring VM. This intentionally is
+    // not expansion-safe: invoking expansion recursively from an expander would
+    // make site identity and purity auditing ambiguous.
+    vm.register_native_with_vm("macroexpand", macroexpand_native);
+
     // (source val ...) → concatenated evaluable Lisp source
     vm.register_native("source", |args| {
         let mut s = String::new();
@@ -3112,6 +3185,16 @@ pub fn register_core_natives(vm: &mut VM) {
         }
         Value::String(rendered)
     });
+
+    // This is intentionally an allowlist rather than a default on
+    // `register_native`: host/application natives remain expansion-unsafe
+    // unless the language kernel explicitly audits and admits them.
+    vm.mark_natives_expansion_safe(&[
+        "dict", "get", "merge", "keys", "first", "rest", "cons", "len",
+        "append", "list", "empty?", "set-nth", "map", "filter", "reduce",
+        "zip", "nth", "reverse", "chunks", "range", "not", "str", "substring",
+        "str-contains?", "gensym", "source", "fmt",
+    ]);
 }
 
 fn reactive_float_ref(
@@ -3270,6 +3353,11 @@ pub fn register_math_natives(vm: &mut VM) {
         }
         Value::Number(f64::NAN)
     });
+
+    vm.mark_natives_expansion_safe(&[
+        "abs", "sqrt", "sin", "cos", "floor", "ceil", "round", "fract", "pow",
+        "atan2", "mod", "clamp", "mix", "smoothstep", "vec2", "length", "dot",
+    ]);
 }
 
 impl ReactiveDag {
@@ -3824,6 +3912,10 @@ impl VM {
             module_exports: crate::modules::ModuleExportRegistry::new(),
             imported_at_epoch: HashMap::new(),
             import_pass_epoch: 1,
+            active_expander: None,
+            active_expansion_site: None,
+            expansion_violation: None,
+            active_execution_origins: Vec::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
         };
@@ -3852,7 +3944,11 @@ impl VM {
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, None);
         }
-        let native = Value::NativeFunction(Rc::new(f));
+        let native = Value::NativeFunction(NativeFunction {
+            name: name.to_string(),
+            callable: Rc::new(f),
+            expansion_safe: false,
+        });
         // Re-registration mutates the existing cell in place instead of
         // replacing the slot Option: a converted module's healed alias slot
         // (spec §10 stage 3) shares the cell, and replacing the Option would
@@ -3878,6 +3974,102 @@ impl VM {
     ) {
         let qualified = crate::modules::qualify(namespace, name);
         self.register_native_with_vm(&qualified, f);
+    }
+
+    fn mark_natives_expansion_safe(&mut self, names: &[&str]) {
+        for name in names {
+            let Some(idx) = self.resolve_global_read_index(name) else {
+                debug_assert!(false, "expansion-safe native `{name}` was not registered");
+                continue;
+            };
+            let Some(cell) = self.globals.get(idx).and_then(Option::as_ref) else {
+                continue;
+            };
+            if let Value::NativeFunction(native) = &mut *cell.borrow_mut() {
+                native.expansion_safe = true;
+            }
+        }
+    }
+
+    fn expansion_error(&mut self, operation: &str) -> VMError {
+        let error = VMError::ExpansionUnsafe {
+            macro_name: self.active_expander.clone().unwrap_or_default(),
+            operation: operation.to_string(),
+        };
+        self.expansion_violation = Some(error.clone());
+        error
+    }
+
+    fn expansion_forbidden_opcode(op: &OpCode) -> Option<&'static str> {
+        match op {
+            OpCode::StoreGlobal(_) => Some("set! global"),
+            OpCode::StoreState(_) => Some("state mutation"),
+            OpCode::StoreField(_) => Some("field mutation"),
+            OpCode::StoreReactive(_, _) => Some("reactive mutation"),
+            OpCode::LoadState(_) | OpCode::LoadDerived(_)
+            | OpCode::LoadReactive(_, _) | OpCode::LoadReactiveNth(_, _)
+            | OpCode::LoadReactiveLen(_, _) => Some("reactive state read"),
+            OpCode::Eval => Some("eval"),
+            OpCode::InitDerived(_, _) | OpCode::InitEffect(_, _)
+            | OpCode::InitNamedEffect(_, _, _) | OpCode::InitState(_) => {
+                Some("reactive definition")
+            }
+            OpCode::EmitTree => Some("widget emission"),
+            _ => None,
+        }
+    }
+
+    fn validate_expander_chunk(
+        &mut self,
+        chunk_idx: usize,
+        visited: &mut HashSet<usize>,
+    ) -> Result<(), VMError> {
+        if !visited.insert(chunk_idx) {
+            return Ok(());
+        }
+        let ops = self
+            .chunks
+            .get(chunk_idx)
+            .map(|chunk| chunk.ops.clone())
+            .unwrap_or_default();
+        for op in ops {
+            if let Some(operation) = Self::expansion_forbidden_opcode(&op) {
+                return Err(self.expansion_error(operation));
+            }
+            match op {
+                OpCode::LoadGlobal(idx) => {
+                    let value = self.global_read_cell(idx).map(|cell| cell.borrow().clone());
+                    match value {
+                        Some(Value::NativeFunction(native)) if !native.expansion_safe => {
+                            return Err(self.expansion_error(&native.name));
+                        }
+                        Some(Value::Function(helper_chunk))
+                        | Some(Value::Closure(helper_chunk, _)) => {
+                            self.validate_expander_chunk(helper_chunk, visited)?;
+                        }
+                        Some(Value::OverrideDispatcher(_)) | Some(Value::OverrideOriginal(_)) => {
+                            return Err(self.expansion_error("override dispatcher"));
+                        }
+                        Some(Value::HostHandle { .. }) => {
+                            return Err(self.expansion_error("host handle"));
+                        }
+                        _ => {}
+                    }
+                }
+                OpCode::MakeFunc(child_chunk) | OpCode::MakeClosure(child_chunk, _) => {
+                    self.validate_expander_chunk(child_chunk, visited)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn check_native_expansion_safety(&mut self, native: &NativeFunction) -> Result<(), VMError> {
+        if self.active_expander.is_some() && !native.expansion_safe {
+            return Err(self.expansion_error(&native.name));
+        }
+        Ok(())
     }
 
     pub fn add_global_store_hook(&mut self, hook: GlobalStoreHook) {
@@ -3964,6 +4156,250 @@ impl VM {
         self.macros.keys().cloned().collect()
     }
 
+    /// Reader-syntax wrappers (`'x`, `` `x ``, `,x`, `,@x`) have no `Value`
+    /// counterpart, so forms-as-data uses their canonical two-element list
+    /// spelling. `macro_value_to_expression` recognises the same spellings, so
+    /// a form that an expander merely passes through round-trips unchanged.
+    const MACRO_READER_TAGS: [(&'static str, fn(Box<Expression>) -> Expression); 3] = [
+        ("quasiquote", Expression::Quasiquote),
+        ("unquote", Expression::Unquote),
+        ("unquote-splicing", Expression::UnquoteSplicing),
+    ];
+
+    fn macro_reader_form(tag: &str, inner: Value) -> Value {
+        Value::List(vec![
+            Rc::new(RefCell::new(Value::Symbol(tag.to_string()))),
+            Rc::new(RefCell::new(inner)),
+        ])
+    }
+
+    fn expression_to_macro_value(expr: &Expression) -> Value {
+        match expr {
+            Expression::Symbol(symbol) => Value::Symbol(symbol.clone()),
+            Expression::QuoteSymbol(symbol) => {
+                Self::macro_reader_form("quote", Value::Symbol(symbol.clone()))
+            }
+            Expression::Keyword(keyword) => Value::Keyword(keyword.clone()),
+            Expression::String(string) => Value::String(string.clone()),
+            Expression::Number(number) => Value::Number(*number),
+            Expression::List(items) => Value::List(
+                items
+                    .iter()
+                    .map(|item| Rc::new(RefCell::new(Self::expression_to_macro_value(item))))
+                    .collect(),
+            ),
+            Expression::QuoteList(items) => Self::macro_reader_form(
+                "quote",
+                Value::List(
+                    items
+                        .iter()
+                        .map(|item| Rc::new(RefCell::new(Self::expression_to_macro_value(item))))
+                        .collect(),
+                ),
+            ),
+            Expression::Quasiquote(inner) => {
+                Self::macro_reader_form("quasiquote", Self::expression_to_macro_value(inner))
+            }
+            Expression::Unquote(inner) => {
+                Self::macro_reader_form("unquote", Self::expression_to_macro_value(inner))
+            }
+            Expression::UnquoteSplicing(inner) => {
+                Self::macro_reader_form("unquote-splicing", Self::expression_to_macro_value(inner))
+            }
+        }
+    }
+
+    fn macro_value_to_expression(value: &Value) -> Result<Expression, String> {
+        match value {
+            Value::Number(number) => Ok(Expression::Number(*number)),
+            Value::Bool(true) => Ok(Expression::Symbol("true".to_string())),
+            Value::Bool(false) => Ok(Expression::Symbol("false".to_string())),
+            Value::Nil => Ok(Expression::Symbol("nil".to_string())),
+            Value::String(string) => Ok(Expression::String(string.clone())),
+            Value::Symbol(symbol) => Ok(Expression::Symbol(symbol.clone())),
+            Value::Keyword(keyword) => Ok(Expression::Keyword(keyword.clone())),
+            Value::List(items)
+                if items.len() == 2
+                    && matches!(&*items[0].borrow(), Value::Symbol(symbol) if symbol == "quote") =>
+            {
+                match Self::macro_value_to_expression(&items[1].borrow())? {
+                    Expression::List(items) => Ok(Expression::QuoteList(items)),
+                    Expression::Symbol(symbol) => Ok(Expression::QuoteSymbol(symbol)),
+                    other => Ok(other),
+                }
+            }
+            Value::List(items) if items.len() == 2 => {
+                let tag = match &*items[0].borrow() {
+                    Value::Symbol(symbol) => Some(symbol.clone()),
+                    _ => None,
+                };
+                let wrapper = tag.and_then(|tag| {
+                    Self::MACRO_READER_TAGS
+                        .iter()
+                        .find(|(name, _)| *name == tag)
+                        .map(|(_, wrap)| *wrap)
+                });
+                match wrapper {
+                    Some(wrap) => Ok(wrap(Box::new(Self::macro_value_to_expression(
+                        &items[1].borrow(),
+                    )?))),
+                    None => Ok(Expression::List(
+                        items
+                            .iter()
+                            .map(|item| Self::macro_value_to_expression(&item.borrow()))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )),
+                }
+            }
+            Value::List(items) => Ok(Expression::List(
+                items
+                    .iter()
+                    .map(|item| Self::macro_value_to_expression(&item.borrow()))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            other => Err(format!(
+                "expander returned non-syntax value {}",
+                format_lisp_value(other)
+            )),
+        }
+    }
+
+    fn macro_expansion_site_hash(&self, macro_name: &str, site: &MacroExpansionSite) -> u64 {
+        // FNV-1a is fixed across Rust versions and processes. `DefaultHasher`
+        // is intentionally unsuitable for source identity because its output
+        // is not a stability contract.
+        fn add(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+            *hash ^= 0xff;
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+
+        let mut hash = 0xcbf29ce484222325;
+        match self.current_effect_source_buffer_id {
+            Some(buffer_id) => add(&mut hash, &buffer_id.to_le_bytes()),
+            None => add(&mut hash, b"no-buffer"),
+        }
+        if let Some(source_file) = self.source_manager.current_source_file() {
+            add(&mut hash, source_file.to_string_lossy().as_bytes());
+        }
+        add(&mut hash, macro_name.as_bytes());
+        match &site.explicit_key {
+            Some(key) => {
+                add(&mut hash, b"key");
+                add(&mut hash, key.as_bytes());
+            }
+            None => {
+                add(&mut hash, b"ordinal");
+                add(&mut hash, &site.ordinal.to_le_bytes());
+            }
+        }
+        hash
+    }
+
+    fn evaluate_compiled_macro(
+        &mut self,
+        mac: &MacroDef,
+        args: Vec<Expression>,
+        site: &MacroExpansionSite,
+        state: &mut MacroCompilerState,
+    ) -> Result<Expression, String> {
+        let mut values = args
+            .iter()
+            .take(mac.params.len())
+            .map(Self::expression_to_macro_value)
+            .collect::<Vec<_>>();
+        if mac.rest_param.is_some() {
+            values.push(Value::List(
+                args[mac.params.len()..]
+                    .iter()
+                    .map(|arg| Rc::new(RefCell::new(Self::expression_to_macro_value(arg))))
+                    .collect(),
+            ));
+        }
+
+        self.chunks = std::mem::take(&mut state.chunks);
+        self.global_names = std::mem::take(&mut state.global_symbols);
+        if self.globals.len() < self.global_names.len() {
+            self.globals.resize_with(self.global_names.len(), || None);
+        }
+        let macro_name = self
+            .chunks
+            .get(mac.function_chunk)
+            .and_then(|chunk| chunk.source_symbol.clone())
+            .unwrap_or_else(|| "<macro>".to_string());
+        let identity_hash = self.macro_expansion_site_hash(&macro_name, site);
+        let previous_expander = self.active_expander.replace(macro_name);
+        let previous_site = self.active_expansion_site.replace(ActiveExpansionSite {
+            identity_hash,
+            next_gensym: 0,
+        });
+        let previous_violation = self.expansion_violation.take();
+        let result = self
+            .validate_expander_chunk(mac.function_chunk, &mut HashSet::new())
+            .and_then(|_| self.invoke(Value::Closure(mac.function_chunk, Vec::new()), values));
+        let violation = self.expansion_violation.take();
+        self.active_expander = previous_expander;
+        self.active_expansion_site = previous_site;
+        self.expansion_violation = previous_violation;
+        state.chunks = std::mem::take(&mut self.chunks);
+        state.global_symbols = std::mem::take(&mut self.global_names);
+
+        let result = match violation {
+            Some(error) => Err(error),
+            None => result,
+        };
+        let value = result
+            .map_err(|error| match error {
+                VMError::ExpansionUnsafe { macro_name, operation } => format!(
+                    "expansion-unsafe operation `{operation}` called by macro `{macro_name}`"
+                ),
+                other => format!("expander execution failed: {other:?}"),
+            })?
+            .unwrap_or(Value::Nil);
+        Self::macro_value_to_expression(&value)
+    }
+
+    pub(crate) fn expand_macros_expression(
+        &mut self,
+        expr: &Expression,
+    ) -> Result<Expression, String> {
+        let chunks = std::mem::take(&mut self.chunks);
+        let names = std::mem::take(&mut self.global_names);
+        let source_label = self
+            .current_effect_source_buffer_id
+            .map(|buffer_id| format!("buf#{buffer_id}"));
+        let mut compiler = Compiler::new_repl(
+            vec![],
+            chunks,
+            names,
+            self.reactive_namespaces.clone(),
+            self.derived_bindings.clone(),
+            self.state_bindings.clone(),
+            self.dag.next_id,
+            self.macros.clone(),
+            self.source_manager.current_source_file(),
+            source_label,
+        );
+        compiler.set_macro_evaluator(|mac, args, site, state| {
+            self.evaluate_compiled_macro(mac, args, site, state)
+        });
+        let result = compiler
+            .expand_macros(expr, 0)
+            .map_err(|error| match error {
+                CompilerError::Message(message) => message,
+                _ => "macro expansion failed".to_string(),
+            });
+        let chunks = compiler.take_chunks();
+        let names = compiler.take_global_names();
+        drop(compiler);
+        self.chunks = chunks;
+        self.global_names = names;
+        result
+    }
+
     /// Compile and run `code` in this VM's existing context (globals persist).
     ///
     /// The unit is split at top-level `(import …)` forms (spec §4: import's
@@ -4023,53 +4459,96 @@ impl VM {
 
             let macros = self.macros.clone();
             let source_file = self.source_manager.current_source_file();
-            let mut compiler = Compiler::new_repl(
-                exprs,
-                existing,
-                names,
-                reactive_namespaces,
-                derived_bindings,
-                state_bindings,
-                next_node_id,
-                macros,
-                source_file,
-            );
-            compiler.set_module_exports(self.module_exports.clone());
-            // Continuation segments belong to the same unit: the module
-            // declaration and any :as/:refer bindings compiled in earlier
-            // segments carry forward.
-            if let Some(context) = module_context.take() {
-                compiler.set_module_context(context);
-            }
-            match compiler.compile() {
-                Ok(chunks) => {
+            let source_label = self
+                .current_effect_source_buffer_id
+                .map(|buffer_id| format!("buf#{buffer_id}"));
+            let module_exports = self.module_exports.clone();
+            let compile_result = {
+                let mut compiler = Compiler::new_repl(
+                    exprs,
+                    existing,
+                    names,
+                    reactive_namespaces,
+                    derived_bindings,
+                    state_bindings,
+                    next_node_id,
+                    macros,
+                    source_file,
+                    source_label,
+                );
+                compiler.set_module_exports(module_exports.clone());
+                // Continuation segments belong to the same unit: the module
+                // declaration and any :as/:refer bindings compiled in earlier
+                // segments carry forward.
+                if let Some(context) = module_context.take() {
+                    compiler.set_module_context(context);
+                }
+                compiler.set_macro_evaluator(|mac, args, site, state| {
+                    self.evaluate_compiled_macro(mac, args, site, state)
+                });
+                match compiler.compile() {
+                    Ok(chunks) => {
+                        let names = compiler.take_global_names();
+                        let derived = compiler.take_derived_bindings();
+                        let states = compiler.take_state_bindings();
+                        let next_node_id = compiler.next_node_id();
+                        let macros = compiler.take_macros();
+                        let warnings = compiler.take_warnings();
+                        let refer_error = compiler.validate_refers(&module_exports).err();
+                        let context = compiler.take_module_context();
+                        Ok((
+                            chunks,
+                            names,
+                            derived,
+                            states,
+                            next_node_id,
+                            macros,
+                            warnings,
+                            refer_error,
+                            context,
+                        ))
+                    }
+                    Err(error) => Err((
+                        error,
+                        compiler.take_chunks(),
+                        compiler.take_global_names(),
+                    )),
+                }
+            };
+            match compile_result {
+                Ok((
+                    chunks,
+                    names,
+                    derived,
+                    states,
+                    next_node_id,
+                    macros,
+                    warnings,
+                    refer_error,
+                    context,
+                )) => {
                     self.chunks = chunks;
-                    self.global_names = compiler.take_global_names();
-                    self.derived_bindings = compiler.take_derived_bindings();
-                    self.state_bindings = compiler.take_state_bindings();
-                    self.dag.next_id = compiler.next_node_id();
-                    // The compiler's macro table started from this VM's, so
-                    // taking it wholesale keeps every existing macro and
-                    // merges any new definitions.
-                    self.macros = compiler.take_macros();
-                    for warning in compiler.take_warnings() {
+                    self.global_names = names;
+                    self.derived_bindings = derived;
+                    self.state_bindings = states;
+                    self.dag.next_id = next_node_id;
+                    self.macros = macros;
+                    for warning in warnings {
                         self.source_manager.push_diagnostic(warning);
                     }
                     last_value = self.execute_from(entry_idx)?;
-                    if let Err(message) = compiler.validate_refers(&self.module_exports) {
+                    if let Some(message) = refer_error {
                         self.source_load_errors.push(message);
                         return Err(VMError::CompileError);
                     }
-                    module_context = Some(compiler.take_module_context());
+                    module_context = Some(context);
                 }
-                Err(error) => {
+                Err((error, mut chunks, mut names)) => {
                     if let CompilerError::Message(message) = &error {
                         self.source_load_errors.push(message.clone());
                     }
-                    let mut chunks = compiler.take_chunks();
                     chunks.truncate(entry_idx);
                     self.chunks = chunks;
-                    let mut names = compiler.take_global_names();
                     names.truncate(names_len);
                     self.global_names = names;
                     return Err(VMError::CompileError);
@@ -4360,39 +4839,62 @@ impl VM {
 
         let macros = self.macros.clone();
         let source_file = self.source_manager.current_source_file();
+        let source_label = self
+            .current_effect_source_buffer_id
+            .map(|buffer_id| format!("buf#{buffer_id}"));
         let compile_started = std::time::Instant::now();
-        let mut compiler = Compiler::new_repl(
-            exprs,
-            existing,
-            names,
-            reactive_namespaces,
-            derived_bindings,
-            state_bindings,
-            next_node_id,
-            macros,
-            source_file,
-        );
-        compiler.set_module_exports(self.module_exports.clone());
-        match compiler.compile() {
-            Ok(chunks) => {
+        let compile_result = {
+            let mut compiler = Compiler::new_repl(
+                exprs,
+                existing,
+                names,
+                reactive_namespaces,
+                derived_bindings,
+                state_bindings,
+                next_node_id,
+                macros,
+                source_file,
+                source_label,
+            );
+            compiler.set_module_exports(self.module_exports.clone());
+            compiler.set_macro_evaluator(|mac, args, site, state| {
+                self.evaluate_compiled_macro(mac, args, site, state)
+            });
+            match compiler.compile() {
+                Ok(chunks) => Ok((
+                    chunks,
+                    compiler.take_global_names(),
+                    compiler.take_derived_bindings(),
+                    compiler.take_state_bindings(),
+                    compiler.next_node_id(),
+                    compiler.take_macros(),
+                    compiler.take_warnings(),
+                )),
+                Err(error) => Err((
+                    error,
+                    compiler.take_chunks(),
+                    compiler.take_global_names(),
+                )),
+            }
+        };
+        match compile_result {
+            Ok((chunks, names, derived, states, next_node_id, macros, warnings)) => {
                 self.chunks = chunks;
-                self.global_names = compiler.take_global_names();
-                self.derived_bindings = compiler.take_derived_bindings();
-                self.state_bindings = compiler.take_state_bindings();
-                self.dag.next_id = compiler.next_node_id();
-                self.macros = compiler.take_macros();
-                for warning in compiler.take_warnings() {
+                self.global_names = names;
+                self.derived_bindings = derived;
+                self.state_bindings = states;
+                self.dag.next_id = next_node_id;
+                self.macros = macros;
+                for warning in warnings {
                     self.source_manager.push_diagnostic(warning);
                 }
             }
-            Err(error) => {
+            Err((error, mut chunks, mut names)) => {
                 if let CompilerError::Message(message) = &error {
                     self.source_load_errors.push(message.clone());
                 }
-                let mut chunks = compiler.take_chunks();
                 chunks.truncate(entry_idx);
                 self.chunks = chunks;
-                let mut names = compiler.take_global_names();
                 names.truncate(names_len);
                 self.global_names = names;
                 return Err(VMError::CompileError);
@@ -4995,7 +5497,7 @@ impl VM {
             if let Some(Value::NativeFunction(function)) = self.global_value(form_name) {
                 let previous_static_registration = self.registering_static_inline_widget;
                 self.registering_static_inline_widget = true;
-                function(args, self);
+                (function.callable)(args, self);
                 self.registering_static_inline_widget = previous_static_registration;
             }
         }
@@ -5420,50 +5922,108 @@ impl VM {
         }
     }
 
+    fn finish_expansion_origin_boundary(
+        &mut self,
+        result: Result<Option<Value>, VMError>,
+        origin_depth: usize,
+    ) -> Result<Option<Value>, VMError> {
+        let origin = self
+            .active_execution_origins
+            .get(origin_depth..)
+            .and_then(|origins| origins.last().cloned());
+        self.active_execution_origins.truncate(origin_depth);
+        result.map_err(|error| match (origin, &error) {
+            (Some(_), VMError::ExpandedFrom { .. }) => error,
+            (Some(origin), _) => VMError::ExpandedFrom {
+                error: Box::new(error),
+                diagnostic: origin.diagnostic(),
+            },
+            (None, _) => error,
+        })
+    }
+
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
+        let origin_depth = self.active_execution_origins.len();
         self.execution_depth = self.execution_depth.saturating_add(1);
         let previous_chunk = self.current_chunk;
         self.current_chunk = entry_chunk;
-        let result = self.execute();
+        let mut result = self.execute();
         self.current_chunk = previous_chunk;
         self.execution_depth = self.execution_depth.saturating_sub(1);
-        if result.is_ok() && self.execution_depth == 0 && !self.processing_reactive {
-            self.process_dirty_reactive()?;
+        if result.is_ok()
+            && self.execution_depth == 0
+            && !self.processing_reactive
+            && self.active_expander.is_none()
+        {
+            if let Err(error) = self.process_dirty_reactive() {
+                result = Err(error);
+            }
         }
-        result
+        self.finish_expansion_origin_boundary(result, origin_depth)
     }
 
     pub fn invoke(&mut self, callable: Value, args: Vec<Value>) -> Result<Option<Value>, VMError> {
-        match callable {
+        let origin_depth = self.active_execution_origins.len();
+        let result = (|| match callable {
             Value::Closure(chunk_idx, upvalues) => {
                 self.execution_depth = self.execution_depth.saturating_add(1);
                 let current_chunk = self.current_chunk;
-                let result = self.execute_callable_chunk(chunk_idx, upvalues, args);
+                let mut result = self.execute_callable_chunk(chunk_idx, upvalues, args);
                 self.current_chunk = current_chunk;
                 self.execution_depth = self.execution_depth.saturating_sub(1);
-                if result.is_ok() && self.execution_depth == 0 && !self.processing_reactive {
-                    self.process_dirty_reactive()?;
+                if result.is_ok()
+                    && self.execution_depth == 0
+                    && !self.processing_reactive
+                    && self.active_expander.is_none()
+                {
+                    if let Err(error) = self.process_dirty_reactive() {
+                        result = Err(error);
+                    }
                 }
                 result
             }
-            Value::NativeFunction(f) => {
-                let result = f(args, self);
-                if self.execution_depth == 0 && !self.processing_reactive {
+            Value::NativeFunction(native) => {
+                self.check_native_expansion_safety(&native)?;
+                let result = (native.callable)(args, self);
+                if let Some(error) = self.expansion_violation.take() {
+                    return Err(error);
+                }
+                if self.execution_depth == 0
+                    && !self.processing_reactive
+                    && self.active_expander.is_none()
+                {
                     self.process_dirty_reactive()?;
                 }
                 Ok(Some(result))
             }
-            Value::OverrideDispatcher(name) => self.dispatch_override(&name, args),
-            Value::OverrideOriginal(name) => self.invoke_raw_global(&name, args),
+            Value::OverrideDispatcher(name) => {
+                if self.active_expander.is_some() {
+                    return Err(self.expansion_error("override dispatcher"));
+                }
+                self.dispatch_override(&name, args)
+            }
+            Value::OverrideOriginal(name) => {
+                if self.active_expander.is_some() {
+                    return Err(self.expansion_error("override dispatcher"));
+                }
+                self.invoke_raw_global(&name, args)
+            }
             Value::HostHandle { callable, .. } => {
+                if self.active_expander.is_some() {
+                    return Err(self.expansion_error("host handle"));
+                }
                 let result = callable(args, self);
-                if self.execution_depth == 0 && !self.processing_reactive {
+                if self.execution_depth == 0
+                    && !self.processing_reactive
+                    && self.active_expander.is_none()
+                {
                     self.process_dirty_reactive()?;
                 }
                 Ok(Some(result))
             }
             _ => Err(VMError::ExpectedFunction),
-        }
+        })();
+        self.finish_expansion_origin_boundary(result, origin_depth)
     }
 
     fn execute_callable_chunk(
@@ -6126,6 +6686,11 @@ impl VM {
 
         while frames.last().unwrap().pc < self.chunks[self.current_chunk].ops.len() {
             let op = self.chunks[self.current_chunk].ops[frames.last().unwrap().pc].clone();
+            if self.active_expander.is_some()
+                && let Some(operation) = Self::expansion_forbidden_opcode(&op)
+            {
+                return Err(self.expansion_error(operation));
+            }
             match op {
                 OpCode::PushConst(x) => {
                     if let Some(constant) = self.chunks[self.current_chunk].constants.get(x) {
@@ -6149,6 +6714,14 @@ impl VM {
                 }
                 OpCode::PushNil => {
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::ExpansionOriginBegin(origin) => {
+                    self.active_execution_origins.push(origin);
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::ExpansionOriginEnd => {
+                    let _ = self.active_execution_origins.pop();
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::Add(arity) => {
@@ -6340,6 +6913,23 @@ impl VM {
                     }
                     let mut list: Vec<_> = (0..arity).filter_map(|_| stack.pop()).collect();
                     list.reverse();
+                    stack.push(Rc::new(RefCell::new(Value::List(list))));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::ConcatLists(arity) => {
+                    if stack.len() < arity {
+                        return Err(VMError::StackUnderflow);
+                    }
+                    let mut segments: Vec<_> =
+                        (0..arity).filter_map(|_| stack.pop()).collect();
+                    segments.reverse();
+                    let mut list = Vec::new();
+                    for segment in segments {
+                        let Value::List(items) = &*segment.borrow() else {
+                            return Err(VMError::IncorrectType);
+                        };
+                        list.extend(items.iter().cloned());
+                    }
                     stack.push(Rc::new(RefCell::new(Value::List(list))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -6860,16 +7450,21 @@ impl VM {
                                 frames.last_mut().unwrap().pc += 1;
                                 frames.push(frame);
                             }
-                            Value::NativeFunction(f) => {
-                                // Clone the Rc so we can drop the borrow before touching the stack
-                                let f = f.clone();
+                            Value::NativeFunction(native) => {
+                                // Clone the callable metadata so the stack cell can be released
+                                // before invoking code that may mutate the VM.
+                                let native = native.clone();
                                 drop(borrowed);
+                                self.check_native_expansion_safety(&native)?;
                                 let mut args: Vec<Value> = (0..arity)
                                     .filter_map(|_| stack.pop())
                                     .map(|v| v.borrow().clone())
                                     .collect();
                                 args.reverse();
-                                let result = f(args, self);
+                                let result = (native.callable)(args, self);
+                                if let Some(error) = self.expansion_violation.take() {
+                                    return Err(error);
+                                }
                                 stack.push(Rc::new(RefCell::new(result)));
                                 frames.last_mut().unwrap().pc += 1;
                             }
@@ -6877,6 +7472,9 @@ impl VM {
                                 let name = name.clone();
                                 let is_dispatcher = matches!(&*borrowed, Value::OverrideDispatcher(_));
                                 drop(borrowed);
+                                if self.active_expander.is_some() {
+                                    return Err(self.expansion_error("override dispatcher"));
+                                }
                                 let mut args: Vec<Value> = (0..arity)
                                     .filter_map(|_| stack.pop())
                                     .map(|v| v.borrow().clone())
@@ -6894,6 +7492,9 @@ impl VM {
                             Value::HostHandle { callable, .. } => {
                                 let f = callable.clone();
                                 drop(borrowed);
+                                if self.active_expander.is_some() {
+                                    return Err(self.expansion_error("host handle"));
+                                }
                                 let mut args: Vec<Value> = (0..arity)
                                     .filter_map(|_| stack.pop())
                                     .map(|v| v.borrow().clone())
@@ -7037,7 +7638,7 @@ mod tests {
         EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
         ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
-        Value, debug_assert_cell_not_frozen, freeze_widget_tree,
+        VMError, Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
 
     fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
@@ -8483,6 +9084,509 @@ counter
     }
 
     #[test]
+    fn procedural_macro_body_is_evaluated_in_definition_order() {
+        let mut vm = VM::new(Vec::new());
+
+        let result = vm
+            .eval_str(
+                "(defmacro choose-offset (form)\n\
+                   (if (= form 0) `(+ ,form 10) `(+ ,form 20)))\n\
+                 (list (choose-offset 0) (choose-offset 2))",
+            )
+            .expect("define and expand procedural macro in one compile unit");
+
+        assert_eq!(
+            result,
+            Some(Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(10.0))),
+                Rc::new(RefCell::new(Value::Number(22.0))),
+            ]))
+        );
+    }
+
+    #[test]
+    fn macroexpand_returns_fully_expanded_syntax_without_running_it() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str(
+            "(defmacro inner (value) `(+ ,value 1))\n\
+             (defmacro outer (value) `(inner ,value))",
+        )
+        .expect("macro definitions");
+
+        let expansion = vm
+            .eval_str("(macroexpand '(outer 41))")
+            .expect("macroexpand call")
+            .expect("expanded syntax");
+
+        assert_eq!(
+            expansion,
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Symbol("+".to_string()))),
+                Rc::new(RefCell::new(Value::Number(41.0))),
+                Rc::new(RefCell::new(Value::Number(1.0))),
+            ])
+        );
+    }
+
+    #[test]
+    fn macro_residue_runtime_error_carries_call_site_origin() {
+        let mut vm = VM::new(Vec::new());
+        vm.set_current_effect_context(Some(9));
+        let source = "(defmacro broken () 'missing-generated-value)\n(broken)";
+        let start = source.rfind("(broken)").expect("macro call offset");
+
+        let error = vm.eval_str(source).expect_err("generated read must fail");
+
+        let VMError::ExpandedFrom { error, diagnostic } = error else {
+            panic!("expected expansion origin, got {error:?}");
+        };
+        assert_eq!(
+            *error,
+            VMError::UnknownVariable("missing-generated-value".to_string())
+        );
+        assert!(diagnostic.contains(&format!("expanded from `broken` at buf#9:{start}")));
+        assert!(diagnostic.contains("revision "));
+    }
+
+    #[test]
+    fn generated_closure_keeps_macro_origin_when_called_later() {
+        let mut vm = VM::new(Vec::new());
+        let definition = "(defmacro broken-later () '(lambda () missing-generated-value))\n\
+                          (def delayed (broken-later))";
+        let start = definition
+            .rfind("(broken-later)")
+            .expect("macro call offset");
+        vm.eval_str(definition).expect("define generated closure");
+
+        let error = vm
+            .eval_str("(delayed)")
+            .expect_err("generated closure must fail");
+
+        let VMError::ExpandedFrom { error, diagnostic } = error else {
+            panic!("expected expansion origin, got {error:?}");
+        };
+        assert_eq!(
+            *error,
+            VMError::UnknownVariable("missing-generated-value".to_string())
+        );
+        assert!(diagnostic.contains(&format!("expanded from `broken-later` at scratch:{start}")));
+    }
+
+    #[test]
+    fn expansion_origins_do_not_leak_across_generated_closure_calls() {
+        // The provenance opcodes are emitted per generated chunk; an unbalanced
+        // Begin/End would leave stale origins on the stack and attribute later,
+        // unrelated failures to a macro that had nothing to do with them.
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str(
+            "(defmacro make-adder () '(lambda (x) (+ x 1)))\n\
+             (def add1 (make-adder))",
+        )
+        .expect("define generated closure");
+
+        for _ in 0..4 {
+            assert_eq!(vm.eval_str("(add1 1)"), Ok(Some(Value::Number(2.0))));
+            assert!(vm.active_execution_origins.is_empty());
+        }
+
+        let error = vm
+            .eval_str("nowhere-defined")
+            .expect_err("plain lookup must fail");
+        assert_eq!(
+            error,
+            VMError::UnknownVariable("nowhere-defined".to_string())
+        );
+    }
+
+    #[test]
+    fn macro_residue_compile_error_carries_call_site_origin() {
+        let mut vm = VM::new(Vec::new());
+        let source = "(defmacro broken () '(unquote value))\n(broken)";
+        let start = source.rfind("(broken)").expect("macro call offset");
+
+        assert_eq!(vm.eval_str(source), Err(VMError::CompileError));
+
+        let diagnostics = vm.take_source_load_errors();
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.contains(&format!("expanded from `broken` at scratch:{start}"))
+            }),
+            "diagnostics: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn procedural_macro_gensym_is_stable_per_site_and_unique_per_call() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.set_current_effect_context(Some(41));
+        vm.eval_str(
+            "(defmacro generated (&rest options) `(quote ,(gensym \"tmp\")))\n\
+             (defmacro generated-pair ()\n\
+               `(quote (,(gensym \"tmp\") ,(gensym \"tmp\"))))",
+        )
+        .expect("gensym macro definitions");
+
+        let first_run = vm
+            .eval_str("(list (generated) (generated))")
+            .expect("first expansion")
+            .expect("first expansion value");
+        let Value::List(first_symbols) = first_run else {
+            panic!("expected generated symbol list");
+        };
+        assert_ne!(*first_symbols[0].borrow(), *first_symbols[1].borrow());
+
+        let repeated = vm
+            .eval_str("(generated)")
+            .expect("repeat expansion")
+            .expect("repeat expansion value");
+        assert_eq!(repeated, *first_symbols[0].borrow());
+
+        let pair = vm
+            .eval_str("(generated-pair)")
+            .expect("counter expansion")
+            .expect("counter expansion value");
+        let Value::List(pair_symbols) = pair else {
+            panic!("expected pair of generated symbols");
+        };
+        assert_ne!(*pair_symbols[0].borrow(), *pair_symbols[1].borrow());
+    }
+
+    #[test]
+    fn procedural_macro_gensym_keys_survive_reordering_and_buffers_do_not_collide() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str("(defmacro generated (&rest options) `(quote ,(gensym \"tmp\")))")
+            .expect("gensym macro definition");
+
+        vm.set_current_effect_context(Some(7));
+        let keyed = vm
+            .eval_str("(generated :key \"fixed\")")
+            .expect("keyed expansion")
+            .expect("keyed expansion value");
+        let reordered = vm
+            .eval_str("(list (generated) (generated :key \"fixed\"))")
+            .expect("reordered expansion")
+            .expect("reordered expansion value");
+        let Value::List(reordered) = reordered else {
+            panic!("expected reordered expansion list");
+        };
+        assert_eq!(keyed, *reordered[1].borrow());
+
+        vm.set_current_effect_context(Some(8));
+        let other_buffer = vm
+            .eval_str("(generated :key \"fixed\")")
+            .expect("other-buffer expansion")
+            .expect("other-buffer expansion value");
+        assert_ne!(keyed, other_buffer);
+    }
+
+    #[test]
+    fn procedural_macro_gensym_bindings_do_not_capture_caller_symbols() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.set_current_effect_context(Some(11));
+        // The residue binds a generated `tmp` and then reads the caller's own
+        // `tmp`: capture would make both reads see the generated binding.
+        vm.eval_str(
+            "(defmacro shadowing (body)\n\
+               (let ((g (gensym \"tmp\")))\n\
+                 `(let ((,g 100)) (+ ,g ,body))))",
+        )
+        .expect("capture-hazard macro definition");
+
+        let result = vm
+            .eval_str("(let ((tmp 7)) (shadowing tmp))")
+            .expect("expansion evaluates")
+            .expect("expansion value");
+        assert_eq!(result, Value::Number(107.0));
+    }
+
+    #[test]
+    fn procedural_macro_gensym_is_identical_across_fresh_vms() {
+        fn generated_symbol() -> Value {
+            let mut vm = VM::new(Vec::new());
+            super::register_core_natives(&mut vm);
+            vm.set_current_effect_context(Some(23));
+            vm.eval_str("(defmacro generated () `(quote ,(gensym \"tmp\")))")
+                .expect("gensym macro definition");
+            vm.eval_str("(generated)")
+                .expect("expansion")
+                .expect("expansion value")
+        }
+
+        // Source-identity diffing depends on the suffix being a function of the
+        // site alone, never of per-process hasher seeding.
+        assert_eq!(generated_symbol(), generated_symbol());
+    }
+
+    #[test]
+    fn procedural_macro_calls_functions_in_the_owning_vm() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(def macro-add-form (form) (list '+ form 5))")
+            .expect("define expansion helper in owning VM");
+
+        let result = vm
+            .eval_str(
+                "(defmacro add-through-vm (form) (macro-add-form form))\n\
+                 (add-through-vm 7)",
+            )
+            .expect("evaluate macro through owning VM callback");
+
+        assert_eq!(result, Some(Value::Number(12.0)));
+    }
+
+    #[test]
+    fn procedural_macro_execution_error_aborts_compilation_with_macro_name() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro broken (form) (missing-expander-helper form))")
+            .expect("compile macro body before it is called");
+
+        assert_eq!(vm.eval_str("(broken 1)"), Err(VMError::CompileError));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("error expanding macro `broken`")
+                && message.contains("missing-expander-helper")
+        }));
+    }
+
+    #[test]
+    fn procedural_macro_rejects_expansion_unsafe_native_with_diagnostic() {
+        let mut vm = VM::new(Vec::new());
+        let called = Rc::new(RefCell::new(false));
+        let called_by_native = called.clone();
+        vm.register_native("send", move |_args| {
+            *called_by_native.borrow_mut() = true;
+            Value::Nil
+        });
+        // Validation is structural, not just an execution guard: an unsafe
+        // capability is rejected even when this invocation would not reach it.
+        vm.eval_str("(defmacro emit (form) (if false (send \"out\" form) form))")
+            .expect("macro definition");
+
+        assert_eq!(vm.eval_str("(emit 1)"), Err(VMError::CompileError));
+        assert_eq!(*called.borrow(), false, "forbidden native must not run");
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("error expanding macro `emit`")
+                && message.contains("expansion-unsafe operation `send`")
+                && message.contains("macro `emit`")
+        }));
+    }
+
+    #[test]
+    fn procedural_macro_sandbox_follows_calls_into_module_functions() {
+        let mut vm = VM::new(Vec::new());
+        vm.register_native("load", |_args| Value::Nil);
+        vm.eval_str("(def expansion-helper (form) (do (load \"other.lisp\") form))")
+            .expect("helper definition");
+        vm.eval_str("(defmacro indirect (form) (expansion-helper form))")
+            .expect("macro definition");
+
+        assert_eq!(vm.eval_str("(indirect 1)"), Err(VMError::CompileError));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("expansion-unsafe operation `load`")
+                && message.contains("macro `indirect`")
+        }));
+    }
+
+    #[test]
+    fn procedural_macro_vm_backstop_rejects_dynamically_loaded_native() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("send", |_args| Value::Nil);
+        vm.eval_str("(def capabilities (dict :call send))")
+            .expect("capability table");
+        vm.eval_str("(defmacro dynamic-call (form) ((get capabilities :call) form))")
+            .expect("macro definition");
+
+        assert_eq!(vm.eval_str("(dynamic-call 1)"), Err(VMError::CompileError));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("expansion-unsafe operation `send`")
+                && message.contains("macro `dynamic-call`")
+        }));
+    }
+
+    #[test]
+    fn procedural_macro_rejects_global_mutation_before_it_runs() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(def expansion-counter 0)")
+            .expect("counter definition");
+        vm.eval_str(
+            "(defmacro mutate (form) (do (set! expansion-counter 1) form))",
+        )
+        .expect("macro definition");
+
+        assert_eq!(vm.eval_str("(mutate 1)"), Err(VMError::CompileError));
+        assert_eq!(vm.global_value("expansion-counter"), Some(Value::Number(0.0)));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("expansion-unsafe operation `set! global`")
+                && message.contains("macro `mutate`")
+        }));
+    }
+
+    #[test]
+    fn procedural_macro_allows_audited_pure_natives() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str(
+            "(def expansion-add-one (form) (list '+ form (nth (list 1) 0)))\n\
+             (defmacro pure (form) (expansion-add-one form))",
+        )
+        .expect("pure helper and macro definition");
+
+        assert_eq!(vm.eval_str("(pure 4)"), Ok(Some(Value::Number(5.0))));
+    }
+
+    #[test]
+    fn expansion_safe_dict_iteration_is_deterministic() {
+        // Rule 2 buys "same source → same expansion"; a whitelisted native
+        // that leaked hash order would break that for every dict-driven macro.
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str("(def options (dict :d 4 :a 1 :c 3 :b 2))")
+            .expect("options definition");
+        vm.eval_str("(defmacro option-order () (cons 'list (keys options)))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(source (option-order))"),
+            Ok(Some(Value::String("(:a :b :c :d)".to_string())))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_violation_survives_error_swallowing_callback_natives() {
+        // `map` and friends log callback errors and substitute `nil`. The
+        // sandbox violation must not be laundered into a successful expansion.
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        let called = Rc::new(RefCell::new(false));
+        let called_by_native = called.clone();
+        vm.register_native("send", move |_args| {
+            *called_by_native.borrow_mut() = true;
+            Value::Nil
+        });
+        vm.eval_str("(def capabilities (dict :call send))")
+            .expect("capability table");
+        vm.eval_str(
+            "(defmacro mapped (form)\n\
+               (first (map (lambda (x) ((get capabilities :call) x)) (list form))))",
+        )
+        .expect("macro definition");
+
+        assert_eq!(vm.eval_str("(mapped 1)"), Err(VMError::CompileError));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("expansion-unsafe operation `send`")
+                && message.contains("macro `mapped`")
+        }));
+    }
+
+    #[test]
+    fn template_macro_may_emit_expansion_unsafe_residue() {
+        // The sandbox constrains what the expander *does*, never what it
+        // *emits*: quoted residue naming a stateful native or `set!` is
+        // ordinary generated code and must still compile and run.
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let sent_by_native = sent.clone();
+        vm.register_native("send", move |args| {
+            sent_by_native.borrow_mut().push(args[0].clone());
+            Value::Nil
+        });
+        vm.eval_str("(def counter 0)").expect("counter definition");
+        vm.eval_str(
+            "(defmacro emit-effects (value) `(do (send ,value) (set! counter ,value)))",
+        )
+        .expect("macro definition");
+
+        assert!(vm.eval_str("(emit-effects 7)").is_ok());
+        assert_eq!(vm.global_value("counter"), Some(Value::Number(7.0)));
+        assert_eq!(sent.borrow().len(), 1);
+    }
+
+    #[test]
+    fn procedural_macro_can_evaluate_non_parameter_unquotes() {
+        let mut vm = VM::new(Vec::new());
+
+        let result = vm
+            .eval_str("(defmacro add-computed (form) `(+ ,form ,(+ 1 2))) (add-computed 4)")
+            .expect("computed unquote expansion");
+
+        assert_eq!(result, Some(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn procedural_macro_preserves_quoted_arguments() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro wrap-arg (form) `(list ,form))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(wrap-arg 'foo)"),
+            Ok(Some(Value::List(vec![Rc::new(RefCell::new(Value::Symbol(
+                "foo".to_string()
+            )))])))
+        );
+        assert_eq!(
+            vm.eval_str("(wrap-arg '(1 2))"),
+            Ok(Some(Value::List(vec![Rc::new(RefCell::new(Value::List(
+                vec![
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                    Rc::new(RefCell::new(Value::Number(2.0))),
+                ]
+            )))])))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_sees_quoted_arguments_as_quote_forms() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        // `'foo` is data spelled `(quote foo)`, so an expander that takes it
+        // apart with `first`/`nth` sees the canonical two-element list.
+        vm.eval_str("(defmacro head-of (form) `(quote ,(first form)))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(head-of 'foo)"),
+            Ok(Some(Value::Symbol("quote".to_string())))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_rest_arguments_keep_their_quoting() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro collect-forms (&rest forms) `(list ,@forms))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(collect-forms 'a '(1) 2)"),
+            Ok(Some(Value::List(vec![
+                Rc::new(RefCell::new(Value::Symbol("a".to_string()))),
+                Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(
+                    Value::Number(1.0)
+                ))]))),
+                Rc::new(RefCell::new(Value::Number(2.0))),
+            ])))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_expands_through_another_macro() {
+        let mut vm = VM::new(Vec::new());
+
+        assert_eq!(
+            vm.eval_str(
+                "(defmacro add-one (form) `(+ ,form 1))\n\
+                 (defmacro add-one-outer (form) `(add-one ,form))\n\
+                 (add-one-outer 5)",
+            ),
+            Ok(Some(Value::Number(6.0)))
+        );
+    }
+
+    #[test]
     fn variadic_macro_splices_rest_arguments() {
         let mut vm = VM::new(Vec::new());
         vm.eval_str("(defmacro collect (head &rest tail) `(list ,head ,@tail))")
@@ -8535,13 +9639,17 @@ counter
     }
 
     #[test]
-    fn macro_can_splice_a_quoted_list_parameter() {
+    fn macro_can_splice_a_list_parameter() {
         let mut vm = VM::new(Vec::new());
         vm.eval_str("(defmacro unwrap (items) `(list ,@items))")
             .expect("macro definition");
 
+        // Under procedural expansion a parameter holds the argument *form*, so
+        // the spliceable value is the bare list. `'(1 2 3)` is the two-element
+        // form `(quote (1 2 3))` and splices as such — see
+        // `procedural_macro_sees_quoted_arguments_as_quote_forms`.
         let result = vm
-            .eval_str("(unwrap '(1 2 3))")
+            .eval_str("(unwrap (1 2 3))")
             .expect("splicing macro call");
         assert_eq!(
             result,
@@ -9388,21 +10496,214 @@ counter
     }
 
     #[test]
-    fn def_sequencer_tick_capture_preserves_inner_quotes_through_source_roundtrip() {
+    fn def_process_capture_expands_macros_before_quoting() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-process", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured process clause"),
+            ))
+        });
+        let result = vm
+            .eval_str(
+                r#"
+                (defmacro process-kernel (value) `(target-set! ,value))
+                (def-process expanded :run (process-kernel 7))
+                "#,
+            )
+            .expect("eval")
+            .expect("value");
+        let Value::String(source) = result else {
+            panic!("expected captured process source, got {result:?}");
+        };
+        assert_eq!(source, "(target-set! 7)");
+        assert!(!source.contains("process-kernel"), "expanded source: {source}");
+        assert!(!source.contains("__source-origin"), "expanded source: {source}");
+    }
+
+    #[test]
+    fn captured_macro_residue_is_independent_of_authoring_origin() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-process", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured process clause"),
+            ))
+        });
+        vm.eval_str("(defmacro process-kernel (value) `(target-set! ,value))")
+            .expect("define macro");
+
+        let capture = |result: Option<Value>| {
+            let Value::String(source) = result.expect("captured process source") else {
+                panic!("expected captured process source");
+            };
+            source
+        };
+        let first = capture(
+            vm.eval_str("(def-process p :run (process-kernel 7))")
+                .expect("first capture"),
+        );
+        let shifted = capture(
+            vm.eval_str("\n    (def-process p :run (process-kernel 7))")
+                .expect("shifted capture"),
+        );
+
+        assert_eq!(first, "(target-set! 7)");
+        assert_eq!(shifted, first);
+    }
+
+    #[test]
+    fn unexpanded_captures_still_drop_authoring_source_origins() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        for name in ["def-song", "def-accumulator"] {
+            vm.register_native(name, |args| {
+                Value::String(super::format_lisp_source(
+                    args.last().expect("captured clause"),
+                ))
+            });
+        }
+        vm.eval_str("(defmacro capture-kernel (value) `(target-set! ,value))")
+            .expect("define macro");
+
+        for source in [
+            "(def-song s (at 0 :scene (capture-kernel 1)))",
+            "(def-accumulator a (capture-kernel 1))",
+        ] {
+            let Some(Value::String(captured)) = vm.eval_str(source).expect("eval capture") else {
+                panic!("expected captured source for {source}");
+            };
+            assert!(
+                !captured.contains("__source-origin"),
+                "{source}: {captured}"
+            );
+            // Shifting the form in the buffer must not change the shipped text.
+            let shifted_source = format!("\n      {source}");
+            let Some(Value::String(shifted)) =
+                vm.eval_str(&shifted_source).expect("eval shifted capture")
+            else {
+                panic!("expected captured source for {shifted_source}");
+            };
+            assert_eq!(shifted, captured, "{source}");
+        }
+    }
+
+    #[test]
+    fn process_sugar_captures_expand_macros_before_quoting() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        for name in ["every", "after", "on", "tap"] {
+            vm.register_native(name, |args| {
+                Value::String(super::format_lisp_source(
+                    args.last().expect("captured process-sugar body"),
+                ))
+            });
+        }
+        vm.eval_str("(defmacro process-kernel (value) `(target-set! ,value))")
+            .expect("define macro");
+
+        for name in ["every", "after", "on", "tap"] {
+            let source = format!("({name} :trigger (process-kernel 9))");
+            let result = vm
+                .eval_str(&source)
+                .expect("eval process sugar")
+                .expect("captured process-sugar source");
+            let Value::String(captured) = result else {
+                panic!("expected {name} to return captured source, got {result:?}");
+            };
+            assert_eq!(captured, "(target-set! 9)", "{name}");
+            assert!(!captured.contains("process-kernel"), "{name}: {captured}");
+            assert!(!captured.contains("__source-origin"), "{name}: {captured}");
+        }
+    }
+
+    #[test]
+    fn process_sugar_expands_the_trigger_argument_too() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        for name in ["every", "after", "on", "tap"] {
+            vm.register_native(name, |args| {
+                Value::String(super::format_lisp_source(
+                    args.first().expect("captured process-sugar trigger"),
+                ))
+            });
+        }
+        vm.eval_str("(defmacro trigger-kernel () `(beats 4))")
+            .expect("define macro");
+
+        for name in ["every", "after", "on", "tap"] {
+            let result = vm
+                .eval_str(&format!("({name} (trigger-kernel) (target-set! 1))"))
+                .expect("eval process sugar")
+                .expect("captured process-sugar trigger");
+            let Value::String(captured) = result else {
+                panic!("expected {name} to return the captured trigger, got {result:?}");
+            };
+            assert_eq!(captured, "(beats 4)", "{name}");
+            assert!(!captured.contains("trigger-kernel"), "{name}: {captured}");
+            assert!(!captured.contains("__source-origin"), "{name}: {captured}");
+        }
+    }
+
+    #[test]
+    fn def_sequencer_tick_and_init_capture_expand_macros_and_preserve_quotes() {
         let mut vm = VM::new(Vec::new());
         super::register_core_natives(&mut vm);
         vm.register_native("def-sequencer", |args| {
             Value::String(super::format_lisp_source(
-                args.last().expect("captured tick body"),
+                args.last().expect("captured sequencer body"),
+            ))
+        });
+        vm.eval_str(
+            r#"(defmacro pattern-kernel (form symbol) `(jaki/from-list ,form ,symbol))"#,
+        )
+        .expect("define macro");
+
+        for clause in ["tick", "init"] {
+            let source = format!(
+                r#"(def-sequencer "j" :{clause} (pattern-kernel '(. . -) 'sym))"#
+            );
+            let result = vm
+                .eval_str(&source)
+                .expect("eval sequencer")
+                .expect("captured sequencer source");
+            let Value::String(captured) = result else {
+                panic!("expected :{clause} to return captured source, got {result:?}");
+            };
+            assert!(
+                captured.contains("(jaki/from-list '(. . -) 'sym)"),
+                ":{clause}: {captured}"
+            );
+            assert!(!captured.contains("pattern-kernel"), ":{clause}: {captured}");
+            assert!(!captured.contains("__source-origin"), ":{clause}: {captured}");
+        }
+    }
+
+    #[test]
+    fn def_sequencer_graph_capture_expands_nested_macros_before_quoting() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-sequencer", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured graph form"),
             ))
         });
         let result = vm
-            .eval_str(r#"(def-sequencer "j" :tick (jaki/pat '(. . - (every 2 swap)) 'sym))"#)
+            .eval_str(
+                r#"
+                (defmacro graph-edge () `(edge "a" "b"))
+                (def-sequencer "g"
+                  (def-node "a" :type :source)
+                  (edges (graph-edge)))
+                "#,
+            )
             .expect("eval")
             .expect("value");
-        let Value::String(tick_source) = result else {
-            panic!("expected the captured tick source, got {result:?}");
+        let Value::String(source) = result else {
+            panic!("expected captured graph source, got {result:?}");
         };
-        assert_eq!(tick_source, "(jaki/pat '(. . - (every 2 swap)) 'sym)");
+        assert!(source.contains("(edge \"a\" \"b\")"), "expanded source: {source}");
+        assert!(!source.contains("graph-edge"), "expanded source: {source}");
+        assert!(!source.contains("__source-origin"), "expanded source: {source}");
     }
 }

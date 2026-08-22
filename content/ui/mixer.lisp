@@ -1068,7 +1068,7 @@
       :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
       (if (= track-renaming i)
         (track-rename-input i "track-rename-input-" 9.8 10)
-        (badge (substring (nth SEQ.track-names i) 0 10)
+        (badge (substring (nth SEQ.track-names i) 0 15)
           :key (str "track-label-content-" i)
           :icon (eseq.track-collapse/type-icon i)
           :width 9.8

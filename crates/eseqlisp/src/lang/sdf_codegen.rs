@@ -1484,22 +1484,11 @@ mod tests {
 
     /// Expand SDF macros and return the expanded Expression.
     fn expand_sdf(src: &str) -> Expression {
-        use crate::compiler::Compiler;
         use crate::runtime::Runtime;
 
-        let rt = Runtime::new();
-        let compiler = Compiler::new_repl(
-            vec![],
-            vec![],
-            vec![],
-            std::collections::HashSet::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            0,
-            rt.macros().clone(),
-            None,
-        );
-        compiler.expand_macros(&parse_one_expr(src), 0)
+        let mut rt = Runtime::new();
+        rt.expand_macros_expression(&parse_one_expr(src))
+            .expect("expand SDF macro")
     }
 
     fn macro_to_metal(src: &str) -> (Vec<String>, String) {

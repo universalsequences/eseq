@@ -25,10 +25,9 @@
 ;;   (scale x in-lo in-hi out-lo out-hi)   linear remap
 ;; Everything else passes through untouched (sin, cos, abs, mod, ->, ...).
 ;;
-;; Mechanics mirror alez.jaki.surface: the macro quotes its spec on the
-;; authoring VM; sig-register parses options as data, rewrites the pipeline,
-;; declares the value channel idempotently, then evals a generated string-named
-;; def-process whose :run body auto-quotes and ships to the scheduler VM.
+;; Mechanics mirror alez.jaki.surface: the macro parses its option forms and
+;; rewrites the pipeline on the authoring VM, then returns ordinary process
+;; syntax. The def-process :run body auto-quotes and ships to the scheduler VM.
 ;; Phase is derived from the transport each tick — (now-beats) is the tick's
 ;; quantized boundary beat, so phase = fract(now-beats / over + from). No
 ;; accumulator state: signals are seek-safe, restart-safe, drift-free, and
@@ -105,67 +104,66 @@
       acc
       (thread-form (thread-stage acc (first stages) last?) (rest stages) last?)))
 
-(def rewrite-all (forms)
+(def rewrite-all (forms phase)
   (if (empty? forms)
       (list)
-      (cons (rewrite (first forms)) (rewrite-all (rest forms)))))
+      (cons (rewrite (first forms) phase) (rewrite-all (rest forms) phase))))
 
-(def rewrite (form)
+(def rewrite (form phase)
+  (if (= form 'phase) phase
   (if (= form 'tau) tau-value
   (if (= form 'pi) pi-value
     (let ((head (nth form 0)))
       (if (= head nil)
           form
       (if (= head '->)
-          (rewrite (thread-form (nth form 1) (rest (rest form)) false))
+          (rewrite (thread-form (nth form 1) (rest (rest form)) false) phase)
       (if (= head '->>)
-          (rewrite (thread-form (nth form 1) (rest (rest form)) true))
+          (rewrite (thread-form (nth form 1) (rest (rest form)) true) phase)
       (if (= head 'scale)
-          (let ((x (rewrite (nth form 1)))
-                (a (rewrite (nth form 2)))
-                (b (rewrite (nth form 3)))
-                (c (rewrite (nth form 4)))
-                (d (rewrite (nth form 5))))
+          (let ((x (rewrite (nth form 1) phase))
+                (a (rewrite (nth form 2) phase))
+                (b (rewrite (nth form 3) phase))
+                (c (rewrite (nth form 4) phase))
+                (d (rewrite (nth form 5) phase)))
             (list '+ c (list '* (list '- d c)
                              (list '/ (list '- x a) (list '- b a)))))
       (if (= head 'unipolar)
-          (list '+ 0.5 (list '* 0.5 (rewrite (nth form 1))))
+          (list '+ 0.5 (list '* 0.5 (rewrite (nth form 1) phase)))
       (if (= head 'bipolar)
-          (list '- (list '* 2 (rewrite (nth form 1))) 1)
+          (list '- (list '* 2 (rewrite (nth form 1) phase)) 1)
       (if (= head 'sine)
           (list '+ 0.5
                 (list '* 0.5 (list 'sin (list '* tau-value
-                                              (rewrite (nth form 1))))))
+                                              (rewrite (nth form 1) phase)))))
       (if (= head 'tri)
-          (list '- 1 (list 'abs (list '- (list '* 2 (list 'mod (rewrite (nth form 1)) 1)) 1)))
+          (list '- 1 (list 'abs (list '- (list '* 2 (list 'mod (rewrite (nth form 1) phase) 1)) 1)))
       (if (= head 'saw)
-          (list 'mod (rewrite (nth form 1)) 1)
+          (list 'mod (rewrite (nth form 1) phase) 1)
       (if (= head 'sqr)
-          (let ((duty (if (= (nth form 2) nil) 0.5 (rewrite (nth form 2)))))
-            (list 'if (list '< (list 'mod (rewrite (nth form 1)) 1) duty) 1 0))
-          (rewrite-all form)))))))))))))))
+          (let ((duty (if (= (nth form 2) nil) 0.5 (rewrite (nth form 2) phase))))
+            (list 'if (list '< (list 'mod (rewrite (nth form 1) phase) 1) duty) 1 0))
+          (rewrite-all form phase))))))))))))))))
 
-;; ── registration ────────────────────────────────────────────────────────────
-;; Build the def-process source explicitly (jak-style) rather than letting the
-;; compiler auto-quote the unrewritten spec; `source` provides canonical
-;; escaping for every literal. The channel name doubles as the process class
-;; suffix, so keep names symbol-safe (letters, digits, - _ .).
-
-(def sig-register (name spec)
-  (let ((rate (time-beats (opt-value spec :rate nil) 0.125))
-        (over (time-beats (opt-value spec :over nil) 4))
-        (from (opt-value spec :from 0)))
-    (let ((pipe (rewrite (pipeline-form (strip-opts spec))))
-          (proc (str "__sig-" name)))
-      (if (__jaki-declare-value-channels (list (list name 0)))
-          (eval
-            (str "(do (def-process " (source proc)
-                 " :every (beats " (source rate) ")"
-                 " :run (let ((phase (mod (+ (/ (now-beats) " (source over) ") "
-                 (source from) ") 1)))"
-                 " (send " (source name) " " (source pipe) ")))"
-                 " (let ((h (" proc "))) (start h) h))"))
-          false))))
+;; ── expansion ───────────────────────────────────────────────────────────────
+;; The generated process class and local bindings use deterministic expansion-
+;; site symbols. This keeps repeated evaluations stable while preventing
+;; authored pipeline names from capturing implementation bindings.
 
 (defmacro sig (name &rest spec)
-  `(alez.sig.surface/sig-register ,name '(,@spec)))
+  (let ((rate (time-beats (opt-value spec :rate nil) 0.125))
+        (over (time-beats (opt-value spec :over nil) 4))
+        (from (opt-value spec :from 0))
+        (proc (gensym (str "__sig-" name)))
+        (phase (gensym "phase"))
+        (handle (gensym "handle")))
+    (let ((pipe (rewrite (pipeline-form (strip-opts spec)) phase)))
+      `(if (__jaki-declare-value-channels (list (list ,name 0)))
+           (do
+             (def-process ,proc
+               :every (beats ,rate)
+               :run (let ((,phase (mod (+ (/ (now-beats) ,over) ,from) 1)))
+                      (send ,name ,pipe)))
+             (let ((,handle (,proc)))
+               (do (start ,handle) ,handle)))
+           false))))
