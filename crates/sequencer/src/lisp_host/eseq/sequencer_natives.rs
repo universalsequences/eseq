@@ -16,6 +16,8 @@ natives are the internal hooks `def-accumulator`/`def-midi-fx`/
 
 use super::super::*;
 
+const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
+
 pub const DEF_SEQUENCER_SIGNATURE: &str =
     "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
 pub const DEF_SEQUENCER_DOCS: &str =
@@ -69,7 +71,7 @@ pub fn register_scene_slot_natives(
 
     let declarations_for_resolve = Arc::clone(&declarations);
     let state_for_resolve = Arc::clone(&state);
-    runtime.register_native("__defscene-resolve", move |args, _ctx| {
+    runtime.register_native("__defscene-resolve", move |args, ctx| {
         let [EValue::String(name)] = args.as_slice() else {
             return Err("scene-slot read expects one declaration name".to_string());
         };
@@ -81,11 +83,16 @@ pub fn register_scene_slot_natives(
             .ok_or_else(|| format!("scene slot '{}' is not declared", name))?;
         let (value, _epoch, _overridden) =
             state_for_resolve.resolve_current_scene_slot(name, &default);
+        // The pattern edge repaints every scene-slot reader on a scene switch;
+        // the qualified slot edge lets a write invalidate only this slot's
+        // readers. NativeContext retains these edges only during rendering.
+        ctx.track_reactive_read("SEQ", "current-pattern");
+        ctx.track_reactive_read(SCENE_SLOT_REACTIVE_NAMESPACE, name);
         Ok(value.to_value())
     });
 
     let declarations_for_set = Arc::clone(&declarations);
-    runtime.register_native("__defscene-set", move |args, _ctx| {
+    runtime.register_native("__defscene-set", move |args, ctx| {
         let [EValue::String(name), value] = args.as_slice() else {
             return Err("set! on a scene slot expects a declaration name and value".to_string());
         };
@@ -98,7 +105,12 @@ pub fn register_scene_slot_natives(
         }
         let literal = crate::process::ProcessLiteral::from_value(value)
             .map_err(|error| format!("scene slot '{}': {}", name, error))?;
-        state.write_current_scene_slot(name.clone(), literal)?;
+        let epoch = state.write_current_scene_slot(name.clone(), literal)?;
+        ctx.invalidate_reactive_source(
+            SCENE_SLOT_REACTIVE_NAMESPACE,
+            name,
+            EValue::String(epoch.to_string()),
+        );
         Ok(value.clone())
     });
 }

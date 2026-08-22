@@ -5609,6 +5609,29 @@ impl VM {
         }
     }
 
+    /// Add an edge from a host-owned reactive source to the effect currently
+    /// rendering. A plain, non-rendering native call has no tracking context
+    /// and therefore resolves immediately without retaining a dependency.
+    pub(crate) fn inject_reactive_read(&mut self, namespace: &str, field: &str) {
+        let Some(effect_id) = self.tracking_stack.last().copied() else {
+            return;
+        };
+        self.record_reactive_read(namespace, field);
+        let source_id = self.get_or_create_source_node(namespace, field);
+        self.dag.add_edge(source_id, effect_id);
+    }
+
+    /// Advance a host-owned source and dirty only effects which read it.
+    pub(crate) fn invalidate_injected_reactive_source(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        generation: Value,
+    ) {
+        let source_id = self.get_or_create_source_node(namespace, field);
+        self.mark_source_dependents_dirty(source_id, generation);
+    }
+
     fn record_symbol_read(&mut self, name: &str) {
         if let Some(reads) = self.current_effect_symbol_reads.as_mut() {
             reads.insert(name.to_string());

@@ -5044,6 +5044,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn scene_slot_test_runtime() -> (Arc<SequencerState>, Runtime) {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![("current-pattern", Value::Number(0.0))],
+            true,
+        );
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),
@@ -5128,6 +5133,123 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 crate::process::ProcessLiteral::Number(5.0),
             ])),
             "a rejected value must not alter the stored override"
+        );
+    }
+
+    #[test]
+    fn defscene_render_reads_invalidate_by_pattern_and_qualified_slot() {
+        let (_state, mut runtime) = scene_slot_test_runtime();
+        runtime
+            .eval_str(
+                r#"
+                (defscene alpha 1)
+                (defscene beta 2)
+                (effect-buffer "*scene-slot-reactivity*"
+                  (h-stack
+                    (subtree :key "alpha" (label (str alpha)))
+                    (subtree :key "beta" (label (str beta)))
+                    (subtree :key "unrelated" (label "static"))))
+                "#,
+            )
+            .expect("render scene-slot readers");
+        let initial = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(initial.len(), 1, "initial render should publish one full tree");
+        assert!(matches!(
+            initial.as_slice(),
+            [eseqlisp::vm::PendingUiUpdate::FullTree(_)]
+        ));
+
+        let one_replaced_root = |updates: Vec<eseqlisp::vm::PendingUiUpdate>, label: &str| {
+            let [eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
+                subtree_root_id, ..
+            }] = updates.as_slice()
+            else {
+                panic!(
+                    "{label} should replace exactly one subtree, got {} updates",
+                    updates.len()
+                );
+            };
+            *subtree_root_id
+        };
+
+        runtime.eval_str("(set! alpha 3)").expect("write alpha");
+        let alpha_root = one_replaced_root(
+            runtime.take_pending_buffer_widget_trees(),
+            "alpha write",
+        );
+
+        runtime.eval_str("(set! beta 4)").expect("write beta");
+        let beta_root = one_replaced_root(
+            runtime.take_pending_buffer_widget_trees(),
+            "beta write",
+        );
+        assert_ne!(
+            alpha_root, beta_root,
+            "slot writes must target distinct readers"
+        );
+
+        runtime
+            .eval_str("(set! alpha 3)")
+            .expect("repeat equal alpha write");
+        assert_eq!(
+            one_replaced_root(
+                runtime.take_pending_buffer_widget_trees(),
+                "equal alpha write",
+            ),
+            alpha_root,
+            "every authored write advances the slot generation"
+        );
+
+        let outcome = runtime.set_reactive("SEQ", "current-pattern", Value::Number(1.0));
+        assert!(outcome.effects_dirty, "pattern switch must dirty slot readers");
+        runtime.run_reactive_cycle();
+        let mut switched_roots = runtime
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .map(|update| match update {
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
+                    subtree_root_id, ..
+                } => subtree_root_id,
+                eseqlisp::vm::PendingUiUpdate::FullTree(_) => {
+                    panic!("pattern switch must not repaint the full tree")
+                }
+            })
+            .collect::<Vec<_>>();
+        switched_roots.sort_unstable();
+        let mut expected = vec![alpha_root, beta_root];
+        expected.sort_unstable();
+        assert_eq!(
+            switched_roots, expected,
+            "pattern switch should replace every scene-slot reader and no unrelated subtree"
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("(set! alpha (lambda () 9))")
+                .expect("rejected write reports false"),
+            Some(Value::Bool(false))
+        );
+        assert!(
+            runtime.take_pending_buffer_widget_trees().is_empty(),
+            "a rejected write must not invalidate the slot"
+        );
+    }
+
+    #[test]
+    fn defscene_non_render_reads_resolve_without_retaining_dependencies() {
+        let (_state, mut runtime) = scene_slot_test_runtime();
+        assert_eq!(
+            runtime
+                .eval_str("(defscene immediate 1)\nimmediate")
+                .expect("plain read"),
+            Some(Value::Number(1.0))
+        );
+        runtime
+            .eval_str("(set! immediate 2)")
+            .expect("plain write");
+        assert!(
+            runtime.take_pending_buffer_widget_trees().is_empty(),
+            "non-render reads must not create reactive UI work"
         );
     }
 

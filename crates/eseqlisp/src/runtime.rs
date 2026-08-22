@@ -811,11 +811,36 @@ pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
 
 pub struct NativeContext {
     shared: SharedBridgeState,
+    reactive_reads: Vec<ReactiveFieldKey>,
+    reactive_invalidations: Vec<(ReactiveFieldKey, Value)>,
 }
 
 impl NativeContext {
     pub(crate) fn new(shared: SharedBridgeState) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            reactive_reads: Vec::new(),
+            reactive_invalidations: Vec::new(),
+        }
+    }
+
+    /// Inject a reactive dependency for the currently rendering effect.
+    /// Calls made outside reactive rendering are intentionally inert.
+    pub fn track_reactive_read(&mut self, namespace: impl Into<String>, field: impl Into<String>) {
+        self.reactive_reads
+            .push(ReactiveFieldKey::new(namespace, field));
+    }
+
+    /// Dirty effects which previously tracked this host-owned reactive source.
+    /// `generation` must change for each semantic invalidation.
+    pub fn invalidate_reactive_source(
+        &mut self,
+        namespace: impl Into<String>,
+        field: impl Into<String>,
+        generation: Value,
+    ) {
+        self.reactive_invalidations
+            .push((ReactiveFieldKey::new(namespace, field), generation));
     }
 
     pub fn current_buffer_id(&self) -> Option<BufferId> {
@@ -1851,7 +1876,19 @@ impl Runtime {
                 (module != crate::modules::IMPLICIT_MODULE).then(|| module.to_string());
             let mut ctx = NativeContext::new(shared.clone());
             match f(args, &mut ctx) {
-                Ok(value) => value,
+                Ok(value) => {
+                    for field in ctx.reactive_reads {
+                        vm.inject_reactive_read(&field.namespace, &field.field);
+                    }
+                    for (field, generation) in ctx.reactive_invalidations {
+                        vm.invalidate_injected_reactive_source(
+                            &field.namespace,
+                            &field.field,
+                            generation,
+                        );
+                    }
+                    value
+                }
                 Err(error) => {
                     ctx.set_status(format!("Error: {error}"));
                     Value::Bool(false)
