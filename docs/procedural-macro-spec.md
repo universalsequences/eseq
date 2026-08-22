@@ -186,3 +186,9 @@ it is also the debugging story (`(macroexpand '(sig "hello" …))`).
 - Interaction with the module `override` mechanism (content-tiers spec §6.1):
   overriding a macro must invalidate compiled callers or be restricted to
   pre-first-use.
+- Whether the capture site should auto-declare value channels by scanning
+  residue for `(chan name initial)` forms. Channel-widget walks (jak's
+  `channel-walk`) still exist as expansion-time library code — they can
+  `macroexpand-all` first and emit declaration/binding calls as generated code
+  to stay pure — but residue is self-describing, so kernel-side auto-declare
+  would shrink every DSL's walk to just widget-byte-range → binding mapping.
