@@ -83,6 +83,14 @@ pub type OnsetTableShared = SliceTableShared;
 pub struct AnalysisCache {
     inner: Arc<RwLock<HashMap<i32, Arc<AnalysisEntry>>>>,
     tables: Arc<RwLock<HashMap<i32, Arc<OnsetTableShared>>>>,
+    /// Tables displaced by a re-analysis of the same buffer id. The audio
+    /// thread reads published tables through a raw pointer (`pack_ptr`), so a
+    /// table that was ever published must stay allocated for the app lifetime:
+    /// buffer ids are recycled by the audio graph, and freeing the old table on
+    /// replacement would leave a pool pointing at freed memory until the UI
+    /// thread republishes. Retiring is bounded by the number of sample loads
+    /// and each table is a small `Vec<u32>`.
+    retired_tables: Arc<RwLock<Vec<Arc<OnsetTableShared>>>>,
     generation: Arc<AtomicU64>,
 }
 
@@ -106,7 +114,9 @@ impl AnalysisCache {
             sample_len_frames,
             sample_rate,
         ));
-        self.tables.write().unwrap().insert(buffer_id, table);
+        if let Some(displaced) = self.tables.write().unwrap().insert(buffer_id, table) {
+            self.retired_tables.write().unwrap().push(displaced);
+        }
         self.inner
             .write()
             .unwrap()
@@ -128,6 +138,11 @@ impl AnalysisCache {
 
     pub fn table(&self, buffer_id: i32) -> Option<Arc<OnsetTableShared>> {
         self.tables.read().unwrap().get(&buffer_id).cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retired_table_count(&self) -> usize {
+        self.retired_tables.read().unwrap().len()
     }
 
     pub fn generation(&self) -> u64 {
@@ -313,6 +328,32 @@ mod tests {
             table.slice_starts(1.0).collect::<Vec<_>>(),
             vec![0, 400, 4_000, 4_400]
         );
+    }
+
+    #[test]
+    fn reanalyzing_a_recycled_buffer_id_keeps_the_published_table_alive() {
+        // The audio thread holds published tables as raw pointers, so a table
+        // displaced by a later analysis of the same (recycled) buffer id must
+        // not be freed.
+        let cache = AnalysisCache::new();
+        let result = AnalysisResult {
+            buffer_id: 7,
+            bpm: 120.0,
+            bpm_confidence: 1.0,
+            onsets_frames: vec![0, 128],
+            downbeat_frame: None,
+        };
+        cache.insert_ready(result.clone(), 256, 44_100);
+        let first = cache.table(7).expect("table published");
+        let first_ptr = Arc::as_ptr(&first);
+        drop(first);
+
+        cache.insert_ready(result, 512, 48_000);
+        assert_eq!(cache.retired_table_count(), 1);
+        // Safe: the retired list keeps the original allocation alive.
+        let retained = unsafe { &*first_ptr };
+        assert_eq!(retained.sample_len_frames, 256);
+        assert_eq!(cache.table(7).unwrap().sample_len_frames, 512);
     }
 
     #[test]

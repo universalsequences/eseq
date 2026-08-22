@@ -111,8 +111,9 @@ pub(super) fn resolve_slice(
     if ptr.is_null() {
         return SliceTriggerVerdict::Ignore;
     }
-    // The analysis cache owns this table for the app lifetime; runtime
-    // publication only exposes that stable Arc allocation to the audio thread.
+    // The analysis cache keeps every published table alive for the app
+    // lifetime (replaced tables are retired, never freed), so this pointer
+    // stays valid even if the buffer id is recycled and re-analyzed.
     let table = unsafe { &*ptr };
     let selector = transpose.round() as i32 - params.slice_base.round() as i32;
     if selector < 0 {
