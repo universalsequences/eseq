@@ -1,3 +1,4 @@
+use super::SOURCE_ORIGIN_NATIVE;
 use crate::compiler::{
     Chunk, Compiler, CompilerError, MacroCompilerState, MacroDef, OpCode,
 };
@@ -27,7 +28,6 @@ pub const INLINE_VALUE_END_BYTE_PROP: &str = "__inline-value-end-byte";
 pub const INLINE_WRITEBACK_CALLBACK: &str = "__inline-code-widget-writeback";
 pub const INLINE_PARENT_CALLEE_PROP: &str = "__inline-parent-callee";
 pub const INLINE_PARENT_INLET_PROP: &str = "__inline-parent-inlet";
-const SOURCE_ORIGIN_NATIVE: &str = "__source-origin";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VMError {
@@ -10159,8 +10159,40 @@ counter
         let Value::String(source) = result else {
             panic!("expected captured process source, got {result:?}");
         };
-        assert!(source.contains("(target-set! 7)"), "expanded source: {source}");
+        assert_eq!(source, "(target-set! 7)");
         assert!(!source.contains("process-kernel"), "expanded source: {source}");
+        assert!(!source.contains("__source-origin"), "expanded source: {source}");
+    }
+
+    #[test]
+    fn captured_macro_residue_is_independent_of_authoring_origin() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-process", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured process clause"),
+            ))
+        });
+        vm.eval_str("(defmacro process-kernel (value) `(target-set! ,value))")
+            .expect("define macro");
+
+        let capture = |result: Option<Value>| {
+            let Value::String(source) = result.expect("captured process source") else {
+                panic!("expected captured process source");
+            };
+            source
+        };
+        let first = capture(
+            vm.eval_str("(def-process p :run (process-kernel 7))")
+                .expect("first capture"),
+        );
+        let shifted = capture(
+            vm.eval_str("\n    (def-process p :run (process-kernel 7))")
+                .expect("shifted capture"),
+        );
+
+        assert_eq!(first, "(target-set! 7)");
+        assert_eq!(shifted, first);
     }
 
     #[test]
@@ -10186,8 +10218,9 @@ counter
             let Value::String(captured) = result else {
                 panic!("expected {name} to return captured source, got {result:?}");
             };
-            assert!(captured.contains("(target-set! 9)"), "{name}: {captured}");
+            assert_eq!(captured, "(target-set! 9)", "{name}");
             assert!(!captured.contains("process-kernel"), "{name}: {captured}");
+            assert!(!captured.contains("__source-origin"), "{name}: {captured}");
         }
     }
 
@@ -10213,8 +10246,9 @@ counter
             let Value::String(captured) = result else {
                 panic!("expected {name} to return the captured trigger, got {result:?}");
             };
-            assert!(captured.contains("(beats 4)"), "{name}: {captured}");
+            assert_eq!(captured, "(beats 4)", "{name}");
             assert!(!captured.contains("trigger-kernel"), "{name}: {captured}");
+            assert!(!captured.contains("__source-origin"), "{name}: {captured}");
         }
     }
 
@@ -10248,6 +10282,7 @@ counter
                 ":{clause}: {captured}"
             );
             assert!(!captured.contains("pattern-kernel"), ":{clause}: {captured}");
+            assert!(!captured.contains("__source-origin"), ":{clause}: {captured}");
         }
     }
 
@@ -10276,5 +10311,6 @@ counter
         };
         assert!(source.contains("(edge \"a\" \"b\")"), "expanded source: {source}");
         assert!(!source.contains("graph-edge"), "expanded source: {source}");
+        assert!(!source.contains("__source-origin"), "expanded source: {source}");
     }
 }

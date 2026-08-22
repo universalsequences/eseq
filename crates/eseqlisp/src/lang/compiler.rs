@@ -1,3 +1,4 @@
+use super::SOURCE_ORIGIN_NATIVE;
 use crate::parser::Expression;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -289,6 +290,47 @@ fn extract_zip_sources(source: &Expression) -> Option<Vec<Expression>> {
         return None;
     };
     (name == "zip").then(|| items[1..].to_vec())
+}
+
+/// Macro calls carry source-origin wrappers while they execute in the authoring VM so
+/// diagnostics can point back to the call site. Expanded forms captured as data run in a
+/// different VM, where those offsets and the authoring revision have no meaning and must not
+/// become part of the serialized expansion residue.
+fn strip_source_origin_wrappers(expression: Expression) -> Expression {
+    match expression {
+        Expression::List(mut items) => {
+            let is_source_origin = matches!(
+                items.as_slice(),
+                [Expression::Symbol(name), Expression::Number(_), Expression::Number(_), Expression::String(_), _]
+                    if name == SOURCE_ORIGIN_NATIVE
+            );
+            if is_source_origin {
+                return strip_source_origin_wrappers(items.pop().expect("matched wrapper payload"));
+            }
+            Expression::List(
+                items
+                    .into_iter()
+                    .map(strip_source_origin_wrappers)
+                    .collect(),
+            )
+        }
+        Expression::QuoteList(items) => Expression::QuoteList(
+            items
+                .into_iter()
+                .map(strip_source_origin_wrappers)
+                .collect(),
+        ),
+        Expression::Quasiquote(inner) => {
+            Expression::Quasiquote(Box::new(strip_source_origin_wrappers(*inner)))
+        }
+        Expression::Unquote(inner) => {
+            Expression::Unquote(Box::new(strip_source_origin_wrappers(*inner)))
+        }
+        Expression::UnquoteSplicing(inner) => {
+            Expression::UnquoteSplicing(Box::new(strip_source_origin_wrappers(*inner)))
+        }
+        other => other,
+    }
 }
 
 impl<'a> Compiler<'a> {
@@ -643,7 +685,8 @@ impl<'a> Compiler<'a> {
         expression: &Expression,
     ) -> Result<(), CompilerError> {
         let expanded = self.expand_macros(expression, 0)?;
-        self.compile_quoted_expression(&expanded)
+        let residue = strip_source_origin_wrappers(expanded);
+        self.compile_quoted_expression(&residue)
     }
 
     fn compile_expanded_quoted_expression_preserving_quotes(
@@ -651,7 +694,8 @@ impl<'a> Compiler<'a> {
         expression: &Expression,
     ) -> Result<(), CompilerError> {
         let expanded = self.expand_macros(expression, 0)?;
-        self.compile_quoted_expression_preserving_quotes(&expanded)
+        let residue = strip_source_origin_wrappers(expanded);
+        self.compile_quoted_expression_preserving_quotes(&residue)
     }
 
     fn compile_quoted_expression(&mut self, expression: &Expression) -> Result<(), CompilerError> {

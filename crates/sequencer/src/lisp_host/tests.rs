@@ -10172,6 +10172,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "shipped source must contain the expanded kernel form: {}",
             invocation.source
         );
+        assert!(
+            !invocation.source.contains("__source-origin"),
+            "shipped source must not contain authoring provenance: {}",
+            invocation.source
+        );
         let first = scratch
             .invoke_process_run(invocation.clone())
             .expect("invoke expanded process source");
@@ -10184,6 +10189,52 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .invoke_process_run(invocation)
             .expect("invoke already-shipped process after macro redefinition");
         assert_eq!(unchanged.target_writes[0].value, 1.0);
+    }
+
+    #[test]
+    fn process_declaration_clauses_parse_expanded_macros_without_authoring_provenance() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def c (defchan c 0))
+                (defmacro process-rate () `(beats 5))
+                (defmacro process-target () `(step-param :transpose))
+                (defmacro process-listens () `((event (channel c))))
+                (def-process expanded-declarations
+                  :every (process-rate)
+                  :target (process-target)
+                  :listen (process-listens)
+                  :on-event (lambda (value) value)
+                  :run (target-set! 1))
+                "#,
+            )
+            .expect("define process with expanded declaration clauses");
+
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "expanded-declarations")
+            .expect("expanded process definition");
+        assert_eq!(def.every, Some(crate::process::ProcessTimeExpr::Beats(5.0)));
+        assert_eq!(
+            def.ports,
+            vec![crate::process::ProcessPortDef::default_with_target(
+                crate::process::ProcessTargetHint::StepParam {
+                    param: "transpose".to_string(),
+                },
+            )],
+        );
+        assert_eq!(def.listens.len(), 1);
+        assert_eq!(def.listens[0].name, "event");
     }
 
     #[test]
