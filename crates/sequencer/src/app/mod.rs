@@ -2023,7 +2023,8 @@ impl App {
             .instrument_slots
             .get(track)
             .and_then(|slot| slot.sampler_slice_edits.read().unwrap().clone());
-        self.publish_sampler_analysis_pool_runtime(track, buffer_id, edits.as_ref());
+        let edits = self.sampler_slice_edits_for_track(track, edits.as_ref());
+        self.publish_sampler_analysis_pool_runtime(track, buffer_id, edits);
     }
 
     pub fn publish_sampler_analysis_pool_runtime(
@@ -2100,7 +2101,11 @@ impl App {
                 self.publish_sampler_analysis_pool_runtime(
                     pool,
                     sample.0,
-                    slot.instrument_slot.sampler_slice_edits.as_ref(),
+                    self.sampler_slice_edits_for_sample(
+                        slot.instrument_slot.sampler_slice_edits.as_ref(),
+                        sample.0,
+                        &sample.1,
+                    ),
                 );
             }
         }
@@ -3502,6 +3507,43 @@ impl App {
         }
     }
 
+    /// Manual slice overrides only apply to the sample they were authored
+    /// against. Sample swaps reach the sampler through several paths (project
+    /// load, scene switch, a browser drop on a live track), so consumers
+    /// resolve edits through these filters rather than trusting every writer
+    /// to have discarded them first.
+    pub fn sampler_slice_edits_for_track<'a>(
+        &self,
+        track: usize,
+        edits: Option<&'a crate::analysis::SamplerSliceEdits>,
+    ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
+        let path = self.sampler_path_for_track(track);
+        crate::analysis::edits_for_sample(
+            edits,
+            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
+        )
+    }
+
+    pub fn sampler_slice_edits_for_sample<'a>(
+        &self,
+        edits: Option<&'a crate::analysis::SamplerSliceEdits>,
+        buffer_id: i32,
+        sample_name: &str,
+    ) -> Option<&'a crate::analysis::SamplerSliceEdits> {
+        let path = self.sample_path_for_buffer(buffer_id, sample_name);
+        crate::analysis::edits_for_sample(
+            edits,
+            path.as_ref().map(|path| path.to_string_lossy()).as_deref(),
+        )
+    }
+
+    pub fn sample_path_for_buffer(&self, buffer_id: i32, sample_name: &str) -> Option<PathBuf> {
+        self.sample_buffer_path_registry
+            .get(&buffer_id)
+            .cloned()
+            .or_else(|| self.sample_path_registry.get(sample_name).cloned())
+    }
+
     pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {
         self.sampler_paths
             .get(track)
@@ -3531,11 +3573,7 @@ impl App {
         if track >= self.sampler_paths.len() {
             return;
         }
-        self.sampler_paths[track] = self
-            .sample_buffer_path_registry
-            .get(&buffer_id)
-            .cloned()
-            .or_else(|| self.sample_path_registry.get(sample_name).cloned());
+        self.sampler_paths[track] = self.sample_path_for_buffer(buffer_id, sample_name);
         let sample_hash = self.sampler_paths[track]
             .as_ref()
             .and_then(|path| crate::analysis::sample_path_hash(&path.to_string_lossy()));

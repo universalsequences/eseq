@@ -129,7 +129,7 @@ pub(super) fn rack_slot_param_map(
     Rc::new(RefCell::new(Value::Map(pmap)))
 }
 
-pub(super) fn rack_slot_param_value(
+pub(crate) fn rack_slot_param_value(
     rack: &sequencer::sequencer::RackTrackSnapshot,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
@@ -551,9 +551,13 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             .cache()
             .table(buffer_id)
             .map(|table| {
-                let table = table.with_edits(
+                let table = table.with_edits(sequencer::analysis::edits_for_sample(
                     slot.instrument_slot.sampler_slice_edits.as_ref(),
-                );
+                    sampler_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy())
+                        .as_deref(),
+                ));
                 table
                     .slice_starts(sensitivity)
                     .map(|frame| {

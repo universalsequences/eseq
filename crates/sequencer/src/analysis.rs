@@ -151,6 +151,17 @@ impl SamplerSliceEdits {
     }
 }
 
+/// Manual overrides are authored against one specific sample. Every consumer
+/// resolves them through this filter so a sample swap that never routed
+/// through the discard path still cannot apply another sample's markers.
+pub fn edits_for_sample<'a>(
+    edits: Option<&'a SamplerSliceEdits>,
+    sample_path: Option<&str>,
+) -> Option<&'a SamplerSliceEdits> {
+    let hash = sample_path.and_then(sample_path_hash)?;
+    edits.filter(|item| item.sample_hash == hash)
+}
+
 pub fn sample_path_hash(path: &str) -> Option<String> {
     let stem = std::path::Path::new(path).file_stem()?.to_str()?;
     (stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -607,6 +618,30 @@ mod tests {
             resolved.slice_starts(1.0).collect::<Vec<_>>(),
             vec![0, 50, 100, 1_000],
         );
+    }
+
+    #[test]
+    fn edits_for_sample_drops_overrides_authored_against_another_sample() {
+        let hash = "a".repeat(64);
+        let other = "b".repeat(64);
+        let edits = SamplerSliceEdits {
+            sample_hash: hash.clone(),
+            user_added: vec![50],
+            ..SamplerSliceEdits::default()
+        };
+
+        assert_eq!(
+            edits_for_sample(Some(&edits), Some(&format!("samples/{hash}.wav"))),
+            Some(&edits),
+        );
+        // A sample swap that never routed through a discard path must still not
+        // paint the previous sample's markers onto the new one.
+        assert_eq!(
+            edits_for_sample(Some(&edits), Some(&format!("samples/{other}.wav"))),
+            None,
+        );
+        assert_eq!(edits_for_sample(Some(&edits), Some("samples/kick.wav")), None);
+        assert_eq!(edits_for_sample(Some(&edits), None), None);
     }
 
     #[test]

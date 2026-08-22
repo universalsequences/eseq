@@ -33,14 +33,20 @@ pub(super) fn handle(
     let gesture = map_string(&map, "gesture").unwrap_or_else(|| "sampler-slice".to_string());
     let label = map_string(&map, "label").unwrap_or_else(|| "Edit sampler slice".to_string());
 
+    // Marker indices address the list the panel rendered, so sensitivity has to
+    // resolve exactly the way the panel resolved it (p-locks and rack macros
+    // included) or an edit lands on a neighbouring marker.
+    let plock_step = ctx.shared.selected_steps.lock().unwrap().iter().copied().min();
     let target = if let Some(slot_idx) = rack_slot {
         let snapshot = app.state.latest_scheduler_snapshot();
-        let Some(slot) = snapshot
+        let Some(rack) = snapshot
             .tracks
             .get(track)
             .and_then(|track| track.rack_track.as_ref())
-            .and_then(|rack| rack.slots.get(slot_idx))
         else {
+            return;
+        };
+        let Some(slot) = rack.slots.get(slot_idx) else {
             return;
         };
         let Some((buffer_id, sample_name, _)) = slot.sample_id.as_ref() else {
@@ -55,12 +61,14 @@ pub(super) fn handle(
         }) else {
             return;
         };
-        let sensitivity = slot
-            .instrument_slot
-            .defaults
-            .get(sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
-            .copied()
-            .unwrap_or(0.5);
+        let sensitivity = state_values::rack_panel::rack_slot_param_value(
+            rack,
+            slot_idx,
+            slot,
+            &sequencer::effects::EffectDescriptor::builtin_sampler(),
+            sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+            plock_step,
+        );
         (*buffer_id, hash, sensitivity)
     } else {
         let Some(&buffer_id) = app.graph.track_buffer_ids.get(track) else {
@@ -76,9 +84,16 @@ pub(super) fn handle(
         let Some(slot) = app.state.pattern.instrument_slots.get(track) else {
             return;
         };
-        let sensitivity = slot.defaults.get(
-            sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
-        );
+        let desc = app
+            .graph
+            .instrument_descriptors
+            .get(track)
+            .cloned()
+            .unwrap_or_else(sequencer::effects::EffectDescriptor::builtin_sampler);
+        let Some(sensitivity) = state_values::sampler_slice_sensitivity(slot, &desc, plock_step)
+        else {
+            return;
+        };
         (buffer_id, hash, sensitivity)
     };
     let Some(table) = app.sample_analysis.cache().table(target.0) else {

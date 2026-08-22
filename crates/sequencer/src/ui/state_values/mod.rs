@@ -13,7 +13,7 @@ mod param_fields_and_sync;
 mod plocks;
 mod process_and_macros;
 mod project_state;
-mod rack_panel;
+pub(crate) mod rack_panel;
 mod shared;
 mod song_state;
 mod sound_palette;

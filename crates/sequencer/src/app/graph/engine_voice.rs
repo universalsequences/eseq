@@ -475,11 +475,15 @@ impl GraphController<'_> {
                     .and_then(|track| track.rack_track.as_ref())
                     .and_then(|rack| rack.slots.get(slot_idx))
                 {
-                    if let Some(buffer_id) = slot.sample_id.as_ref().map(|sample| sample.0) {
+                    if let Some(sample) = slot.sample_id.as_ref() {
                         self.app.publish_sampler_analysis_pool_runtime(
                             pool_id,
-                            buffer_id,
-                            slot.instrument_slot.sampler_slice_edits.as_ref(),
+                            sample.0,
+                            self.app.sampler_slice_edits_for_sample(
+                                slot.instrument_slot.sampler_slice_edits.as_ref(),
+                                sample.0,
+                                &sample.1,
+                            ),
                         );
                     }
                 }

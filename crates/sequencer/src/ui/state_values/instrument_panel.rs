@@ -15,6 +15,32 @@ fn sound_binding_label(app: &app::App, track: usize) -> Option<String> {
         .or_else(|| app.track_binding_label(track))
 }
 
+/// Slice sensitivity as the sampler panel resolves it. Marker indices in
+/// `edit-sampler-slice` payloads address the list this panel rendered, so the
+/// host command has to reach the same value — p-lock and descriptor-tail
+/// fallback included — or an edit lands on the wrong marker.
+///
+/// A sampler track can be backed by a descriptor that predates the slice
+/// controls (stale/converted tracks in particular), so the default resolves
+/// through `get` and slicing is skipped entirely when the tail is absent.
+pub(crate) fn sampler_slice_sensitivity(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::EffectDescriptor,
+    plock_step: Option<usize>,
+) -> Option<f32> {
+    let sensitivity_idx = sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY;
+    let default = if sensitivity_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+        Some(slot.defaults.get(sensitivity_idx))
+    } else {
+        desc.params.get(sensitivity_idx).map(|param| param.default)
+    };
+    default.map(|default| {
+        plock_step
+            .and_then(|step| slot.plocks.get(step, sensitivity_idx))
+            .unwrap_or(default)
+    })
+}
+
 pub(crate) fn build_sampler_panel_value(
     app: &app::App,
     track: usize,
@@ -435,25 +461,13 @@ pub(crate) fn build_sampler_panel_value(
         panel_map.insert("buffer".to_string(), Rc::new(RefCell::new(buf_val)));
     }
     let buffer_id = app.graph.track_buffer_ids.get(track).copied().unwrap_or(-1);
-    let sensitivity_idx = sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY;
-    // A sampler track can be backed by a descriptor that predates the slice
-    // controls (stale/converted tracks in particular), so resolve the default
-    // through `get` and skip slicing entirely when the tail is absent.
-    let sensitivity_default = if sensitivity_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-        Some(slot.defaults.get(sensitivity_idx))
-    } else {
-        desc.params.get(sensitivity_idx).map(|param| param.default)
-    };
-    let sensitivity = sensitivity_default.map(|default| {
-        plock_step
-            .and_then(|step| slot.plocks.get(step, sensitivity_idx))
-            .unwrap_or(default)
-    });
+    let sensitivity = sampler_slice_sensitivity(slot, &desc, plock_step);
     let slice_values = sensitivity
         .and_then(|sensitivity| {
             app.sample_analysis.cache().table(buffer_id).map(|table| {
                 let edits = slot.sampler_slice_edits.read().unwrap();
-                let table = table.with_edits(edits.as_ref());
+                let table =
+                    table.with_edits(app.sampler_slice_edits_for_track(track, edits.as_ref()));
                 table
                     .slice_starts(sensitivity)
                     .map(|frame| {
