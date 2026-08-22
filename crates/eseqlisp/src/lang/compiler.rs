@@ -333,6 +333,26 @@ fn strip_source_origin_wrappers(expression: Expression) -> Expression {
     }
 }
 
+/// True when `expression` still carries a source-origin wrapper anywhere inside it, so the
+/// capture paths that quote an unexpanded form can skip cloning when there is nothing to strip.
+fn contains_source_origin_wrapper(expression: &Expression) -> bool {
+    match expression {
+        Expression::List(items) => {
+            let is_source_origin = matches!(
+                items.as_slice(),
+                [Expression::Symbol(name), Expression::Number(_), Expression::Number(_), Expression::String(_), _]
+                    if name == SOURCE_ORIGIN_NATIVE
+            );
+            is_source_origin || items.iter().any(contains_source_origin_wrapper)
+        }
+        Expression::QuoteList(items) => items.iter().any(contains_source_origin_wrapper),
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => contains_source_origin_wrapper(inner),
+        _ => false,
+    }
+}
+
 impl<'a> Compiler<'a> {
     pub fn new(expressions: Vec<Expression>) -> Self {
         Compiler {
@@ -695,6 +715,33 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         let expanded = self.expand_macros(expression, 0)?;
         let residue = strip_source_origin_wrappers(expanded);
+        self.compile_quoted_expression_preserving_quotes(&residue)
+    }
+
+    /// Quote a form that ships as data without expanding it (`def-song` rows,
+    /// `def-accumulator` bodies, `:shader`/`:doc`-style auto-quoted values). Expansion is
+    /// deliberately not run here, but the authoring VM's source-origin wrappers must still be
+    /// stripped: they embed authoring byte offsets and a per-revision hash, which would make
+    /// the shipped text depend on where in the buffer the form happened to sit.
+    fn compile_captured_quoted_expression(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        if !contains_source_origin_wrapper(expression) {
+            return self.compile_quoted_expression(expression);
+        }
+        let residue = strip_source_origin_wrappers(expression.clone());
+        self.compile_quoted_expression(&residue)
+    }
+
+    fn compile_captured_quoted_expression_preserving_quotes(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        if !contains_source_origin_wrapper(expression) {
+            return self.compile_quoted_expression_preserving_quotes(expression);
+        }
+        let residue = strip_source_origin_wrappers(expression.clone());
         self.compile_quoted_expression_preserving_quotes(&residue)
     }
 
@@ -1309,7 +1356,7 @@ impl<'a> Compiler<'a> {
                     self.emit(OpCode::PushKeyword(kw_idx));
                     arity += 1;
                     if let Some(val) = list.get(idx + 1) {
-                        self.compile_quoted_expression(val)?;
+                        self.compile_captured_quoted_expression(val)?;
                         arity += 1;
                     }
                     idx += 2;
@@ -2494,7 +2541,7 @@ impl<'a> Compiler<'a> {
                             && i + 1 < list.len()
                         {
                             // Auto-quote shader, state, and bindable expressions.
-                            self.compile_quoted_expression(&list[i + 1])?;
+                            self.compile_captured_quoted_expression(&list[i + 1])?;
                         } else if i + 1 < list.len() {
                             self.compile_expression(&list[i + 1])?;
                         }
@@ -2600,9 +2647,9 @@ impl<'a> Compiler<'a> {
                             self.compile_expanded_quoted_expression(elem)?;
                         }
                     } else if quote_next_preserving {
-                        self.compile_quoted_expression_preserving_quotes(elem)?;
+                        self.compile_captured_quoted_expression_preserving_quotes(elem)?;
                     } else {
-                        self.compile_quoted_expression(elem)?;
+                        self.compile_captured_quoted_expression(elem)?;
                     }
                     quote_next = false;
                     quote_next_preserving = false;
@@ -2610,7 +2657,7 @@ impl<'a> Compiler<'a> {
                     continue;
                 }
                 if is_def_accumulator && list.len() == 3 && i == 1 {
-                    self.compile_quoted_expression(elem)?;
+                    self.compile_captured_quoted_expression(elem)?;
                     continue;
                 }
                 if is_process_sugar {
@@ -2622,7 +2669,7 @@ impl<'a> Compiler<'a> {
                     continue;
                 }
                 if is_def_song {
-                    self.compile_quoted_expression(elem)?;
+                    self.compile_captured_quoted_expression(elem)?;
                     continue;
                 }
                 match elem {

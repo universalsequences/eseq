@@ -10196,6 +10196,42 @@ counter
     }
 
     #[test]
+    fn unexpanded_captures_still_drop_authoring_source_origins() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        for name in ["def-song", "def-accumulator"] {
+            vm.register_native(name, |args| {
+                Value::String(super::format_lisp_source(
+                    args.last().expect("captured clause"),
+                ))
+            });
+        }
+        vm.eval_str("(defmacro capture-kernel (value) `(target-set! ,value))")
+            .expect("define macro");
+
+        for source in [
+            "(def-song s (at 0 :scene (capture-kernel 1)))",
+            "(def-accumulator a (capture-kernel 1))",
+        ] {
+            let Some(Value::String(captured)) = vm.eval_str(source).expect("eval capture") else {
+                panic!("expected captured source for {source}");
+            };
+            assert!(
+                !captured.contains("__source-origin"),
+                "{source}: {captured}"
+            );
+            // Shifting the form in the buffer must not change the shipped text.
+            let shifted_source = format!("\n      {source}");
+            let Some(Value::String(shifted)) =
+                vm.eval_str(&shifted_source).expect("eval shifted capture")
+            else {
+                panic!("expected captured source for {shifted_source}");
+            };
+            assert_eq!(shifted, captured, "{source}");
+        }
+    }
+
+    #[test]
     fn process_sugar_captures_expand_macros_before_quoting() {
         let mut vm = VM::new(Vec::new());
         super::register_core_natives(&mut vm);
