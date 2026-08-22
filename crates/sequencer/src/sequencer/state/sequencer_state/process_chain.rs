@@ -92,7 +92,12 @@ impl SequencerState {
         let mut published = self.process_channel_values.lock().unwrap();
         if *published != values {
             *published = values;
+            self.process_channel_values_version
+                .fetch_add(1, Ordering::Release);
         }
+    }
+    pub fn process_channel_values_version(&self) -> u64 {
+        self.process_channel_values_version.load(Ordering::Acquire)
     }
     /// Return the scheduler-owned value of one channel, if it currently holds
     /// a value representable on the control thread.

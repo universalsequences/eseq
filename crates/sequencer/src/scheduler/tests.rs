@@ -2388,12 +2388,17 @@
                 "the scheduler drain should have consumed the queue"
             );
 
+            let version_before_process_write = state.process_channel_values_version();
             scratch_runtime
                 .as_mut()
                 .expect("scratch runtime")
                 .eval("(drive :set 1)")
                 .expect("wake the process that contends with the UI write");
             let driven = velocities(&mut scheduler, &mut scratch_runtime, 48_000);
+            assert!(
+                state.process_channel_values_version() > version_before_process_write,
+                "a changed scheduler channel snapshot must wake the event-driven UI"
+            );
             assert!(
                 !driven.is_empty(),
                 "generator emitted nothing after process write"

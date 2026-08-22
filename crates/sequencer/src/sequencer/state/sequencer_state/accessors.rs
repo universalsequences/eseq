@@ -305,6 +305,7 @@ impl SequencerState {
             published_process_authoring_version: AtomicU64::new(0),
             pending_process_channel_writes: Mutex::new(Vec::new()),
             process_channel_values: Mutex::new(HashMap::new()),
+            process_channel_values_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
             process_trace_enabled: AtomicBool::new(

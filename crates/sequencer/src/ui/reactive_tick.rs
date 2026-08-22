@@ -138,6 +138,17 @@ pub(crate) fn reactive_tick_and_render(
         &ctx.shared.ui_epoch,
     );
 
+    // Inline runtime values are polled while building a render frame. The UI
+    // is otherwise event-driven, so scheduler-owned channel changes must ask
+    // for a frame or a process-driven slider remains still until unrelated
+    // input redraws it (and appears to snap under the pointer).
+    let process_channel_values_version =
+        ctx.shared.state.process_channel_values_version();
+    if process_channel_values_version != ctx.frame.prev_process_channel_values_version {
+        ctx.frame.prev_process_channel_values_version = process_channel_values_version;
+        editor.mark_needs_redraw();
+    }
+
     // Keep plugin-delay-compensation pads in sync with whatever mutated the
     // effect chains this frame (installs, undo/redo, project load, scenes).
     // Change-detecting: writes to the graph only when the pad set differs.

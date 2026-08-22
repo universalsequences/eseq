@@ -415,6 +415,9 @@ pub struct SequencerState {
     /// widgets poll this mirror; values stay scheduler-owned and are copied
     /// here only in the thread-safe process-literal representation.
     pub(super) process_channel_values: Mutex<HashMap<String, crate::process::ProcessLiteral>>,
+    /// Incremented only when `process_channel_values` changes, so the
+    /// event-driven UI can request a frame that polls inline bindings.
+    pub(super) process_channel_values_version: AtomicU64,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pub(super) process_trace_enabled: AtomicBool,

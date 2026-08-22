@@ -116,6 +116,9 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_track_playheads: Vec<u32>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
     pub(crate) prev_current_track_playhead_visible: bool,
+    /// Scheduler → UI channel mirror generation last offered to a render
+    /// frame. A change requests a frame so inline bindings are polled.
+    pub(crate) prev_process_channel_values_version: u64,
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
     pub(crate) prev_fx_value_epoch: usize,
