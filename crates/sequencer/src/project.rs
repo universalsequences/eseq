@@ -524,7 +524,42 @@ pub struct ProjectRackEffectChain {
 }
 
 impl ProjectFile {
+    /// A pattern's rack slot knows its sample only by *name*; the path lives
+    /// on the track layout (`ProjectTrackKind::Rack`), which is the only side
+    /// that resolves it at save time. Mirror it across so slice edits can be
+    /// validated against the sample they were authored for — without it
+    /// `discard_slice_edits_for_other_sample` compares against `None` and
+    /// discards every saved marker on load. Runs on both capture and
+    /// deserialize, so projects written before the mirror existed are repaired
+    /// rather than losing their edits once more.
+    fn mirror_rack_slot_sample_paths(&mut self) {
+        let track_slot_paths: Vec<Vec<Option<String>>> = self
+            .tracks
+            .iter()
+            .map(|track| match &track.kind {
+                ProjectTrackKind::Rack { slots, .. } => {
+                    slots.iter().map(|slot| slot.sample_path.clone()).collect()
+                }
+                ProjectTrackKind::Sampler { sample_path } => vec![Some(sample_path.clone())],
+                ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
+            })
+            .collect();
+        for pattern in &mut self.patterns {
+            for (track, rack) in pattern.rack_tracks.iter_mut().enumerate() {
+                let (Some(rack), Some(paths)) = (rack.as_mut(), track_slot_paths.get(track)) else {
+                    continue;
+                };
+                for (slot_index, slot) in rack.slots.iter_mut().enumerate() {
+                    if slot.sample_path.is_none() {
+                        slot.sample_path = paths.get(slot_index).cloned().flatten();
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn normalize_device_instances(&mut self) -> Result<(), String> {
+        self.mirror_rack_slot_sample_paths();
         let mut next_id = self.device_instances.track_effects.iter()
             .flat_map(|chain| chain.instances.iter().map(|instance| instance.id))
             .chain(self.device_instances.midi_effects.iter()
@@ -5190,6 +5225,103 @@ mod tests {
         );
         // Slots saved before the IR field deserialize with ir = None.
         assert_eq!(slot.ir, None);
+    }
+
+    #[test]
+    fn rack_slot_slice_edits_survive_a_load_by_borrowing_the_track_layout_path() {
+        // The pattern-level rack slot only saves its sample *name*; the path
+        // lives on the track layout. Without the mirror, the load-time
+        // validation compares the edits' hash against `None` and throws every
+        // saved marker away.
+        let hash = crate::analysis::sample_path_hash("samples/kick.wav")
+            .expect("path hash for an ordinary sample");
+        let json = format!(
+            r#"
+        {{
+            "version": 1,
+            "name": "rack",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {{"size":0.5,"brightness":0.5,"replace":0.0}},
+            "tracks": [{{
+                "kind": "rack",
+                "routing": "broadcast",
+                "slots": [
+                    {{"instrument_type":"sampler","sample_path":"samples/kick.wav","sample_name":"kick"}}
+                ]
+            }}],
+            "custom_effects": [[]],
+            "patterns": [{{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[0,0,0,0,0,0,0,0,0,0]]],
+                "track_params": [{{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "volume": 1.0,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "max_polyphony": 4,
+                    "timebase": 2
+                }}],
+                "effect_slots": [[]],
+                "instrument_slots": [{{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{{"loaded_preset":null,"dirty":false}}],
+                "chord_snapshots": [[]],
+                "timebase_plock_snapshots": [[]],
+                "instrument_types": ["sampler"],
+                "sample_paths": ["samples/kick.wav"],
+                "sample_names": ["kick"],
+                "rack_tracks": [{{
+                    "routing": "broadcast",
+                    "slots": [{{
+                        "instrument_type": "sampler",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 0.0,
+                        "gain": 1.0,
+                        "pan": 0.0,
+                        "max_polyphony": 4,
+                        "sample_name": "kick",
+                        "instrument_slot": {{
+                            "num_params":0,
+                            "defaults":[],
+                            "plocks":[],
+                            "param_node_indices":[],
+                            "sampler_slice_edits": {{
+                                "sample_hash": "{hash}",
+                                "user_added": [4410],
+                                "user_deleted": [],
+                                "user_moved": []
+                            }}
+                        }},
+                        "effect_slots": [],
+                        "custom_effects": [],
+                        "track_sound_state": {{"loaded_preset":null,"dirty":false}}
+                    }}]
+                }}]
+            }}]
+        }}
+        "#
+        );
+
+        let project: ProjectFile = serde_json::from_str(&json).expect("deserialize rack project");
+        let saved_slot = &project.patterns[0].rack_tracks[0].as_ref().unwrap().slots[0];
+        assert_eq!(
+            saved_slot.sample_path.as_deref(),
+            Some("samples/kick.wav"),
+            "the mirror fills the pattern slot from the track layout"
+        );
+
+        let runtime = RackSlotSnapshot::from(saved_slot.clone());
+        let edits = runtime
+            .instrument_slot
+            .sampler_slice_edits
+            .expect("saved slice edits must survive the load-time validation");
+        assert_eq!(edits.user_added, vec![4410]);
+        assert_eq!(edits.sample_hash, hash);
     }
 
     #[test]

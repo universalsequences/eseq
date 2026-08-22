@@ -4441,7 +4441,7 @@ impl App {
             graph_overrides,
             instrument_types: _,
             instrument_run_modes,
-            sample_paths: _,
+            sample_paths: pattern_sample_paths,
             sample_names: _,
             rack_tracks,
             process_chains,
@@ -4550,7 +4550,18 @@ impl App {
                                     sampler_slice_edits: None,
                                 }
                             });
-                        let resolved_sample_path = self.sampler_path_for_track(track_idx);
+                        // Validate the edits against the sample *this pattern*
+                        // saved, not against whatever is bound to the live
+                        // track right now: during a load `sampler_paths` still
+                        // reflects the previous project, and across scenes two
+                        // patterns on one track routinely hold different
+                        // samples. Only fall back to the live binding when the
+                        // pattern saved no path of its own.
+                        let resolved_sample_path = pattern_sample_paths
+                            .get(track_idx)
+                            .and_then(|path| path.clone())
+                            .map(PathBuf::from)
+                            .or_else(|| self.sampler_path_for_track(track_idx));
                         let sample_path = resolved_sample_path
                             .as_ref()
                             .map(|path| path.to_string_lossy());

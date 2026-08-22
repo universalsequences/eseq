@@ -130,6 +130,14 @@ impl SamplerSliceEdits {
         if from == 0 || to == 0 || to >= sample_len_frames || from == to {
             return false;
         }
+        // `add` refuses a frame that already resolves to a marker, and a move
+        // has to refuse it for the same reason: `resolved` dedups, so landing
+        // on an existing marker collapses the two. The survivor then answers
+        // `delete_index` through the move record, silently destroying the
+        // other marker while the delete appears to do nothing.
+        if resolved.binary_search(&to).is_ok() {
+            return false;
+        }
         if let Some(position) = self.user_added.iter().position(|item| *item == from) {
             self.user_added[position] = to;
         } else if let Some(item) = self.user_moved.iter_mut().find(|item| item.to == from) {
@@ -690,6 +698,29 @@ mod tests {
         assert_eq!(edits.resolved(&detected, 400), vec![0, 100, 175, 300]);
         assert!(!edits.delete_index(0, &detected, 400));
         assert_eq!(edits.resolved(&detected, 400)[0], 0);
+    }
+
+    #[test]
+    fn moving_a_marker_onto_another_is_refused_like_adding_one_there() {
+        let mut edits = SamplerSliceEdits::for_sample_hash("abc123");
+        let detected = [0, 100, 200, 300];
+
+        // `resolved` dedups, so landing on an existing marker would collapse
+        // the two: the survivor answers `delete_index` through the move
+        // record, leaving the detected marker in place while the other one is
+        // already gone — a delete that appears to do nothing after a silent
+        // loss.
+        assert!(!edits.move_index(1, 200, &detected, 400));
+        assert_eq!(edits.resolved(&detected, 400), vec![0, 100, 200, 300]);
+
+        // Frame 0 is likewise not a landing site, and a legal move still works.
+        assert!(!edits.move_index(1, 0, &detected, 400));
+        assert!(edits.move_index(1, 150, &detected, 400));
+        assert_eq!(edits.resolved(&detected, 400), vec![0, 150, 200, 300]);
+
+        // The moved marker can be moved again, but still not onto a neighbour.
+        assert!(!edits.move_index(1, 300, &detected, 400));
+        assert_eq!(edits.resolved(&detected, 400), vec![0, 150, 200, 300]);
     }
 
     #[test]

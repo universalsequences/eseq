@@ -557,6 +557,63 @@ mod tests {
     }
 
     #[test]
+    fn rebinding_drops_host_resolved_plocks_but_a_first_sync_keeps_them() {
+        use crate::instruments::sampler::{SLOT_PARAM_SLICE_MODE, SLOT_PARAM_SLICE_SENSITIVITY};
+        let desc = EffectDescriptor::builtin_sampler();
+
+        // Host-resolved tail params (`node_param_idx == u32::MAX`) get no
+        // ParamNodeId, so the identity check that rejects every other param's
+        // stale rows is a no-op for them. A slice p-lock left behind by a
+        // previous binding would silently force the step into slice mode,
+        // rewriting start/end and muting it outright.
+        let slot = EffectSlotState::new(&desc, 100);
+        slot.set_plock(3, SLOT_PARAM_SLICE_MODE, 1.0);
+        slot.set_plock(3, SLOT_PARAM_SLICE_SENSITIVITY, 0.75);
+        slot.set_plock(3, 2, 0.25); // `start`, a real node param
+        assert_eq!(slot.plocks.get(3, SLOT_PARAM_SLICE_MODE), Some(1.0));
+
+        slot.sync_descriptor(&desc, 200);
+
+        assert_eq!(
+            slot.plocks.get(3, SLOT_PARAM_SLICE_MODE),
+            None,
+            "a slice p-lock from the previous binding must not survive a rebind"
+        );
+        assert_eq!(slot.plocks.get(3, SLOT_PARAM_SLICE_SENSITIVITY), None);
+        assert_eq!(
+            slot.plocks.get(3, 2),
+            Some(0.25),
+            "node-backed params are re-stamped, not dropped"
+        );
+
+        // An unbound slot being synced for the first time — a project load —
+        // is not a rebind: those rows are exactly what is being restored.
+        let mut loaded = EffectSlotSnapshot::new_empty();
+        loaded.num_params = desc.params.len() as u32;
+        loaded.defaults = desc.params.iter().map(|param| param.default).collect();
+        loaded.param_node_indices =
+            desc.params.iter().map(|param| param.node_param_idx).collect();
+        loaded.param_node_spans = desc.params.iter().map(|_| 1).collect();
+        loaded.plocks = (0..crate::sequencer::MAX_STEPS)
+            .map(|_| vec![None; desc.params.len()])
+            .collect();
+        loaded.plock_param_ids =
+            (0..crate::sequencer::MAX_STEPS)
+            .map(|_| vec![None; desc.params.len()])
+            .collect();
+        loaded.plocks[3][SLOT_PARAM_SLICE_MODE] = Some(1.0);
+        assert_eq!(loaded.node_id, 0, "a freshly deserialized slot is unbound");
+
+        loaded.sync_to_descriptor(&desc, 200);
+
+        assert_eq!(
+            loaded.plocks[3][SLOT_PARAM_SLICE_MODE],
+            Some(1.0),
+            "a saved slice p-lock must survive the load-time sync"
+        );
+    }
+
+    #[test]
     fn sync_descriptor_restamps_lock_identity_under_the_new_node_id() {
         let desc = EffectDescriptor {
             name: "synth".to_string(),
@@ -8923,6 +8980,27 @@ impl EffectSlotState {
     ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let preserve = old_num_params.min(desc.params.len());
+        // Same hole as the snapshot-side sync: host-resolved params carry no
+        // ParamNodeId, so nothing downstream can tell a row carried across a
+        // rebind apart from one this binding actually authored. Drop them.
+        let old_node_id = self.node_id.load(Ordering::Relaxed);
+        let rebound_to_other_node = old_node_id != 0 && old_node_id != node_id;
+        let old_param_node_indices: Vec<u32> = (0..preserve)
+            .map(|param_idx| self.resolve_node_idx(param_idx) as u32)
+            .collect();
+        let new_param_node_indices: Vec<u32> = desc
+            .params
+            .iter()
+            .map(|param| param.node_param_idx)
+            .collect();
+        let drop_host_param = |param_idx: usize| {
+            rebound_to_other_node
+                && is_host_resolved_param(
+                    &old_param_node_indices,
+                    &new_param_node_indices,
+                    param_idx,
+                )
+        };
 
         let mut saved_defaults = Vec::with_capacity(preserve);
         for param_idx in 0..preserve {
@@ -8954,15 +9032,17 @@ impl EffectSlotState {
         for step in 0..MAX_STEPS {
             for param_idx in 0..preserve {
                 match saved_plocks[step][param_idx] {
-                    Some(value) => self.set_plock(step, param_idx, value),
-                    None => self.plocks.clear_param(step, param_idx),
+                    Some(value) if !drop_host_param(param_idx) => {
+                        self.set_plock(step, param_idx, value)
+                    }
+                    _ => self.plocks.clear_param(step, param_idx),
                 }
             }
         }
         self.key_locks.clear_all();
         for (&note, row) in &saved_key_locks {
             for (param_idx, value) in row.iter().enumerate().take(preserve) {
-                if let Some(value) = value {
+                if let (Some(value), false) = (value, drop_host_param(param_idx)) {
                     self.set_key_lock(note, param_idx, *value);
                 }
             }
@@ -9310,6 +9390,15 @@ fn prepared_ir_bits_eq(
         (None, None) => true,
         _ => false,
     }
+}
+
+/// A param is host-resolved when it has no node cell behind it. Checking both
+/// the old and new descriptors means a positionally reused index is treated as
+/// host-resolved if either side ever was, which is the conservative direction:
+/// the row is dropped rather than reinterpreted as a different control.
+fn is_host_resolved_param(old: &[u32], new: &[u32], param_idx: usize) -> bool {
+    old.get(param_idx).copied() == Some(u32::MAX)
+        || new.get(param_idx).copied() == Some(u32::MAX)
 }
 
 fn f32_slice_bits_eq(left: &[f32], right: &[f32]) -> bool {
@@ -10012,6 +10101,14 @@ impl EffectSlotSnapshot {
         let old_plocks = self.plocks.clone();
         let old_key_locks = self.key_locks.clone();
         let old_tensor_params = self.tensor_params.clone();
+        let old_param_node_indices = self.param_node_indices.clone();
+        // Host-resolved params (`node_param_idx == u32::MAX`) get no
+        // `ParamNodeId`, so the identity check that rejects every other
+        // param's stale rows below is a no-op for them. Detect the rebind
+        // here instead. `self.node_id == 0` is an unbound slot being synced
+        // for the first time (project load), which is not a rebind — its
+        // saved rows are the ones we are restoring.
+        let rebound_to_other_node = self.node_id != 0 && self.node_id != node_id;
 
         self.node_id = node_id;
         self.modulator_node_id = modulator_node_id;
@@ -10061,6 +10158,18 @@ impl EffectSlotSnapshot {
         for step in 0..MAX_STEPS {
             if let Some(saved_step) = old_plocks.get(step) {
                 for param_idx in 0..preserve.min(saved_step.len()) {
+                    if rebound_to_other_node
+                        && is_host_resolved_param(
+                            &old_param_node_indices,
+                            &self.param_node_indices,
+                            param_idx,
+                        )
+                    {
+                        // A stale sampler slice p-lock left here by a previous
+                        // binding would silently force the step into slice
+                        // mode, rewriting start/end and muting it outright.
+                        continue;
+                    }
                     self.plocks[step][param_idx] = saved_step[param_idx];
                     self.plock_param_ids[step][param_idx] = self
                         .param_node_indices
@@ -10078,6 +10187,15 @@ impl EffectSlotSnapshot {
                 let Some(value) = saved_row[param_idx] else {
                     continue;
                 };
+                if rebound_to_other_node
+                    && is_host_resolved_param(
+                        &old_param_node_indices,
+                        &self.param_node_indices,
+                        param_idx,
+                    )
+                {
+                    continue;
+                }
                 self.key_locks
                     .entry(note)
                     .or_insert_with(|| vec![None; new_np])[param_idx] = Some(value);

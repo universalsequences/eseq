@@ -3574,14 +3574,23 @@ impl App {
             return;
         }
         self.sampler_paths[track] = self.sample_path_for_buffer(buffer_id, sample_name);
-        let sample_hash = self.sampler_paths[track]
+        // An unresolved path is *unknown*, not *different*. Both registries are
+        // still being populated during a load, and this wipe bypasses undo and
+        // is persisted by the next save, so a transient miss here would destroy
+        // the user's markers with no way back. Only discard on a positive
+        // mismatch.
+        let Some(sample_hash) = self.sampler_paths[track]
             .as_ref()
-            .and_then(|path| crate::analysis::sample_path_hash(&path.to_string_lossy()));
+            .and_then(|path| crate::analysis::sample_path_hash(&path.to_string_lossy()))
+        else {
+            return;
+        };
         if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
             let mut edits = slot.sampler_slice_edits.write().unwrap();
-            if edits.as_ref().is_some_and(|edits| {
-                Some(edits.sample_hash.as_str()) != sample_hash.as_deref()
-            }) {
+            if edits
+                .as_ref()
+                .is_some_and(|edits| edits.sample_hash != sample_hash)
+            {
                 *edits = None;
             }
         }

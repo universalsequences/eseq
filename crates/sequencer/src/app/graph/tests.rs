@@ -380,6 +380,61 @@
         )
     }
 
+    #[test]
+    fn an_unresolved_sample_path_keeps_slice_edits_instead_of_wiping_them() {
+        let graph = TestLiveGraph::new("unresolved-sample-path-keeps-slice-edits");
+        let mut app = test_app(&graph);
+        app.sampler_paths = vec![None];
+        let authored = crate::analysis::sample_path_hash("/samples/kick.wav")
+            .expect("path hash for an ordinary sample");
+        let edits = crate::analysis::SamplerSliceEdits {
+            sample_hash: authored.clone(),
+            user_added: vec![4410],
+            ..Default::default()
+        };
+        *app.state.pattern.instrument_slots[0]
+            .sampler_slice_edits
+            .write()
+            .unwrap() = Some(edits.clone());
+
+        // Neither registry knows this buffer yet — the ordinary situation part
+        // way through a load. Unknown is not "a different sample": this wipe
+        // bypasses undo and is persisted by the next save, so guessing here
+        // destroys the markers with no way back.
+        app.sync_sampler_path_from_sample(0, 4_242, "not-registered-yet");
+        assert_eq!(
+            *app.state.pattern.instrument_slots[0]
+                .sampler_slice_edits
+                .read()
+                .unwrap(),
+            Some(edits.clone()),
+            "an unresolved path must not discard the edits"
+        );
+
+        // Resolving to the sample they were authored against also keeps them.
+        app.register_loaded_sample_path("kick", 4_242, PathBuf::from("/samples/kick.wav"));
+        app.sync_sampler_path_from_sample(0, 4_242, "kick");
+        assert_eq!(
+            *app.state.pattern.instrument_slots[0]
+                .sampler_slice_edits
+                .read()
+                .unwrap(),
+            Some(edits),
+        );
+
+        // A positive mismatch still discards, which is the rule this guards.
+        app.register_loaded_sample_path("snare", 4_243, PathBuf::from("/samples/snare.wav"));
+        app.sync_sampler_path_from_sample(0, 4_243, "snare");
+        assert!(
+            app.state.pattern.instrument_slots[0]
+                .sampler_slice_edits
+                .read()
+                .unwrap()
+                .is_none(),
+            "loading a different sample still discards the edits"
+        );
+    }
+
     fn test_instrument_manifest() -> DGenManifest {
         DGenManifest {
             dylib_path: PathBuf::new(),
@@ -1185,6 +1240,68 @@
             fallback_count, 1,
             "the unresolvable lane should be reported as a fallback sample"
         );
+        graph.process_block();
+    }
+
+    #[test]
+    fn pattern_slice_edits_are_validated_against_the_patterns_own_sample() {
+        let graph = TestLiveGraph::new("pattern-slice-edit-sample-identity-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let bound_path = std::env::temp_dir().join(format!(
+            "eseq-slice-identity-bound-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        let other_path = std::env::temp_dir().join(format!(
+            "eseq-slice-identity-other-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        write_test_wav(&bound_path);
+        write_test_wav(&other_path);
+        let _bound_cleanup = TestProjectFile(bound_path.clone());
+        let _other_cleanup = TestProjectFile(other_path.clone());
+        app.graph_controller()
+            .add_track(&bound_path)
+            .expect("add sampler track");
+
+        let project = app
+            .capture_project("__test-pattern-slice-identity")
+            .expect("project should capture");
+        let mut pattern = project.patterns[0].clone();
+
+        // A second scene on the same track holds a *different* sample, with
+        // markers authored against it. Validating those against whatever is
+        // bound to the live track right now — still the first sample — drops
+        // them wholesale.
+        let other_hash = crate::analysis::sample_path_hash(&other_path.to_string_lossy())
+            .expect("path hash for the pattern's own sample");
+        pattern.sample_paths[0] = Some(other_path.to_string_lossy().into_owned());
+        pattern.instrument_slots[0].sampler_slice_edits =
+            Some(crate::analysis::SamplerSliceEdits {
+                sample_hash: other_hash.clone(),
+                user_added: vec![4410],
+                ..Default::default()
+            });
+        assert_ne!(
+            app.sampler_path_for_track(0),
+            Some(other_path.clone()),
+            "the live track must still be bound to the other sample for this to mean anything"
+        );
+
+        let mut sample_assets = std::collections::HashMap::new();
+        let (snapshot, _, _) = app
+            .project_pattern_into_snapshot(pattern, &mut sample_assets)
+            .expect("pattern should convert");
+
+        let edits = snapshot.instrument_slots[0]
+            .sampler_slice_edits
+            .clone()
+            .expect("edits authored against the pattern's own sample must survive");
+        assert_eq!(edits.sample_hash, other_hash);
+        assert_eq!(edits.user_added, vec![4410]);
         graph.process_block();
     }
 

@@ -109,6 +109,11 @@ struct WaveformView {
     /// runs straight through them.
     slice_active: Vec<bool>,
     active_slice: Option<usize>,
+    /// The explicitly picked slice, with no playhead fallback. `active_slice`
+    /// is a *display* value and resolves to whatever chop the playhead is in;
+    /// destructive actions must not fire on that, or Delete would remove a
+    /// marker chosen by wherever the transport happened to be.
+    selected_slice: Option<usize>,
     slice_select: bool,
     buffer: Option<WaveformBuffer>,
 }
@@ -687,15 +692,15 @@ impl WaveformView {
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
         let slices = props.get("slices").map(parse_number_list).unwrap_or_default();
         let playhead_time = props.get("playhead-time").and_then(as_number);
-        let active_slice = props
+        let selected_slice = props
             .get("active-slice")
             .and_then(as_number)
             .filter(|index| index.is_finite() && *index >= 0.0)
-            .map(|index| index.round() as usize)
-            .or_else(|| {
-                let playhead = playhead_time?;
-                slices.iter().rposition(|time| time.is_finite() && *time <= playhead)
-            });
+            .map(|index| index.round() as usize);
+        let active_slice = selected_slice.or_else(|| {
+            let playhead = playhead_time?;
+            slices.iter().rposition(|time| time.is_finite() && *time <= playhead)
+        });
         Self {
             rect,
             header_height: get_num(props, "header-height", 0.5).max(0.0) as f32,
@@ -726,6 +731,7 @@ impl WaveformView {
                 .map(|value| value != 0.0)
                 .collect(),
             active_slice,
+            selected_slice,
             slice_select: get_bool(props, "slice-select", false),
             buffer: props.get("buffer").and_then(parse_waveform_buffer),
         }
@@ -1040,7 +1046,13 @@ impl WaveformView {
                 ("index", Value::Number(index as f64)),
                 ("offset", Value::Number(self.time_at_col(local_col) - time)),
             ])),
-            HitRegion::Content { time } if modifiers.contains(KeyModifiers::SHIFT) => {
+            // Shift adds a marker only where markers exist. In classic mode a
+            // shift-press is still a range selection, and the host drops an
+            // `add` it never asked for — so gating this arm is what keeps
+            // shift-drag working on a non-sliced sampler.
+            HitRegion::Content { time }
+                if self.slice_select && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 Some(map_value(vec![
                     ("kind", keyword(":add-slice")),
                     ("time", Value::Number(time)),
@@ -1063,7 +1075,9 @@ impl WaveformView {
         modifiers: KeyModifiers,
     ) -> Option<Value> {
         match self.hit_test(local_col, local_row)? {
-            HitRegion::Content { time } if modifiers.contains(KeyModifiers::SHIFT) => {
+            HitRegion::Content { time }
+                if self.slice_select && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 Some(action_map(vec![
                     ("type", keyword(":add-slice")),
                     ("time", Value::Number(time)),
@@ -1291,7 +1305,7 @@ impl WaveformView {
             KeyCode::Esc if self.selection_range().is_some() => {
                 Some(action_map(vec![("type", keyword(":clear-selection"))]))
             }
-            KeyCode::Delete | KeyCode::Backspace => self.active_slice.map(|index| {
+            KeyCode::Delete | KeyCode::Backspace => self.selected_slice.map(|index| {
                 action_map(vec![
                     ("type", keyword(":delete-slice")),
                     ("index", Value::Number(index as f64)),
@@ -1814,10 +1828,114 @@ mod tests {
     }
 
     #[test]
+    fn shift_on_the_body_still_selects_a_range_outside_slice_mode() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        // Classic mode has no markers to add to, and the host drops an `add`
+        // it never asked for — so a shift-press here must stay a range gesture
+        // rather than silently doing nothing.
+        let Value::Map(gesture) = view
+            .begin_gesture(24.0, 2.0, KeyModifiers::SHIFT)
+            .expect("shift-press must start a range gesture in classic mode")
+        else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            gesture.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("select-range".to_string()))
+        );
+
+        let Value::Map(action) = view
+            .handle_pointer_down(24.0, 2.0, KeyModifiers::SHIFT)
+            .expect("shift-press action")
+        else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("set-cursor".to_string()))
+        );
+    }
+
+    #[test]
+    fn delete_needs_an_explicitly_selected_slice_not_the_playhead() {
+        let base = |active: Value| {
+            HashMap::from([
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(1.0)),
+                ("slice-select".to_string(), Value::Bool(true)),
+                ("playhead-time".to_string(), number_value(0.6)),
+                ("active-slice".to_string(), active),
+                (
+                    "slices".to_string(),
+                    list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+                ),
+            ])
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        let backspace = WidgetKeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // `-1` is the panel's default: nothing picked. The playhead still
+        // resolves a slice for *display*, and that must not become a delete
+        // target — which marker dies would depend on where the transport was.
+        let unpicked = base(number_value(-1.0));
+        let view = WaveformView::from_props(&unpicked, rect);
+        assert_eq!(
+            view.active_slice,
+            Some(1),
+            "the playhead fallback still drives the display highlight"
+        );
+        assert!(
+            view.handle_key(backspace).is_none(),
+            "backspace with nothing picked must not delete a marker"
+        );
+
+        // An explicit pick deletes that slice, and only that slice.
+        let picked = base(number_value(0.0));
+        let view = WaveformView::from_props(&picked, rect);
+        let Value::Map(action) = view.handle_key(backspace).expect("delete action") else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("delete-slice".to_string()))
+        );
+        assert_eq!(
+            action.get("index").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+    }
+
+    #[test]
     fn slice_markers_emit_add_move_and_delete_actions() {
         let props = HashMap::from([
             ("view-start".to_string(), number_value(0.0)),
             ("view-duration".to_string(), number_value(1.0)),
+            ("slice-select".to_string(), Value::Bool(true)),
             (
                 "slices".to_string(),
                 list_value_raw(vec![number_value(0.25), number_value(0.5)]),
