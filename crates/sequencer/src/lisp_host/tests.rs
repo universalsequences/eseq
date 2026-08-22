@@ -8788,6 +8788,78 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        let paths = crate::app_paths::app_paths();
+        authoring.set_load_root(paths.factory_root());
+        authoring.set_scoped_module_load_path(paths.module_load_roots().0);
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+        let state_for_def = Arc::clone(&state);
+        authoring.register_native_with_docs_and_keywords(
+            "def-sequencer",
+            crate::lisp_host::DEF_SEQUENCER_SIGNATURE,
+            crate::lisp_host::DEF_SEQUENCER_DOCS,
+            crate::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
+            move |args, _ctx| {
+                let published = crate::lisp_host::published_sequencer_from_def_args(&args)?;
+                let name = published.name.clone();
+                state_for_def.publish_sequencer(published);
+                Ok(Value::String(name))
+            },
+        );
+
+        authoring
+            .eval_str(
+                r#"(import alez.jaki.surface :refer (jak))
+                   (jak "hit" :16
+                     . . -
+                     -> 0 left)"#,
+            )
+            .expect("evaluate Jaki in the editor authoring runtime");
+        let published = state.published_sequencers();
+        assert_eq!(published.len(), 1, "jak must publish, not register editor-locally");
+        assert!(!published[0].tick_source.is_empty());
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scheduler
+            .eval("(import alez.jaki.surface :refer (jak))")
+            .expect("load Jaki on the scheduler VM");
+        scheduler
+            .register_published_sequencer(
+                published[0].id,
+                published[0].name.clone(),
+                Timebase::from_index(published[0].resolution as u32),
+                published[0].tick_source.clone(),
+            )
+            .expect("compile the published Jaki tick on the scheduler VM");
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&scheduler.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| scheduler.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        assert!(!out.is_empty(), "the published Jaki definition must trigger");
+        assert!(out.iter().all(|event| event.event.track == Some(0)));
+    }
+
+    #[test]
     fn jaki_surface_no_routes_defaults_to_track_zero() {
         let mut rt = jaki_runtime();
         rt.eval(

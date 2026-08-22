@@ -17,11 +17,11 @@ natives are the internal hooks `def-accumulator`/`def-midi-fx`/
 use super::super::*;
 
 pub const DEF_SEQUENCER_SIGNATURE: &str =
-    "(def-sequencer name :resolution timebase :res timebase :tick callback :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
+    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
 pub const DEF_SEQUENCER_DOCS: &str =
-    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :init is reserved for generator initialization.";
+    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization.";
 pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
-    ":resolution", ":res", ":tick", ":init", ":shape", ":energy-decay", ":reset-every",
+    ":resolution", ":res", ":tick", ":tick-source", ":init", ":shape", ":energy-decay", ":reset-every",
     ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
 ];
 pub const SEQ_EMIT_SIGNATURE: &str =
@@ -2729,7 +2729,8 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
     }
 
     let mut resolution: u8 = Timebase::Sixteenth as u8;
-    let mut tick_source: Option<String> = None;
+    let mut tick: Option<String> = None;
+    let mut prebuilt_tick_source: Option<String> = None;
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -2744,15 +2745,22 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         };
         match key.as_str() {
             "resolution" | "res" => resolution = sequencer_resolution_index(value),
-            "tick" => tick_source = Some(sequencer_tick_source(value)),
+            "tick" => tick = Some(sequencer_tick_source(value)),
+            "tick-source" => match value {
+                EValue::String(source) => prebuilt_tick_source = Some(source.clone()),
+                _ => return Err("def-sequencer :tick-source expects a string".to_string()),
+            },
             "init" => { /* reserved for future one-time init */ }
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
     }
-    let Some(tick_source) = tick_source else {
-        return Err("def-sequencer requires :tick".to_string());
-    };
+    if tick.is_some() && prebuilt_tick_source.is_some() {
+        return Err("def-sequencer accepts only one of :tick and :tick-source".to_string());
+    }
+    let tick_source = tick
+        .or(prebuilt_tick_source)
+        .ok_or_else(|| "def-sequencer requires :tick".to_string())?;
     Ok(PublishedSequencer {
         id: stable_sequencer_id(&name),
         name,

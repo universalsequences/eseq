@@ -93,7 +93,7 @@
         ;; Build scheduler source after the walk, rather than letting the compiler
         ;; auto-quote the unrewritten source as `def-sequencer` would. `source`
         ;; provides canonical escaping for every authored literal in the body.
-        (__register-sequencer name
+        (def-sequencer name
           :resolution res
           :tick-source
             (str "(do (alez.jaki.core/init " (source res)
