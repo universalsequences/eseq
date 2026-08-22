@@ -3966,23 +3966,55 @@ impl VM {
         self.macros.keys().cloned().collect()
     }
 
+    /// Reader-syntax wrappers (`'x`, `` `x ``, `,x`, `,@x`) have no `Value`
+    /// counterpart, so forms-as-data uses their canonical two-element list
+    /// spelling. `macro_value_to_expression` recognises the same spellings, so
+    /// a form that an expander merely passes through round-trips unchanged.
+    const MACRO_READER_TAGS: [(&'static str, fn(Box<Expression>) -> Expression); 3] = [
+        ("quasiquote", Expression::Quasiquote),
+        ("unquote", Expression::Unquote),
+        ("unquote-splicing", Expression::UnquoteSplicing),
+    ];
+
+    fn macro_reader_form(tag: &str, inner: Value) -> Value {
+        Value::List(vec![
+            Rc::new(RefCell::new(Value::Symbol(tag.to_string()))),
+            Rc::new(RefCell::new(inner)),
+        ])
+    }
+
     fn expression_to_macro_value(expr: &Expression) -> Value {
         match expr {
-            Expression::Symbol(symbol) | Expression::QuoteSymbol(symbol) => {
-                Value::Symbol(symbol.clone())
+            Expression::Symbol(symbol) => Value::Symbol(symbol.clone()),
+            Expression::QuoteSymbol(symbol) => {
+                Self::macro_reader_form("quote", Value::Symbol(symbol.clone()))
             }
             Expression::Keyword(keyword) => Value::Keyword(keyword.clone()),
             Expression::String(string) => Value::String(string.clone()),
             Expression::Number(number) => Value::Number(*number),
-            Expression::List(items) | Expression::QuoteList(items) => Value::List(
+            Expression::List(items) => Value::List(
                 items
                     .iter()
                     .map(|item| Rc::new(RefCell::new(Self::expression_to_macro_value(item))))
                     .collect(),
             ),
-            Expression::Quasiquote(inner) => Self::expression_to_macro_value(inner),
-            Expression::Unquote(inner) | Expression::UnquoteSplicing(inner) => {
-                Self::expression_to_macro_value(inner)
+            Expression::QuoteList(items) => Self::macro_reader_form(
+                "quote",
+                Value::List(
+                    items
+                        .iter()
+                        .map(|item| Rc::new(RefCell::new(Self::expression_to_macro_value(item))))
+                        .collect(),
+                ),
+            ),
+            Expression::Quasiquote(inner) => {
+                Self::macro_reader_form("quasiquote", Self::expression_to_macro_value(inner))
+            }
+            Expression::Unquote(inner) => {
+                Self::macro_reader_form("unquote", Self::expression_to_macro_value(inner))
+            }
+            Expression::UnquoteSplicing(inner) => {
+                Self::macro_reader_form("unquote-splicing", Self::expression_to_macro_value(inner))
             }
         }
     }
@@ -4004,6 +4036,29 @@ impl VM {
                     Expression::List(items) => Ok(Expression::QuoteList(items)),
                     Expression::Symbol(symbol) => Ok(Expression::QuoteSymbol(symbol)),
                     other => Ok(other),
+                }
+            }
+            Value::List(items) if items.len() == 2 => {
+                let tag = match &*items[0].borrow() {
+                    Value::Symbol(symbol) => Some(symbol.clone()),
+                    _ => None,
+                };
+                let wrapper = tag.and_then(|tag| {
+                    Self::MACRO_READER_TAGS
+                        .iter()
+                        .find(|(name, _)| *name == tag)
+                        .map(|(_, wrap)| *wrap)
+                });
+                match wrapper {
+                    Some(wrap) => Ok(wrap(Box::new(Self::macro_value_to_expression(
+                        &items[1].borrow(),
+                    )?))),
+                    None => Ok(Expression::List(
+                        items
+                            .iter()
+                            .map(|item| Self::macro_value_to_expression(&item.borrow()))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )),
                 }
             }
             Value::List(items) => Ok(Expression::List(
@@ -8743,6 +8798,76 @@ counter
     }
 
     #[test]
+    fn procedural_macro_preserves_quoted_arguments() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro wrap-arg (form) `(list ,form))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(wrap-arg 'foo)"),
+            Ok(Some(Value::List(vec![Rc::new(RefCell::new(Value::Symbol(
+                "foo".to_string()
+            )))])))
+        );
+        assert_eq!(
+            vm.eval_str("(wrap-arg '(1 2))"),
+            Ok(Some(Value::List(vec![Rc::new(RefCell::new(Value::List(
+                vec![
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                    Rc::new(RefCell::new(Value::Number(2.0))),
+                ]
+            )))])))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_sees_quoted_arguments_as_quote_forms() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        // `'foo` is data spelled `(quote foo)`, so an expander that takes it
+        // apart with `first`/`nth` sees the canonical two-element list.
+        vm.eval_str("(defmacro head-of (form) `(quote ,(first form)))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(head-of 'foo)"),
+            Ok(Some(Value::Symbol("quote".to_string())))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_rest_arguments_keep_their_quoting() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro collect-forms (&rest forms) `(list ,@forms))")
+            .expect("macro definition");
+
+        assert_eq!(
+            vm.eval_str("(collect-forms 'a '(1) 2)"),
+            Ok(Some(Value::List(vec![
+                Rc::new(RefCell::new(Value::Symbol("a".to_string()))),
+                Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(
+                    Value::Number(1.0)
+                ))]))),
+                Rc::new(RefCell::new(Value::Number(2.0))),
+            ])))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_expands_through_another_macro() {
+        let mut vm = VM::new(Vec::new());
+
+        assert_eq!(
+            vm.eval_str(
+                "(defmacro add-one (form) `(+ ,form 1))\n\
+                 (defmacro add-one-outer (form) `(add-one ,form))\n\
+                 (add-one-outer 5)",
+            ),
+            Ok(Some(Value::Number(6.0)))
+        );
+    }
+
+    #[test]
     fn variadic_macro_splices_rest_arguments() {
         let mut vm = VM::new(Vec::new());
         vm.eval_str("(defmacro collect (head &rest tail) `(list ,head ,@tail))")
@@ -8795,13 +8920,17 @@ counter
     }
 
     #[test]
-    fn macro_can_splice_a_quoted_list_parameter() {
+    fn macro_can_splice_a_list_parameter() {
         let mut vm = VM::new(Vec::new());
         vm.eval_str("(defmacro unwrap (items) `(list ,@items))")
             .expect("macro definition");
 
+        // Under procedural expansion a parameter holds the argument *form*, so
+        // the spliceable value is the bare list. `'(1 2 3)` is the two-element
+        // form `(quote (1 2 3))` and splices as such — see
+        // `procedural_macro_sees_quoted_arguments_as_quote_forms`.
         let result = vm
-            .eval_str("(unwrap '(1 2 3))")
+            .eval_str("(unwrap (1 2 3))")
             .expect("splicing macro call");
         assert_eq!(
             result,
