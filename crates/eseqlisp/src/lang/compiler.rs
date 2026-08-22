@@ -211,6 +211,7 @@ pub struct Compiler<'a> {
     next_macro_expansion_ordinal: usize,
     compiling_macro_body: usize,
     active_expansion_origin: Option<ExpansionOrigin>,
+    compiling_source_origin_payload: bool,
 }
 
 fn is_widget_name(name: &str) -> bool {
@@ -420,6 +421,7 @@ impl<'a> Compiler<'a> {
             next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
             active_expansion_origin: None,
+            compiling_source_origin_payload: false,
         }
     }
 
@@ -463,6 +465,7 @@ impl<'a> Compiler<'a> {
             next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
             active_expansion_origin: None,
+            compiling_source_origin_payload: false,
         }
     }
 
@@ -2126,16 +2129,20 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        // Cleared on entry so it only suppresses re-interception of the single form the
+        // branch below re-wraps; nested macro calls inside it are still intercepted.
+        let reentered_source_origin = std::mem::take(&mut self.compiling_source_origin_payload);
         // Calls parsed from authored source are wrapped with their byte range and revision.
         // Keep the wrapper around the expansion while compiling so both compile-time failures
         // and later execution of generated closures retain the macro call site's provenance.
-        if let [
-            Expression::Symbol(origin_native),
-            Expression::Number(start),
-            Expression::Number(end),
-            Expression::String(revision),
-            payload @ Expression::List(payload_items),
-        ] = list
+        if !reentered_source_origin
+            && let [
+                Expression::Symbol(origin_native),
+                Expression::Number(start),
+                Expression::Number(end),
+                Expression::String(revision),
+                payload @ Expression::List(payload_items),
+            ] = list
             && origin_native == SOURCE_ORIGIN_NATIVE
             && let Some(Expression::Symbol(macro_name)) = payload_items.first()
             && self.lookup_macro(macro_name).is_some()
@@ -2160,9 +2167,20 @@ impl<'a> Compiler<'a> {
                     origin.diagnostic()
                 ))
             })?;
+            // Re-wrap the expansion in the runtime `__source-origin` call: it is what stamps
+            // widget maps produced by the residue with the macro call site's span/revision.
+            let rewrapped = Expression::List(vec![
+                Expression::Symbol(SOURCE_ORIGIN_NATIVE.to_string()),
+                Expression::Number(*start),
+                Expression::Number(*end),
+                Expression::String(revision.clone()),
+                expanded,
+            ]);
             let previous_origin = self.active_expansion_origin.replace(origin.clone());
             self.emit(OpCode::ExpansionOriginBegin(origin.clone()));
-            let result = self.compile_expression(&expanded);
+            self.compiling_source_origin_payload = true;
+            let result = self.compile_expression(&rewrapped);
+            self.compiling_source_origin_payload = false;
             if result.is_ok() {
                 self.emit(OpCode::ExpansionOriginEnd);
             }

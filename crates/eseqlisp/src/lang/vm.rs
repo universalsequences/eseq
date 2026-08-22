@@ -5927,9 +5927,10 @@ impl VM {
         result: Result<Option<Value>, VMError>,
         origin_depth: usize,
     ) -> Result<Option<Value>, VMError> {
-        let origin = self.active_execution_origins.get(origin_depth..).and_then(|origins| {
-            origins.last().cloned()
-        });
+        let origin = self
+            .active_execution_origins
+            .get(origin_depth..)
+            .and_then(|origins| origins.last().cloned());
         self.active_execution_origins.truncate(origin_depth);
         result.map_err(|error| match (origin, &error) {
             (Some(_), VMError::ExpandedFrom { .. }) => error,
@@ -9140,7 +9141,10 @@ counter
         let VMError::ExpandedFrom { error, diagnostic } = error else {
             panic!("expected expansion origin, got {error:?}");
         };
-        assert_eq!(*error, VMError::UnknownVariable("missing-generated-value".to_string()));
+        assert_eq!(
+            *error,
+            VMError::UnknownVariable("missing-generated-value".to_string())
+        );
         assert!(diagnostic.contains(&format!("expanded from `broken` at buf#9:{start}")));
         assert!(diagnostic.contains("revision "));
     }
@@ -9162,10 +9166,37 @@ counter
         let VMError::ExpandedFrom { error, diagnostic } = error else {
             panic!("expected expansion origin, got {error:?}");
         };
-        assert_eq!(*error, VMError::UnknownVariable("missing-generated-value".to_string()));
-        assert!(diagnostic.contains(&format!(
-            "expanded from `broken-later` at scratch:{start}"
-        )));
+        assert_eq!(
+            *error,
+            VMError::UnknownVariable("missing-generated-value".to_string())
+        );
+        assert!(diagnostic.contains(&format!("expanded from `broken-later` at scratch:{start}")));
+    }
+
+    #[test]
+    fn expansion_origins_do_not_leak_across_generated_closure_calls() {
+        // The provenance opcodes are emitted per generated chunk; an unbalanced
+        // Begin/End would leave stale origins on the stack and attribute later,
+        // unrelated failures to a macro that had nothing to do with them.
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str(
+            "(defmacro make-adder () '(lambda (x) (+ x 1)))\n\
+             (def add1 (make-adder))",
+        )
+        .expect("define generated closure");
+
+        for _ in 0..4 {
+            assert_eq!(vm.eval_str("(add1 1)"), Ok(Some(Value::Number(2.0))));
+            assert!(vm.active_execution_origins.is_empty());
+        }
+
+        let error = vm
+            .eval_str("nowhere-defined")
+            .expect_err("plain lookup must fail");
+        assert_eq!(
+            error,
+            VMError::UnknownVariable("nowhere-defined".to_string())
+        );
     }
 
     #[test]
@@ -9177,9 +9208,12 @@ counter
         assert_eq!(vm.eval_str(source), Err(VMError::CompileError));
 
         let diagnostics = vm.take_source_load_errors();
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic.contains(&format!(
-            "expanded from `broken` at scratch:{start}"
-        ))), "diagnostics: {diagnostics:?}");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.contains(&format!("expanded from `broken` at scratch:{start}"))
+            }),
+            "diagnostics: {diagnostics:?}"
+        );
     }
 
     #[test]
