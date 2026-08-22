@@ -9290,6 +9290,92 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn shipped_scene_writes_ship_as_by_name_sets() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        let publish_state = Arc::clone(&state);
+        authoring.register_native("def-sequencer", move |args, _ctx| {
+            let published = super::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            publish_state.publish_sequencer(published);
+            Ok(Value::String(name))
+        });
+        authoring
+            .eval_str(
+                r#"(defscene counter 0.25)
+                   (def-sequencer "counting-reader" :resolution :16
+                     :tick (do (set! counter (+ counter 0.25))
+                               (seq-emit :track 0 :vel counter)))"#,
+            )
+            .expect("publish a scene-writing sequencer");
+
+        let published = state.published_sequencers();
+        let writer = published
+            .iter()
+            .find(|definition| definition.name == "counting-reader")
+            .expect("writer publication");
+        assert!(
+            writer
+                .tick_source
+                .contains("(__defscene-set \"counter\" (+ (__defscene-resolve \"counter\") 0.25))"),
+            "a scene write must ship as a by-name set: {}",
+            writer.tick_source
+        );
+
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scheduler
+            .eval("(defscene counter 0.25)")
+            .expect("register the declaration default in the scheduler VM");
+        scheduler
+            .register_published_sequencer(
+                writer.id,
+                writer.name.clone(),
+                Timebase::from_index(writer.resolution as u32),
+                writer.tick_source.clone(),
+            )
+            .expect("compile the published writer");
+
+        let invoke = |scheduler: &mut ScratchControlRuntime| {
+            let definitions = scheduler.sequencer_defs();
+            let index = definitions
+                .iter()
+                .position(|definition| definition.name == "counting-reader")
+                .expect("registered sequencer");
+            scheduler
+                .invoke_sequencer_tick(
+                    index,
+                    crate::generator::GeneratorTickInput {
+                        id: definitions[index].id,
+                        generator_index: index,
+                        tick_index: 0,
+                        beat: 0.0,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: HashMap::new(),
+                    },
+                )
+                .expect("invoke sequencer tick")
+                .emitted[0]
+                .resolved
+                .velocity
+        };
+
+        // The write lands in the live slot bank; the read still observes the
+        // boundary snapshot until the next boundary republishes it.
+        assert!((invoke(&mut scheduler) - 0.25).abs() < 1e-6);
+        scheduler.set_scene_slot_snapshot(state.latest_scheduler_snapshot().scene_slots.clone());
+        assert!((invoke(&mut scheduler) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut authoring = jaki_authoring_runtime(Arc::clone(&state));

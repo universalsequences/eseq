@@ -270,6 +270,20 @@ fn extract_function_definition(
     }
 }
 
+/// Forms whose second element is the name being defined rather than a value
+/// read, for the shipped-body scene lowering.
+const DEFINITION_NAME_FORMS: &[&str] = &[
+    "def",
+    "def-accumulator",
+    "def-node",
+    "def-process",
+    "defchan",
+    "defcustom",
+    "defmacro",
+    "defscene",
+    "defstate",
+];
+
 fn collect_pattern_symbols(pattern: &Expression, symbols: &mut Vec<String>) {
     match pattern {
         Expression::Symbol(name) => symbols.push(name.clone()),
@@ -811,7 +825,13 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         let expanded = self.expand_macros(expression, 0)?;
         let residue = strip_source_origin_wrappers(expanded);
-        let lowered = self.lower_scene_references_for_shipping(&residue, &[]);
+        // Nothing to lower until a `defscene` is in scope, and the vast
+        // majority of shipped bodies are in that state; skip the rebuild.
+        let lowered = if self.scene_bindings.is_empty() {
+            residue
+        } else {
+            self.lower_scene_references_for_shipping(&residue, &[])
+        };
         if preserve_quotes {
             self.compile_quoted_expression_preserving_quotes(&lowered)
         } else {
@@ -902,6 +922,43 @@ impl<'a> Compiler<'a> {
                 }
                 let mut lowered = items[..3].to_vec();
                 lowered.extend(items[3..].iter().map(|body| lower(body, &body_bound)));
+                Expression::List(lowered)
+            }
+            // A scene write ships as the by-name setter. Lowering the target
+            // as a read would emit `(set! (__defscene-resolve …) …)`, which is
+            // not an assignment target the scheduler compiler accepts.
+            Expression::List(items)
+                if items.len() == 3
+                    && matches!(items.first(), Some(Expression::Symbol(name)) if name == "set!") =>
+            {
+                let value = lower(&items[2], bound);
+                match &items[1] {
+                    Expression::Symbol(name) if !bound.iter().any(|local| local == name) => {
+                        match self.scene_binding_for(name) {
+                            Some(key) => Expression::List(vec![
+                                Expression::Symbol("__defscene-set".to_string()),
+                                Expression::String(key),
+                                value,
+                            ]),
+                            None => {
+                                Expression::List(vec![items[0].clone(), items[1].clone(), value])
+                            }
+                        }
+                    }
+                    target => Expression::List(vec![items[0].clone(), lower(target, bound), value]),
+                }
+            }
+            // Definition forms name what they define; that symbol is a binding
+            // occurrence, not a free read. (The `def` arm above already covers
+            // the named-function shape, which additionally binds parameters.)
+            Expression::List(items)
+                if items.len() >= 2
+                    && matches!(items.first(), Some(Expression::Symbol(name))
+                        if DEFINITION_NAME_FORMS.contains(&name.as_str()))
+                    && matches!(items.get(1), Some(Expression::Symbol(_))) =>
+            {
+                let mut lowered = items[..2].to_vec();
+                lowered.extend(items[2..].iter().map(|item| lower(item, bound)));
                 Expression::List(lowered)
             }
             Expression::List(items) => {
