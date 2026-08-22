@@ -5044,11 +5044,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn scene_slot_test_runtime() -> (Arc<SequencerState>, Runtime) {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![("current-pattern", Value::Number(0.0))],
-            true,
-        );
+        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),
@@ -5147,79 +5143,86 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 (effect-buffer "*scene-slot-reactivity*"
                   (h-stack
                     (subtree :key "alpha" (label (str alpha)))
+                    (subtree :key "alpha-mirror" (label (str alpha)))
                     (subtree :key "beta" (label (str beta)))
                     (subtree :key "unrelated" (label "static"))))
                 "#,
             )
             .expect("render scene-slot readers");
         let initial = runtime.take_pending_buffer_widget_trees();
-        assert_eq!(initial.len(), 1, "initial render should publish one full tree");
-        assert!(matches!(
-            initial.as_slice(),
-            [eseqlisp::vm::PendingUiUpdate::FullTree(_)]
-        ));
+        assert!(
+            matches!(
+                initial.as_slice(),
+                [eseqlisp::vm::PendingUiUpdate::FullTree(_)]
+            ),
+            "initial render should publish exactly one full tree, got {} updates",
+            initial.len()
+        );
 
-        let one_replaced_root = |updates: Vec<eseqlisp::vm::PendingUiUpdate>, label: &str| {
-            let [eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
-                subtree_root_id, ..
-            }] = updates.as_slice()
-            else {
-                panic!(
-                    "{label} should replace exactly one subtree, got {} updates",
-                    updates.len()
-                );
-            };
-            *subtree_root_id
+        // Every scene-slot invalidation must arrive as targeted subtree
+        // replacements: a full-tree update here is the whole-UI-repaint
+        // failure mode this seam exists to prevent.
+        let replaced_roots = |updates: Vec<eseqlisp::vm::PendingUiUpdate>, label: &str| {
+            let mut roots = updates
+                .into_iter()
+                .map(|update| match update {
+                    eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
+                        subtree_root_id, ..
+                    } => subtree_root_id,
+                    eseqlisp::vm::PendingUiUpdate::FullTree(_) => {
+                        panic!("{label} must not repaint the full tree")
+                    }
+                })
+                .collect::<Vec<_>>();
+            roots.sort_unstable();
+            roots
         };
 
         runtime.eval_str("(set! alpha 3)").expect("write alpha");
-        let alpha_root = one_replaced_root(
-            runtime.take_pending_buffer_widget_trees(),
-            "alpha write",
+        let alpha_roots = replaced_roots(runtime.take_pending_buffer_widget_trees(), "alpha write");
+        assert_eq!(
+            alpha_roots.len(),
+            2,
+            "a write must replace every subtree reading that slot and nothing else"
         );
 
         runtime.eval_str("(set! beta 4)").expect("write beta");
-        let beta_root = one_replaced_root(
-            runtime.take_pending_buffer_widget_trees(),
-            "beta write",
+        let beta_roots = replaced_roots(runtime.take_pending_buffer_widget_trees(), "beta write");
+        assert_eq!(
+            beta_roots.len(),
+            1,
+            "a write must not touch subtrees reading a different slot"
         );
-        assert_ne!(
-            alpha_root, beta_root,
-            "slot writes must target distinct readers"
+        assert!(
+            !alpha_roots.contains(&beta_roots[0]),
+            "slot writes must target disjoint readers"
         );
 
         runtime
             .eval_str("(set! alpha 3)")
             .expect("repeat equal alpha write");
         assert_eq!(
-            one_replaced_root(
+            replaced_roots(
                 runtime.take_pending_buffer_widget_trees(),
                 "equal alpha write",
             ),
-            alpha_root,
-            "every authored write advances the slot generation"
+            alpha_roots,
+            "every authored write advances the slot generation, and re-rendered \
+             subtrees keep their injected dependency"
         );
 
         let outcome = runtime.set_reactive("SEQ", "current-pattern", Value::Number(1.0));
-        assert!(outcome.effects_dirty, "pattern switch must dirty slot readers");
+        assert!(
+            outcome.effects_dirty,
+            "pattern switch must dirty slot readers"
+        );
         runtime.run_reactive_cycle();
-        let mut switched_roots = runtime
-            .take_pending_buffer_widget_trees()
-            .into_iter()
-            .map(|update| match update {
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
-                    subtree_root_id, ..
-                } => subtree_root_id,
-                eseqlisp::vm::PendingUiUpdate::FullTree(_) => {
-                    panic!("pattern switch must not repaint the full tree")
-                }
-            })
-            .collect::<Vec<_>>();
-        switched_roots.sort_unstable();
-        let mut expected = vec![alpha_root, beta_root];
+        let mut expected = alpha_roots.clone();
+        expected.extend_from_slice(&beta_roots);
         expected.sort_unstable();
         assert_eq!(
-            switched_roots, expected,
+            replaced_roots(runtime.take_pending_buffer_widget_trees(), "pattern switch"),
+            expected,
             "pattern switch should replace every scene-slot reader and no unrelated subtree"
         );
 
