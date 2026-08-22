@@ -6379,7 +6379,7 @@ impl VM {
         self.mark_source_dependents_dirty(source_id, current);
     }
 
-    fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
+    pub(crate) fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
         if self.processing_reactive {
             return Ok(());
         }

@@ -5084,6 +5084,37 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn scene_slot_authoring_write_queues_stable_history_payload() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let scene = state.current_scene_id().expect("current scene identity");
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(defscene amount 0.1)\n(set! amount 0.75)")
+            .expect("authoring write");
+        let mut editor = eseqlisp::Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let commands = editor.drain_host_commands();
+        let payload = commands
+            .iter()
+            .find_map(|command| match command {
+                eseqlisp::HostCommand::Custom { name, payload }
+                    if name == "scene-slot-history-write" => Some(payload),
+                _ => None,
+            })
+            .expect("scene-slot history command");
+        let Value::Map(payload) = payload else {
+            panic!("history payload must be a map");
+        };
+        assert_eq!(
+            &*payload["scene-id"].borrow(),
+            &Value::String(scene.0.to_string())
+        );
+        assert_eq!(&*payload["slot"].borrow(), &Value::String("amount".to_string()));
+        assert_eq!(&*payload["old-present"].borrow(), &Value::Bool(false));
+        assert_eq!(&*payload["new"].borrow(), &Value::Number(0.75));
+    }
+
+    #[test]
     fn defscene_bare_read_and_set_lower_to_current_pattern_slot_storage() {
         let (state, mut runtime) = scene_slot_test_runtime();
 

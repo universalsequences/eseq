@@ -438,6 +438,7 @@ impl ScratchControlRuntime {
             &mut runtime,
             Arc::clone(&state),
             Some(Arc::clone(&scene_slots)),
+            false,
         );
         register_process_natives(
             &mut runtime,

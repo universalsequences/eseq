@@ -91,6 +91,31 @@ impl SceneSlotStore {
         }
     }
 
+    /// Replace an override and advance this slot's generation. `None` removes
+    /// the override so history can faithfully restore declaration fallback;
+    /// it is not equivalent to storing the declaration's current default.
+    pub fn set_override(
+        &mut self,
+        name: impl Into<String>,
+        value: Option<ProcessLiteral>,
+    ) -> Result<u64, String> {
+        let name = name.into();
+        if let Some(value) = &value {
+            validate_scene_slot_literal(&name, value)?;
+        }
+        let epoch = next_scene_slot_epoch();
+        match value {
+            Some(value) => {
+                self.values.insert(name.clone(), value);
+            }
+            None => {
+                self.values.remove(&name);
+            }
+        }
+        self.epochs.insert(name, epoch);
+        Ok(epoch)
+    }
+
     /// Store a validated literal and advance this slot's generation even when
     /// the new value compares equal to the old value. Consumers may therefore
     /// safely invalidate on every authored write rather than memoizing the
@@ -100,12 +125,7 @@ impl SceneSlotStore {
         name: impl Into<String>,
         value: ProcessLiteral,
     ) -> Result<u64, String> {
-        let name = name.into();
-        validate_scene_slot_literal(&name, &value)?;
-        let epoch = next_scene_slot_epoch();
-        self.values.insert(name.clone(), value);
-        self.epochs.insert(name, epoch);
-        Ok(epoch)
+        self.set_override(name, Some(value))
     }
 
     /// Convert and store a VM value, reporting an authoring error that names

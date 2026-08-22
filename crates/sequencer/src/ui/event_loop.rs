@@ -609,12 +609,48 @@ pub(crate) fn run_event_loop(
                             app.ui.recording = false;
                         }
                         let track_count_before_replay = app.tracks.len();
+                        let scene_slot_replay = match shortcut {
+                            SequencerHistoryShortcut::Undo => app.history.next_undo_patch(),
+                            SequencerHistoryShortcut::Redo => app.history.next_redo_patch(),
+                        }
+                        .and_then(|patch| match patch {
+                            app::history::EditPatch::SceneSlot(patch) => {
+                                Some((patch.scene, patch.name.clone()))
+                            }
+                            _ => None,
+                        });
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => app::edit::undo(&mut app),
                             SequencerHistoryShortcut::Redo => app::edit::redo(&mut app),
                         };
-                        let message = match replay {
-                            app::history::HistoryReplay::Applied(result) => {
+                        let message = match (replay, scene_slot_replay) {
+                            (
+                                app::history::HistoryReplay::Applied(result),
+                                Some((scene, name)),
+                            ) => {
+                                if shared.state.current_scene_id() == Some(scene) {
+                                    let epoch = shared.state.current_scene_slots().epoch(&name);
+                                    match editor.runtime_mut().invalidate_reactive_source(
+                                        "__scene-slot",
+                                        &name,
+                                        Value::String(epoch.to_string()),
+                                    ) {
+                                        Ok(()) => editor.refresh_runtime_side_effects(),
+                                        Err(error) => editor.handle_host_event(HostEvent::Error(
+                                            format!("Scene-slot history repaint failed: {error:?}"),
+                                        )),
+                                    }
+                                }
+                                match shortcut {
+                                    SequencerHistoryShortcut::Undo => {
+                                        format!("Undid {}", result.label)
+                                    }
+                                    SequencerHistoryShortcut::Redo => {
+                                        format!("Redid {}", result.label)
+                                    }
+                                }
+                            }
+                            (app::history::HistoryReplay::Applied(result), None) => {
                                 let topology_changed =
                                     app.tracks.len() != track_count_before_replay;
                                 if !topology_changed {
@@ -729,11 +765,11 @@ pub(crate) fn run_event_loop(
                                     }
                                 }
                             }
-                            app::history::HistoryReplay::Unavailable => match shortcut {
+                            (app::history::HistoryReplay::Unavailable, _) => match shortcut {
                                 SequencerHistoryShortcut::Undo => "Nothing to undo".to_string(),
                                 SequencerHistoryShortcut::Redo => "Nothing to redo".to_string(),
                             },
-                            app::history::HistoryReplay::Failed(error) => match shortcut {
+                            (app::history::HistoryReplay::Failed(error), _) => match shortcut {
                                 SequencerHistoryShortcut::Undo => {
                                     format!("Could not undo: {error:?}")
                                 }

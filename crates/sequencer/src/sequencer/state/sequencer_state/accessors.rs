@@ -393,7 +393,7 @@ impl SequencerState {
         self.current_pattern_index()
     }
 
-    pub(crate) fn current_scene_id(&self) -> Option<SceneId> {
+    pub fn current_scene_id(&self) -> Option<SceneId> {
         self.pattern
             .scenes
             .lock()

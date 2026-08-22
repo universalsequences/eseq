@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::vm::Value as EValue;
-use eseqlisp::{CompileKind, Runtime};
+use eseqlisp::{CompileKind, HostCommand, Runtime};
 use serde::{Deserialize, Serialize};
 
 use crate::accumulator::ResolvedStep;

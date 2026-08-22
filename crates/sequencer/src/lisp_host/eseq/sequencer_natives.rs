@@ -49,13 +49,24 @@ pub fn register_scene_slot_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
 ) {
-    register_scene_slot_natives_with_snapshot(runtime, state, None);
+    register_scene_slot_natives_with_snapshot(runtime, state, None, false);
+}
+
+/// Register scene-slot writes for the UI authoring VM. Writes still land
+/// synchronously so a handler can read its own `set!`, while an explicit host
+/// command carries the stable target and before/after values into App history.
+pub fn register_scene_slot_authoring_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    register_scene_slot_natives_with_snapshot(runtime, state, None, true);
 }
 
 pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
     scheduler_slots: Option<SharedSceneSlotSnapshot>,
+    record_history: bool,
 ) {
     let declarations = Arc::new(Mutex::new(HashMap::<
         String,
@@ -120,7 +131,26 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         }
         let literal = crate::process::ProcessLiteral::from_value(value)
             .map_err(|error| format!("scene slot '{}': {}", name, error))?;
-        let epoch = state.write_current_scene_slot(name.clone(), literal)?;
+        let (scene_id, previous, epoch) = state
+            .write_current_scene_slot_identified(name.clone(), literal.clone())?;
+        if record_history {
+            let mut payload = HashMap::new();
+            payload.insert(
+                "scene-id".to_string(),
+                lisp_string(scene_id.0.to_string()),
+            );
+            payload.insert("slot".to_string(), lisp_string(name.clone()));
+            payload.insert("old-present".to_string(), lisp_bool(previous.is_some()));
+            payload.insert(
+                "old".to_string(),
+                lisp_value(previous.map_or(EValue::Nil, |value| value.to_value())),
+            );
+            payload.insert("new".to_string(), lisp_value(literal.to_value()));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "scene-slot-history-write".to_string(),
+                payload: EValue::Map(payload),
+            });
+        }
         ctx.invalidate_reactive_source(
             SCENE_SLOT_REACTIVE_NAMESPACE,
             name,

@@ -2436,6 +2436,27 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
+    /// Advance a host-owned reactive source previously injected by a native
+    /// and immediately process the targeted dirty effects. Injected sources
+    /// live directly in the VM DAG rather than the ordinary reactive registry,
+    /// so they do not participate in `run_reactive_cycle` batching.
+    pub fn invalidate_reactive_source(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        generation: Value,
+    ) -> Result<(), crate::vm::VMError> {
+        self.vm
+            .invalidate_injected_reactive_source(namespace, field, generation);
+        self.vm.process_dirty_reactive()?;
+        self.flush_vm_reactive_sets();
+        if self.sync_theme_to_global {
+            self.sync_theme_from_vm();
+        }
+        self.flush_widget_trees();
+        Ok(())
+    }
+
     /// Update one reactive field.
     ///
     /// `#[track_caller]` makes filtered UI traces identify the host write site,

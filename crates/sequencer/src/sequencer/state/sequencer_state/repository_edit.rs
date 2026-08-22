@@ -326,15 +326,16 @@ impl SequencerState {
     }
 
     /// Persist one override into the current pattern and publish it to the
-    /// scheduler. `SceneSlotStore::write_literal` advances the per-slot epoch
-    /// before this method drops the scene lock and publishes the snapshot.
-    pub fn write_current_scene_slot(
+    /// scheduler. The stable scene identity and previous override are captured
+    /// under the same lock as the write so an authoring host command can replay
+    /// the exact pattern even if selection changes before the command drains.
+    pub(crate) fn write_current_scene_slot_identified(
         &self,
         name: impl Into<String>,
         value: crate::process::ProcessLiteral,
-    ) -> Result<u64, String> {
+    ) -> Result<(SceneId, Option<crate::process::ProcessLiteral>, u64), String> {
         let name = name.into();
-        let epoch = {
+        let (scene_id, previous, epoch) = {
             let mut scenes = self
                 .pattern
                 .scenes
@@ -345,7 +346,44 @@ impl SequencerState {
                 .scenes
                 .get_mut(current)
                 .ok_or_else(|| "current pattern out of range".to_string())?;
-            scene.scene_slots.write_literal(name, value)?
+            let previous = scene.scene_slots.get(&name).cloned();
+            let epoch = scene.scene_slots.write_literal(name, value)?;
+            (scene.id, previous, epoch)
+        };
+        self.publish_scheduler_snapshot();
+        Ok((scene_id, previous, epoch))
+    }
+
+    pub fn write_current_scene_slot(
+        &self,
+        name: impl Into<String>,
+        value: crate::process::ProcessLiteral,
+    ) -> Result<u64, String> {
+        self.write_current_scene_slot_identified(name, value)
+            .map(|(_, _, epoch)| epoch)
+    }
+
+    /// Restore or replace a slot override in a stable pattern. This is the
+    /// history replay seam; selection order is deliberately irrelevant.
+    pub(crate) fn set_scene_slot_override(
+        &self,
+        scene_id: SceneId,
+        name: impl Into<String>,
+        value: Option<crate::process::ProcessLiteral>,
+    ) -> Result<u64, String> {
+        let name = name.into();
+        let epoch = {
+            let mut scenes = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let scene_idx = scenes
+                .scene_index(scene_id)
+                .ok_or_else(|| "scene-slot pattern no longer exists".to_string())?;
+            scenes.scenes[scene_idx]
+                .scene_slots
+                .set_override(name, value)?
         };
         self.publish_scheduler_snapshot();
         Ok(epoch)
