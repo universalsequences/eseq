@@ -488,6 +488,31 @@ The def-sequencer skeleton is now machine-written. The package module
   with different cycle structures don't fight over the shared cells),
   and emission options `(vel s)` (`:vel-scale`) and `(note n)`. Unknown
   words are ignored.
+- Route-word `stac` is a **post op** (gate cap at 1/4 unit), not the
+  figure-level xf flag, so it composes with the gate-extending filters in
+  authored word order: `left stac` filters to the left hand and then caps
+  the extended legato gates; `stac left` caps first and the filter's §7
+  legato extension wins. Figure-segment `(stac)` inside the pattern keeps
+  the scale-aware xf behavior from §4.6.
+- `(every n w)` dispatches on the wrapped word: post-op words (`stac`,
+  `(shift k)`, `left`/`right`/`accent`, nested `every` of those) lower to a
+  cycle-gated post op applied in authored word order; xf-able words keep the
+  §4.6 `every` transform path.
+- `(quant tb)` — post op that snaps every surviving event offset to the
+  nearest multiple of the timebase grid (straight or triplet: `:16`, `:8t`,
+  …), wrapping into the cycle like `shift`. Composes in word order:
+  `left (quant :16)` quantizes the left hand's events. The grid resolves to
+  exact rational units at route time ((beats tb)/unit over denominator 96),
+  so the memoized evaluator stays resolution-independent and tuplet
+  membership needs no epsilon. Distinct from the stream-layer quantizers
+  (MIDI FX quantize, `seq-emit :quantize`), which are forward-push-only
+  deferrals — the post op re-places events musically and may pull them
+  earlier.
+- The route destination and the emission options are per-cycle arguments:
+  `-> (cyc 1 3) left` bounces the route between tracks each pattern cycle,
+  and `(note (cyc 0 4 12))` / `(vel (cyc 1 0.5))` cycle the transpose /
+  velocity scale. Resolution uses the routed pattern's own cycle index
+  (post-retime), via `resolve-arg` in `emit*`.
 - Multi-voice: when the first body element is a list containing a top-level
   `->`, every element is one voice line with its own pattern and routes:
   `(jak "kit" :16 (. . - . -> 0) (- . . . -> 1 stac))`.

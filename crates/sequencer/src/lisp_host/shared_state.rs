@@ -110,6 +110,10 @@ pub(super) type SharedRegisteredSequencers = Arc<Mutex<Vec<RegisteredSequencer>>
 pub(super) type SharedGeneratorTickContext = Arc<Mutex<Option<GeneratorTickContext>>>;
 pub(super) type SharedProcessAuthoring = Arc<Mutex<ProcessAuthoringRegistry>>;
 pub(super) type SharedProcessEvalContext = Arc<Mutex<Option<ProcessEvalContext>>>;
+/// Snapshot of process-channel values readable by `chan-get` inside generator
+/// ticks. The scheduler refreshes it from the process runtime once per
+/// lookahead chunk, so a tick observes channel writes from earlier chunks.
+pub(super) type SharedGeneratorChannels = Arc<Mutex<Arc<HashMap<String, EValue>>>>;
 pub(super) type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,6 +295,7 @@ pub struct ScratchControlRuntime {
     pub(super) accumulator_eval: SharedAccumulatorEvalContext,
     pub(super) sequencers: SharedRegisteredSequencers,
     pub(super) generator_tick: SharedGeneratorTickContext,
+    pub(super) generator_channels: SharedGeneratorChannels,
     pub(super) process_authoring: SharedProcessAuthoring,
     pub(super) process_eval: SharedProcessEvalContext,
     pub(super) graph_node: SharedGraphNodeContext,
@@ -359,6 +364,8 @@ impl ScratchControlRuntime {
         let accumulator_eval = Arc::new(Mutex::new(None));
         let sequencers = Arc::new(Mutex::new(Vec::new()));
         let generator_tick = Arc::new(Mutex::new(None));
+        let generator_channels: SharedGeneratorChannels =
+            Arc::new(Mutex::new(Arc::new(HashMap::new())));
         let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::default()));
         let process_eval = Arc::new(Mutex::new(None));
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
@@ -386,6 +393,7 @@ impl ScratchControlRuntime {
             Arc::clone(&accumulator_eval),
             Arc::clone(&sequencers),
             Arc::clone(&generator_tick),
+            Arc::clone(&generator_channels),
         );
         register_process_natives(
             &mut runtime,
@@ -422,6 +430,7 @@ impl ScratchControlRuntime {
             accumulator_eval,
             sequencers,
             generator_tick,
+            generator_channels,
             process_authoring,
             process_eval,
             graph_node,
@@ -438,6 +447,15 @@ impl ScratchControlRuntime {
         this.install_midi_fx_macro();
         this.refresh_runtime_globals();
         this
+    }
+
+    /// Publish the current process-channel values for `chan-get` reads inside
+    /// generator `:tick` bodies. The scheduler refreshes this from the process
+    /// runtime once per lookahead chunk, before ticking generators.
+    pub fn set_generator_channel_values(&self, values: HashMap<String, EValue>) {
+        if let Ok(mut guard) = self.generator_channels.lock() {
+            *guard = Arc::new(values);
+        }
     }
 
     pub fn set_position(&mut self, track: usize, cursor_step: usize) {
@@ -788,6 +806,7 @@ impl ScratchControlRuntime {
         SharedAccumulatorEvalContext,
         SharedRegisteredSequencers,
         SharedGeneratorTickContext,
+        SharedGeneratorChannels,
         SharedProcessAuthoring,
         SharedProcessEvalContext,
         SharedGraphNodeContext,
@@ -803,6 +822,7 @@ impl ScratchControlRuntime {
             self.accumulator_eval,
             self.sequencers,
             self.generator_tick,
+            self.generator_channels,
             self.process_authoring,
             self.process_eval,
             self.graph_node,
@@ -821,6 +841,7 @@ impl ScratchControlRuntime {
         accumulator_eval: SharedAccumulatorEvalContext,
         sequencers: SharedRegisteredSequencers,
         generator_tick: SharedGeneratorTickContext,
+        generator_channels: SharedGeneratorChannels,
         process_authoring: SharedProcessAuthoring,
         process_eval: SharedProcessEvalContext,
         graph_node: SharedGraphNodeContext,
@@ -836,6 +857,7 @@ impl ScratchControlRuntime {
             accumulator_eval,
             sequencers,
             generator_tick,
+            generator_channels,
             process_authoring,
             process_eval,
             graph_node,

@@ -1811,6 +1811,18 @@ impl ProcessRuntime {
         self.channels = next;
     }
 
+    /// Last value of every value channel (seeded from `defchan` initials), for
+    /// read-only sampling by generator ticks (`chan-get`). Message-only
+    /// channels hold no value and are omitted.
+    pub fn channel_values(&self) -> HashMap<String, Value> {
+        self.channels
+            .iter()
+            .filter_map(|(name, channel)| {
+                channel.value.clone().map(|value| (name.clone(), value))
+            })
+            .collect()
+    }
+
     fn sync_instances(&mut self, instances: Vec<AuthoredProcessInstance>, total_beats: f64) {
         let mut existing = std::mem::take(&mut self.instances);
         let mut next = Vec::with_capacity(instances.len());
@@ -3773,5 +3785,40 @@ mod tests {
         assert_eq!(first, vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
         assert_eq!(replay, first);
         assert_eq!(second_cycle, vec![2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn channel_values_snapshot_holds_value_channels_only() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.sync_authoring(
+            ProcessAuthoringSnapshot {
+                channels: vec![
+                    AuthoredChannel {
+                        handle_id: AuthoredHandleId(1),
+                        name: Some("warp".to_string()),
+                        initial: Some(Value::Number(1.0)),
+                        message_only: false,
+                    },
+                    AuthoredChannel {
+                        handle_id: AuthoredHandleId(2),
+                        name: Some("retrig".to_string()),
+                        initial: None,
+                        message_only: true,
+                    },
+                ],
+                ..ProcessAuthoringSnapshot::default()
+            },
+            0.0,
+        );
+
+        let values = runtime.channel_values();
+        assert_eq!(values.get("warp"), Some(&Value::Number(1.0)));
+        assert!(!values.contains_key("retrig"));
+
+        runtime.send_channel_at("warp", Value::Number(2.0), 4.0, 1_000);
+        runtime.send_channel_at("retrig", Value::Number(1.0), 4.0, 1_000);
+        let values = runtime.channel_values();
+        assert_eq!(values.get("warp"), Some(&Value::Number(2.0)));
+        assert!(!values.contains_key("retrig"));
     }
 }

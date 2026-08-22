@@ -7935,6 +7935,72 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn chan_get_reads_channel_snapshot_inside_generator_tick() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"(__register-sequencer "chan-reader"
+                     :resolution :16
+                     :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))"#,
+            )
+            .expect("register sequencer");
+        let defs = runtime.sequencer_defs();
+        let invoke = |runtime: &mut ScratchControlRuntime, tick_index| {
+            runtime
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        id: defs[0].id,
+                        generator_index: 0,
+                        tick_index,
+                        beat: tick_index as f64 * 0.25,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: Default::default(),
+                    },
+                )
+                .expect("tick")
+        };
+
+        // No snapshot published yet: the channel is unset, the default wins.
+        assert!((invoke(&mut runtime, 0).emitted[0].resolved.velocity - 0.25).abs() < 1e-6);
+
+        runtime.set_generator_channel_values(HashMap::from([(
+            "warp".to_string(),
+            Value::Number(0.9),
+        )]));
+        assert!((invoke(&mut runtime, 1).emitted[0].resolved.velocity - 0.9).abs() < 1e-6);
+
+        // An unset channel still falls through to the default.
+        runtime.set_generator_channel_values(HashMap::new());
+        assert!((invoke(&mut runtime, 2).emitted[0].resolved.velocity - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chan_get_outside_generator_tick_errors() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let result = runtime.eval(r#"(chan-get "warp")"#).expect("eval");
+        assert_eq!(result, Some(Value::Bool(false)));
+        let status = runtime.take_status_message().unwrap_or_default();
+        assert!(status.contains("outside a generator tick"), "{status}");
+    }
+
+    #[test]
     fn published_sequencer_tick_compiles_once_and_hot_reloads_without_stale_code() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
@@ -8645,6 +8711,176 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         // :vel-scale applies at emission, on top of the threaded velocities
         let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
         assert_close(&vels, &[0.4, 0.34, 0.289, 0.24565000000000003]);
+    }
+
+    #[test]
+    fn jaki_route_stac_applies_in_word_order_with_filters() {
+        // Route-word stac is a post op so it composes with the gate-extending
+        // hand/accent filters in authored order: `left stac` caps the extended
+        // gates, `stac left` lets the filter's legato win.
+        let cases: [(&str, &str, &[f32]); 4] = [
+            ("plain", r#"(jak "a" :16 . . - .)"#, &[0.2, 0.2, 0.2, 0.2, 0.2]),
+            ("stac", r#"(jak "b" :16 . . - . -> 0 stac)"#, &[0.0625; 5]),
+            (
+                "left-stac",
+                r#"(jak "c" :16 . . - . -> 0 left stac)"#,
+                &[0.0625; 3],
+            ),
+            (
+                "stac-left",
+                r#"(jak "d" :16 . . - . -> 0 stac left)"#,
+                &[0.5, 0.25, 0.5],
+            ),
+        ];
+        for (label, src, expected) in cases {
+            let mut rt = jaki_runtime();
+            rt.eval(&format!(
+                "(import alez.jaki.surface :refer (jak))\n{src}"
+            ))
+            .expect("jaki surface macro");
+            let mut generators = crate::generator::GeneratorRuntime::default();
+            generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+            let mut out = Vec::new();
+            generators.process_block(
+                0.0,
+                1.25,
+                0,
+                48_000.0,
+                |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+                &mut out,
+            );
+            let durs: Vec<f32> = out.iter().map(|e| e.event.resolved.duration).collect();
+            assert_eq!(durs, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn jaki_route_every_wraps_post_words_cycle_gated() {
+        // (every n w) with a post-op word (stac/shift/filters) lowers to a
+        // cycle-gated post op in authored order. Pattern `. . - .` = 5 units
+        // = 1.25 beats at :16; run two cycles.
+        let run = |src: &str| {
+            let mut rt = jaki_runtime();
+            rt.eval(&format!(
+                "(import alez.jaki.surface :refer (jak))\n{src}"
+            ))
+            .expect("jaki surface macro");
+            let mut generators = crate::generator::GeneratorRuntime::default();
+            generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+            let mut out = Vec::new();
+            generators.process_block(
+                0.0,
+                2.5,
+                0,
+                48_000.0,
+                |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+                &mut out,
+            );
+            out
+        };
+
+        // stac on every 2nd cycle: cycle 0 normal 80% gates, cycle 1 capped.
+        let out = run(r#"(jak "a" :16 . . - . -> 0 (every 2 stac))"#);
+        let durs: Vec<f32> = out.iter().map(|e| e.event.resolved.duration).collect();
+        assert_eq!(durs, [[0.2; 5], [0.0625; 5]].concat(), "every-stac");
+
+        // stac survives a hand filter when written after it, still cycle-gated.
+        let out = run(r#"(jak "b" :16 . . - . -> 0 left (every 2 stac))"#);
+        let durs: Vec<f32> = out.iter().map(|e| e.event.resolved.duration).collect();
+        assert_eq!(
+            durs,
+            vec![0.5, 0.25, 0.5, 0.0625, 0.0625, 0.0625],
+            "left-every-stac"
+        );
+
+        // (every 2 (shift 1)) was a silent no-op through the xf path; as a
+        // post op it rotates cycle 1's left-hand events by one unit. Left-hand
+        // events sit at units [0,2,3] per cycle; the block clock's first
+        // boundary is beat 0.25 (sample 12000), so cycle 0 (unshifted) lands
+        // at [12000,36000,48000] and cycle 1 (shifted +1 unit) at
+        // [84000,108000,120000] instead of [72000,96000,108000].
+        let out = run(r#"(jak "c" :16 . . - . -> 0 left (every 2 (shift 1)))"#);
+        let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
+        assert_eq!(
+            samples,
+            vec![12_000, 36_000, 48_000, 84_000, 108_000, 120_000],
+            "left-every-shift"
+        );
+    }
+
+    #[test]
+    fn jaki_route_destination_and_note_take_cyc_args() {
+        // `-> (cyc 0 1)` bounces the route between tracks per pattern cycle;
+        // `(note (cyc 0 4 12))` cycles the emitted transpose. Pattern `. . . .`
+        // = 4 units = 1 beat per cycle; run three cycles.
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "cycdest" :16 . . . . -> (cyc 0 1) (note (cyc 0 4 12)))"#,
+        )
+        .expect("jaki surface macro");
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            3.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        let tracks: Vec<usize> = out.iter().map(|e| e.event.track.unwrap()).collect();
+        assert_eq!(tracks, [[0; 4], [1; 4], [0; 4]].concat(), "cyc destination");
+        let notes: Vec<f32> = out.iter().map(|e| e.event.resolved.transpose).collect();
+        assert_eq!(notes, [[0.0; 4], [4.0; 4], [12.0; 4]].concat(), "cyc note");
+    }
+
+    #[test]
+    fn jaki_route_quant_snaps_offsets_to_straight_and_triplet_grids() {
+        let run = |src: &str| {
+            let mut rt = jaki_runtime();
+            rt.eval(&format!(
+                "(import alez.jaki.surface :refer (jak))\n{src}"
+            ))
+            .expect("jaki surface macro");
+            let mut generators = crate::generator::GeneratorRuntime::default();
+            generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+            let mut out = Vec::new();
+            generators.process_block(
+                0.0,
+                1.0,
+                0,
+                48_000.0,
+                |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+                &mut out,
+            );
+            out
+        };
+
+        // A 3-into-4 tuplet (offsets 0, 4/3, 8/3 units): the quantized arm
+        // snaps to units [0,1,3], the raw arm keeps the tuplet placement.
+        // Boundary k = sample 12000*(k+1); fractional offsets add within the
+        // tick window (1/3 unit = 4000 samples).
+        let out = run(r#"(jak "qs" :16 (fig (. . .) (% 4)) -> 0 (quant :16) -> 1)"#);
+        let track = |t: usize| -> Vec<u64> {
+            out.iter()
+                .filter(|e| e.event.track == Some(t))
+                .map(|e| e.sample_time)
+                .collect()
+        };
+        assert_eq!(track(0), vec![12_000, 24_000, 48_000], "tuplet -> straight");
+        assert_eq!(track(1), vec![12_000, 28_000, 44_000], "raw tuplet arm");
+
+        // Straight 16ths pushed onto a triplet grid (q = 2/3 unit):
+        // units [0,1,2,3] snap to [0, 4/3, 2, 10/3].
+        let out = run(r#"(jak "qt" :16 . . . . -> 0 (quant :16t))"#);
+        let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
+        assert_eq!(
+            samples,
+            vec![12_000, 28_000, 36_000, 52_000],
+            "straight -> triplet"
+        );
     }
 
     #[test]

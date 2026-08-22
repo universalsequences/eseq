@@ -51,6 +51,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives(
         Arc::new(Mutex::new(None)),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(Arc::new(HashMap::new()))),
     );
 }
 
@@ -571,6 +572,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     accumulator_eval: SharedAccumulatorEvalContext,
     sequencers: SharedRegisteredSequencers,
     generator_tick: SharedGeneratorTickContext,
+    generator_channels: SharedGeneratorChannels,
 ) {
     let current_track =
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.track).unwrap_or(0);
@@ -748,6 +750,36 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             };
             ctx.state.insert(key, *value);
             Ok(EValue::Number(*value))
+        },
+    );
+
+    let generator_tick_for_chan_get = Arc::clone(&generator_tick);
+    let generator_channels_for_chan_get = Arc::clone(&generator_channels);
+    runtime.register_native_with_docs(
+        "chan-get",
+        "(chan-get \"name\") | (chan-get \"name\" default)",
+        "Read a process channel's current value from a generator :tick (nil, or the given default, if unset). Read-only: values are a per-chunk snapshot, so a process write lands on subsequent ticks.",
+        move |args, _ctx| {
+            let name = match args.first() {
+                Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => s.clone(),
+                _ => return Err("chan-get expects a string channel name".to_string()),
+            };
+            {
+                let guard = generator_tick_for_chan_get
+                    .lock()
+                    .map_err(|_| "failed to lock generator tick context".to_string())?;
+                if guard.is_none() {
+                    return Err("chan-get called outside a generator tick".to_string());
+                }
+            }
+            let channels = generator_channels_for_chan_get
+                .lock()
+                .map_err(|_| "failed to lock generator channel snapshot".to_string())?
+                .clone();
+            Ok(channels
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| args.get(1).cloned().unwrap_or(EValue::Nil)))
         },
     );
 

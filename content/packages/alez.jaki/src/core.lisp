@@ -613,12 +613,41 @@
   (merge res :events
     (map (lambda (e) (fh-one e hand xf cycle)) (get res :events))))
 
+;; quantize as a post op: snap every event offset to the nearest multiple of
+;; q (a rational, in units), wrapping into the cycle like `shift`. Route-word
+;; `(quant tb)` resolves tb to units at route time so the memoized evaluator
+;; stays resolution-independent.
+(def apply-quant (res q)
+  (let ((total (get res :len)))
+    (if (r<= q (r-int 0))
+        res
+        (merge res :events
+          (sort-evs
+            (map (lambda (e)
+                   (let ((snapped (r* (r-int (round-int (r->f (r-div (get e :off) q)))) q)))
+                     (merge e :off
+                       (if (r<= total (r-int 0)) snapped (r-mod snapped total)))))
+                 (get res :events)))))))
+
+;; staccato as a post op: cap every gate at 1/4 unit. Route-word `stac` lands
+;; here (not as the xf flag) so it applies in authored word order relative to
+;; the gate-extending filters — `left stac` caps after the extension.
+(def apply-stac (res)
+  (merge res :events
+    (map (lambda (e) (merge e :gate (r-min (get e :gate) (rat 1 4))))
+         (get res :events))))
+
 (def apply-post-one (res op cycle)
   (let ((h (first op)))
     (match h
       :filter (apply-filter res (nth op 1))
       :shift (apply-shift res (round-int (resolve-arg (nth op 1) cycle)))
       :for-hand (apply-for-hand res (nth op 1) (nth op 2) cycle)
+      :stac (apply-stac res)
+      :quant (apply-quant res (nth op 1))
+      :every (if (every-active? (round-int (resolve-arg (nth op 1) cycle)) cycle)
+                 (apply-post-one res (nth op 2) cycle)
+                 res)
       _ res)))
 
 ;; evaluate a pattern for one cycle with explicit threading state
@@ -801,8 +830,14 @@
           n))
     0 evs))
 
+(def resolve-opt (opts k c)
+  (let ((v (get opts k)))
+    (if (= v nil) nil (resolve-arg v c))))
+
 ;; evaluate the pattern for the current tick's cycle and emit this window's
-;; events; returns the number of events emitted
+;; events; returns the number of events emitted. `track` and the emit opts
+;; (:note, :vel-scale) are raw per-cycle argument data — numbers, or (cyc …)
+;; to cycle the destination / transpose / velocity scale per cycle.
 (def emit* (p track opts)
   (let ((tick (gen-tick)))
     (let ((loc (locate p tick)))
@@ -810,7 +845,10 @@
         (do (ensure-state p c)
             (let ((r (eval-cycle p c (n->hand (state-get (cell p "jaki-hand") 0))
                                  (load-state p))))
-              (emit-window (get r :events) (- tick cstart) track opts)))))))
+              (emit-window (get r :events) (- tick cstart)
+                           (round-int (resolve-arg track c))
+                           (dict :note (resolve-opt opts :note c)
+                                 :vel-scale (resolve-opt opts :vel-scale c)))))))))
 
 (def emit (p track) (emit* p track (dict)))
 
@@ -828,6 +866,31 @@
 ;; Multi-voice: when the first body element is a list containing a top-level
 ;; `->`, every element is one voice line with its own pattern and routes.
 
+;; quant grid in units, as an exact rational: (beats tb)/(jaki unit),
+;; rationalized over 96 so straight and triplet timebase ratios stay exact
+;; (e.g. :16t on a :16 jak → 2/3). Resolved at route time so the memoized
+;; evaluator never depends on the generator's resolution.
+(def quant-units (tb)
+  (let ((u (state-get "jaki-unit" 0.25)))
+    (rat (round-int (* (/ (beats tb) u) 96)) 96)))
+
+;; route words that lower to post ops, so `(every n w)` can wrap them
+;; cycle-gated while staying in authored word order; nil for xf-able words
+(def route-post-op (w)
+  (let ((h (raw-head w)) (args (raw-args w)))
+    (match h
+      'stac   (list :stac)
+      'quant  (list :quant (quant-units (nth args 0)))
+      'shift  (list :shift (nth args 0))
+      'left   (list :filter '(:hand :left))
+      'right  (list :filter '(:hand :right))
+      'accent (list :filter '(:accent true))
+      'every  (let ((inner (route-post-op (nth args 1))))
+                (if (= inner nil)
+                    nil
+                    (list :every (nth args 0) inner)))
+      _ nil)))
+
 (def split-arrows (l cur acc)
   (if (empty? l)
       (append acc (list cur))
@@ -843,7 +906,7 @@
       'right  (merge acc :p (filter (get acc :p) '(:hand :right)))
       'accent (merge acc :p (filter (get acc :p) '(:accent true)))
       'rev    (merge acc :p (rev (get acc :p)))
-      'stac   (merge acc :p (stac (get acc :p)))
+      'stac   (merge acc :p (add-post (get acc :p) (list :stac) "stac"))
       'ghost  (merge acc :p (ghost (get acc :p)))
       'swap   (merge acc :p (swap (get acc :p)))
       'rot    (merge acc :p (rot (get acc :p) (nth args 0)))
@@ -851,7 +914,16 @@
       'shift  (merge acc :p (shift (get acc :p) (nth args 0)))
       'fast   (merge acc :p (fast (get acc :p) (nth args 0)))
       'slow   (merge acc :p (slow (get acc :p) (nth args 0)))
-      'every  (merge acc :p (every (get acc :p) (nth args 0) (nth args 1)))
+      'quant  (let ((q (quant-units (nth args 0))))
+                (merge acc :p (add-post (get acc :p) (list :quant q)
+                                        (str "quant:" (source q)))))
+      'every  (let ((post (route-post-op (nth args 1))))
+                (if (= post nil)
+                    (merge acc :p (every (get acc :p) (nth args 0) (nth args 1)))
+                    (merge acc :p (add-post (get acc :p)
+                                            (list :every (nth args 0) post)
+                                            (str "every:" (source (nth args 0))
+                                                 ":" (source post))))))
       'for-hand (merge acc :p (for-hand (get acc :p) (nth args 0) (nth args 1)))
       'vel    (merge acc :opts (merge (get acc :opts) :vel-scale (nth args 0)))
       'note   (merge acc :opts (merge (get acc :opts) :note (nth args 0)))
