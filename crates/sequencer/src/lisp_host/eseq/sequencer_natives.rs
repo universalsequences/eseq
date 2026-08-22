@@ -597,8 +597,8 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     let sequencers_for_register_alias = Arc::clone(&sequencers);
     runtime.register_native_with_docs(
         "__register-sequencer",
-        "(__register-sequencer name :resolution timebase :res timebase :tick callback :init callback)",
-        "Lower-level alias for def-sequencer.",
+        "(__register-sequencer name :resolution timebase :tick callback | :tick-source source)",
+        "Lower-level alias for def-sequencer; :tick-source registers prebuilt scheduler source.",
         move |args, _ctx| register_sequencer_impl(&args, &sequencers_for_register_alias),
     );
 
@@ -2625,6 +2625,7 @@ pub(in crate::lisp_host) fn register_sequencer_impl(
     };
     let mut resolution = Timebase::Sixteenth;
     let mut tick: Option<EValue> = None;
+    let mut tick_source: Option<String> = None;
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -2640,22 +2641,30 @@ pub(in crate::lisp_host) fn register_sequencer_impl(
         match key.as_str() {
             "resolution" | "res" => resolution = parse_timebase_arg(args, idx)?,
             "tick" => tick = Some(args[idx].clone()),
+            "tick-source" => match &args[idx] {
+                EValue::String(source) => tick_source = Some(source.clone()),
+                _ => return Err("def-sequencer :tick-source expects a string".to_string()),
+            },
             "init" => { /* reserved for future one-time init */ }
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
     }
-    let Some(tick) = tick else {
-        return Err("def-sequencer requires :tick".to_string());
-    };
+    if tick.is_some() && tick_source.is_some() {
+        return Err("def-sequencer accepts only one of :tick and :tick-source".to_string());
+    }
     // `def-sequencer` auto-quotes :tick, so it arrives as list *data* — store it as
     // re-evaluable source (run once per boundary). The low-level `__register-sequencer`
-    // does not auto-quote, so its :tick arrives as a closure.
-    let tick = match tick {
-        EValue::List(_) => {
-            RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(&tick))
+    // also accepts already-built source for authoring surfaces that transform quoted data.
+    let tick = if let Some(source) = tick_source {
+        RegisteredAccumulatorCallback::Source(source)
+    } else {
+        match tick.ok_or_else(|| "def-sequencer requires :tick".to_string())? {
+            value @ EValue::List(_) => RegisteredAccumulatorCallback::Source(
+                eseqlisp::vm::format_lisp_source(&value),
+            ),
+            closure => RegisteredAccumulatorCallback::Closure(closure),
         }
-        closure => RegisteredAccumulatorCallback::Closure(closure),
     };
     let id = stable_sequencer_id(&name);
     let entry = RegisteredSequencer {

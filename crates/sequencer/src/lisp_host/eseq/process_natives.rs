@@ -254,6 +254,106 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_authoring_for_jaki_channels = Arc::clone(&process_authoring);
+    let publish_for_jaki_channels = publish.clone();
+    let chain_state_for_jaki_channels = process_chain_state.clone();
+    runtime.register_native_with_docs(
+        "__jaki-declare-value-channels",
+        "(__jaki-declare-value-channels ((name initial) ...))",
+        "Atomically declare the value channels found while expanding a jaki body.",
+        move |args, _ctx| {
+            let entries = match args.as_slice() {
+                [EValue::List(entries)] => entries,
+                _ => {
+                    return Err(
+                        "__jaki-declare-value-channels expects one declaration list".to_string(),
+                    )
+                }
+            };
+            let mut declarations = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let entry = entry.borrow();
+                let EValue::List(pair) = &*entry else {
+                    return Err("jaki :chan declaration must be (name initial)".to_string());
+                };
+                if pair.len() != 2 {
+                    return Err("jaki :chan declaration must be (name initial)".to_string());
+                }
+                let name = match &*pair[0].borrow() {
+                    EValue::String(name) => name.clone(),
+                    _ => return Err("jaki :chan expects true or a string name".to_string()),
+                };
+                let initial = pair[1].borrow().clone();
+                let literal = crate::process::ProcessLiteral::from_value(&initial)
+                    .map_err(|error| format!("jaki :chan initial must be a literal: {error}"))?;
+                declarations.push((name, initial, literal));
+            }
+
+            let mut registry = process_authoring_for_jaki_channels
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            for (name, _, _) in &declarations {
+                for channel in registry
+                    .channels
+                    .iter()
+                    .filter(|channel| channel.name.as_deref() == Some(name))
+                {
+                    if channel.message_only {
+                        return Err(format!(
+                            "jaki :chan '{name}' collides with a message-only channel"
+                        ));
+                    }
+                    if let Some(initial) = &channel.initial {
+                        crate::process::ProcessLiteral::from_value(initial).map_err(|error| {
+                            format!("existing channel '{name}' has a non-literal initial: {error}")
+                        })?;
+                    }
+                }
+            }
+
+            for (name, initial, literal) in declarations {
+                if let Some(index) = registry
+                    .channels
+                    .iter()
+                    .position(|channel| channel.name.as_deref() == Some(name.as_str()))
+                {
+                    let stored = registry.channels[index]
+                        .initial
+                        .as_ref()
+                        .map(crate::process::ProcessLiteral::from_value)
+                        .transpose()?;
+                    if stored.as_ref() != Some(&literal) {
+                        registry.channels[index].initial = Some(initial);
+                        registry.queue_channel_write(name, literal);
+                    }
+                } else {
+                    let handle_id = crate::process::AuthoredHandleId(registry.next_id());
+                    registry.channels.push(crate::process::AuthoredChannel {
+                        handle_id,
+                        name: Some(name.clone()),
+                        initial: Some(initial),
+                        message_only: false,
+                    });
+                    registry.channel_handles.insert(handle_id.0, name);
+                }
+            }
+            let pending_writes = chain_state_for_jaki_channels
+                .is_some()
+                .then(|| registry.take_pending_channel_writes());
+            drop(registry);
+            if let (Some(state), Some(pending_writes)) =
+                (&chain_state_for_jaki_channels, pending_writes)
+            {
+                state.queue_process_channel_writes(pending_writes);
+            }
+            publish_process_authoring(
+                &process_authoring_for_jaki_channels,
+                &publish_for_jaki_channels,
+            );
+            Ok(EValue::Bool(true))
+        },
+    );
+
     let process_authoring_for_start = Arc::clone(&process_authoring);
     let publish_for_start = publish.clone();
     runtime.register_native_with_docs(

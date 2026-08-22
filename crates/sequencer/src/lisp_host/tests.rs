@@ -8667,6 +8667,127 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_surface_channel_widgets_rewrite_declare_and_reseed_idempotently() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut rt = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        rt.eval("(import alez.jaki.surface :refer (jak))")
+            .expect("import Jaki package");
+        let source = r#"(import alez.jaki.surface :refer (jak))
+                         (jak "hit" :16
+                           - .
+                           (dashdecay (~slider 0.294 :chan "hit.dashdecay"))
+                           (dotdecay (~knob 0.177 :chan true)))"#;
+        rt.eval(source).expect("channel widget surface");
+
+        let authored = rt.process_authoring_snapshot();
+        assert_eq!(authored.channels.len(), 2);
+        assert_eq!(authored.channels[0].name.as_deref(), Some("hit.dashdecay"));
+        assert_eq!(authored.channels[0].initial, Some(Value::Number(0.294)));
+        assert_eq!(authored.channels[1].name.as_deref(), Some("hit#1"));
+        assert_eq!(authored.channels[1].initial, Some(Value::Number(0.177)));
+        assert!(authored.channels.iter().all(|channel| !channel.message_only));
+        let handles: Vec<_> = authored.channels.iter().map(|channel| channel.handle_id).collect();
+        assert!(state.take_process_channel_writes().is_empty());
+
+        rt.eval(source).expect("unchanged re-evaluation");
+        let unchanged = rt.process_authoring_snapshot();
+        assert_eq!(unchanged.channels.len(), 2, "declarations are upserts by name");
+        assert_eq!(
+            unchanged
+                .channels
+                .iter()
+                .map(|channel| channel.handle_id)
+                .collect::<Vec<_>>(),
+            handles,
+            "re-evaluation must preserve channel handles"
+        );
+        assert!(
+            state.take_process_channel_writes().is_empty(),
+            "an unchanged literal must not stomp the runtime value"
+        );
+
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "hit" :16
+                 - .
+                 (dashdecay (~slider 0.5 :chan "hit.dashdecay"))
+                 (dotdecay (~knob 0.177 :chan true)))"#,
+        )
+        .expect("edited channel seed");
+        let edited = rt.process_authoring_snapshot();
+        assert_eq!(edited.channels.len(), 2);
+        assert_eq!(edited.channels[0].initial, Some(Value::Number(0.5)));
+        assert_eq!(
+            state.take_process_channel_writes(),
+            vec![(
+                "hit.dashdecay".to_string(),
+                crate::process::ProcessLiteral::Number(0.5),
+            )],
+            "a text edit must enter the normal scheduler write queue"
+        );
+
+        // The scheduler source contains `(chan ...)`, not a widget fallback:
+        // changing its channel snapshot changes the payload without re-eval.
+        rt.set_generator_channel_values(
+            1,
+            HashMap::from([("hit.dashdecay".to_string(), Value::Number(0.4))]),
+        );
+        let definition = rt.sequencer_defs().remove(0);
+        let emitted = rt
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    id: definition.id,
+                    generator_index: 0,
+                    tick_index: 1,
+                    beat: 0.25,
+                    resolution_beats: 0.25,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: Default::default(),
+                },
+            )
+            .expect("tick")
+            .emitted;
+        assert_eq!(emitted.len(), 1);
+        assert!((emitted[0].resolved.velocity - 0.32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn jaki_surface_channel_declarations_reject_message_only_collisions_atomically() {
+        let mut rt = jaki_runtime();
+        rt.eval("(defchan ping)").expect("message-only channel");
+        let before = rt.process_authoring_snapshot().channels;
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].name.as_deref(), Some("ping"));
+        assert!(before[0].message_only);
+        let result = rt
+            .eval(
+                r#"(import alez.jaki.surface :refer (jak))
+                   (jak "bad" :16
+                     -
+                     (dotdecay (~slider 0.2 :chan true))
+                     (dashdecay (~slider 0.3 :chan "ping")))"#,
+            )
+            .expect("native errors use the host status plus a false result");
+        assert_eq!(result, Some(Value::Bool(false)));
+        assert!(rt.sequencer_defs().is_empty(), "the invalid body must not publish");
+        let channels = rt.process_authoring_snapshot().channels;
+        assert_eq!(channels.len(), 1, "validation must precede all mutations");
+        assert_eq!(channels[0].name.as_deref(), Some("ping"));
+        assert!(channels[0].message_only);
+    }
+
+    #[test]
     fn jaki_surface_no_routes_defaults_to_track_zero() {
         let mut rt = jaki_runtime();
         rt.eval(
