@@ -2437,6 +2437,10 @@ pub(crate) fn init_runtime(
         Arc::clone(&selected_neural_neurons),
     );
     sequencer::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+    // `defscene` reads and writes lower to host calls; the UI VM is where
+    // panels read slots and handlers `set!` them, so it needs the same
+    // lowering targets the scratch/scheduler runtimes get.
+    sequencer::lisp_host::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
     let process_authoring_natives =
         sequencer::lisp_host::register_published_process_authoring_natives(
             &mut runtime,

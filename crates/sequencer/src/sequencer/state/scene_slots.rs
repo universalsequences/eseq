@@ -37,10 +37,9 @@ pub struct ResolvedSceneSlot<'a> {
 }
 
 impl SceneSlotStore {
-    pub(crate) fn validate_literal(
-        name: &str,
-        value: &ProcessLiteral,
-    ) -> Result<(), String> {
+    /// Reject a declaration default before it can be resolved as a slot
+    /// value; stored writes are validated by `write_literal`.
+    pub(crate) fn validate_literal(name: &str, value: &ProcessLiteral) -> Result<(), String> {
         validate_scene_slot_literal(name, value)
     }
 

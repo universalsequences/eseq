@@ -33,7 +33,17 @@ pub const SEQ_EMIT_KEYWORDS: &[&str] = &[
     ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q",
 ];
 
-fn register_scene_slot_natives(
+/// Install the `defscene` lowering targets (`__defscene-register`,
+/// `__defscene-resolve`, `__defscene-set`) that `compiler.rs` emits for a
+/// scene-slot declaration, bare read, and `set!`.
+///
+/// Every VM that can evaluate user source needs these: the scratch/scheduler
+/// runtimes get them through `register_sequencer_natives_with_accumulators`,
+/// and the UI runtime — the primary consumer, since panels read and `set!`
+/// slots — registers them directly in `ui::natives::init_runtime`. The
+/// declaration table is per-runtime (it only caches defaults); the values
+/// themselves live in the shared `SequencerState` pattern store.
+pub fn register_scene_slot_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
 ) {

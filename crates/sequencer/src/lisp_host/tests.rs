@@ -5056,6 +5056,32 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         (state, runtime)
     }
 
+    /// The UI VM (`ui::natives::init_runtime`) does not install the full
+    /// sequencer native set; it registers the scene-slot natives on their own.
+    /// Guard that this registration stands alone, since a `defscene` read or
+    /// `set!` in a UI script has no other lowering target.
+    #[test]
+    fn scene_slot_natives_register_without_the_rest_of_the_sequencer_natives() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+
+        assert_eq!(
+            runtime
+                .eval_str("(defscene rate 0.5)\nrate")
+                .expect("declare and read a scene slot in a bare runtime"),
+            Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            runtime.eval_str("(set! rate 0.75)").expect("write"),
+            Some(Value::Number(0.75))
+        );
+        assert_eq!(
+            state.current_scene_slots().get("rate"),
+            Some(&crate::process::ProcessLiteral::Number(0.75))
+        );
+    }
+
     #[test]
     fn defscene_bare_read_and_set_lower_to_current_pattern_slot_storage() {
         let (state, mut runtime) = scene_slot_test_runtime();
