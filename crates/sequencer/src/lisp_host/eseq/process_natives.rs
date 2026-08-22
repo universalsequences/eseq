@@ -729,6 +729,27 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_eval_for_now_beats = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "now-beats",
+        "(now-beats)",
+        "Return this tick's transport beat: the quantized boundary time the \
+         body's outputs are stamped to. fract(now-beats / period) derives a \
+         seek-safe, restart-safe transport phase.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("now-beats expects no arguments".to_string());
+            }
+            let guard = process_eval_for_now_beats
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("now-beats called outside process execution".to_string());
+            };
+            Ok(EValue::Number(ctx.beat))
+        },
+    );
+
     let process_eval_for_step_length = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "step-length",

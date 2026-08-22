@@ -206,6 +206,9 @@ fn text_input_auto_focus_submit_and_blur_callbacks_drive_inline_edit_lifecycle()
     editor.widget_layout().expect("inline edit layout");
     assert!(editor.focused_widget_id().is_some(), "auto-focus should focus the input");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(editor.runtime_mut().eval_str("cancelled"), Ok(Some(Value::Bool(true))));
 
@@ -1986,6 +1989,9 @@ fn search_escape_restores_original_cursor() {
 
     assert_eq!(editor.active_buffer().cursor, (0, 11));
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().cursor, (0, 7));
@@ -2145,12 +2151,18 @@ fn esc_period_and_esc_comma_work_as_meta_definition_bindings() {
     editor.set_active_buffer(callsite_id);
     editor.active_buffer_mut().cursor = (0, 1);
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().id, defs_id);
     assert_eq!(editor.active_buffer().cursor, (0, 5));
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
 
@@ -2359,6 +2371,9 @@ fn vim_insert_mode_accepts_text_and_escape_returns_to_normal() {
 
     editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
 
@@ -2629,6 +2644,9 @@ fn vim_escape_clears_selection_before_changing_mode() {
     editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert!(editor.active_region_range().is_some());
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     assert!(editor.active_region_range().is_none());
@@ -2650,6 +2668,9 @@ fn vim_undo_and_redo_restore_text_edits() {
     editor.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
     assert_eq!(editor.active_buffer().text(), "Zabc");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
     assert_eq!(editor.active_buffer().text(), "abc");
@@ -2679,6 +2700,9 @@ fn undo_and_redo_preserve_viewport_when_restored_cursor_is_visible() {
 
     editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
 
@@ -2709,6 +2733,9 @@ fn plain_typing_coalesces_into_one_undo_snapshot() {
     }
     assert_eq!(editor.active_buffer().text(), "abc");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
     assert_eq!(editor.active_buffer().text(), "");
@@ -2732,6 +2759,9 @@ fn cursor_movement_starts_a_new_typing_undo_group() {
     editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
     assert_eq!(editor.active_buffer().text(), "ba");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
     assert_eq!(editor.active_buffer().text(), "a");
@@ -6178,6 +6208,9 @@ fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
         "numeric input should put the focused picker into edit mode"
     );
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     assert!(
@@ -6778,6 +6811,9 @@ fn hidden_ui_only_status_bar_reappears_for_chord_and_minibuffer_input() {
     assert!(frame.tiles[0].show_status);
     assert!(status.contains("Find file: demo"), "{status}");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
     assert!(!frame.tiles[0].show_status);
@@ -6808,6 +6844,9 @@ fn hidden_ui_only_status_bar_reappears_in_inspect_mode() {
     assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 7);
     assert!(status.contains("Inspect mode"), "{status}");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
     assert!(!frame.tiles[0].show_status);
@@ -9297,6 +9336,73 @@ fn buffer_list_mode_backspace_updates_filter() {
 }
 
 #[test]
+fn buffer_list_mode_escape_returns_to_source_buffer() {
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
+    let runtime = Runtime::with_init_source(&init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init),
+            ..EditorConfig::default()
+        },
+    );
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().name, "*buffers*");
+
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().name, "*grid*");
+}
+
+#[test]
+fn buffer_list_mode_escape_clears_filter_before_quitting() {
+    let init = include_str!("../../../../content/core/init.lisp").to_string();
+    let runtime = Runtime::with_init_source(&init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init),
+            ..EditorConfig::default()
+        },
+    );
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().lines[0], "Switch to: gr");
+
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().name, "*buffers*");
+    assert_eq!(editor.active_buffer().lines[0], "Switch to: ");
+
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().name, "*grid*");
+}
+
+#[test]
 fn timeline_click_item_emits_select_action() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -10611,6 +10717,9 @@ fn focused_timeline_escape_emits_clear_selection_action() {
         30,
         8,
     );
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
@@ -11890,6 +11999,29 @@ fn inline_scope_reserves_display_rows_and_keeps_following_source_line_identity()
 }
 
 #[test]
+fn inline_slider_and_knob_in_quoted_pattern_default_to_normalized_range() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.active_buffer_mut().set_text(
+        "(defmacro pat (&rest body) `(list '(,@body)))\n\
+         (def pattern (pat (dotdecay (~slider 0.85))\n\
+                           (basevel (~knob 0.5))))",
+    );
+    editor.sync_runtime_context();
+    let buffer_id = editor.active_buffer().id;
+    editor.evaluate_buffer_transactional(buffer_id);
+
+    let widgets = editor.active_buffer().inline_code_widgets();
+    assert_eq!(widgets.len(), 2);
+    for widget in widgets {
+        let Value::Map(map) = &widget.widget else {
+            panic!("inline range control should be a widget map");
+        };
+        assert!(matches!(&*map["min"].borrow(), Value::Number(0.0)));
+        assert!(matches!(&*map["max"].borrow(), Value::Number(1.0)));
+    }
+}
+
+#[test]
 fn inline_slider_infers_range_from_enclosing_keyword_call_metadata() {
     let mut runtime = Runtime::new();
     runtime.register_native("synth", |_args, _ctx| Ok(Value::Nil));
@@ -12326,6 +12458,9 @@ fn stale_overlay_widget_id_cannot_strand_the_modal() {
     );
 
     // Escape must still request close through the by-type fallback.
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
@@ -12431,6 +12566,9 @@ fn touchpad_scroll_over_modal_stays_in_the_modal_tile() {
     );
 
     // The modal must still be closable after the gesture.
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
@@ -12708,6 +12846,9 @@ fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
         Some(crate::widget_render::OverlayKind::Modal),
     );
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
@@ -12941,6 +13082,9 @@ fn escape_closes_the_dropdown_first_then_the_modal() {
     let mut editor = modal_two_tile_editor(MODAL_WITH_DROPDOWN_BODY);
     open_dropdown_inside_modal(&mut editor);
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let top = crate::widget_render::topmost_overlay().expect("modal must survive first escape");
     assert_eq!(top.kind, crate::widget_render::OverlayKind::Modal);
@@ -12949,6 +13093,9 @@ fn escape_closes_the_dropdown_first_then_the_modal() {
         "first escape closes only the dropdown"
     );
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
@@ -13065,6 +13212,9 @@ fn inspect_toggle_and_escape_outrank_an_open_modal() {
         "toggling inspect must not disturb the modal"
     );
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!editor.inspect_mode, "Esc must exit inspect mode first");
     assert!(
@@ -13072,6 +13222,9 @@ fn inspect_toggle_and_escape_outrank_an_open_modal() {
         "the modal stays open until the next Esc"
     );
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
@@ -13106,6 +13259,9 @@ fn save_prompt_keys_outrank_an_open_modal() {
     );
 
     // Esc answers the prompt (cancel) rather than closing the modal.
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         editor.save_prompt.is_none(),
@@ -13116,6 +13272,9 @@ fn save_prompt_keys_outrank_an_open_modal() {
         "the modal stays open until the next Esc"
     );
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
@@ -14088,6 +14247,9 @@ fn context_menu_escape_closes_without_firing_items() {
     right_click_at(&mut editor, 6.0, 1.5);
     assert!(editor.modal_is_open(), "menu must gate keyboard input");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     assert!(
@@ -14153,6 +14315,9 @@ fn escape_closes_the_context_menu_first_then_the_modal() {
     );
     assert!(eval_bool(&mut editor, "menu-open"), "right-click opens menu");
 
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "menu-open"),
@@ -14166,9 +14331,13 @@ fn escape_closes_the_context_menu_first_then_the_modal() {
 
     let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
     register_active_layout_overlays(&mut editor);
+    eprintln!("region = {:?}", editor.active_region_range().is_some());
+    eprintln!("completion = {:?}", editor.completion.is_some());
+    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         !eval_bool(&mut editor, "modal-open"),
         "second escape reaches the modal"
     );
 }
+

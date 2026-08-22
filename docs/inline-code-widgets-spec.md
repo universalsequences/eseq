@@ -176,8 +176,8 @@ language of the stale-anchor state.
   from the inlet's declared `:in` metadata (already retained since Cirklon
   Phase 0) — the `:in` declaration's triple duty (behavior input, UI surface,
   preset schema) becomes quadruple. Explicit keywords always override.
-  Outside a metadata context, a range-needing widget with no `:min`/`:max` is
-  an authoring error.
+  Outside a metadata context, `~slider` and `~knob` default to the normalized
+  range 0..1; authors only specify `:min`/`:max` for another range.
 
 ### Authoring walkthrough: minimal code per site
 

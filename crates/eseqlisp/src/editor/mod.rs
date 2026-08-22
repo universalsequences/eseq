@@ -5654,6 +5654,17 @@ impl Editor {
             return;
         }
 
+        // A named mode's on-key handler outranks global Escape bindings and
+        // the "ESC ." chord table: modal list modes (buffer-list, etc.) use
+        // Escape to dismiss themselves, which must win over e.g. the global
+        // selection-clearing binding.
+        if key.code == KeyCode::Esc
+            && key.modifiers == KeyModifiers::NONE
+            && self.handle_mode_input_key(key)
+        {
+            return;
+        }
+
         // Check direct keybinding before treating as chord prefix.
         // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
         // In Vim insert mode, literal characters and plain Tab retain their

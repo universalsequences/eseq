@@ -1,3 +1,28 @@
-(load "crates/sequencer/scripts/sequencers/graph-neural-8x8-reset-demo.lisp")
+(import alez.jaki.surface :refer (jak))
 
-(load "crates/sequencer/scripts/sequencers/graph-neural-16-demo.lisp")
+(def-process "sine-wave"
+  :doc "create sine wave for other stuff"
+  :state ((phase 0))
+  :every (beats 0.25)
+  :run
+  (do
+    (send :hello  (+ 0.5 (* 0.5 (sin (* 3.14 2 phase)))))
+    (set! phase 
+      (mod 
+        (+ phase 0.01)
+        1 
+        )
+      )))
+
+(def dot-wave (sine-wave))
+(start dot-wave)
+
+
+(jak "h" :16
+  (fig (. . .  -) 
+    (minvel (~knob 0 :chan "m"))
+    (dotdecay (~slider 0 :chan "hello")) 
+    (dashdecay (~slider 0.679 :chan "dash")))
+  -> 0 
+  )
+

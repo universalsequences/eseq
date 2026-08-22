@@ -256,8 +256,11 @@
         true)
       (if (= key "ESC")
         (do
-          (set! buflist-filter "")
-          (buflist-refresh)
+          (if (> (len buflist-filter) 0)
+            (do
+              (set! buflist-filter "")
+              (buflist-refresh))
+            (buflist-quit))
           true)
         false))))
 

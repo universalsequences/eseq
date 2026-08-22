@@ -136,10 +136,10 @@ fn register_inline_widget_target_binding_native(vm: &mut VM) {
 }
 
 fn register_inline_value_widget_natives(vm: &mut VM) {
-    for (form_name, widget_type, requires_range) in [
-        ("~slider", "hslider", true),
-        ("~knob", "inline-knob", true),
-        ("~toggle", "toggle", false),
+    for (form_name, widget_type, default_range) in [
+        ("~slider", "hslider", Some((0.0, 1.0))),
+        ("~knob", "inline-knob", Some((0.0, 1.0))),
+        ("~toggle", "toggle", None),
     ] {
         let widget_type = widget_type.to_string();
         vm.register_native_with_vm(form_name, move |args, vm| {
@@ -148,76 +148,61 @@ fn register_inline_value_widget_natives(vm: &mut VM) {
                 return value;
             }
 
-            let mut has_min = args
-                .iter()
-                .any(|arg| matches!(arg, Value::Keyword(key) if key == "min"));
-            let mut has_max = args
-                .iter()
-                .any(|arg| matches!(arg, Value::Keyword(key) if key == "max"));
             let parent_callee = keyword_string_arg(&args, crate::vm::INLINE_PARENT_CALLEE_PROP);
             let parent_inlet = keyword_string_arg(&args, crate::vm::INLINE_PARENT_INLET_PROP);
             let inferred = parent_callee
                 .as_deref()
                 .zip(parent_inlet.as_deref())
                 .and_then(|(callee, inlet)| vm.resolve_inline_widget_metadata(callee, inlet));
-            has_min |= inferred.is_some_and(|metadata| metadata.min.is_some());
-            has_max |= inferred.is_some_and(|metadata| metadata.max.is_some());
-            let mut widget = if requires_range && (!has_min || !has_max) {
-                build_widget(
-                    "label",
-                    vec![
-                        Value::String(format!(
-                            "{form_name}: :min and :max are required outside a process inlet"
-                        )),
-                        Value::Keyword("color".to_string()),
-                        Value::Keyword("red".to_string()),
-                    ],
-                )
-            } else {
-                let display_value = if form_name == "~toggle" {
-                    match &value {
-                        Value::Number(number) => Value::Bool(*number != 0.0),
-                        _ => value.clone(),
-                    }
-                } else {
-                    value.clone()
-                };
-                let mut widget_args = vec![Value::Keyword("value".to_string()), display_value];
-                let mut property_index = 1usize;
-                while property_index + 1 < args.len() {
-                    if !matches!(&args[property_index], Value::Keyword(key) if key == "chan") {
-                        widget_args.push(args[property_index].clone());
-                        widget_args.push(args[property_index + 1].clone());
-                    }
-                    property_index += 2;
+            let display_value = if form_name == "~toggle" {
+                match &value {
+                    Value::Number(number) => Value::Bool(*number != 0.0),
+                    _ => value.clone(),
                 }
+            } else {
+                value.clone()
+            };
+            let mut widget_args = vec![Value::Keyword("value".to_string()), display_value];
+            let mut property_index = 1usize;
+            while property_index + 1 < args.len() {
+                if !matches!(&args[property_index], Value::Keyword(key) if key == "chan") {
+                    widget_args.push(args[property_index].clone());
+                    widget_args.push(args[property_index + 1].clone());
+                }
+                property_index += 2;
+            }
+            if let Some((default_min, default_max)) = default_range {
                 if !args
                     .iter()
                     .any(|arg| matches!(arg, Value::Keyword(key) if key == "min"))
-                    && let Some(min) = inferred.and_then(|metadata| metadata.min)
                 {
+                    let min = inferred
+                        .and_then(|metadata| metadata.min)
+                        .unwrap_or(default_min);
                     widget_args.extend([Value::Keyword("min".to_string()), Value::Number(min)]);
                 }
                 if !args
                     .iter()
                     .any(|arg| matches!(arg, Value::Keyword(key) if key == "max"))
-                    && let Some(max) = inferred.and_then(|metadata| metadata.max)
                 {
+                    let max = inferred
+                        .and_then(|metadata| metadata.max)
+                        .unwrap_or(default_max);
                     widget_args.extend([Value::Keyword("max".to_string()), Value::Number(max)]);
                 }
-                if !args
-                    .iter()
-                    .any(|arg| matches!(arg, Value::Keyword(key) if key == "step"))
-                    && let Some(step) = inferred.and_then(|metadata| metadata.step)
-                {
-                    widget_args.extend([Value::Keyword("step".to_string()), Value::Number(step)]);
-                }
-                widget_args.extend([
-                    Value::Keyword("on-change".to_string()),
-                    Value::String(INLINE_WRITEBACK_CALLBACK.to_string()),
-                ]);
-                build_widget(&widget_type, widget_args)
-            };
+            }
+            if !args
+                .iter()
+                .any(|arg| matches!(arg, Value::Keyword(key) if key == "step"))
+                && let Some(step) = inferred.and_then(|metadata| metadata.step)
+            {
+                widget_args.extend([Value::Keyword("step".to_string()), Value::Number(step)]);
+            }
+            widget_args.extend([
+                Value::Keyword("on-change".to_string()),
+                Value::String(INLINE_WRITEBACK_CALLBACK.to_string()),
+            ]);
+            let mut widget = build_widget(&widget_type, widget_args);
             if let Value::Map(map) = &mut widget {
                 let mut index = 1usize;
                 while index + 1 < args.len() {

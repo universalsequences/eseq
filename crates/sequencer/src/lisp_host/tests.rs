@@ -8989,6 +8989,77 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(out.iter().all(|event| event.event.track == Some(0)));
     }
 
+    // ── sig: signal-pipeline sugar over def-process + channels ──
+    // (content/packages/alez.sig, sibling of alez.jaki)
+
+    #[test]
+    fn sig_surface_registers_process_and_channel() {
+        let mut rt = jaki_runtime();
+        let handle = rt
+            .eval(
+                r#"(import alez.sig.surface :refer (sig))
+                   (sig "hello" :over (bars 4) :rate :16
+                     (-> phase (* tau) sin (scale -1 1 0 1)))"#,
+            )
+            .expect("sig surface macro")
+            .expect("sig must return the started process handle");
+        assert!(
+            matches!(handle, Value::HostHandle { ref kind, .. } if kind == "process"),
+            "expected a process handle, got {handle:?}"
+        );
+        rt.eval("(channel-handle \"hello\")")
+            .expect("sig must declare its value channel");
+    }
+
+    #[test]
+    fn sig_surface_derives_transport_phase_per_tick() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"(import alez.sig.surface :refer (sig))
+                   (sig "ramp" :over (beats 4) :rate (beats 1) :from 0.5)"#,
+            )
+            .expect("sig surface macro");
+
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+
+        let mut ticks = 0usize;
+        for beat in 0..6u64 {
+            let invocations =
+                processes.process_block(beat as f64, beat as f64 + 1.0, beat * 48_000, 48_000.0);
+            for invocation in invocations {
+                let tick_beat = invocation.beat;
+                let result = scratch
+                    .invoke_process_run(invocation)
+                    .expect("sig process tick");
+                let sent = result
+                    .outputs
+                    .iter()
+                    .find(|output| output.name == "__chan:ramp")
+                    .expect("sig tick must send its channel");
+                let Value::Number(value) = sent.value else {
+                    panic!("expected a numeric channel value, got {:?}", sent.value);
+                };
+                let expected = (tick_beat / 4.0 + 0.5).fract();
+                assert!(
+                    (value - expected).abs() < 1e-9,
+                    "beat {tick_beat}: sent {value}, expected derived phase {expected}"
+                );
+                processes.apply_run_result(result);
+                ticks += 1;
+            }
+        }
+        assert!(ticks >= 4, "expected at least four sig ticks, got {ticks}");
+    }
+
     #[test]
     fn jaki_surface_no_routes_defaults_to_track_zero() {
         let mut rt = jaki_runtime();
