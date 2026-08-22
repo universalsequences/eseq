@@ -5621,6 +5621,28 @@ impl VM {
         self.dag.add_edge(source_id, effect_id);
     }
 
+    /// Return the fields in a host-owned namespace which currently have
+    /// reactive readers. Detached subtree readers remain subscribers so a
+    /// change while they are hidden is observed when they are reattached.
+    pub(crate) fn subscribed_injected_reactive_fields(&self, namespace: &str) -> Vec<String> {
+        let Some(fields) = self.dag.namespace_field_sources.get(namespace) else {
+            return Vec::new();
+        };
+        let mut subscribed = fields
+            .iter()
+            .filter_map(|(field, id)| {
+                self.dag.nodes.get(id).and_then(|node| match node {
+                    ReactiveNode::Source { dependents, .. } if !dependents.is_empty() => {
+                        Some(field.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Vec<_>>();
+        subscribed.sort();
+        subscribed
+    }
+
     /// Advance a host-owned source and dirty only effects which read it.
     pub(crate) fn invalidate_injected_reactive_source(
         &mut self,

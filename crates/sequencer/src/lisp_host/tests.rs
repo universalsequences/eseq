@@ -5242,10 +5242,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
              subtrees keep their injected dependency"
         );
 
-        let outcome = runtime.set_reactive("SEQ", "current-pattern", Value::Number(1.0));
-        assert!(
-            outcome.effects_dirty,
-            "pattern switch must dirty slot readers"
+        runtime.queue_reactive_namespace_invalidation(
+            super::SCENE_SLOT_REACTIVE_NAMESPACE,
+            |_| Value::String("scene-2".to_string()),
         );
         runtime.run_reactive_cycle();
         let mut expected = alpha_roots.clone();

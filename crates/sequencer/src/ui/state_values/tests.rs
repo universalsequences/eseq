@@ -111,6 +111,68 @@
     }
 
     #[test]
+    fn pattern_sync_repaints_defscene_readers_with_the_current_scene_epoch() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut first = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        first
+            .scene_slots
+            .write_literal("amount", sequencer::process::ProcessLiteral::Number(1.0))
+            .expect("write first scene slot");
+        let mut second = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        second
+            .scene_slots
+            .write_literal("amount", sequencer::process::ProcessLiteral::Number(2.0))
+            .expect("write second scene slot");
+        state.replace_pattern_repository(vec![first, second], 0);
+        state
+            .restore_current_pattern_from_repository()
+            .expect("restore first scene");
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![("current-pattern", Value::Number(0.0))],
+            true,
+        );
+        sequencer::lisp_host::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str(
+                r#"(defscene amount 0)
+                   (effect-buffer "*scene-slot-switch*"
+                     (h-stack
+                       (subtree :key "amount" (label (str amount)))
+                       (subtree :key "unrelated" (label "static"))))"#,
+            )
+            .expect("render scene-slot reader");
+        runtime.take_pending_buffer_widget_trees();
+
+        state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[sequencer::sequencer::InstrumentType::Sampler],
+            )
+            .expect("switch to second scene");
+        sync_pattern_state(&mut runtime, &state);
+        runtime.run_reactive_cycle();
+
+        let updates = runtime.take_pending_buffer_widget_trees();
+        let [eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. }] = updates.as_slice() else {
+            panic!(
+                "scene switch must repaint only the slot reader subtree, got {} updates",
+                updates.len()
+            );
+        };
+        assert!(
+            value_contains_string(tree, "2"),
+            "the repainted reader must resolve the newly-current scene's value"
+        );
+    }
+
+    #[test]
     fn neural_networks_reactive_value_reflects_current_pattern_model() {
         let state = Arc::new(SequencerState::new(
             2,

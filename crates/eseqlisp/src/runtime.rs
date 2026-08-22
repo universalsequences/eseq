@@ -1193,6 +1193,7 @@ pub struct Runtime {
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
     pub reactive_registry: ReactiveRegistry,
+    pending_injected_reactive_invalidations: HashMap<ReactiveFieldKey, Value>,
     #[cfg(test)]
     rendered_layouts: Vec<Vec<String>>,
     pub current_layout: Option<Arc<LayoutNode>>,
@@ -1228,6 +1229,7 @@ struct RuntimeStateSnapshot {
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
     reactive_registry: ReactiveRegistry,
+    pending_injected_reactive_invalidations: HashMap<ReactiveFieldKey, Value>,
     current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
     dirty_widget_ids: Vec<u64>,
@@ -1262,6 +1264,7 @@ impl Runtime {
             cached_completion_symbols: None,
             cached_completion_metadata: None,
             reactive_registry,
+            pending_injected_reactive_invalidations: HashMap::new(),
             #[cfg(test)]
             rendered_layouts: Vec::new(),
             current_layout: None,
@@ -1934,6 +1937,9 @@ impl Runtime {
             cached_completion_symbols: self.cached_completion_symbols.clone(),
             cached_completion_metadata: self.cached_completion_metadata.clone(),
             reactive_registry: self.reactive_registry.clone(),
+            pending_injected_reactive_invalidations: self
+                .pending_injected_reactive_invalidations
+                .clone(),
             current_layout: self.current_layout.clone(),
             layout_revision: self.layout_revision,
             dirty_widget_ids: self.dirty_widget_ids.clone(),
@@ -1954,6 +1960,8 @@ impl Runtime {
         self.cached_completion_symbols = snapshot.cached_completion_symbols;
         self.cached_completion_metadata = snapshot.cached_completion_metadata;
         self.reactive_registry = snapshot.reactive_registry;
+        self.pending_injected_reactive_invalidations =
+            snapshot.pending_injected_reactive_invalidations;
         self.current_layout = snapshot.current_layout;
         self.layout_revision = snapshot.layout_revision;
         self.dirty_widget_ids = snapshot.dirty_widget_ids;
@@ -2457,6 +2465,25 @@ impl Runtime {
         Ok(())
     }
 
+    /// Queue fresh generations for every subscribed host-owned field in a
+    /// namespace. The invalidations join the next ordinary reactive cycle, so
+    /// effects observe all reactive registry writes from that cycle before
+    /// they re-render. Repeated calls before the cycle retain only the newest
+    /// generation for each field.
+    pub fn queue_reactive_namespace_invalidation(
+        &mut self,
+        namespace: &str,
+        mut generation_for_field: impl FnMut(&str) -> Value,
+    ) {
+        for field in self.vm.subscribed_injected_reactive_fields(namespace) {
+            let generation = generation_for_field(&field);
+            self.pending_injected_reactive_invalidations.insert(
+                ReactiveFieldKey::new(namespace, field),
+                generation,
+            );
+        }
+    }
+
     /// Update one reactive field.
     ///
     /// `#[track_caller]` makes filtered UI traces identify the host write site,
@@ -2805,20 +2832,37 @@ impl Runtime {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
-        if dirty.is_empty() {
+        let injected = std::mem::take(&mut self.pending_injected_reactive_invalidations);
+        if dirty.is_empty() && injected.is_empty() {
             if trace_ui_enabled() {
                 eprintln!("[ui-trace][reactive-cycle] dirty=[] no-op");
             }
             return;
         }
 
-        let dirty_len = dirty.len();
-        let dirty_fields = dirty
+        let dirty_len = dirty.len() + injected.len();
+        let mut dirty_fields = dirty
             .iter()
             .map(|(namespace, field, _)| format!("{namespace}.{field}"))
             .collect::<Vec<_>>();
+        dirty_fields.extend(
+            injected
+                .keys()
+                .map(|field| format!("{}.{}", field.namespace, field.field)),
+        );
+        for (field, generation) in injected {
+            self.vm.invalidate_injected_reactive_source(
+                &field.namespace,
+                &field.field,
+                generation,
+            );
+        }
         let apply_started = Instant::now();
-        let apply_result = self.vm.apply_reactive_changes(dirty);
+        let apply_result = if dirty.is_empty() {
+            self.vm.process_dirty_reactive()
+        } else {
+            self.vm.apply_reactive_changes(dirty)
+        };
         match apply_result {
             Ok(()) => {
                 let apply_elapsed = apply_started.elapsed();

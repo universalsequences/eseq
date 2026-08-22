@@ -112,10 +112,8 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         } else {
             state_for_resolve.resolve_current_scene_slot(name, &default)
         };
-        // The pattern edge repaints every scene-slot reader on a scene switch;
-        // the qualified slot edge lets a write invalidate only this slot's
-        // readers. NativeContext retains these edges only during rendering.
-        ctx.track_reactive_read("SEQ", "current-pattern");
+        // Writes and scene switches advance this qualified slot source.
+        // NativeContext retains the edge only during reactive rendering.
         ctx.track_reactive_read(SCENE_SLOT_REACTIVE_NAMESPACE, name);
         Ok(value.to_value())
     });
