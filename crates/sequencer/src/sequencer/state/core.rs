@@ -404,6 +404,13 @@ pub struct SequencerState {
     pub(super) published_sequencers_version: AtomicU64,
     pub(super) published_process_authoring: Mutex<crate::process::PublishedProcessAuthoringSnapshot>,
     pub(super) published_process_authoring_version: AtomicU64,
+    /// Control-thread channel writes awaiting the scheduler
+    /// (docs/jaki-live-channel-widgets-spec.md 7). These deliberately do not
+    /// ride `published_process_authoring`: `ProcessRuntime::sync_channels`
+    /// prefers an existing runtime value over the authored initial, so a value
+    /// smuggled in as an initial would be dropped. The lookahead worker drains
+    /// this queue at the top of a chunk instead.
+    pub(super) pending_process_channel_writes: Mutex<Vec<(String, crate::process::ProcessLiteral)>>,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pub(super) process_trace_enabled: AtomicBool,

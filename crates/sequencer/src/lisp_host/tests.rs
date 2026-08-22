@@ -12032,6 +12032,59 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(result.target_writes[0].value, -1.0);
     }
 
+    /// docs/jaki-live-channel-widgets-spec.md 7: handle writes queue for the
+    /// scheduler in call order and are handed over exactly once. The value
+    /// deliberately does not ride the authoring snapshot, where
+    /// `sync_channels` would prefer the existing runtime value and drop it.
+    #[test]
+    fn channel_handle_set_queues_writes_for_the_scheduler_in_order() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval("(def warp (defchan warp 0.25))")
+            .expect("declare channel");
+        assert!(
+            state.take_process_channel_writes().is_empty(),
+            "declaring a channel is not a write"
+        );
+
+        // An inline widget bound to the channel sees the initial until the
+        // author moves it, then its own last value.
+        assert_eq!(
+            runtime.eval("(warp :__inline-read :set)").expect("read"),
+            Some(Value::Number(0.25))
+        );
+        runtime.eval("(warp :set 0.6)").expect("first write");
+        runtime.eval("(warp :set 0.9)").expect("second write");
+        assert_eq!(
+            runtime.eval("(warp :__inline-read :set)").expect("read"),
+            Some(Value::Number(0.9))
+        );
+
+        assert_eq!(
+            state.take_process_channel_writes(),
+            vec![
+                ("warp".to_string(), crate::process::ProcessLiteral::Number(0.6)),
+                ("warp".to_string(), crate::process::ProcessLiteral::Number(0.9)),
+            ]
+        );
+        assert!(
+            state.take_process_channel_writes().is_empty(),
+            "a drained write must not be replayed"
+        );
+
+        // The authoring snapshot still carries only the declared initial.
+        let channels = runtime.process_authoring_snapshot().channels;
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].initial, Some(Value::Number(0.25)));
+    }
+
     #[test]
     fn process_tap_from_regular_runtime_publishes_listener_process() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));

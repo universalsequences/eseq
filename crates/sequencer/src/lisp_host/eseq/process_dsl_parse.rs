@@ -1415,15 +1415,105 @@ pub(in crate::lisp_host) fn process_instance_handle(
     }
 }
 
+/// A `defchan` handle. `(handle :set value)` queues a control-thread channel
+/// write that the lookahead worker drains at the top of the next chunk
+/// (docs/jaki-live-channel-widgets-spec.md 7); `(handle :__inline-read :set)`
+/// reports the value an inline widget bound to the channel should display.
 pub(in crate::lisp_host) fn process_channel_handle(
     process_authoring: SharedProcessAuthoring,
+    process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     handle_id: crate::process::AuthoredHandleId,
 ) -> EValue {
     EValue::HostHandle {
         kind: "channel".to_string(),
         id: handle_id.0,
-        callable: Rc::new(move |_args, _vm| EValue::Bool(true)),
+        callable: Rc::new(move |args, _vm| {
+            match process_channel_handle_call(
+                &process_authoring,
+                process_chain_state.as_ref(),
+                handle_id,
+                args,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("[process] channel handle error: {error}");
+                    EValue::Bool(false)
+                }
+            }
+        }),
     }
+}
+
+fn channel_name_for_handle(
+    registry: &ProcessAuthoringRegistry,
+    handle_id: crate::process::AuthoredHandleId,
+) -> Result<String, String> {
+    registry
+        .channels
+        .iter()
+        .find(|channel| channel.handle_id == handle_id)
+        .and_then(|channel| channel.name.clone())
+        .or_else(|| registry.channel_handles.get(&handle_id.0).cloned())
+        .ok_or_else(|| "unknown channel handle".to_string())
+}
+
+fn process_channel_handle_call(
+    process_authoring: &SharedProcessAuthoring,
+    process_chain_state: Option<&Arc<crate::sequencer::SequencerState>>,
+    handle_id: crate::process::AuthoredHandleId,
+    args: Vec<EValue>,
+) -> Result<EValue, String> {
+    let mut registry = process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?;
+    let name = channel_name_for_handle(&registry, handle_id)?;
+
+    let inline_read = matches!(
+        args.as_slice(),
+        [EValue::Keyword(command) | EValue::Symbol(command), _]
+            if command.trim_start_matches(':') == "__inline-read"
+    );
+    if inline_read {
+        // Latest write wins, then the authored initial. The scheduler-side
+        // value is not readable from here, which is the point: the widget
+        // shows the author's hand, not a process's.
+        let value = registry
+            .channel_write_echo
+            .get(&name)
+            .map(|literal| literal.to_value())
+            .or_else(|| {
+                registry
+                    .channels
+                    .iter()
+                    .find(|channel| channel.handle_id == handle_id)
+                    .and_then(|channel| channel.initial.clone())
+            })
+            .unwrap_or(EValue::Nil);
+        return Ok(value);
+    }
+
+    let value = match args.as_slice() {
+        [EValue::Keyword(command) | EValue::Symbol(command), value]
+            if command.trim_start_matches(':') == "set" =>
+        {
+            value
+        }
+        [value] => value,
+        _ => {
+            return Err(format!(
+                "channel '{name}' expects (chan :set value) or (chan value)"
+            ))
+        }
+    };
+    let literal = crate::process::ProcessLiteral::from_value(value)?;
+    registry.queue_channel_write(name, literal);
+    // Without a state to hand them to there is no scheduler to reach, so the
+    // writes stay queued on the registry and a later call delivers them in
+    // order.
+    if let Some(state) = process_chain_state {
+        state.queue_process_channel_writes(registry.take_pending_channel_writes());
+    }
+    Ok(EValue::Bool(true))
 }
 
 pub(in crate::lisp_host) fn process_outlet_handle(

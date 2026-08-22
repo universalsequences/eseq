@@ -441,6 +441,19 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
         let chunk_start_beats = clock.total_beats;
+        // Control-thread channel writes land on the chunk boundary, in order,
+        // with a defined beat (docs/jaki-live-channel-widgets-spec.md 7). This
+        // has to precede the `chan-get` snapshot published below so a tick in
+        // this chunk observes the write.
+        let mut channel_write_invocations = Vec::new();
+        for (name, literal) in state.take_process_channel_writes() {
+            channel_write_invocations.extend(process_runtime.send_channel_at(
+                &name,
+                literal.to_value(),
+                chunk_start_beats,
+                scheduled_until_sample,
+            ));
+        }
         let roll_grid = crate::sequencer::Timebase::from_index(
             state.transport.roll_rate.load(Ordering::Relaxed),
         )
@@ -1540,12 +1553,16 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // named inlets/outlets/channels and a pending store for future emits.
         if !process_runtime.is_empty() {
             if scratch_runtime.is_some() {
-                let invocations = process_runtime.process_block(
+                // Listeners woken by this chunk's control-thread channel
+                // writes run before the clocked processes, matching the beat
+                // the writes were applied at.
+                let mut invocations = std::mem::take(&mut channel_write_invocations);
+                invocations.extend(process_runtime.process_block(
                     chunk_start_beats,
                     chunk_end_beats,
                     scheduled_until_sample,
                     samples_per_quarter,
-                );
+                ));
                 for invocation in invocations {
                     let mut pending_invocations = vec![invocation];
                     let mut processed_invocations = 0usize;

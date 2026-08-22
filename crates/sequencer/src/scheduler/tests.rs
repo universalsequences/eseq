@@ -2294,6 +2294,98 @@
         out
     }
 
+    /// docs/jaki-live-channel-widgets-spec.md 7: a `(handle :set value)` call
+    /// on the control thread reaches the scheduler through the pending-write
+    /// queue, is applied at the top of a chunk, and is visible to a `chan-get`
+    /// in that chunk's generator ticks.
+    #[test]
+    fn channel_handle_write_reaches_generator_chan_get_on_the_next_chunk() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"(def warp (defchan warp 0.25))
+                       (__register-sequencer "warp-reader"
+                         :resolution :4
+                         :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))"#,
+                )
+                .expect("declare channel and generator");
+
+            let velocities = |scheduler: &mut SchedulerLookaheadState,
+                              scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+                              rendered: u64| {
+                let snapshot = state.publish_scheduler_snapshot();
+                let queue = ScheduledEventQueue::<32>::new();
+                let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                    std::array::from_fn(|_| LiveMidiFxTrackState::default());
+                schedule_playing_lookahead(
+                    scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    rendered,
+                    rendered + 24_000,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    rendered,
+                    false,
+                    false,
+                );
+                let mut out = Vec::new();
+                while let Some(event) = queue.pop() {
+                    if let ScheduledEventKind::NetworkTrigger { resolved, .. } = event.kind {
+                        out.push(resolved.velocity);
+                    }
+                }
+                out
+            };
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+
+            let before = velocities(&mut scheduler, &mut scratch_runtime, 0);
+            assert!(!before.is_empty(), "generator emitted nothing");
+            assert!(
+                before.iter().all(|vel| (vel - 0.25).abs() < 1e-6),
+                "expected the defchan initial before any write, got {before:?}"
+            );
+
+            // The stubbed handle used to swallow this call entirely.
+            let handle = scratch_runtime
+                .as_mut()
+                .expect("scratch runtime")
+                .eval("(warp :set 0.9)")
+                .expect("write the channel through its handle");
+            assert_eq!(handle, Some(Value::Bool(true)));
+
+            let after = velocities(&mut scheduler, &mut scratch_runtime, 24_000);
+            assert!(!after.is_empty(), "generator emitted nothing after the write");
+            assert!(
+                after.iter().all(|vel| (vel - 0.9).abs() < 1e-6),
+                "expected the written channel value, got {after:?}"
+            );
+            assert!(
+                state.take_process_channel_writes().is_empty(),
+                "the scheduler drain should have consumed the queue"
+            );
+        });
+    }
+
     fn run_sparse_process_accumulator_fixture() -> (Arc<SequencerState>, Vec<ObservedTrigger>) {
         run_sparse_process_accumulator_fixture_impl(false)
     }

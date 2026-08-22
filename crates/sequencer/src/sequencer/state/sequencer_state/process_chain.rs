@@ -59,6 +59,30 @@ impl SequencerState {
         self.published_process_authoring_version
             .load(Ordering::Acquire)
     }
+    /// Queue control-thread channel writes for the scheduler to apply at the
+    /// top of the next lookahead chunk
+    /// (docs/jaki-live-channel-widgets-spec.md 7).
+    ///
+    /// Nothing drains while the transport is stopped, so a long drag would
+    /// otherwise grow the queue without bound. Past the cap the oldest writes
+    /// are dropped: the channel still ends at the value the author left it on,
+    /// which is what section 8 promises for a stopped transport.
+    pub fn queue_process_channel_writes(
+        &self,
+        writes: impl IntoIterator<Item = (String, crate::process::ProcessLiteral)>,
+    ) {
+        const MAX_PENDING_CHANNEL_WRITES: usize = 512;
+        let mut pending = self.pending_process_channel_writes.lock().unwrap();
+        pending.extend(writes);
+        let overflow = pending.len().saturating_sub(MAX_PENDING_CHANNEL_WRITES);
+        if overflow > 0 {
+            pending.drain(..overflow);
+        }
+    }
+    /// Take the queued control-thread channel writes, oldest first.
+    pub fn take_process_channel_writes(&self) -> Vec<(String, crate::process::ProcessLiteral)> {
+        std::mem::take(&mut *self.pending_process_channel_writes.lock().unwrap())
+    }
     pub fn track_process_chain(&self, track: usize) -> Option<crate::process::TrackProcessChain> {
         if track >= self.active_track_count() {
             return None;

@@ -221,6 +221,7 @@ pub(in crate::lisp_host) fn register_process_natives(
 
     let process_authoring_for_defchan = Arc::clone(&process_authoring);
     let publish_for_defchan = publish.clone();
+    let chain_state_for_defchan = process_chain_state.clone();
     runtime.register_native_with_docs(
         "defchan",
         "(defchan name [initial])",
@@ -242,8 +243,11 @@ pub(in crate::lisp_host) fn register_process_natives(
                 message_only: args.len() == 1,
             });
             registry.channel_handles.insert(handle_id.0, name);
-            let handle =
-                process_channel_handle(Arc::clone(&process_authoring_for_defchan), handle_id);
+            let handle = process_channel_handle(
+                Arc::clone(&process_authoring_for_defchan),
+                chain_state_for_defchan.clone(),
+                handle_id,
+            );
             drop(registry);
             publish_process_authoring(&process_authoring_for_defchan, &publish_for_defchan);
             Ok(handle)

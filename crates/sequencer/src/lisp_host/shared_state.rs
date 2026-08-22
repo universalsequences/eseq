@@ -183,6 +183,16 @@ pub(super) struct ProcessAuthoringRegistry {
     pub(super) conductors: Vec<crate::process::AuthoredConductorAttachment>,
     pub(super) outlet_handles: HashMap<u64, crate::process::ProcessOutletRef>,
     pub(super) channel_handles: HashMap<u64, String>,
+    /// Channel writes made through a channel handle, awaiting a drain onto the
+    /// scheduler (docs/jaki-live-channel-widgets-spec.md 7). Kept off
+    /// [`ProcessAuthoringRegistry::snapshot`] on purpose: `sync_channels`
+    /// prefers an existing runtime value over the authored initial, so a write
+    /// carried as an initial would be silently swallowed.
+    pub(super) pending_channel_writes: Vec<(String, crate::process::ProcessLiteral)>,
+    /// Last value written to each channel through a handle. Survives the drain
+    /// so an inline widget bound to the channel reports the author's own last
+    /// value rather than snapping back to the `defchan` initial.
+    pub(super) channel_write_echo: HashMap<String, crate::process::ProcessLiteral>,
 }
 
 impl ProcessAuthoringRegistry {
@@ -229,6 +239,21 @@ impl ProcessAuthoringRegistry {
             instance.name = Some(name.to_string());
             instance.anonymous = false;
         }
+    }
+
+    pub(super) fn queue_channel_write(
+        &mut self,
+        name: String,
+        value: crate::process::ProcessLiteral,
+    ) {
+        self.channel_write_echo.insert(name.clone(), value.clone());
+        self.pending_channel_writes.push((name, value));
+    }
+
+    pub(super) fn take_pending_channel_writes(
+        &mut self,
+    ) -> Vec<(String, crate::process::ProcessLiteral)> {
+        std::mem::take(&mut self.pending_channel_writes)
     }
 
     pub(super) fn name_channel(&mut self, handle_id: crate::process::AuthoredHandleId, name: &str) {
