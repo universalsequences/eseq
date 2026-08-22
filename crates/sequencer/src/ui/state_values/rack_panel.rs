@@ -129,7 +129,7 @@ pub(super) fn rack_slot_param_map(
     Rc::new(RefCell::new(Value::Map(pmap)))
 }
 
-pub(super) fn rack_slot_param_value(
+pub(crate) fn rack_slot_param_value(
     rack: &sequencer::sequencer::RackTrackSnapshot,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
@@ -320,7 +320,10 @@ pub(super) fn build_selected_rack_slot_instrument_value(
     ));
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        if sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx)
+        // u32::MAX marks host-only controls such as sampler slicing; it is not
+        // a packed voice-modulator source index.
+        if (pdesc.node_param_idx != u32::MAX
+            && sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx))
             || pdesc.name.starts_with("__host_mod__")
             || pdesc.name.starts_with("__dgen_mod_active__")
         {
@@ -535,6 +538,64 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             "duration".to_string(),
             value_cell(Value::Number(sample_duration)),
         );
+        let slice_mode = rack_slot_param_value(
+            rack,
+            slot_idx,
+            slot,
+            &desc,
+            sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
+            selected_step,
+        )
+        .round();
+        let mut slice_active: Vec<Rc<RefCell<Value>>> = Vec::new();
+        let slices: Vec<Rc<RefCell<Value>>> = app
+            .sample_analysis
+            .cache()
+            .table(buffer_id)
+            .map(|table| {
+                let frames: Vec<u32> = if slice_mode == 1.0 {
+                    let sensitivity = rack_slot_param_value(
+                        rack,
+                        slot_idx,
+                        slot,
+                        &desc,
+                        sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+                        selected_step,
+                    );
+                    // Sensitivity deactivates markers rather than removing
+                    // them; the parallel flag list carries which are live.
+                    let (frames, active) = table
+                        .with_edits(sequencer::analysis::edits_for_sample(
+                            slot.instrument_slot.sampler_slice_edits.as_ref(),
+                            sampler_path
+                                .as_ref()
+                                .map(|path| path.to_string_lossy())
+                                .as_deref(),
+                        ))
+                        .slice_markers(sensitivity);
+                    slice_active = active
+                        .into_iter()
+                        .map(|active| {
+                            value_cell(Value::Number(if active { 1.0 } else { 0.0 }))
+                        })
+                        .collect();
+                    frames
+                } else {
+                    Vec::new()
+                };
+                frames
+                    .into_iter()
+                    .map(|frame| {
+                        value_cell(Value::Number(
+                            frame as f64 / table.sample_rate.max(1) as f64,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        debug_assert_eq!(slice_active.len(), slices.len());
+        panel_map.insert("slices".to_string(), value_cell(Value::List(slices)));
+        panel_map.insert("slice-active".to_string(), value_cell(Value::List(slice_active)));
     }
 
     Some(Rc::new(RefCell::new(Value::Map(panel_map))))

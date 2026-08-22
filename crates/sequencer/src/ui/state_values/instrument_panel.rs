@@ -15,6 +15,58 @@ fn sound_binding_label(app: &app::App, track: usize) -> Option<String> {
         .or_else(|| app.track_binding_label(track))
 }
 
+/// Slice sensitivity as the sampler panel resolves it. Marker indices in
+/// `edit-sampler-slice` payloads address the list this panel rendered, so the
+/// host command has to reach the same value — p-lock and descriptor-tail
+/// fallback included — or an edit lands on the wrong marker.
+///
+/// A sampler track can be backed by a descriptor that predates the slice
+/// controls (stale/converted tracks in particular), so the default resolves
+/// through `get` and slicing is skipped entirely when the tail is absent.
+fn sampler_slice_param_value(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::EffectDescriptor,
+    plock_step: Option<usize>,
+    param_idx: usize,
+) -> Option<f32> {
+    let default = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+        Some(slot.defaults.get(param_idx))
+    } else {
+        desc.params.get(param_idx).map(|param| param.default)
+    };
+    default.map(|default| {
+        plock_step
+            .and_then(|step| slot.plocks.get(step, param_idx))
+            .unwrap_or(default)
+    })
+}
+
+pub(crate) fn sampler_slice_mode(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::EffectDescriptor,
+    plock_step: Option<usize>,
+) -> Option<f32> {
+    sampler_slice_param_value(
+        slot,
+        desc,
+        plock_step,
+        sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
+    )
+}
+
+pub(crate) fn sampler_slice_sensitivity(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::EffectDescriptor,
+    plock_step: Option<usize>,
+) -> Option<f32> {
+    sampler_slice_param_value(
+        slot,
+        desc,
+        plock_step,
+        sequencer::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+    )
+}
+
 pub(crate) fn build_sampler_panel_value(
     app: &app::App,
     track: usize,
@@ -35,7 +87,10 @@ pub(crate) fn build_sampler_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
+        // u32::MAX marks host-only controls such as sampler slicing; it is not
+        // a packed voice-modulator source index.
+        node_param_idx != u32::MAX
+            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
@@ -432,6 +487,50 @@ pub(crate) fn build_sampler_panel_value(
         panel_map.insert("buffer".to_string(), Rc::new(RefCell::new(buf_val)));
     }
     let buffer_id = app.graph.track_buffer_ids.get(track).copied().unwrap_or(-1);
+    let slice_mode = sampler_slice_param_value(
+        slot,
+        &desc,
+        plock_step,
+        sequencer::instruments::sampler::SLOT_PARAM_SLICE_MODE,
+    )
+    .unwrap_or(0.0)
+    .round();
+    let mut slice_active_values: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let slice_values: Vec<Rc<RefCell<Value>>> = app
+        .sample_analysis
+        .cache()
+        .table(buffer_id)
+        .map(|table| {
+            let frames: Vec<u32> = if slice_mode == 1.0 {
+                let sensitivity = sampler_slice_sensitivity(slot, &desc, plock_step)
+                    .unwrap_or(0.5);
+                let edits = slot.sampler_slice_edits.read().unwrap();
+                // Sensitivity deactivates markers rather than removing them, so
+                // the panel renders every candidate and carries a parallel
+                // active flag for colouring.
+                let (frames, active) = table
+                    .with_edits(app.sampler_slice_edits_for_track(track, edits.as_ref()))
+                    .slice_markers(sensitivity);
+                slice_active_values = active
+                    .into_iter()
+                    .map(|active| {
+                        Rc::new(RefCell::new(Value::Number(if active { 1.0 } else { 0.0 })))
+                    })
+                    .collect();
+                frames
+            } else {
+                Vec::new()
+            };
+            frames
+                .into_iter()
+                .map(|frame| {
+                    Rc::new(RefCell::new(Value::Number(
+                        frame as f64 / table.sample_rate.max(1) as f64,
+                    )))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let analysis_entry = app.sample_analysis.cache().get(buffer_id);
     let mut analysis_status = "none".to_string();
     let mut analysis_message = String::new();
@@ -487,6 +586,15 @@ pub(crate) fn build_sampler_panel_value(
     panel_map.insert(
         "onsets".to_string(),
         Rc::new(RefCell::new(Value::List(onset_values))),
+    );
+    debug_assert_eq!(slice_active_values.len(), slice_values.len());
+    panel_map.insert(
+        "slices".to_string(),
+        Rc::new(RefCell::new(Value::List(slice_values))),
+    );
+    panel_map.insert(
+        "slice-active".to_string(),
+        Rc::new(RefCell::new(Value::List(slice_active_values))),
     );
     panel_map.insert(
         "params".to_string(),
@@ -786,7 +894,10 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
+        // u32::MAX marks host-only controls; it is not a packed
+        // voice-modulator source index.
+        node_param_idx != u32::MAX
+            && sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {

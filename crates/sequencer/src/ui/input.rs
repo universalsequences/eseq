@@ -512,6 +512,17 @@ pub(crate) fn should_route_to_live_keyboard(
         return false;
     }
 
+    // A focused number picker or knob-number begins its edit on the first
+    // digit. Roll-rate keys are digits, so without this they eat the keypress
+    // that would have started the edit — and `editor_accepts_live_keyboard_input`
+    // only notices a picker that is *already* editing, which is one key too late.
+    if !semantic_hold_binding
+        && matches!(key.code, crossterm::event::KeyCode::Char(c) if c.is_ascii_digit())
+        && editor.focused_widget_captures_numeric_input()
+    {
+        return false;
+    }
+
     semantic_hold_binding || matches!(key.code, crossterm::event::KeyCode::Char(_))
 }
 
@@ -1269,9 +1280,11 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
         && key.modifiers == KeyModifiers::NONE
         // Defer to a focused widget (e.g. an arrangement lane with a selected
-        // clip): the widget's own delete handling wins over the global
-        // selected-step shortcut, mirroring the navigation-key gate below.
-        && editor.focused_widget_id().is_none()
+        // clip, a text input, a number picker mid-edit) only when that widget
+        // actually handles this key. Gating on "anything is focused" meant a
+        // click on any button — which consumes only Enter and Space — silently
+        // disarmed Cmd+A followed by Backspace.
+        && !editor.focused_widget_consumes_key(key.code, key.modifiers)
         && selected_steps_delete_shortcut_available(editor, selected_steps)
     {
         let _ = editor.runtime_mut().eval_str("(eseq.step-grid-interactions/delete-selected-steps)");

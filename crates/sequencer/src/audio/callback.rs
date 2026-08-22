@@ -130,7 +130,9 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             if let Some(active_note) =
                 take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose)
             {
-                release_active_keyboard_note(data, active_note, 0, block_end_sample);
+                if live_key_release_cuts_voice(&data.state, kt.track) {
+                    release_active_keyboard_note(data, active_note, 0, block_end_sample);
+                }
             }
         } else {
             // Note-on: allocate voice and trigger
@@ -273,12 +275,6 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     }],
                 );
             } else {
-                let voice = data.voice_pools[kt.track]
-                    .allocate_voice_retriggering_same_note(resolved_transpose);
-                let voice_lid = voice.logical_id;
-                if voice_lid == 0 {
-                    continue;
-                }
                 let tp = &data.state.pattern.track_params[kt.track];
                 let Some(kb_inst_slot) = data
                     .scheduler_snapshot
@@ -290,13 +286,35 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 };
                 let kb_default =
                     |param_idx: usize| kb_inst_slot.defaults.get(param_idx).copied().unwrap_or(0.0);
+                let mut kb_sampler_params = resolve_rack_slot_sampler_defaults(kb_inst_slot);
+                let mut trigger_transpose = resolved_transpose;
+                if resolve_slice(
+                    &data.state,
+                    kt.track,
+                    &mut kb_sampler_params,
+                    &mut trigger_transpose,
+                ) == SliceTriggerVerdict::Ignore
+                {
+                    continue;
+                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += base_note_offset;
+                let voice = data.voice_pools[kt.track]
+                    .allocate_voice_retriggering_same_note(resolved_transpose);
+                let voice_lid = voice.logical_id;
+                if voice_lid == 0 {
+                    continue;
+                }
                 let kb_instrument_params =
                     resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
                 let attack_samples = kb_default(0) * data.sample_rate as f32 / 1000.0;
                 let release_samples = kb_default(1) * data.sample_rate as f32 / 1000.0;
                 let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
-                let kb_start = kb_default(2);
-                let kb_end = kb_default(3);
+                let kb_start = kb_sampler_params.start_point;
+                let kb_end = kb_sampler_params.end_point;
                 let kb_enabled = kb_default(4);
                 let kb_reverse = kb_default(5);
                 let kb_loop_mode = kb_default(6);
@@ -346,7 +364,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                             voice.gatepitch_id as u64,
                             0,
                             gatepitch_seq,
-                            custom_pitch_hz(resolved_transpose + base_note_offset, 0.0),
+                            custom_pitch_hz(trigger_transpose, 0.0),
                             kt.velocity,
                         );
                     }
@@ -358,7 +376,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         voice_lid,
                         0,
                         sampler_seq,
-                        resolved_transpose + base_note_offset,
+                        trigger_transpose,
                         kt.velocity,
                         kb_playback_speed,
                         attack_samples,

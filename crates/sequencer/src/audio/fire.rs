@@ -208,6 +208,20 @@ pub(super) fn fire_resolved(
                 .plocks
                 .get(step, 13)
                 .unwrap_or_else(|| inst_slot.defaults.get(13)),
+            slice_mode: inst_slot
+                .plocks
+                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)
+                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE)),
+            slice_sensitivity: inst_slot
+                .plocks
+                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)
+                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY)),
+            slice_base: inst_slot
+                .plocks
+                .get(step, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)
+                .unwrap_or_else(|| inst_slot.defaults.get(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE)),
+            start_point_locked: inst_slot.plocks.get(step, 2).is_some(),
+            end_point_locked: inst_slot.plocks.get(step, 3).is_some(),
             warp_preserve: live_slot_resolved_node_param_value(
                 inst_slot,
                 step,
@@ -342,6 +356,7 @@ pub(super) fn fire_resolved(
         && track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
 
     // Check chord data: if chord has notes, trigger each note on its own voice
+    let mut sampler_voice_fired = false;
     let chord_count = chord.count;
     if chord_count > 0 {
         for n in 0..chord_count {
@@ -484,8 +499,25 @@ pub(super) fn fire_resolved(
                     );
                 }
             } else {
-                let voice =
-                    data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
+                let selector_transpose = transpose;
+                let mut trigger_transpose = transpose;
+                let mut trigger_params = sampler_params;
+                if resolve_slice(
+                    &data.state,
+                    track_idx,
+                    &mut trigger_params,
+                    &mut trigger_transpose,
+                ) == SliceTriggerVerdict::Ignore
+                {
+                    continue;
+                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += base_note_offset;
+                let voice = data.voice_pools[track_idx]
+                    .allocate_voice_retriggering_same_note(selector_transpose);
                 let voice_lid = voice.logical_id;
                 let lid = if voice_lid != 0 {
                     voice_lid
@@ -506,7 +538,7 @@ pub(super) fn fire_resolved(
                             voice.gatepitch_id as u64,
                             frame_offset,
                             gatepitch_seq,
-                            custom_pitch_hz(transpose + base_note_offset, 0.0),
+                            custom_pitch_hz(trigger_transpose, 0.0),
                             velocity,
                         );
                     }
@@ -525,9 +557,9 @@ pub(super) fn fire_resolved(
                         attack_samples,
                         release_samples,
                         gate_mode,
-                        transpose + base_note_offset,
-                        start_point,
-                        end_point,
+                        trigger_transpose,
+                        trigger_params.start_point,
+                        trigger_params.end_point,
                         instrument_enabled,
                         reverse,
                         loop_mode,
@@ -546,6 +578,7 @@ pub(super) fn fire_resolved(
                         scrub,
                     );
                 }
+                sampler_voice_fired = true;
                 if gate_mode > 0.5 {
                     schedule_gate_off_event(
                         data,
@@ -689,8 +722,25 @@ pub(super) fn fire_resolved(
                 );
             }
         } else {
-            let voice =
-                data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
+            let selector_transpose = transpose;
+            let mut trigger_transpose = transpose;
+            let mut trigger_params = sampler_params;
+            if resolve_slice(
+                &data.state,
+                track_idx,
+                &mut trigger_params,
+                &mut trigger_transpose,
+            ) == SliceTriggerVerdict::Ignore
+            {
+                return;
+            }
+            // `resolve_slice` consumes the note to pick the slice and zeroes the
+            // transpose, so adding the base-note offset unconditionally leaves
+            // classic mode untouched and makes `base` the pitch offset that every
+            // slice plays at.
+            trigger_transpose += base_note_offset;
+            let voice = data.voice_pools[track_idx]
+                .allocate_voice_retriggering_same_note(selector_transpose);
             let voice_lid = voice.logical_id;
             let lid = if voice_lid != 0 {
                 voice_lid
@@ -711,7 +761,7 @@ pub(super) fn fire_resolved(
                         voice.gatepitch_id as u64,
                         frame_offset,
                         gatepitch_seq,
-                        custom_pitch_hz(transpose + base_note_offset, 0.0),
+                        custom_pitch_hz(trigger_transpose, 0.0),
                         velocity,
                     );
                 }
@@ -730,9 +780,9 @@ pub(super) fn fire_resolved(
                     attack_samples,
                     release_samples,
                     gate_mode,
-                    transpose + base_note_offset,
-                    start_point,
-                    end_point,
+                    trigger_transpose,
+                    trigger_params.start_point,
+                    trigger_params.end_point,
                     instrument_enabled,
                     reverse,
                     loop_mode,
@@ -751,6 +801,7 @@ pub(super) fn fire_resolved(
                     scrub,
                 );
             }
+            sampler_voice_fired = true;
             if gate_mode > 0.5 {
                 schedule_gate_off_event(
                     data,
@@ -762,6 +813,10 @@ pub(super) fn fire_resolved(
                 );
             }
         }
+    }
+
+    if !is_custom && !sampler_voice_fired {
+        return;
     }
 
     // Update send gain (reverb send amount from track-level param)
@@ -948,6 +1003,43 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
     );
     let sd = &data.state.pattern.step_data[track_idx];
     let transpose = sd.get(event.step, StepParam::Transpose);
+    let host_value = |param_idx: usize, default: f32| {
+        if param_idx >= chop_inst_slot.num_params.load(Ordering::Relaxed) as usize {
+            return default;
+        }
+        chop_inst_slot
+            .plocks
+            .get(event.step, param_idx)
+            .unwrap_or_else(|| chop_inst_slot.defaults.get(param_idx))
+    };
+    let mut trigger_params = ScheduledSamplerParams {
+        start_point: chop_start,
+        end_point: chop_end,
+        slice_mode: host_value(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0),
+        slice_sensitivity: host_value(
+            crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY,
+            0.5,
+        ),
+        slice_base: host_value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        start_point_locked: chop_inst_slot.plocks.get(event.step, 2).is_some(),
+        end_point_locked: chop_inst_slot.plocks.get(event.step, 3).is_some(),
+        ..ScheduledSamplerParams::default()
+    };
+    let mut trigger_transpose = transpose;
+    if resolve_slice(
+        &data.state,
+        track_idx,
+        &mut trigger_params,
+        &mut trigger_transpose,
+    ) == SliceTriggerVerdict::Ignore
+    {
+        return;
+    }
+    // `resolve_slice` consumes the note to pick the slice and zeroes the
+    // transpose, so adding the base-note offset unconditionally leaves
+    // classic mode untouched and makes `base` the pitch offset that every
+    // slice plays at.
+    trigger_transpose += chop_base_note_offset;
     let voice = data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
     let voice_lid = voice.logical_id;
     let sampler_lid = data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);
@@ -973,7 +1065,7 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
                 voice.gatepitch_id as u64,
                 frame_offset,
                 gatepitch_seq,
-                custom_pitch_hz(transpose + chop_base_note_offset, 0.0),
+                custom_pitch_hz(trigger_transpose, 0.0),
                 sd.get(event.step, StepParam::Velocity),
             );
         }
@@ -992,9 +1084,9 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
             attack_samples,
             release_samples,
             gate_mode,
-            transpose + chop_base_note_offset,
-            chop_start,
-            chop_end,
+            trigger_transpose,
+            trigger_params.start_point,
+            trigger_params.end_point,
             chop_inst_slot
                 .plocks
                 .get(event.step, 4)

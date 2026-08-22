@@ -10,6 +10,7 @@ mod project;
 mod rack;
 mod routing;
 mod samples;
+mod sampler_slices;
 mod scenes;
 mod scripts;
 mod song;

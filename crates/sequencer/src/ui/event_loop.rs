@@ -115,6 +115,9 @@ pub(crate) fn run_event_loop(
         prev_selected_neural_neurons: shared.selected_neural_neurons.lock().unwrap().clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),
         prev_sampler_analysis_key: None,
+        // Force one complete track/rack publication on the first frame; an
+        // analysis may have completed between graph binding and loop startup.
+        prev_sampler_analysis_generation: u64::MAX,
         prev_auto_follow: true,
         prev_browser_preview_playing: false,
         prev_queued_transport_scene: None,

@@ -22,6 +22,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),
         n if super::routing::COMMANDS.contains(&n) => super::routing::handle(name, payload, app, editor, ctx),
         n if super::samples::COMMANDS.contains(&n) => super::samples::handle(name, payload, app, editor, ctx),
+        n if super::sampler_slices::COMMANDS.contains(&n) => super::sampler_slices::handle(name, payload, app, editor, ctx),
         n if super::scripts::COMMANDS.contains(&n) => super::scripts::handle(name, payload, app, editor, ctx),
         n if super::agent::COMMANDS.contains(&n) => super::agent::handle(name, payload, app, editor, ctx),
         n if super::project::COMMANDS.contains(&n) => super::project::handle(name, payload, app, editor, ctx),
@@ -37,6 +38,11 @@ pub(crate) fn dispatch_custom_host_command(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sampler_slice_edit_command_is_registered_with_its_handler() {
+        assert!(super::super::sampler_slices::COMMANDS.contains(&"edit-sampler-slice"));
+    }
+
     #[test]
     fn sampler_range_batch_commands_are_registered_with_their_handler() {
         for command in [

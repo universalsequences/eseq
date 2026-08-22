@@ -524,7 +524,42 @@ pub struct ProjectRackEffectChain {
 }
 
 impl ProjectFile {
+    /// A pattern's rack slot knows its sample only by *name*; the path lives
+    /// on the track layout (`ProjectTrackKind::Rack`), which is the only side
+    /// that resolves it at save time. Mirror it across so slice edits can be
+    /// validated against the sample they were authored for — without it
+    /// `discard_slice_edits_for_other_sample` compares against `None` and
+    /// discards every saved marker on load. Runs on both capture and
+    /// deserialize, so projects written before the mirror existed are repaired
+    /// rather than losing their edits once more.
+    fn mirror_rack_slot_sample_paths(&mut self) {
+        let track_slot_paths: Vec<Vec<Option<String>>> = self
+            .tracks
+            .iter()
+            .map(|track| match &track.kind {
+                ProjectTrackKind::Rack { slots, .. } => {
+                    slots.iter().map(|slot| slot.sample_path.clone()).collect()
+                }
+                ProjectTrackKind::Sampler { sample_path } => vec![Some(sample_path.clone())],
+                ProjectTrackKind::Custom { .. } | ProjectTrackKind::Modulator => Vec::new(),
+            })
+            .collect();
+        for pattern in &mut self.patterns {
+            for (track, rack) in pattern.rack_tracks.iter_mut().enumerate() {
+                let (Some(rack), Some(paths)) = (rack.as_mut(), track_slot_paths.get(track)) else {
+                    continue;
+                };
+                for (slot_index, slot) in rack.slots.iter_mut().enumerate() {
+                    if slot.sample_path.is_none() {
+                        slot.sample_path = paths.get(slot_index).cloned().flatten();
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn normalize_device_instances(&mut self) -> Result<(), String> {
+        self.mirror_rack_slot_sample_paths();
         let mut next_id = self.device_instances.track_effects.iter()
             .flat_map(|chain| chain.instances.iter().map(|instance| instance.id))
             .chain(self.device_instances.midi_effects.iter()
@@ -1696,6 +1731,7 @@ pub struct ProjectEffectSlot {
     /// Host-managed effect source references that are not numeric parameters.
     pub ir: Option<String>,
     pub table: Option<String>,
+    pub sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -2124,11 +2160,21 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
                 .or_else(|| value.ir.clone()),
             table: crate::effects::filter_table::persisted_table_ref_for(value.node_id as i32)
                 .or_else(|| value.table.clone()),
+            sampler_slice_edits: value.sampler_slice_edits.clone(),
         }
     }
 }
 
 impl ProjectEffectSlot {
+    pub fn discard_slice_edits_for_other_sample(&mut self, sample_path: Option<&str>) {
+        let expected_hash = sample_path.and_then(crate::analysis::sample_path_hash);
+        if self.sampler_slice_edits.as_ref().is_some_and(|edits| {
+            Some(edits.sample_hash.as_str()) != expected_hash.as_deref()
+        }) {
+            self.sampler_slice_edits = None;
+        }
+    }
+
     pub fn into_snapshot_with_node_id(self, node_id: u32) -> EffectSlotSnapshot {
         self.into_snapshot_with_node_ids(node_id, 0)
     }
@@ -2153,6 +2199,7 @@ impl ProjectEffectSlot {
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: self.ir,
             table: self.table,
+            sampler_slice_edits: self.sampler_slice_edits,
         }
     }
 }
@@ -2418,7 +2465,10 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
 }
 
 impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
-    fn from(value: ProjectRackSlotPattern) -> Self {
+    fn from(mut value: ProjectRackSlotPattern) -> Self {
+        value
+            .instrument_slot
+            .discard_slice_edits_for_other_sample(value.sample_path.as_deref());
         let sample_id = value
             .sample_name
             .filter(|name| !name.trim().is_empty())
@@ -3078,6 +3128,8 @@ struct SparseProjectEffectSlot {
     ir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 #[derive(Deserialize)]
@@ -3100,6 +3152,8 @@ struct DenseProjectEffectSlot {
     ir: Option<String>,
     #[serde(default)]
     table: Option<String>,
+    #[serde(default)]
+    sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
 #[derive(Deserialize)]
@@ -3205,6 +3259,7 @@ impl Serialize for ProjectEffectSlot {
             && tensor_params.is_empty()
             && self.ir.is_none()
             && self.table.is_none()
+            && self.sampler_slice_edits.is_none()
         {
             return Option::<()>::None.serialize(serializer);
         }
@@ -3219,6 +3274,7 @@ impl Serialize for ProjectEffectSlot {
             param_node_spans: self.param_node_spans.clone(),
             ir: self.ir.clone(),
             table: self.table.clone(),
+            sampler_slice_edits: self.sampler_slice_edits.clone(),
         }
         .serialize(serializer)
     }
@@ -3271,6 +3327,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
                     table: slot.table,
+                    sampler_slice_edits: slot.sampler_slice_edits,
                 }
             }
             ProjectEffectSlotRepr::Dense(slot) => Self {
@@ -3289,6 +3346,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
                 table: slot.table,
+                sampler_slice_edits: slot.sampler_slice_edits,
             },
             ProjectEffectSlotRepr::Empty(_) => Self {
                 num_params: 0,
@@ -3302,6 +3360,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 param_node_spans: Vec::new(),
                 ir: None,
                 table: None,
+                sampler_slice_edits: None,
             },
         })
     }
@@ -3604,6 +3663,7 @@ mod tests {
                         tensor_params: Vec::new(),
                         ir: None,
                         table: None,
+                        sampler_slice_edits: None,
                     },
                     ProjectEffectSlot {
                         num_params: 0,
@@ -3617,6 +3677,7 @@ mod tests {
                         tensor_params: Vec::new(),
                         ir: None,
                         table: None,
+                        sampler_slice_edits: None,
                     },
                 ],
                 instrument_base_note_offsets: vec![0.0, 12.0],
@@ -5167,6 +5228,103 @@ mod tests {
     }
 
     #[test]
+    fn rack_slot_slice_edits_survive_a_load_by_borrowing_the_track_layout_path() {
+        // The pattern-level rack slot only saves its sample *name*; the path
+        // lives on the track layout. Without the mirror, the load-time
+        // validation compares the edits' hash against `None` and throws every
+        // saved marker away.
+        let hash = crate::analysis::sample_path_hash("samples/kick.wav")
+            .expect("path hash for an ordinary sample");
+        let json = format!(
+            r#"
+        {{
+            "version": 1,
+            "name": "rack",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {{"size":0.5,"brightness":0.5,"replace":0.0}},
+            "tracks": [{{
+                "kind": "rack",
+                "routing": "broadcast",
+                "slots": [
+                    {{"instrument_type":"sampler","sample_path":"samples/kick.wav","sample_name":"kick"}}
+                ]
+            }}],
+            "custom_effects": [[]],
+            "patterns": [{{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[0,0,0,0,0,0,0,0,0,0]]],
+                "track_params": [{{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "volume": 1.0,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "max_polyphony": 4,
+                    "timebase": 2
+                }}],
+                "effect_slots": [[]],
+                "instrument_slots": [{{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{{"loaded_preset":null,"dirty":false}}],
+                "chord_snapshots": [[]],
+                "timebase_plock_snapshots": [[]],
+                "instrument_types": ["sampler"],
+                "sample_paths": ["samples/kick.wav"],
+                "sample_names": ["kick"],
+                "rack_tracks": [{{
+                    "routing": "broadcast",
+                    "slots": [{{
+                        "instrument_type": "sampler",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 0.0,
+                        "gain": 1.0,
+                        "pan": 0.0,
+                        "max_polyphony": 4,
+                        "sample_name": "kick",
+                        "instrument_slot": {{
+                            "num_params":0,
+                            "defaults":[],
+                            "plocks":[],
+                            "param_node_indices":[],
+                            "sampler_slice_edits": {{
+                                "sample_hash": "{hash}",
+                                "user_added": [4410],
+                                "user_deleted": [],
+                                "user_moved": []
+                            }}
+                        }},
+                        "effect_slots": [],
+                        "custom_effects": [],
+                        "track_sound_state": {{"loaded_preset":null,"dirty":false}}
+                    }}]
+                }}]
+            }}]
+        }}
+        "#
+        );
+
+        let project: ProjectFile = serde_json::from_str(&json).expect("deserialize rack project");
+        let saved_slot = &project.patterns[0].rack_tracks[0].as_ref().unwrap().slots[0];
+        assert_eq!(
+            saved_slot.sample_path.as_deref(),
+            Some("samples/kick.wav"),
+            "the mirror fills the pattern slot from the track layout"
+        );
+
+        let runtime = RackSlotSnapshot::from(saved_slot.clone());
+        let edits = runtime
+            .instrument_slot
+            .sampler_slice_edits
+            .expect("saved slice edits must survive the load-time validation");
+        assert_eq!(edits.user_added, vec![4410]);
+        assert_eq!(edits.sample_hash, hash);
+    }
+
+    #[test]
     fn rack_track_serializes_and_deserializes_broadcast_slots() {
         let json = r#"
         {
@@ -5653,6 +5811,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: Some("lexicon-300-rich-plate".to_string()),
             table: Some("vowel-bank".to_string()),
+            sampler_slice_edits: None,
         };
         let json = serde_json::to_string(&slot).expect("serialize slot with assets");
         assert!(json.contains("\"ir\":\"lexicon-300-rich-plate\""), "{json}");
@@ -5660,6 +5819,39 @@ mod tests {
         let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip assets");
         assert_eq!(back.ir.as_deref(), Some("lexicon-300-rich-plate"));
         assert_eq!(back.table.as_deref(), Some("vowel-bank"));
+    }
+
+    #[test]
+    fn effect_slot_roundtrips_manual_slice_edits_without_detected_onsets() {
+        let mut slot = ProjectEffectSlot::default();
+        slot.sampler_slice_edits = Some(crate::analysis::SamplerSliceEdits {
+            sample_hash: "a".repeat(64),
+            user_added: vec![120],
+            user_deleted: vec![240],
+            user_moved: vec![crate::analysis::SliceMove { from: 360, to: 400 }],
+        });
+
+        let json = serde_json::to_string(&slot).expect("serialize slice edits");
+        assert!(json.contains("sampler_slice_edits"), "{json}");
+        assert!(!json.contains("onsets_frames"), "detected analysis must not persist: {json}");
+        let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip slice edits");
+        assert_eq!(back.sampler_slice_edits, slot.sampler_slice_edits);
+    }
+
+    #[test]
+    fn effect_slot_drops_manual_slice_edits_when_the_sample_hash_changes() {
+        let original_hash = "a".repeat(64);
+        let replacement_hash = "b".repeat(64);
+        let mut slot = ProjectEffectSlot::default();
+        slot.sampler_slice_edits = Some(crate::analysis::SamplerSliceEdits::for_sample_hash(
+            original_hash.clone(),
+        ));
+
+        slot.discard_slice_edits_for_other_sample(Some(&format!(
+            "samples/{replacement_hash}.wav"
+        )));
+
+        assert!(slot.sampler_slice_edits.is_none());
     }
 
     #[test]
@@ -5689,6 +5881,7 @@ mod tests {
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let json = serde_json::to_string(&slot).expect("serialize key-lock slot");
@@ -5728,6 +5921,7 @@ mod tests {
             }],
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         };
 
         let json = serde_json::to_string(&slot).expect("serialize tensor slot");

@@ -635,6 +635,62 @@ impl Editor {
         true
     }
 
+    /// Whether the focused widget takes numeric text input — digits, `.`, `-`.
+    ///
+    /// Number pickers and knob-numbers start an edit on the *first* digit, so a
+    /// digit-keyed global shortcut (roll rates at the live-keyboard seam) must
+    /// not consume the key out from under a focused one. Checking "is it
+    /// already editing" is too late: that first digit is exactly the key that
+    /// would begin the edit.
+    ///
+    /// Deliberately declarative rather than asking the widget through
+    /// `map_key_event`: widget key handlers mutate edit state, so they must
+    /// never be run from a predicate.
+    pub fn focused_widget_captures_numeric_input(&self) -> bool {
+        self.focused_widget_node().is_some_and(|node| {
+            node_captures_text_input(&node)
+                || matches!(
+                    node.widget_type.as_str(),
+                    "number-picker"
+                        | "number-picker-tri"
+                        | "knob-number"
+                        | "knob-number-mod-range"
+                )
+        })
+    }
+
+    /// Whether the focused widget would consume this key itself.
+    ///
+    /// NOTE: widget key handlers mutate their own edit state, so this is safe
+    /// only for keys whose handlers are no-ops when idle — Backspace/Delete are
+    /// guarded on `state.editing` in both the number picker and knob-number.
+    /// Do not call it with digits or Enter, which would *start* or *commit* an
+    /// edit as a side effect; use `focused_widget_captures_numeric_input` for
+    /// the numeric case.
+    ///
+    /// Destructive global shortcuts (Backspace/Delete over a step selection)
+    /// must defer to a focused widget only when that widget genuinely handles
+    /// the key — a text input, a number-picker or knob mid-edit, a lane with
+    /// its own selection. Gating on "something is focused" instead meant that
+    /// clicking any button silently disarmed Cmd+A followed by Backspace,
+    /// because a button consumes only Enter and Space.
+    pub fn focused_widget_consumes_key(
+        &self,
+        code: crossterm::event::KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        self.focused_widget_node().is_some_and(|node| {
+            crate::widget_render::map_key_event(
+                &node,
+                WidgetKeyEvent {
+                    code,
+                    modifiers,
+                },
+            )
+            .is_some()
+        })
+    }
+
     fn focused_widget_captures_text_input(&self) -> bool {
         self.focused_widget_node()
             .is_some_and(|node| node_captures_text_input(&node))

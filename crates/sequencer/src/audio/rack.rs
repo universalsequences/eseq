@@ -588,7 +588,22 @@ pub(super) fn fire_live_keyboard_rack_note(
                 if sampler_lid == 0 {
                     continue;
                 }
-                let sampler_params = resolve_rack_slot_sampler_defaults(&slot.instrument_slot);
+                let mut sampler_params = resolve_rack_slot_sampler_defaults(&slot.instrument_slot);
+                let mut trigger_transpose = transpose;
+                if resolve_slice(
+                    &data.state,
+                    pool_id,
+                    &mut sampler_params,
+                    &mut trigger_transpose,
+                ) == SliceTriggerVerdict::Ignore
+                {
+                    continue;
+                }
+                // `resolve_slice` consumes the note to pick the slice and zeroes the
+                // transpose, so adding the base-note offset unconditionally leaves
+                // classic mode untouched and makes `base` the pitch offset that every
+                // slice plays at.
+                trigger_transpose += slot.instrument_base_note_offset;
                 let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
                 let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
                 let loop_xfade_samples =
@@ -633,7 +648,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             0,
                             gatepitch_seq,
                             custom_pitch_hz(
-                                transpose + slot.instrument_base_note_offset,
+                                trigger_transpose,
                                 0.0,
                             ),
                             trigger.velocity,
@@ -647,7 +662,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                         voice_lid,
                         0,
                         sampler_seq,
-                        transpose + slot.instrument_base_note_offset,
+                        trigger_transpose,
                         trigger.velocity,
                         sampler_params.playback_speed,
                         attack_samples,
@@ -850,7 +865,22 @@ pub(super) fn fire_rack_slot_note(
             if sampler_lid == 0 {
                 return;
             }
-            let sampler_params = sampler_params.unwrap_or_default();
+            let mut sampler_params = sampler_params.unwrap_or_default();
+            let mut trigger_transpose = transpose;
+            if resolve_slice(
+                &data.state,
+                pool_id,
+                &mut sampler_params,
+                &mut trigger_transpose,
+            ) == SliceTriggerVerdict::Ignore
+            {
+                return;
+            }
+            // `resolve_slice` consumes the note to pick the slice and zeroes the
+            // transpose, so adding the base-note offset unconditionally leaves
+            // classic mode untouched and makes `base` the pitch offset that every
+            // slice plays at.
+            trigger_transpose += slot_params.base_note_offset;
             let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
             let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
             let loop_xfade_samples =
@@ -894,7 +924,7 @@ pub(super) fn fire_rack_slot_note(
                         voice.gatepitch_id as u64,
                         frame_offset,
                         gatepitch_seq,
-                        custom_pitch_hz(transpose + slot_params.base_note_offset, 0.0),
+                        custom_pitch_hz(trigger_transpose, 0.0),
                         velocity,
                     );
                 }
@@ -913,7 +943,7 @@ pub(super) fn fire_rack_slot_note(
                     attack_samples,
                     release_samples,
                     gate_mode,
-                    transpose + slot_params.base_note_offset,
+                    trigger_transpose,
                     sampler_params.start_point,
                     sampler_params.end_point,
                     sampler_params.instrument_enabled,

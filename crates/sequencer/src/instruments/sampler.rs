@@ -473,6 +473,15 @@ pub const PARAM_WARP_SEG_LOOP_MODE: u64 = STATE_WARP_SEG_LOOP_MODE as u64;
 pub const PARAM_WARP_SEG_ENVELOPE: u64 = STATE_WARP_SEG_ENVELOPE as u64;
 pub const PARAM_SOURCE_SAMPLE_RATE: u64 = STATE_SOURCE_SAMPLE_RATE as u64;
 pub const PARAM_SCRUB_OFFSET: u64 = STATE_SCRUB_OFFSET as u64;
+
+// Host-resolved sampler descriptor tail indices. These controls intentionally
+// have no DSP state cells: trigger-time slice resolution consumes them before
+// the ordinary sampler trigger is sent. Keep them at the descriptor tail so
+// older saved parameter indices remain stable; the scheduler regression test
+// verifies these constants against the built descriptor.
+pub const SLOT_PARAM_SLICE_MODE: usize = 138;
+pub const SLOT_PARAM_SLICE_SENSITIVITY: usize = 139;
+pub const SLOT_PARAM_SLICE_BASE: usize = 140;
 pub const PARAM_SCRUB_SMOOTH: u64 = STATE_SCRUB_SMOOTH as u64;
 pub const PARAM_SCRUB_SMOOTH_TIME_MS: u64 = STATE_SCRUB_SMOOTH_TIME_MS as u64;
 pub const PARAM_MOD_SPEED_SOURCE: u64 = STATE_MOD_SPEED_SOURCE as u64;

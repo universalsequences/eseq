@@ -140,6 +140,7 @@
             tensor_params: Vec::new(),
             ir: None,
             table: None,
+            sampler_slice_edits: None,
         }
     }
 
@@ -2637,6 +2638,7 @@
                     tensor_params: Vec::new(),
                     ir: None,
                     table: None,
+                    sampler_slice_edits: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],
@@ -4496,6 +4498,18 @@
         assert_eq!(state.runtime.voice_counts.len(), MAX_SAMPLER_POOLS);
         assert_eq!(state.runtime.voice_lids.len(), MAX_SAMPLER_POOLS);
         assert_eq!(state.runtime.synth_node_ids.len(), MAX_SAMPLER_POOLS);
+        assert_eq!(
+            state.runtime.sampler_analysis_status.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_onset_ptr_lo.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_onset_ptr_hi.len(),
+            MAX_SAMPLER_POOLS
+        );
         assert_eq!(
             state.runtime.sampler_gatepitch_node_ids.len(),
             MAX_SAMPLER_POOLS

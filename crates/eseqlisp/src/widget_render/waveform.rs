@@ -14,7 +14,7 @@ use super::{
 #[cfg(target_os = "macos")]
 use super::{
     MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
-    MetalWaveformPrimitive,
+    MetalTrianglePrimitive, MetalWaveformPrimitive,
 };
 use crate::audio::sample::{
     MinMaxPair as WaveformBucket, SampleBuffer, WaveformMipLevel as WaveformLevel,
@@ -32,6 +32,11 @@ const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
 const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
 const MARKER_FLAG_HEIGHT_NORM: f32 = 0.1575;
 const MARKER_LINE_SLOP_PX: f32 = 2.0;
+/// A slice flag is the grab handle for a slice division, so it is drawn as a
+/// downward triangle that is deliberately larger than the start/end squares —
+/// and hit-tested over that whole triangle, not just the hairline below it.
+const SLICE_FLAG_HALF_WIDTH: f32 = 0.45;
+const SLICE_FLAG_HEIGHT: f32 = 0.6;
 
 fn waveform_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "waveform-color", theme::WHITE())
@@ -98,6 +103,18 @@ struct WaveformView {
     selection_end: Option<f64>,
     marker_selection: bool,
     active_marker: Option<String>,
+    slices: Vec<f64>,
+    /// Parallel to `slices`: whether sensitivity keeps that marker as a real
+    /// slice boundary. Inactive markers stay visible and editable, and playback
+    /// runs straight through them.
+    slice_active: Vec<bool>,
+    active_slice: Option<usize>,
+    /// The explicitly picked slice, with no playhead fallback. `active_slice`
+    /// is a *display* value and resolves to whatever chop the playhead is in;
+    /// destructive actions must not fire on that, or Delete would remove a
+    /// marker chosen by wherever the transport happened to be.
+    selected_slice: Option<usize>,
+    slice_select: bool,
     buffer: Option<WaveformBuffer>,
 }
 
@@ -106,6 +123,7 @@ enum HitRegion {
     Header,
     StartMarker,
     EndMarker,
+    SliceMarker { index: usize, time: f64 },
     Content { time: f64 },
 }
 
@@ -119,7 +137,12 @@ impl WidgetDefinition for WaveformWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["playhead-time", "selection-start", "selection-end"]
+        &[
+            "playhead-time",
+            "selection-start",
+            "selection-end",
+            "active-slice",
+        ]
     }
 
     fn measure(
@@ -331,6 +354,20 @@ impl WidgetDefinition for WaveformWidget {
             }
         }
 
+        for (index, time) in view.visible_slices() {
+            let col = view.col_for_time(time);
+            let color = if view.slice_is_active(index) {
+                active_marker_color(props)
+            } else {
+                marker_color(props)
+            };
+            for row_offset in 0..(content.height.round() as u16) {
+                let row = content.row.round() as u16 + row_offset;
+                buf.set(row, col, styled_cell('|', color, None));
+            }
+            buf.set(content_top, col, styled_cell('v', color, None));
+        }
+
         if let Some(cursor_col) = view.playhead_col(view.cursor_time) {
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
@@ -354,10 +391,10 @@ impl WidgetDefinition for WaveformWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
     ) -> Option<Value> {
         let view = WaveformView::from_props(&node.props, node.rect);
-        view.begin_gesture(local_col, local_row)
+        view.begin_gesture(local_col, local_row, modifiers)
     }
 
     fn mouse_event(
@@ -368,14 +405,14 @@ impl WidgetDefinition for WaveformWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
         let view = WaveformView::from_props(&node.props, node.rect);
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => view
-                .handle_pointer_down(local_col, local_row)
+                .handle_pointer_down(local_col, local_row, modifiers)
                 .map(WidgetEvent::Custom)
                 .map(MouseEventOutcome::Dispatch)
                 .unwrap_or(MouseEventOutcome::Consume),
@@ -386,6 +423,11 @@ impl WidgetDefinition for WaveformWidget {
                 .unwrap_or(MouseEventOutcome::Consume),
             MouseEventKind::Up(MouseButton::Left) => view
                 .handle_pointer_up(local_col, local_row, gesture)
+                .map(WidgetEvent::Custom)
+                .map(MouseEventOutcome::Dispatch)
+                .unwrap_or(MouseEventOutcome::Consume),
+            MouseEventKind::Down(MouseButton::Right) => view
+                .handle_pointer_down(local_col, local_row, KeyModifiers::ALT)
                 .map(WidgetEvent::Custom)
                 .map(MouseEventOutcome::Dispatch)
                 .unwrap_or(MouseEventOutcome::Consume),
@@ -560,8 +602,28 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }));
     }
 
+    if let Some((start, end)) = view.active_slice_range() {
+        let start = start.max(view.view_start);
+        let end = end.min(view.view_start + view.view_duration);
+        if end > start {
+            let mut color = active_marker_color(&node.props);
+            color.a *= 0.14;
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: view.x_for_time(start),
+                y: content.row,
+                width: (view.x_for_time(end) - view.x_for_time(start)).max(0.0),
+                height: content.height,
+                color,
+            }));
+        }
+    }
+
     if let Some(buffer) = &view.buffer {
         let selection = view.normalized_selection();
+        // No selection props at all (slice mode drops them) means nothing is
+        // excluded, so the whole sample is active. Only an existing selection
+        // that has scrolled out of view greys everything out.
+        let has_selection = view.selection_range().is_some();
         let playhead = view.normalized_playhead();
         let level = view.best_level(buffer);
         primitives.push(MetalPrimitive::Waveform(MetalWaveformPrimitive {
@@ -573,7 +635,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             samples_per_bucket: level.samples_per_bucket as u32,
             bucket_count: level.buckets.len() as u32,
             selection_start: selection.map(|(start, _)| start).unwrap_or(0.0),
-            selection_end: selection.map(|(_, end)| end).unwrap_or(0.0),
+            selection_end: selection
+                .map(|(_, end)| end)
+                .unwrap_or(if has_selection { 0.0 } else { 1.0 }),
             show_selection_start: view.selection_start_visible(),
             show_selection_end: view.selection_end_visible(),
             playhead_position: playhead.unwrap_or(0.0),
@@ -588,6 +652,33 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }));
     }
 
+    for (index, time) in view.visible_slices() {
+        // Active boundaries take the accent; sensitivity-deactivated markers
+        // stay visible in the dim marker colour.
+        let color = if view.slice_is_active(index) {
+            active_marker_color(&node.props)
+        } else {
+            marker_color(&node.props)
+        };
+        let x = view.x_for_time(time);
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x: x - 0.0625,
+            y: content.row,
+            width: 0.125,
+            height: content.height,
+            color,
+        }));
+        let flag_height = SLICE_FLAG_HEIGHT.min(content.height);
+        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+            points: [
+                [x - SLICE_FLAG_HALF_WIDTH, content.row],
+                [x + SLICE_FLAG_HALF_WIDTH, content.row],
+                [x, content.row + flag_height],
+            ],
+            color,
+        }));
+    }
+
     primitives
 }
 
@@ -599,6 +690,17 @@ fn metal_header_text_row(rect: Rect, header_height: f32) -> f32 {
 
 impl WaveformView {
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
+        let slices = props.get("slices").map(parse_number_list).unwrap_or_default();
+        let playhead_time = props.get("playhead-time").and_then(as_number);
+        let selected_slice = props
+            .get("active-slice")
+            .and_then(as_number)
+            .filter(|index| index.is_finite() && *index >= 0.0)
+            .map(|index| index.round() as usize);
+        let active_slice = selected_slice.or_else(|| {
+            let playhead = playhead_time?;
+            slices.iter().rposition(|time| time.is_finite() && *time <= playhead)
+        });
         Self {
             rect,
             header_height: get_num(props, "header-height", 0.5).max(0.0) as f32,
@@ -614,12 +716,23 @@ impl WaveformView {
                 .or(Some(TimeRuler {
                     mode: TimeRulerMode::Seconds,
                 })),
-            playhead_time: props.get("playhead-time").and_then(as_number),
+            playhead_time,
             cursor_time: props.get("cursor-time").and_then(as_number),
             selection_start: props.get("selection-start").and_then(as_number),
             selection_end: props.get("selection-end").and_then(as_number),
             marker_selection: get_bool(props, "marker-selection", false),
             active_marker: props.get("active-marker").and_then(as_name),
+            slices,
+            slice_active: props
+                .get("slice-active")
+                .map(parse_number_list)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| value != 0.0)
+                .collect(),
+            active_slice,
+            selected_slice,
+            slice_select: get_bool(props, "slice-select", false),
             buffer: props.get("buffer").and_then(parse_waveform_buffer),
         }
     }
@@ -734,6 +847,60 @@ impl WaveformView {
         self.active_marker.as_deref() == Some(marker)
     }
 
+    fn visible_slices(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.slices
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, time)| time.is_finite() && self.time_visible(*time))
+    }
+
+    /// Markers default to active when no flag list is supplied.
+    fn slice_is_active(&self, index: usize) -> bool {
+        self.slice_active.get(index).copied().unwrap_or(true)
+    }
+
+    /// The slice a click lands in: the last division at or before `time`.
+    fn slice_index_at_time(&self, time: f64) -> Option<usize> {
+        self.slices
+            .iter()
+            .rposition(|slice| slice.is_finite() && *slice <= time)
+    }
+
+    fn select_slice_action(&self, index: usize) -> Option<Value> {
+        let time = self.slices.get(index).copied()?;
+        Some(action_map(vec![
+            ("type", keyword(":select-slice")),
+            ("index", Value::Number(index as f64)),
+            ("time", Value::Number(time)),
+        ]))
+    }
+
+    /// The audible chop around the selected marker: it runs between *active*
+    /// boundaries, playing through any deactivated markers in between.
+    fn active_slice_range(&self) -> Option<(f64, f64)> {
+        let index = self.active_slice?;
+        let selected = *self.slices.get(index)?;
+        let start = self
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(i, time)| self.slice_is_active(*i) && time.is_finite() && **time <= selected)
+            .map(|(_, time)| *time)
+            .next_back()
+            .unwrap_or(0.0);
+        let end = self
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(i, time)| self.slice_is_active(*i) && time.is_finite() && **time > start)
+            .map(|(_, time)| *time)
+            .next()
+            .or_else(|| self.buffer.as_ref().map(|buffer| buffer.sample.duration_seconds))
+            .unwrap_or(self.view_start + self.view_duration);
+        (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
+    }
+
     fn waveform_body_rect(&self) -> Rect {
         let content = self.content_rect();
         let top_inset = WAVEFORM_BODY_TOP_INSET.min(content.height.max(0.0));
@@ -759,6 +926,17 @@ impl WaveformView {
             return Some(HitRegion::Header);
         }
         let waveform = self.waveform_body_rect();
+        // Slice flags are drawn from `content_rect().row`, which is
+        // WAVEFORM_BODY_TOP_INSET above the waveform body, so the triangle head
+        // — the obvious thing to grab — lands in a band the body hit test
+        // rejects. Claim slice markers there first.
+        let content = self.content_rect();
+        if local_row >= content.row
+            && local_row < waveform.row
+            && let Some((index, time)) = self.slice_marker_hit_test(local_col)
+        {
+            return Some(HitRegion::SliceMarker { index, time });
+        }
         if local_row < waveform.row || local_row >= waveform.row + waveform.height {
             return None;
         }
@@ -767,9 +945,22 @@ impl WaveformView {
                 return Some(marker);
             }
         }
+        if let Some((index, time)) = self.slice_marker_hit_test(local_col) {
+            return Some(HitRegion::SliceMarker { index, time });
+        }
         Some(HitRegion::Content {
             time: self.time_at_col(local_col),
         })
+    }
+
+    fn slice_marker_hit_test(&self, local_col: f32) -> Option<(usize, f64)> {
+        self.visible_slices()
+            .filter_map(|(index, time)| {
+                let distance = (local_col - self.x_for_time(time)).abs();
+                (distance <= MARKER_LINE_SLOP_PX).then_some((index, time, distance))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(index, time, _)| (index, time))
     }
 
     fn marker_hit_test(&self, local_col: f32, local_row: f32, waveform: Rect) -> Option<HitRegion> {
@@ -828,7 +1019,12 @@ impl WaveformView {
         line_hit || flag_hit
     }
 
-    fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
+    fn begin_gesture(
+        &self,
+        local_col: f32,
+        local_row: f32,
+        modifiers: KeyModifiers,
+    ) -> Option<Value> {
         match self.hit_test(local_col, local_row)? {
             HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
             HitRegion::StartMarker => {
@@ -845,6 +1041,26 @@ impl WaveformView {
                     ("offset", Value::Number(self.time_at_col(local_col) - end)),
                 ]))
             }
+            HitRegion::SliceMarker { index, time } => Some(map_value(vec![
+                ("kind", keyword(":drag-slice")),
+                ("index", Value::Number(index as f64)),
+                ("offset", Value::Number(self.time_at_col(local_col) - time)),
+            ])),
+            // Shift adds a marker only where markers exist. In classic mode a
+            // shift-press is still a range selection, and the host drops an
+            // `add` it never asked for — so gating this arm is what keeps
+            // shift-drag working on a non-sliced sampler.
+            HitRegion::Content { time }
+                if self.slice_select && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(map_value(vec![
+                    ("kind", keyword(":add-slice")),
+                    ("time", Value::Number(time)),
+                ]))
+            }
+            // In slice mode the body is a slice picker, not a range selector,
+            // so a press on it starts no drag at all.
+            HitRegion::Content { .. } if self.slice_select => None,
             HitRegion::Content { time } => Some(map_value(vec![
                 ("kind", keyword(":select-range")),
                 ("time", Value::Number(time)),
@@ -852,8 +1068,30 @@ impl WaveformView {
         }
     }
 
-    fn handle_pointer_down(&self, local_col: f32, local_row: f32) -> Option<Value> {
+    fn handle_pointer_down(
+        &self,
+        local_col: f32,
+        local_row: f32,
+        modifiers: KeyModifiers,
+    ) -> Option<Value> {
         match self.hit_test(local_col, local_row)? {
+            HitRegion::Content { time }
+                if self.slice_select && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                Some(action_map(vec![
+                    ("type", keyword(":add-slice")),
+                    ("time", Value::Number(time)),
+                ]))
+            }
+            HitRegion::Content { time } if self.slice_select => self
+                .slice_index_at_time(time)
+                .and_then(|index| self.select_slice_action(index))
+                .or_else(|| {
+                    Some(action_map(vec![
+                        ("type", keyword(":set-cursor")),
+                        ("time", Value::Number(time)),
+                    ]))
+                }),
             HitRegion::Header | HitRegion::Content { .. } => Some(action_map(vec![
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
@@ -866,6 +1104,23 @@ impl WaveformView {
                 ("type", keyword(":begin-marker-drag")),
                 ("marker", keyword(":end")),
             ])),
+            HitRegion::SliceMarker { index, time } if modifiers.contains(KeyModifiers::ALT) => {
+                Some(action_map(vec![
+                    ("type", keyword(":delete-slice")),
+                    ("index", Value::Number(index as f64)),
+                    ("time", Value::Number(time)),
+                ]))
+            }
+            HitRegion::SliceMarker { index, time } => {
+                if self.slice_select {
+                    self.select_slice_action(index)
+                } else {
+                    Some(action_map(vec![
+                        ("type", keyword(":set-cursor")),
+                        ("time", Value::Number(time)),
+                    ]))
+                }
+            }
         }
     }
 
@@ -911,6 +1166,15 @@ impl WaveformView {
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
             ])),
+            Some(Value::Keyword(kind)) if kind == "drag-slice" => {
+                let index = as_number(gesture.get("index")?)?;
+                let offset = gesture.get("offset").and_then(as_number).unwrap_or(0.0);
+                Some(action_map(vec![
+                    ("type", keyword(":move-slice")),
+                    ("index", Value::Number(index)),
+                    ("time", Value::Number((self.time_at_col(local_col) - offset).max(0.0))),
+                ]))
+            }
             _ => None,
         }
     }
@@ -928,6 +1192,9 @@ impl WaveformView {
             {
                 Some(action_map(vec![("type", keyword(":end-marker-drag"))]))
             }
+            Some(Value::Keyword(kind)) if kind == "drag-slice" => Some(action_map(vec![
+                ("type", keyword(":end-slice-drag")),
+            ])),
             _ => None,
         }
     }
@@ -1038,6 +1305,13 @@ impl WaveformView {
             KeyCode::Esc if self.selection_range().is_some() => {
                 Some(action_map(vec![("type", keyword(":clear-selection"))]))
             }
+            KeyCode::Delete | KeyCode::Backspace => self.selected_slice.map(|index| {
+                action_map(vec![
+                    ("type", keyword(":delete-slice")),
+                    ("index", Value::Number(index as f64)),
+                    ("time", Value::Number(self.slices.get(index).copied().unwrap_or(0.0))),
+                ])
+            }),
             _ => None,
         }
     }
@@ -1167,6 +1441,16 @@ fn as_name(value: &Value) -> Option<String> {
     }
 }
 
+fn parse_number_list(value: &Value) -> Vec<f64> {
+    match value {
+        Value::List(values) => values
+            .iter()
+            .filter_map(|value| as_number(&value.borrow()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn parse_waveform_buffer(value: &Value) -> Option<WaveformBuffer> {
     let map = get_map(value)?;
     for key_name in ["registry-key", "path", "id"] {
@@ -1285,7 +1569,12 @@ mod tests {
     fn marker_and_playhead_times_are_bindable() {
         assert_eq!(
             WAVEFORM_WIDGET.bindable_props(),
-            &["playhead-time", "selection-start", "selection-end"]
+            &[
+                "playhead-time",
+                "selection-start",
+                "selection-end",
+                "active-slice",
+            ]
         );
     }
 
@@ -1381,7 +1670,9 @@ mod tests {
                 height: 8.0,
             },
         );
-        let gesture = view.begin_gesture(4.0, 2.0).expect("gesture");
+        let gesture = view
+            .begin_gesture(4.0, 2.0, KeyModifiers::NONE)
+            .expect("gesture");
         let Value::Map(map) = view
             .handle_pointer_drag(20.0, 2.0, Some(&gesture))
             .expect("selection action")
@@ -1391,6 +1682,315 @@ mod tests {
         assert_eq!(
             map.get("type").map(|value| value.borrow().clone()),
             Some(Value::Keyword("set-selection".to_string()))
+        );
+    }
+
+    /// A deactivated marker is still drawn and still editable, but the chop
+    /// around it runs to the next *active* boundary — that is what "longer
+    /// chops at low sensitivity" means.
+    #[test]
+    fn deactivated_markers_are_played_through_by_the_selected_chop() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![
+                    number_value(0.0),
+                    number_value(0.25),
+                    number_value(0.5),
+                    number_value(0.75),
+                ]),
+            ),
+            // 0.25 and 0.75 are deactivated by sensitivity.
+            (
+                "slice-active".to_string(),
+                list_value_raw(vec![
+                    number_value(1.0),
+                    number_value(0.0),
+                    number_value(1.0),
+                    number_value(0.0),
+                ]),
+            ),
+            ("active-slice".to_string(), number_value(1.0)),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        assert!(view.slice_is_active(0) && !view.slice_is_active(1));
+        // Selecting the deactivated marker at 0.25 highlights the real chop,
+        // which starts at the active 0.0 and runs to the active 0.5.
+        let (start, end) = view.active_slice_range().expect("selected chop");
+        assert!((start - 0.0).abs() < 1e-9, "start {start}");
+        assert!((end - 0.5).abs() < 1e-9, "end {end}");
+    }
+
+    /// The flag head renders above the waveform body, in the top inset. It is
+    /// the obvious grab handle, so it must hit-test as the marker.
+    #[test]
+    fn slice_flag_head_above_the_waveform_body_is_grabbable() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            ("slice-select".to_string(), Value::Bool(true)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let content = view.content_rect();
+        let body = view.waveform_body_rect();
+        assert!(
+            content.row < body.row,
+            "this test is meaningless without a top inset"
+        );
+        // Right at the tip of the flag, above the waveform body.
+        let gesture = view
+            .begin_gesture(16.0, content.row, KeyModifiers::NONE)
+            .expect("the flag head must start a slice drag");
+        let Value::Map(gesture_map) = &gesture else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            gesture_map.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("drag-slice".to_string()))
+        );
+    }
+
+    /// Slice mode retargets a body press to slice selection, but the flags
+    /// themselves must stay draggable — that is the only way to edit a
+    /// division.
+    #[test]
+    fn slice_select_mode_still_drags_slice_flags() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            ("slice-select".to_string(), Value::Bool(true)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        // The second slice sits at 0.5 -> column 16.
+        let gesture = view
+            .begin_gesture(16.0, 2.0, KeyModifiers::NONE)
+            .expect("pressing a slice flag must start a drag gesture");
+        let Value::Map(action) = view
+            .handle_pointer_drag(20.0, 2.0, Some(&gesture))
+            .expect("dragging a slice flag must emit a move action")
+        else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("move-slice".to_string()))
+        );
+
+        // A press away from any flag selects instead, and starts no drag.
+        assert!(
+            view.begin_gesture(28.0, 2.0, KeyModifiers::NONE).is_none(),
+            "the waveform body must not start a range drag in slice mode"
+        );
+        let Value::Map(action) = view
+            .handle_pointer_down(28.0, 2.0, KeyModifiers::NONE)
+            .expect("body press action")
+        else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("select-slice".to_string()))
+        );
+    }
+
+    #[test]
+    fn shift_on_the_body_still_selects_a_range_outside_slice_mode() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        // Classic mode has no markers to add to, and the host drops an `add`
+        // it never asked for — so a shift-press here must stay a range gesture
+        // rather than silently doing nothing.
+        let Value::Map(gesture) = view
+            .begin_gesture(24.0, 2.0, KeyModifiers::SHIFT)
+            .expect("shift-press must start a range gesture in classic mode")
+        else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            gesture.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("select-range".to_string()))
+        );
+
+        let Value::Map(action) = view
+            .handle_pointer_down(24.0, 2.0, KeyModifiers::SHIFT)
+            .expect("shift-press action")
+        else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("set-cursor".to_string()))
+        );
+    }
+
+    #[test]
+    fn delete_needs_an_explicitly_selected_slice_not_the_playhead() {
+        let base = |active: Value| {
+            HashMap::from([
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(1.0)),
+                ("slice-select".to_string(), Value::Bool(true)),
+                ("playhead-time".to_string(), number_value(0.6)),
+                ("active-slice".to_string(), active),
+                (
+                    "slices".to_string(),
+                    list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+                ),
+            ])
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        let backspace = WidgetKeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // `-1` is the panel's default: nothing picked. The playhead still
+        // resolves a slice for *display*, and that must not become a delete
+        // target — which marker dies would depend on where the transport was.
+        let unpicked = base(number_value(-1.0));
+        let view = WaveformView::from_props(&unpicked, rect);
+        assert_eq!(
+            view.active_slice,
+            Some(1),
+            "the playhead fallback still drives the display highlight"
+        );
+        assert!(
+            view.handle_key(backspace).is_none(),
+            "backspace with nothing picked must not delete a marker"
+        );
+
+        // An explicit pick deletes that slice, and only that slice.
+        let picked = base(number_value(0.0));
+        let view = WaveformView::from_props(&picked, rect);
+        let Value::Map(action) = view.handle_key(backspace).expect("delete action") else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            action.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("delete-slice".to_string()))
+        );
+        assert_eq!(
+            action.get("index").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+    }
+
+    #[test]
+    fn slice_markers_emit_add_move_and_delete_actions() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            ("slice-select".to_string(), Value::Bool(true)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.5)]),
+            ),
+        ]);
+        let view = WaveformView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let action_type = |action: Value| {
+            let Value::Map(action) = action else {
+                panic!("expected action map");
+            };
+            action
+                .get("type")
+                .map(|value| value.borrow().clone())
+                .expect("action type")
+        };
+
+        assert_eq!(
+            action_type(
+                view.handle_pointer_down(24.0, 2.0, KeyModifiers::SHIFT)
+                    .expect("add action")
+            ),
+            Value::Keyword("add-slice".to_string())
+        );
+        assert_eq!(
+            action_type(
+                view.handle_pointer_down(8.0, 2.0, KeyModifiers::ALT)
+                    .expect("delete action")
+            ),
+            Value::Keyword("delete-slice".to_string())
+        );
+
+        let gesture = view
+            .begin_gesture(8.0, 2.0, KeyModifiers::NONE)
+            .expect("slice drag gesture");
+        assert_eq!(
+            action_type(
+                view.handle_pointer_drag(12.0, 2.0, Some(&gesture))
+                    .expect("move action")
+            ),
+            Value::Keyword("move-slice".to_string())
+        );
+        assert_eq!(
+            action_type(
+                view.handle_pointer_up(12.0, 2.0, Some(&gesture))
+                    .expect("end drag action")
+            ),
+            Value::Keyword("end-slice-drag".to_string())
         );
     }
 
@@ -1422,6 +2022,49 @@ mod tests {
             has_waveform,
             "expected waveform stroke cells to be rendered"
         );
+    }
+
+    #[test]
+    fn tui_render_highlights_the_active_slice_marker() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "slices".to_string(),
+                list_value_raw(vec![number_value(0.25), number_value(0.75)]),
+            ),
+            ("active-slice".to_string(), number_value(1.0)),
+            (
+                "marker-color".to_string(),
+                Value::Keyword("green".to_string()),
+            ),
+            (
+                "active-marker-color".to_string(),
+                Value::Keyword("purple".to_string()),
+            ),
+        ]);
+        let mut buf = CellBuffer::new(40, 12);
+        WAVEFORM_WIDGET.tui_render(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 40.0,
+                height: 12.0,
+            },
+            &mut buf,
+        );
+
+        let marker_colors = buf
+            .cells
+            .iter()
+            .flatten()
+            .flatten()
+            .filter(|cell| cell.ch == 'v')
+            .map(|cell| cell.style.fg)
+            .collect::<Vec<_>>();
+        assert!(marker_colors.contains(&theme::GREEN()));
+        assert!(marker_colors.contains(&theme::PURPLE()));
     }
 
     #[test]

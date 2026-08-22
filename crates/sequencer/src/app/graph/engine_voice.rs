@@ -441,6 +441,7 @@ impl GraphController<'_> {
 
     pub(super) fn rebind_rack_sampler_runtime_pools(&mut self) {
         self.clear_all_rack_sampler_runtime_pools();
+        let scheduler_snapshot = self.app.state.latest_scheduler_snapshot();
         for track_idx in 0..self.app.graph.track_node_ids.len() {
             self.publish_rack_slot_panner_runtime(track_idx);
             let slot_count = self.app.graph.track_node_ids[track_idx].rack_slots.len();
@@ -468,6 +469,24 @@ impl GraphController<'_> {
                     &gatepitch_ids,
                     &modulator_ids,
                 );
+                if let Some(slot) = scheduler_snapshot
+                    .tracks
+                    .get(track_idx)
+                    .and_then(|track| track.rack_track.as_ref())
+                    .and_then(|rack| rack.slots.get(slot_idx))
+                {
+                    if let Some(sample) = slot.sample_id.as_ref() {
+                        self.app.publish_sampler_analysis_pool_runtime(
+                            pool_id,
+                            sample.0,
+                            self.app.sampler_slice_edits_for_sample(
+                                slot.instrument_slot.sampler_slice_edits.as_ref(),
+                                sample.0,
+                                &sample.1,
+                            ),
+                        );
+                    }
+                }
                 self.app.graph.track_node_ids[track_idx].rack_slots[slot_idx].sampler_pool_id =
                     Some(pool_id);
             }

@@ -186,6 +186,36 @@ pub(super) fn resolved_slot_param_value(
     }
 }
 
+fn resolved_sampler_host_param_value(
+    slot: &crate::effects::EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+    default: f32,
+) -> f32 {
+    slot.plocks
+        .get(step_idx)
+        .and_then(|row| row.get(param_idx))
+        .copied()
+        .flatten()
+        .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(default))
+}
+
+fn slot_has_explicit_plock(
+    slot: &crate::effects::EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+) -> bool {
+    let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+        return false;
+    };
+    plock_identity_matches(
+        &slot.plock_param_ids,
+        step_idx,
+        param_idx,
+        slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx),
+    )
+}
+
 pub(super) fn slot_param_index_by_node_idx(
     slot: &crate::effects::EffectSlotSnapshot,
     node_param_idx: u32,
@@ -801,6 +831,17 @@ pub(super) fn resolve_sampler_params(
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        slice_mode: resolved_sampler_host_param_value(
+            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0,
+        ),
+        slice_sensitivity: resolved_sampler_host_param_value(
+            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
+        ),
+        slice_base: resolved_sampler_host_param_value(
+            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0,
+        ),
+        start_point_locked: slot_has_explicit_plock(slot, step_idx, 2),
+        end_point_locked: slot_has_explicit_plock(slot, step_idx, 3),
         warp_preserve: resolved_slot_node_param_value(
             slot,
             step_idx,

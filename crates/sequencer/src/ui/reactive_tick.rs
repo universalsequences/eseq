@@ -1488,6 +1488,11 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_transport_playhead = transport_playhead;
         }
         {
+            let analysis_generation = app.sample_analysis.cache().generation();
+            if analysis_generation != ctx.frame.prev_sampler_analysis_generation {
+                app.publish_all_sampler_analysis_runtime();
+                ctx.frame.prev_sampler_analysis_generation = analysis_generation;
+            }
             let ct = ctx.shared.current_track.load(Ordering::Relaxed);
             let analysis_key = if app.is_sampler_track(ct) {
                 let buffer_id = app.graph.track_buffer_ids.get(ct).copied().unwrap_or(-1);

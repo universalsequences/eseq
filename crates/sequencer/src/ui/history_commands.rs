@@ -776,6 +776,19 @@ pub(super) fn rack_slot_effect_param_needs_panel_rebuild(
 
 pub(super) fn param_change_needs_fx_rebuild(param: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(param.kind, ParamKind::Boolean | ParamKind::Enum { .. })
+        || param_redefines_derived_panel_data(param)
+}
+
+/// Continuous params normally reach the UI through their bound display field,
+/// with no panel rebuild — a knob readout is all that changes.
+///
+/// The sampler's `sens` is not like that: it re-derives which slice markers are
+/// active, which is panel data the waveform draws, not a knob readout. Without
+/// this the audio followed the knob immediately while the flags kept their old
+/// colours until some Boolean/Enum edit (e.g. the warp button) happened to
+/// force a rebuild.
+fn param_redefines_derived_panel_data(param: &sequencer::effects::ParamDescriptor) -> bool {
+    param.name == "sens"
 }
 
 pub(super) struct AgentDraftApplyResult {

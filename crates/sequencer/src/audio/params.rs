@@ -74,6 +74,77 @@ pub(super) fn track_custom_run_mode(state: &SequencerState, track_idx: usize) ->
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum SliceTriggerVerdict {
+    Fire,
+    Ignore,
+}
+
+/// Resolve one note selector into the transient slice bounds for a sampler
+/// runtime pool. This performs no allocation and is shared by sequenced,
+/// live-keyboard, and rack-member trigger paths.
+pub(super) fn resolve_slice(
+    state: &SequencerState,
+    pool_idx: usize,
+    params: &mut ScheduledSamplerParams,
+    transpose: &mut f32,
+) -> SliceTriggerVerdict {
+    let mode = params.slice_mode.round();
+    if mode == 0.0 {
+        return SliceTriggerVerdict::Fire;
+    }
+    if mode != 1.0 {
+        return SliceTriggerVerdict::Ignore;
+    }
+    let Some(status) = state.runtime.sampler_analysis_status.get(pool_idx) else {
+        return SliceTriggerVerdict::Ignore;
+    };
+    if status.load(Ordering::Acquire) != 2 {
+        return SliceTriggerVerdict::Ignore;
+    }
+    let ptr = crate::analysis::unpack_ptr(
+        f32::from_bits(state.runtime.sampler_onset_ptr_lo[pool_idx].load(Ordering::Acquire)),
+        f32::from_bits(state.runtime.sampler_onset_ptr_hi[pool_idx].load(Ordering::Acquire)),
+    );
+    if ptr.is_null() {
+        return SliceTriggerVerdict::Ignore;
+    }
+    // The analysis cache keeps every published table alive for the app
+    // lifetime (replaced tables are retired, never freed), so this pointer
+    // stays valid even if the buffer id is recycled and re-analyzed.
+    let table = unsafe { &*ptr };
+    let selector = transpose.round() as i32 - params.slice_base.round() as i32;
+    if selector < 0 {
+        return SliceTriggerVerdict::Ignore;
+    }
+    let selector = selector as usize;
+    let bounds = {
+        let mut starts = table.slice_starts(params.slice_sensitivity);
+        starts.nth(selector).map(|start| {
+            let end = starts.next().unwrap_or(table.sample_len_frames);
+            (start, end)
+        })
+    };
+    let Some((start_frame, end_frame)) = bounds else {
+        return SliceTriggerVerdict::Ignore;
+    };
+    let sample_len = table.sample_len_frames.max(1) as f32;
+    if !params.start_point_locked {
+        params.start_point = start_frame as f32 / sample_len;
+    }
+    if !params.end_point_locked {
+        params.end_point = end_frame as f32 / sample_len;
+    }
+    if crate::instruments::sampler::srange_debug_enabled() {
+        eprintln!(
+            "[srange] slice note={} idx={} start={} end={}",
+            *transpose, selector, params.start_point, params.end_point,
+        );
+    }
+    *transpose = 0.0;
+    SliceTriggerVerdict::Fire
+}
+
 pub(super) fn sampler_warp_runtime(
     state: &SequencerState,
     track_idx: usize,
@@ -208,6 +279,32 @@ pub(super) fn resolved_slot_param_value(
     default: f32,
 ) -> f32 {
     slot.resolved_param_value(step_idx, param_idx, default)
+}
+
+fn resolved_sampler_host_param_value(
+    slot: &EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+    default: f32,
+) -> f32 {
+    slot.plocks
+        .get(step_idx)
+        .and_then(|row| row.get(param_idx))
+        .copied()
+        .flatten()
+        .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(default))
+}
+
+fn slot_has_explicit_plock(slot: &EffectSlotSnapshot, step_idx: usize, param_idx: usize) -> bool {
+    let Some(raw_idx) = slot.node_param_idx(param_idx) else {
+        return false;
+    };
+    plock_identity_matches(
+        &slot.plock_param_ids,
+        step_idx,
+        param_idx,
+        crate::neural::ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw_idx),
+    )
 }
 
 pub(super) fn snapshot_slot_param_index_by_node_idx(
@@ -748,6 +845,17 @@ pub(super) fn resolve_rack_slot_sampler_params(
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        slice_mode: resolved_sampler_host_param_value(
+            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0,
+        ),
+        slice_sensitivity: resolved_sampler_host_param_value(
+            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
+        ),
+        slice_base: resolved_sampler_host_param_value(
+            slot, step_idx, crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0,
+        ),
+        start_point_locked: slot_has_explicit_plock(slot, step_idx, 2),
+        end_point_locked: slot_has_explicit_plock(slot, step_idx, 3),
         warp_preserve: resolved_slot_node_param_value(
             slot,
             step_idx,
@@ -787,6 +895,13 @@ pub(super) fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> S
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        slice_mode: value(crate::instruments::sampler::SLOT_PARAM_SLICE_MODE, 0.0),
+        slice_sensitivity: value(
+            crate::instruments::sampler::SLOT_PARAM_SLICE_SENSITIVITY, 0.5,
+        ),
+        slice_base: value(crate::instruments::sampler::SLOT_PARAM_SLICE_BASE, 0.0),
+        start_point_locked: false,
+        end_point_locked: false,
         warp_preserve: default_slot_node_param_value(
             slot,
             crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
