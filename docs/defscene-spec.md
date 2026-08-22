@@ -90,12 +90,23 @@ unit behaves as `defstate` would).
 ### Seam 2: reactive dependency injection
 
 Scene-switch repaint in the graph demo works because `bind-graph` reads
-through `current-pattern`. Bare-symbol scene reads must inject the same
-dependency edge invisibly: a read during widget rendering registers
-"(current-pattern, slot-name)" so that
+through `current-pattern`. Bare-symbol scene reads inject an equivalent
+dependency invisibly, but qualified per slot: a read during widget rendering
+registers `(__scene-slot, slot-name)`, whose generation is the slot's write
+epoch. Two writers advance it:
 
-- a scene/pattern switch dirties exactly the widgets that read any slot, and
-- a `set!` dirties exactly the widgets that read *this* slot, nothing else.
+- a `set!` (and its undo/redo replay) advances *this* slot, dirtying exactly
+  the widgets that read it and nothing else, and
+- a pattern sync sweeps the whole `__scene-slot` namespace, handing every
+  subscribed slot the newly-current scene's epoch, so the live pattern
+  changing dirties exactly the widgets that read any slot.
+
+The sweep is deliberately not an edge on `current-pattern`: that field is the
+scene *index*, so it cannot see a pattern whose contents are replaced in place
+at the same index (loading a project), which left readers stale. Epochs come
+from a process-global counter, so they distinguish two scenes' writes to the
+same slot and are re-seeded on load — the sweep therefore repaints on exactly
+the resolutions that changed.
 
 No `ui_epoch` bumps; this follows the targeted-invalidation playbook
 (undo-drag/glyph-tick lessons). Getting this wrong yields either stale panels

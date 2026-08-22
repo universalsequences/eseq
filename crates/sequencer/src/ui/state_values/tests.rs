@@ -172,6 +172,75 @@
         );
     }
 
+    /// The `SEQ.current-pattern` edge this sweep replaced could only repaint
+    /// when the scene *index* changed. Loading a project replaces the live
+    /// pattern's contents in place — index 0 before and after — so it is the
+    /// stale-reader case that edge could never cover.
+    #[test]
+    fn pattern_sync_repaints_defscene_readers_when_the_scene_index_is_unchanged() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut opened = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        opened
+            .scene_slots
+            .write_literal("amount", sequencer::process::ProcessLiteral::Number(1.0))
+            .expect("write the opened project's scene slot");
+        state.replace_pattern_repository(vec![opened], 0);
+        state
+            .restore_current_pattern_from_repository()
+            .expect("restore the opened project");
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![("current-pattern", Value::Number(0.0))],
+            true,
+        );
+        sequencer::lisp_host::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str(
+                r#"(defscene amount 0)
+                   (effect-buffer "*scene-slot-reload*"
+                     (h-stack
+                       (subtree :key "amount" (label (str amount)))
+                       (subtree :key "unrelated" (label "static"))))"#,
+            )
+            .expect("render scene-slot reader");
+        sync_pattern_state(&mut runtime, &state);
+        runtime.run_reactive_cycle();
+        runtime.take_pending_buffer_widget_trees();
+
+        let mut reopened = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        reopened
+            .scene_slots
+            .write_literal("amount", sequencer::process::ProcessLiteral::Number(7.0))
+            .expect("write the reopened project's scene slot");
+        state.replace_pattern_repository(vec![reopened], 0);
+        state
+            .restore_current_pattern_from_repository()
+            .expect("restore the reopened project");
+        assert_eq!(
+            state.current_scene_index(),
+            0,
+            "the scene index must be unchanged: that is the point of this case"
+        );
+
+        sync_pattern_state(&mut runtime, &state);
+        runtime.run_reactive_cycle();
+
+        let updates = runtime.take_pending_buffer_widget_trees();
+        let [eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. }] = updates.as_slice() else {
+            panic!(
+                "an in-place pattern replacement must repaint only the slot reader \
+                 subtree, got {} updates",
+                updates.len()
+            );
+        };
+        assert!(
+            value_contains_string(tree, "7"),
+            "the repainted reader must resolve the newly-loaded pattern's value"
+        );
+    }
+
     #[test]
     fn neural_networks_reactive_value_reflects_current_pattern_model() {
         let state = Arc::new(SequencerState::new(

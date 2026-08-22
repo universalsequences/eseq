@@ -5164,7 +5164,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
-    fn defscene_render_reads_invalidate_by_pattern_and_qualified_slot() {
+    fn defscene_render_reads_invalidate_by_slot_and_by_namespace_sweep() {
         let (_state, mut runtime) = scene_slot_test_runtime();
         runtime
             .eval_str(
@@ -5242,6 +5242,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
              subtrees keep their injected dependency"
         );
 
+        // What a pattern sync does: sweep the namespace, handing every
+        // subscribed slot the newly-current scene's generation.
         runtime.queue_reactive_namespace_invalidation(
             super::SCENE_SLOT_REACTIVE_NAMESPACE,
             |_| Value::String("scene-2".to_string()),
