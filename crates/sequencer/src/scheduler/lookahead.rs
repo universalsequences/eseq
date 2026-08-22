@@ -13,6 +13,9 @@ pub(super) struct SchedulerLookaheadState {
     pub(super) neural_runtime: NeuralRuntime,
     pub(super) generator_runtime: crate::generator::GeneratorRuntime,
     pub(super) process_runtime: crate::process::ProcessRuntime,
+    /// Last process payload epoch copied to SequencerState for UI polling.
+    /// This keeps the scheduler → UI mirror off unchanged lookahead chunks.
+    pub(super) published_process_channel_epoch: Option<u32>,
     pub(super) resolved_read_pattern_epoch: Option<u64>,
     pub(super) graph_manifests: Vec<crate::graph::GraphManifest>,
     pub(super) graph_runtimes: Vec<crate::graph::GraphRuntime>,
@@ -38,6 +41,7 @@ impl SchedulerLookaheadState {
             neural_runtime: NeuralRuntime::default(),
             generator_runtime: crate::generator::GeneratorRuntime::default(),
             process_runtime: crate::process::ProcessRuntime::default(),
+            published_process_channel_epoch: None,
             resolved_read_pattern_epoch: None,
             graph_manifests: Vec::new(),
             graph_runtimes: Vec::new(),
@@ -215,6 +219,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let neural_runtime = &mut scheduler.neural_runtime;
     let generator_runtime = &mut scheduler.generator_runtime;
     let process_runtime = &mut scheduler.process_runtime;
+    let published_process_channel_epoch = &mut scheduler.published_process_channel_epoch;
     let graph_manifests = &mut scheduler.graph_manifests;
     let graph_runtimes = &mut scheduler.graph_runtimes;
     let session_launches = &mut scheduler.quantized_launches;
@@ -1648,9 +1653,19 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_start_beats, chunk_end_beats
                 );
             }
-            if !chunk_enqueued {
-                break;
-            }
+        }
+
+        // Publish after the process cascade so UI polling sees values written
+        // by processes in this chunk, including contention with a live widget.
+        // Replacing the complete map also removes channels dropped by a later
+        // authoring sync. Unchanged chunks do no allocation or locking here.
+        let channel_epoch = process_runtime.payload_epoch();
+        if *published_process_channel_epoch != Some(channel_epoch) {
+            state.publish_process_channel_values(process_runtime.channel_value_literals());
+            *published_process_channel_epoch = Some(channel_epoch);
+        }
+        if !chunk_enqueued {
+            break;
         }
 
         // Graph-mode sequencers: native gather/scatter over this chunk. Each

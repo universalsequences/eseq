@@ -83,6 +83,25 @@ impl SequencerState {
     pub fn take_process_channel_writes(&self) -> Vec<(String, crate::process::ProcessLiteral)> {
         std::mem::take(&mut *self.pending_process_channel_writes.lock().unwrap())
     }
+    /// Publish the scheduler's latest held channel values for read-only UI
+    /// polling (docs/jaki-live-channel-widgets-spec.md 8.1).
+    pub fn publish_process_channel_values(
+        &self,
+        values: HashMap<String, crate::process::ProcessLiteral>,
+    ) {
+        let mut published = self.process_channel_values.lock().unwrap();
+        if *published != values {
+            *published = values;
+        }
+    }
+    /// Return the scheduler-owned value of one channel, if it currently holds
+    /// a value representable on the control thread.
+    pub fn process_channel_value(
+        &self,
+        name: &str,
+    ) -> Option<crate::process::ProcessLiteral> {
+        self.process_channel_values.lock().unwrap().get(name).cloned()
+    }
     pub fn track_process_chain(&self, track: usize) -> Option<crate::process::TrackProcessChain> {
         if track >= self.active_track_count() {
             return None;

@@ -1474,13 +1474,19 @@ fn process_channel_handle_call(
             if command.trim_start_matches(':') == "__inline-read"
     );
     if inline_read {
-        // Latest write wins, then the authored initial. The scheduler-side
-        // value is not readable from here, which is the point: the widget
-        // shows the author's hand, not a process's.
-        let value = registry
-            .channel_write_echo
-            .get(&name)
+        // The scheduler is authoritative once it has published a held value:
+        // this lets process writes visibly move a bound inline widget. Before
+        // the first scheduler snapshot, preserve the immediate write echo and
+        // authored-initial fallbacks used while stopped or not yet scheduled.
+        let value = process_chain_state
+            .and_then(|state| state.process_channel_value(&name))
             .map(|literal| literal.to_value())
+            .or_else(|| {
+                registry
+                    .channel_write_echo
+                    .get(&name)
+                    .map(|literal| literal.to_value())
+            })
             .or_else(|| {
                 registry
                     .channels

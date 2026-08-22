@@ -411,6 +411,10 @@ pub struct SequencerState {
     /// smuggled in as an initial would be dropped. The lookahead worker drains
     /// this queue at the top of a chunk instead.
     pub(super) pending_process_channel_writes: Mutex<Vec<(String, crate::process::ProcessLiteral)>>,
+    /// Latest scheduler-owned value for each value channel. Inline channel
+    /// widgets poll this mirror; values stay scheduler-owned and are copied
+    /// here only in the thread-safe process-literal representation.
+    pub(super) process_channel_values: Mutex<HashMap<String, crate::process::ProcessLiteral>>,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pub(super) process_trace_enabled: AtomicBool,

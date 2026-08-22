@@ -1847,6 +1847,22 @@ impl ProcessRuntime {
             .collect()
     }
 
+    /// Thread-safe copy of the held value channels for the scheduler → UI
+    /// mirror. Callable and host-only VM values cannot be displayed by an
+    /// inline value widget and are omitted rather than crossing threads.
+    pub fn channel_value_literals(&self) -> HashMap<String, ProcessLiteral> {
+        self.channels
+            .iter()
+            .filter_map(|(name, channel)| {
+                channel.value.as_ref().and_then(|value| {
+                    ProcessLiteral::from_value(value)
+                        .ok()
+                        .map(|literal| (name.clone(), literal))
+                })
+            })
+            .collect()
+    }
+
     /// Global generation for payload-bearing channel values. It changes only
     /// when the value snapshot changes, not merely when it is republished.
     pub fn payload_epoch(&self) -> u32 {

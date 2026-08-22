@@ -2294,12 +2294,11 @@
         out
     }
 
-    /// docs/jaki-live-channel-widgets-spec.md 7: a `(handle :set value)` call
-    /// on the control thread reaches the scheduler through the pending-write
-    /// queue, is applied at the top of a chunk, and is visible to a `chan-get`
-    /// in that chunk's generator ticks.
+    /// docs/jaki-live-channel-widgets-spec.md 7 and 8.1: control-thread
+    /// channel writes reach `chan-get` on the next chunk, while a process write
+    /// is mirrored back through the same channel handle for inline UI polling.
     #[test]
-    fn channel_handle_write_reaches_generator_chan_get_on_the_next_chunk() {
+    fn channel_writes_cross_the_scheduler_boundary_in_both_directions() {
         run_with_scheduler_stack(|| {
             let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
             let mut scratch = lisp_host::ScratchControlRuntime::new(
@@ -2314,7 +2313,9 @@
                     r#"(def warp (defchan warp 0.25))
                        (__register-sequencer "warp-reader"
                          :resolution :4
-                         :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))"#,
+                         :tick (lambda () (seq-emit :track 0 :at :now :vel (chan-get "warp" 0.25))))
+                       (def drive (defchan drive 0))
+                       (tap drive (lambda (value) (send warp 0.8)))"#,
                 )
                 .expect("declare channel and generator");
 
@@ -2356,6 +2357,9 @@
             scheduler
                 .generator_runtime
                 .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
             let mut scratch_runtime = Some(scratch);
 
             let before = velocities(&mut scheduler, &mut scratch_runtime, 0);
@@ -2382,6 +2386,30 @@
             assert!(
                 state.take_process_channel_writes().is_empty(),
                 "the scheduler drain should have consumed the queue"
+            );
+
+            scratch_runtime
+                .as_mut()
+                .expect("scratch runtime")
+                .eval("(drive :set 1)")
+                .expect("wake the process that contends with the UI write");
+            let driven = velocities(&mut scheduler, &mut scratch_runtime, 48_000);
+            assert!(
+                !driven.is_empty(),
+                "generator emitted nothing after process write"
+            );
+            assert!(
+                driven.iter().all(|vel| (vel - 0.8).abs() < 1e-6),
+                "expected the process-driven channel value, got {driven:?}"
+            );
+            assert_eq!(
+                scratch_runtime
+                    .as_mut()
+                    .expect("scratch runtime")
+                    .eval("(warp :__inline-read :set)")
+                    .expect("poll contended channel mirror"),
+                Some(Value::Number(0.8)),
+                "the process's later write should visibly win over the UI echo"
             );
         });
     }
