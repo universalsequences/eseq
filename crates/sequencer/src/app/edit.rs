@@ -9605,7 +9605,7 @@ mod tests {
         );
         runtime
             .invalidate_reactive_source(
-                "__scene-slot",
+                crate::lisp_host::SCENE_SLOT_REACTIVE_NAMESPACE,
                 "amount",
                 eseqlisp::vm::Value::String(
                     app.state.current_scene_slots().epoch("amount").to_string(),

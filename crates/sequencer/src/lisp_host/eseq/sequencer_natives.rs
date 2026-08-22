@@ -16,7 +16,10 @@ natives are the internal hooks `def-accumulator`/`def-midi-fx`/
 
 use super::super::*;
 
-const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
+/// Reactive namespace injected for `defscene` slot reads. History replay
+/// re-dirties readers through this same namespace, so it is shared rather
+/// than restated at each invalidation site.
+pub const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
 
 pub const DEF_SEQUENCER_SIGNATURE: &str =
     "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
