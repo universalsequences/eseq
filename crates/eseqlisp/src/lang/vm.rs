@@ -9100,6 +9100,45 @@ counter
     }
 
     #[test]
+    fn procedural_macro_gensym_bindings_do_not_capture_caller_symbols() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.set_current_effect_context(Some(11));
+        // The residue binds a generated `tmp` and then reads the caller's own
+        // `tmp`: capture would make both reads see the generated binding.
+        vm.eval_str(
+            "(defmacro shadowing (body)\n\
+               (let ((g (gensym \"tmp\")))\n\
+                 `(let ((,g 100)) (+ ,g ,body))))",
+        )
+        .expect("capture-hazard macro definition");
+
+        let result = vm
+            .eval_str("(let ((tmp 7)) (shadowing tmp))")
+            .expect("expansion evaluates")
+            .expect("expansion value");
+        assert_eq!(result, Value::Number(107.0));
+    }
+
+    #[test]
+    fn procedural_macro_gensym_is_identical_across_fresh_vms() {
+        fn generated_symbol() -> Value {
+            let mut vm = VM::new(Vec::new());
+            super::register_core_natives(&mut vm);
+            vm.set_current_effect_context(Some(23));
+            vm.eval_str("(defmacro generated () `(quote ,(gensym \"tmp\")))")
+                .expect("gensym macro definition");
+            vm.eval_str("(generated)")
+                .expect("expansion")
+                .expect("expansion value")
+        }
+
+        // Source-identity diffing depends on the suffix being a function of the
+        // site alone, never of per-process hasher seeding.
+        assert_eq!(generated_symbol(), generated_symbol());
+    }
+
+    #[test]
     fn procedural_macro_calls_functions_in_the_owning_vm() {
         let mut vm = VM::new(Vec::new());
         vm.eval_str("(def macro-add-form (form) (list '+ form 5))")
