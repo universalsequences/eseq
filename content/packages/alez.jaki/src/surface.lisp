@@ -23,8 +23,9 @@
 ;;     (. . - . (every 2 swap) -> 0)
 ;;     (- . . .                -> 1 stac))
 ;;
-;; The macro sends the quoted body through the authoring-side expansion walk;
-;; the rewritten body then ships as source and runs on the scheduler VM.
+;; The macro walks the body on the authoring VM and returns ordinary
+;; def-sequencer syntax; its rewritten tick body is captured after macro
+;; expansion and runs on the scheduler VM.
 
 (module alez.jaki.surface)
 
@@ -108,23 +109,20 @@
                       :bindings (get walked :bindings)
                       :next (get walked :next))))))))
 
-(def channel-register (name res body)
-  (let ((walked (channel-walk-list body name 0)))
-    ;; Runtime natives report a hard authoring error as false plus status. Do
-    ;; not let a later registration overwrite that status and publish a body
-    ;; whose channel declarations failed.
-    (if (__jaki-declare-value-channels (get walked :decls))
-        (if (bind-channel-widgets (get walked :bindings))
-            ;; Build scheduler source after the walk, rather than letting the compiler
-            ;; auto-quote the unrewritten source as `def-sequencer` would. `source`
-            ;; provides canonical escaping for every authored literal in the body.
-            (def-sequencer name
-              :resolution res
-              :tick-source
-                (str "(do (alez.jaki.core/init " (source res)
-                     ") (alez.jaki.core/run '" (source (get walked :forms)) "))"))
-            false)
-        false)))
-
 (defmacro jak (name res &rest body)
-  `(alez.jaki.surface/channel-register ,name ,res '(,@body)))
+  (let ((walked (channel-walk-list body name 0)))
+    (let ((decls (list 'quote (get walked :decls)))
+          (bindings (list 'quote (get walked :bindings)))
+          (forms (list 'quote (get walked :forms))))
+      ;; Declarations and editor bindings remain runtime authoring operations;
+      ;; the pure walk that computes their data runs during macro expansion.
+      ;; A failed declaration must not bind widgets or publish the sequencer.
+      `(if (__jaki-declare-value-channels ,decls)
+           (if (alez.jaki.surface/bind-channel-widgets ,bindings)
+               (def-sequencer ,name
+                 :resolution ,res
+                 :tick (do
+                   (alez.jaki.core/init ,res)
+                   (alez.jaki.core/run ,forms)))
+               false)
+           false))))

@@ -9012,6 +9012,50 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn sig_and_jaki_macros_expand_to_captured_forms_without_source_string_paths() {
+        let mut rt = jaki_runtime();
+        let jaki = rt
+            .eval(
+                r#"(source (macroexpand
+                     '(alez.jaki.surface/jak "kit" :16 . - -> 0)))"#,
+            )
+            .expect("expand jak")
+            .expect("jak expansion");
+        let Value::String(jaki) = jaki else {
+            panic!("expected jak source, got {jaki:?}");
+        };
+        assert!(jaki.contains("def-sequencer"), "{jaki}");
+        assert!(jaki.contains(":tick "), "{jaki}");
+        assert!(!jaki.contains(":tick-source"), "{jaki}");
+        assert!(!jaki.contains("channel-register"), "{jaki}");
+
+        let sig = rt
+            .eval(
+                r#"(import alez.sig.surface :refer (sig))
+                   (source (macroexpand
+                     '(alez.sig.surface/sig "ramp" :over (beats 4) :rate :16 phase)))"#,
+            )
+            .expect("expand sig")
+            .expect("sig expansion");
+        let Value::String(sig) = sig else {
+            panic!("expected sig source, got {sig:?}");
+        };
+        assert!(sig.contains("def-process"), "{sig}");
+        assert!(!sig.contains("sig-register"), "{sig}");
+        assert!(!sig.contains("(eval "), "{sig}");
+
+        let pat = rt
+            .eval("(source (macroexpand '(alez.jaki.core/pat . -)))")
+            .expect("expand pat")
+            .expect("pat expansion");
+        let Value::String(pat) = pat else {
+            panic!("expected pat source, got {pat:?}");
+        };
+        assert!(pat.contains("alez.jaki.core/from-list"), "{pat}");
+        assert!(!pat.contains("alez.jaki.core/pat"), "{pat}");
+    }
+
+    #[test]
     fn sig_surface_derives_transport_phase_per_tick() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
