@@ -10192,6 +10192,33 @@ counter
     }
 
     #[test]
+    fn process_sugar_expands_the_trigger_argument_too() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        for name in ["every", "after", "on", "tap"] {
+            vm.register_native(name, |args| {
+                Value::String(super::format_lisp_source(
+                    args.first().expect("captured process-sugar trigger"),
+                ))
+            });
+        }
+        vm.eval_str("(defmacro trigger-kernel () `(beats 4))")
+            .expect("define macro");
+
+        for name in ["every", "after", "on", "tap"] {
+            let result = vm
+                .eval_str(&format!("({name} (trigger-kernel) (target-set! 1))"))
+                .expect("eval process sugar")
+                .expect("captured process-sugar trigger");
+            let Value::String(captured) = result else {
+                panic!("expected {name} to return the captured trigger, got {result:?}");
+            };
+            assert!(captured.contains("(beats 4)"), "{name}: {captured}");
+            assert!(!captured.contains("trigger-kernel"), "{name}: {captured}");
+        }
+    }
+
+    #[test]
     fn def_sequencer_tick_and_init_capture_expand_macros_and_preserve_quotes() {
         let mut vm = VM::new(Vec::new());
         super::register_core_natives(&mut vm);

@@ -2570,11 +2570,11 @@ impl<'a> Compiler<'a> {
                     continue;
                 }
                 if is_process_sugar {
-                    if i == 0 {
-                        self.compile_quoted_expression(elem)?;
-                    } else {
-                        self.compile_expanded_quoted_expression(elem)?;
-                    }
+                    // The trigger/source argument expands too, matching
+                    // `def-process`'s `:every`/`:listen` clauses: the native
+                    // parses it structurally in *this* VM, so leaving a macro
+                    // call unexpanded there fails to parse rather than working.
+                    self.compile_expanded_quoted_expression(elem)?;
                     continue;
                 }
                 if is_def_song {
