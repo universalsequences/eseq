@@ -210,17 +210,26 @@ scheduler picks it up at the next tick boundary.
 - A separate getter/setter API (`scene-slot`, `slot-set!`) — the symbol is the
   API; a parallel functional surface would fork idioms.
 
-## Open questions
+## Introspection and operational limits
 
-- Whether reads outside widget rendering (plain script code in the UI VM)
-  should also be reactive-context-aware or always resolve immediately.
-  Leaning: immediate resolve; only render-context reads register deps.
-- Whether `(ps)`-style introspection should list declared slots and which
-  patterns override them (useful for debugging "why does scene 3 sound
-  different"). Leaning yes, as a `(scenes)` native.
-- Slot value size limits. Serialized per pattern; a pathological slot (a huge
-  list) bloats every scene that overrides it. Probably a soft cap with a
-  diagnostic rather than a hard limit.
-- Interaction with take capture/splice: takes snapshot pattern state — slots
-  presumably ride along, but the take lifecycle (release-time stamping) needs
-  an explicit pass.
+Reads resolve immediately everywhere; dependency tracking is inert outside a
+reactive render, so plain UI-VM script reads do not acquire a subscription.
+
+`(scenes)` returns one dict per project pattern in presentation order. Each
+contains `:pattern` (zero-based index), stable string `:id`, `:name`, `:current`,
+and a `:slots` list. Every declared slot appears in every pattern with
+`:name`, `:default`, resolved `:value`, `:overridden`, and string `:epoch`.
+This makes fallback explicit while directly answering which patterns carry an
+override. Slot and pattern ordering is deterministic.
+
+A slot value larger than 64 KiB in its serialized `ProcessLiteral` form is
+accepted but produces an authoring status diagnostic naming the slot, measured
+size, and cap. This is deliberately soft: a live performance edit must not fail
+because its data crossed an arbitrary threshold, while the warning makes clear
+that every overriding pattern stores another copy.
+
+Take punch-in chunks contain track data only; scene slots remain on the project
+pattern. The take stop-commit captures scene structure at release, after pending
+script edits have landed. Both sides of the take's undo patch therefore carry
+the release-time slot state: undoing or redoing a take never rolls a slot back
+to its punch-in value.

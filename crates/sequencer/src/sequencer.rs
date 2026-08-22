@@ -46,7 +46,7 @@ pub use state::{
     SongPositionShared,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
     MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, PublishedSequencer, RackMacro, RackMacroCurve,
-    ResolvedSceneSlot, SceneSlotStore,
+    ResolvedSceneSlot, SceneSlotStore, SCENE_SLOT_SOFT_SERIALIZED_BYTES,
     rack_choke_key,
     RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotId, RackSlotParam,
     RackSlotParamPlocks, RackSlotSnapshot, RackSlotValuesSnapshot, RackTrackSnapshot,

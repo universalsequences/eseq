@@ -10,6 +10,10 @@ use crate::process::ProcessLiteral;
 // unchanged token together with its unchanged value.
 static NEXT_SCENE_SLOT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+/// Values larger than this are accepted, but authoring natives surface a
+/// warning because every overriding pattern serializes its own copy.
+pub const SCENE_SLOT_SOFT_SERIALIZED_BYTES: usize = 64 * 1024;
+
 fn next_scene_slot_epoch() -> u64 {
     NEXT_SCENE_SLOT_EPOCH
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
@@ -65,6 +69,29 @@ impl SceneSlotStore {
 
     pub fn get(&self, name: &str) -> Option<&ProcessLiteral> {
         self.values.get(name)
+    }
+
+    /// Return an authoring diagnostic without rejecting the value. The byte
+    /// count uses the same serde representation embedded in project JSON,
+    /// rather than an in-memory estimate that could miss serialization bloat.
+    pub fn soft_size_diagnostic(
+        name: &str,
+        value: &ProcessLiteral,
+    ) -> Result<Option<String>, String> {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|error| {
+                format!(
+                    "scene slot '{}': could not measure serialized value: {error}",
+                    name
+                )
+            })?
+            .len();
+        Ok((bytes > SCENE_SLOT_SOFT_SERIALIZED_BYTES).then(|| {
+            format!(
+                "Scene slot '{}' stores {} serialized bytes in every overriding pattern (soft cap: {} bytes); the value was stored",
+                name, bytes, SCENE_SLOT_SOFT_SERIALIZED_BYTES
+            )
+        }))
     }
 
     pub fn epoch(&self, name: &str) -> u64 {
@@ -226,5 +253,21 @@ mod tests {
             )
             .expect_err("NaN cannot round-trip through project JSON");
         assert!(error.contains("scene slot 'figures'"), "{error}");
+    }
+
+    #[test]
+    fn serialized_size_cap_is_soft_and_reports_the_slot() {
+        let value = ProcessLiteral::String("x".repeat(SCENE_SLOT_SOFT_SERIALIZED_BYTES));
+        let diagnostic = SceneSlotStore::soft_size_diagnostic("figures", &value)
+            .expect("portable values can be measured")
+            .expect("serde tagging pushes this value over the soft cap");
+        assert!(diagnostic.contains("Scene slot 'figures'"), "{diagnostic}");
+        assert!(diagnostic.contains("the value was stored"), "{diagnostic}");
+
+        let mut store = SceneSlotStore::default();
+        store
+            .write_literal("figures", value.clone())
+            .expect("the cap must not reject a portable value");
+        assert_eq!(store.get("figures"), Some(&value));
     }
 }

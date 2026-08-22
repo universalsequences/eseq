@@ -5115,6 +5115,107 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn scenes_introspection_lists_declared_slots_and_pattern_overrides() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(defscene alpha 1)\n(defscene beta '(2 3))\n(set! alpha 4)")
+            .expect("declare slots and override the current pattern");
+        state
+            .set_scene_slot_override(
+                crate::sequencer::SceneId(2),
+                "beta",
+                Some(crate::process::ProcessLiteral::List(vec![
+                    crate::process::ProcessLiteral::Number(5.0),
+                ])),
+            )
+            .expect("override beta in the second pattern");
+
+        let Some(Value::List(patterns)) = runtime.eval_str("(scenes)").expect("introspect") else {
+            panic!("scenes must return a pattern list");
+        };
+        assert_eq!(patterns.len(), 2);
+
+        let slots_for = |pattern: &Rc<RefCell<Value>>| {
+            let Value::Map(pattern) = &*pattern.borrow() else {
+                panic!("each pattern must be a map");
+            };
+            let Value::List(slots) = &*pattern["slots"].borrow() else {
+                panic!("pattern slots must be a list");
+            };
+            slots
+                .iter()
+                .map(|slot| {
+                    let slot_value = slot.borrow();
+                    let Value::Map(slot) = &*slot_value else {
+                        panic!("each slot must be a map");
+                    };
+                    let Value::String(name) = &*slot["name"].borrow() else {
+                        panic!("slot name must be a string");
+                    };
+                    let Value::Bool(overridden) = &*slot["overridden"].borrow() else {
+                        panic!("overridden must be a bool");
+                    };
+                    let value = slot["value"].borrow().clone();
+                    (name.clone(), *overridden, value)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            slots_for(&patterns[0]),
+            vec![
+                ("alpha".to_string(), true, Value::Number(4.0)),
+                (
+                    "beta".to_string(),
+                    false,
+                    lisp_list(vec![Value::Number(2.0), Value::Number(3.0)])
+                ),
+            ]
+        );
+        assert_eq!(
+            slots_for(&patterns[1]),
+            vec![
+                ("alpha".to_string(), false, Value::Number(1.0)),
+                (
+                    "beta".to_string(),
+                    true,
+                    lisp_list(vec![Value::Number(5.0)])
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_scene_slot_write_is_stored_with_a_soft_diagnostic() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_natives(&mut runtime, Arc::clone(&state));
+        runtime.eval_str("(defscene payload \"\")").expect("declare slot");
+        let payload = "x".repeat(crate::sequencer::SCENE_SLOT_SOFT_SERIALIZED_BYTES);
+        runtime
+            .eval_str(&format!("(set! payload \"{payload}\")"))
+            .expect("the soft cap must not reject the write");
+
+        let diagnostic = runtime
+            .take_status_message()
+            .expect("oversized authoring writes produce a status diagnostic");
+        assert!(diagnostic.contains("Scene slot 'payload'"), "{diagnostic}");
+        assert!(diagnostic.contains("soft cap"), "{diagnostic}");
+        assert_eq!(
+            state.current_scene_slots().get("payload"),
+            Some(&crate::process::ProcessLiteral::String(payload))
+        );
+    }
+
+    #[test]
     fn defscene_bare_read_and_set_lower_to_current_pattern_slot_storage() {
         let (state, mut runtime) = scene_slot_test_runtime();
 
