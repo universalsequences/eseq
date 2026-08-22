@@ -81,6 +81,29 @@ fn with_cached_animation(mut node: LayoutNode) -> LayoutNode {
 const FILL_CONTENT_STYLE_PROP: &str = "fill-content-style";
 const NATURAL_CONTENT_WIDTH_PROP: &str = "__natural-content-width";
 
+fn set_natural_content_width_prop(layout: &mut LayoutNode, natural_width: Option<f32>) {
+    if let Some(natural_width) = natural_width {
+        layout.props.insert(
+            NATURAL_CONTENT_WIDTH_PROP.to_string(),
+            Value::Number(natural_width as f64),
+        );
+    }
+}
+
+/// Natural content width persisted on the cached layout root by a prior full
+/// layout pass. Targeted subtree relayouts reuse it instead of re-measuring
+/// the entire tree; edits that change the natural width rebuild the root
+/// through the full layout path.
+fn stored_natural_content_width(existing: &LayoutNode, tree: &Value) -> Option<f32> {
+    if !prop_is_true(tree, FILL_CONTENT_STYLE_PROP) {
+        return None;
+    }
+    match existing.props.get(NATURAL_CONTENT_WIDTH_PROP) {
+        Some(Value::Number(natural)) if natural.is_finite() => Some(*natural as f32),
+        _ => None,
+    }
+}
+
 pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -> bool {
     fn fills_axis(layout: &LayoutNode, prop: &str) -> bool {
         matches!(layout.props.get(prop), Some(Value::Keyword(value)) if value == "fill")
@@ -307,12 +330,7 @@ impl<'a> LayoutEngine<'a> {
         let root_rect = self.root_rect(tree, size, root_max_width, 0.0, 0.0);
         let mut layout =
             self.build_layout_node(tree, root_rect, DEFAULT_FONT_SIZE, LayoutCtx::default());
-        if let Some(natural_width) = natural_width {
-            layout.props.insert(
-                NATURAL_CONTENT_WIDTH_PROP.to_string(),
-                Value::Number(natural_width as f64),
-            );
-        }
+        set_natural_content_width_prop(&mut layout, natural_width);
         let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
         Some(layout)
@@ -701,6 +719,7 @@ impl<'a> LayoutEngine<'a> {
             DEFAULT_FONT_SIZE,
         )
         .map(|s| s.width)
+        .filter(|w| w.is_finite())
         .unwrap_or(0.0)
     }
 
@@ -1411,7 +1430,12 @@ pub fn relayout_subtree_path_result(
     );
     let mut trace_path = Vec::new();
     let mut next_widget_id = max_layout_widget_id(existing).wrapping_add(1);
-    let (root_max_width, natural_width) = engine.root_layout_width(tree);
+    // Reuse the natural content width computed by the last full layout rather
+    // than re-measuring the whole tree on every targeted subtree relayout.
+    let (root_max_width, natural_width) = match stored_natural_content_width(existing, tree) {
+        Some(natural) => (engine.terminal_cols.max(natural), Some(natural)),
+        None => engine.root_layout_width(tree),
+    };
     let root_size = engine.measure_node_at_path(
         existing,
         tree,
@@ -1437,12 +1461,7 @@ pub fn relayout_subtree_path_result(
         &mut next_widget_id,
         &mut trace_path,
     )?;
-    if let Some(natural_width) = natural_width {
-        layout.props.insert(
-            NATURAL_CONTENT_WIDTH_PROP.to_string(),
-            Value::Number(natural_width as f64),
-        );
-    }
+    set_natural_content_width_prop(&mut layout, natural_width);
     Ok(layout)
 }
 
