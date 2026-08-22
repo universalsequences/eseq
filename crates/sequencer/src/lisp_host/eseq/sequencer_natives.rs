@@ -105,38 +105,44 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
                 .lock()
                 .map_err(|_| "failed to lock scene-slot declarations".to_string())?
                 .clone();
-            let project = state_for_scenes.capture_project_scenes();
-            let current = project.current_scene;
-            let patterns = project
-                .scenes
-                .iter()
-                .enumerate()
-                .map(|(index, scene)| {
-                    let slots = declarations
-                        .iter()
-                        .map(|(name, default)| {
-                            let resolved = scene.scene_slots.resolve(name, default);
-                            let mut slot = HashMap::new();
-                            slot.insert("name".to_string(), lisp_string(name));
-                            slot.insert("default".to_string(), lisp_value(default.to_value()));
-                            slot.insert("value".to_string(), lisp_value(resolved.value.to_value()));
-                            slot.insert("overridden".to_string(), lisp_bool(resolved.overridden));
-                            slot.insert(
-                                "epoch".to_string(),
-                                lisp_string(resolved.epoch.to_string()),
-                            );
-                            EValue::Map(slot)
-                        })
-                        .collect();
-                    let mut pattern = HashMap::new();
-                    pattern.insert("pattern".to_string(), lisp_number(index as f64));
-                    pattern.insert("id".to_string(), lisp_string(scene.id.0.to_string()));
-                    pattern.insert("name".to_string(), lisp_string(&scene.name));
-                    pattern.insert("current".to_string(), lisp_bool(index == current));
-                    pattern.insert("slots".to_string(), lisp_value(lisp_list(slots)));
-                    EValue::Map(pattern)
-                })
-                .collect();
+            // Introspection reads the live bank under its own lock rather
+            // than taking the history-grade `capture_project_scenes` clone:
+            // this native is also registered in the scheduler-side runtime,
+            // where deep-cloning every pattern's pools to print slot names
+            // would be paid on a script callback.
+            let patterns = state_for_scenes.with_project_scenes(|project| {
+                let current = project.current_scene;
+                project
+                    .scenes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, scene)| {
+                        let slots = declarations
+                            .iter()
+                            .map(|(name, default)| {
+                                let resolved = scene.scene_slots.resolve(name, default);
+                                let mut slot = HashMap::new();
+                                slot.insert("name".to_string(), lisp_string(name));
+                                slot.insert("default".to_string(), lisp_value(default.to_value()));
+                                slot.insert("value".to_string(), lisp_value(resolved.value.to_value()));
+                                slot.insert("overridden".to_string(), lisp_bool(resolved.overridden));
+                                slot.insert(
+                                    "epoch".to_string(),
+                                    lisp_string(resolved.epoch.to_string()),
+                                );
+                                EValue::Map(slot)
+                            })
+                            .collect();
+                        let mut pattern = HashMap::new();
+                        pattern.insert("pattern".to_string(), lisp_number(index as f64));
+                        pattern.insert("id".to_string(), lisp_string(scene.id.0.to_string()));
+                        pattern.insert("name".to_string(), lisp_string(&scene.name));
+                        pattern.insert("current".to_string(), lisp_bool(index == current));
+                        pattern.insert("slots".to_string(), lisp_value(lisp_list(slots)));
+                        EValue::Map(pattern)
+                    })
+                    .collect::<Vec<_>>()
+            });
             Ok(lisp_list(patterns))
         },
     );
@@ -182,11 +188,13 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         }
         let literal = crate::process::ProcessLiteral::from_value(value)
             .map_err(|error| format!("scene slot '{}': {}", name, error))?;
-        let size_diagnostic =
-            crate::sequencer::SceneSlotStore::soft_size_diagnostic(name, &literal)?;
         let (scene_id, previous, epoch) = state
             .write_current_scene_slot_identified(name.clone(), literal.clone())?;
-        if let Some(diagnostic) = size_diagnostic {
+        // Diagnosed after the write lands: the cap is soft, and a value the
+        // store rejects outright deserves its own portability error instead.
+        if let Some(diagnostic) =
+            crate::sequencer::SceneSlotStore::soft_size_diagnostic(name, &literal)
+        {
             ctx.set_status(diagnostic);
         }
         if record_history {

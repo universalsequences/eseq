@@ -71,27 +71,29 @@ impl SceneSlotStore {
         self.values.get(name)
     }
 
-    /// Return an authoring diagnostic without rejecting the value. The byte
-    /// count uses the same serde representation embedded in project JSON,
-    /// rather than an in-memory estimate that could miss serialization bloat.
-    pub fn soft_size_diagnostic(
-        name: &str,
-        value: &ProcessLiteral,
-    ) -> Result<Option<String>, String> {
+    /// Return an authoring diagnostic without rejecting the value. The
+    /// reported byte count uses the same serde representation embedded in
+    /// project JSON, rather than an in-memory estimate that could miss
+    /// serialization bloat.
+    ///
+    /// Every authored write pays this check — including writes from
+    /// scheduler-side script callbacks — so the measuring serialization is
+    /// gated behind an allocation-free lower bound on that same encoding: a
+    /// value that cannot be over the cap never allocates. Measuring never
+    /// fails a write; portability is `validate_scene_slot_literal`'s job, and
+    /// it reports an authoring error naming the declaration.
+    pub fn soft_size_diagnostic(name: &str, value: &ProcessLiteral) -> Option<String> {
+        let lower_bound = min_serialized_bytes(value);
+        if lower_bound <= SCENE_SLOT_SOFT_SERIALIZED_BYTES {
+            return None;
+        }
         let bytes = serde_json::to_vec(value)
-            .map_err(|error| {
-                format!(
-                    "scene slot '{}': could not measure serialized value: {error}",
-                    name
-                )
-            })?
-            .len();
-        Ok((bytes > SCENE_SLOT_SOFT_SERIALIZED_BYTES).then(|| {
-            format!(
-                "Scene slot '{}' stores {} serialized bytes in every overriding pattern (soft cap: {} bytes); the value was stored",
-                name, bytes, SCENE_SLOT_SOFT_SERIALIZED_BYTES
-            )
-        }))
+            .map(|json| json.len())
+            .unwrap_or(lower_bound);
+        Some(format!(
+            "Scene slot '{}' stores {} serialized bytes in every overriding pattern (soft cap: {} bytes); the value was stored",
+            name, bytes, SCENE_SLOT_SOFT_SERIALIZED_BYTES
+        ))
     }
 
     pub fn epoch(&self, name: &str) -> u64 {
@@ -167,6 +169,37 @@ impl SceneSlotStore {
         let literal = ProcessLiteral::from_value(value)
             .map_err(|error| format!("scene slot '{}': {}", name, error))?;
         self.write_literal(name, literal)
+    }
+}
+
+/// A lower bound on `serde_json`'s byte length for `value`.
+///
+/// Each arm counts the externally-tagged wrapper serde always emits plus the
+/// shortest possible payload, and omits separators and string escaping, so the
+/// result can only undershoot. Exceeding the soft cap here therefore always
+/// means the exact measurement exceeds it too.
+fn min_serialized_bytes(value: &ProcessLiteral) -> usize {
+    match value {
+        // `"Nil"`
+        ProcessLiteral::Nil => 5,
+        // `{"Number":0}` / `{"Bool":true}`
+        ProcessLiteral::Number(_) => 12,
+        ProcessLiteral::Bool(_) => 13,
+        // `{"String":"…"}` and its equally long `Symbol`/`Keyword` siblings
+        ProcessLiteral::String(text)
+        | ProcessLiteral::Symbol(text)
+        | ProcessLiteral::Keyword(text) => 13 + text.len(),
+        // `{"List":[…]}`
+        ProcessLiteral::List(items) => {
+            11 + items.iter().map(min_serialized_bytes).sum::<usize>()
+        }
+        // `{"Map":{"key":…}}`
+        ProcessLiteral::Map(items) => {
+            10 + items
+                .iter()
+                .map(|(key, value)| 3 + key.len() + min_serialized_bytes(value))
+                .sum::<usize>()
+        }
     }
 }
 
@@ -259,7 +292,6 @@ mod tests {
     fn serialized_size_cap_is_soft_and_reports_the_slot() {
         let value = ProcessLiteral::String("x".repeat(SCENE_SLOT_SOFT_SERIALIZED_BYTES));
         let diagnostic = SceneSlotStore::soft_size_diagnostic("figures", &value)
-            .expect("portable values can be measured")
             .expect("serde tagging pushes this value over the soft cap");
         assert!(diagnostic.contains("Scene slot 'figures'"), "{diagnostic}");
         assert!(diagnostic.contains("the value was stored"), "{diagnostic}");
@@ -269,5 +301,61 @@ mod tests {
             .write_literal("figures", value.clone())
             .expect("the cap must not reject a portable value");
         assert_eq!(store.get("figures"), Some(&value));
+    }
+
+    /// The cheap gate must never claim more than serde emits, or a value under
+    /// the cap would be reported as over it.
+    #[test]
+    fn the_size_gate_never_overshoots_the_serde_encoding() {
+        let values = [
+            ProcessLiteral::Nil,
+            ProcessLiteral::Bool(false),
+            ProcessLiteral::Number(0.0),
+            ProcessLiteral::Number(-1234.5678),
+            ProcessLiteral::String(String::new()),
+            ProcessLiteral::Symbol("figure".to_string()),
+            ProcessLiteral::Keyword("mode".to_string()),
+            ProcessLiteral::List(Vec::new()),
+            ProcessLiteral::Map(BTreeMap::new()),
+            ProcessLiteral::List(vec![
+                ProcessLiteral::Number(1.0),
+                ProcessLiteral::Nil,
+                ProcessLiteral::Map(BTreeMap::from([(
+                    "a".to_string(),
+                    ProcessLiteral::List(vec![ProcessLiteral::Bool(true)]),
+                )])),
+            ]),
+        ];
+        for value in values {
+            let exact = serde_json::to_vec(&value).expect("portable values encode").len();
+            assert!(
+                min_serialized_bytes(&value) <= exact,
+                "{value:?}: bound {} exceeds serde's {exact}",
+                min_serialized_bytes(&value)
+            );
+        }
+    }
+
+    /// A list of small numbers is far larger encoded than its payload, so the
+    /// gate has to count the per-element tagging it cannot skip.
+    #[test]
+    fn the_size_gate_counts_per_element_tagging() {
+        let value = ProcessLiteral::List(
+            (0..SCENE_SLOT_SOFT_SERIALIZED_BYTES / 8)
+                .map(|index| ProcessLiteral::Number(index as f64))
+                .collect(),
+        );
+        assert!(
+            SceneSlotStore::soft_size_diagnostic("figures", &value).is_some(),
+            "tagging alone pushes a compact list of numbers over the cap"
+        );
+        assert!(
+            SceneSlotStore::soft_size_diagnostic(
+                "figures",
+                &ProcessLiteral::List(vec![ProcessLiteral::Number(1.0)])
+            )
+            .is_none(),
+            "ordinary values stay quiet"
+        );
     }
 }
