@@ -58,6 +58,33 @@ pub struct MaterializedSource {
     pub shadowed_imports: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateMacroUnquoteKind {
+    Unquote,
+    UnquoteSplicing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateMacroCompatibilityIssue {
+    pub macro_name: String,
+    pub kind: TemplateMacroUnquoteKind,
+    pub expression: String,
+}
+
+impl fmt::Display for TemplateMacroCompatibilityIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let operator = match self.kind {
+            TemplateMacroUnquoteKind::Unquote => ",",
+            TemplateMacroUnquoteKind::UnquoteSplicing => ",@",
+        };
+        write!(
+            f,
+            "defmacro `{}` uses {operator}{} instead of unquoting a parameter directly",
+            self.macro_name, self.expression
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefmacroLibraryError {
     Io {
@@ -653,6 +680,82 @@ fn local_macro_names(exprs: &[Expression]) -> HashSet<String> {
         .collect()
 }
 
+/// Finds template macros whose expansion changes when defmacro bodies become
+/// evaluated code. The legacy expander substitutes only a directly unquoted
+/// parameter: it copies other unquotes into the expansion and rejects other
+/// unquote-splices. Procedural expansion evaluates both kinds instead.
+pub fn lint_template_macro_compatibility(
+    source: &str,
+) -> Result<Vec<TemplateMacroCompatibilityIssue>, DefmacroLibraryError> {
+    let exprs = parse_exprs(source, None)?;
+    let mut issues = Vec::new();
+    for macro_def in exprs.iter().filter_map(parse_defmacro) {
+        let params = macro_def
+            .params
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        for body in &macro_def.body {
+            lint_template_expression(body, &macro_def.name, &params, &mut issues);
+        }
+    }
+    Ok(issues)
+}
+
+fn lint_template_expression(
+    expression: &Expression,
+    macro_name: &str,
+    params: &HashSet<&str>,
+    issues: &mut Vec<TemplateMacroCompatibilityIssue>,
+) {
+    let mut pending = vec![(expression, 0usize)];
+    while let Some((expression, quasiquote_depth)) = pending.pop() {
+        match expression {
+            Expression::Quasiquote(inner) => pending.push((inner, quasiquote_depth + 1)),
+            Expression::Unquote(inner) | Expression::UnquoteSplicing(inner) => {
+                if quasiquote_depth == 1 {
+                    let directly_unquotes_parameter = matches!(
+                        inner.as_ref(),
+                        Expression::Symbol(name) if params.contains(name.as_str())
+                    );
+                    if !directly_unquotes_parameter {
+                        issues.push(TemplateMacroCompatibilityIssue {
+                            macro_name: macro_name.to_string(),
+                            kind: if matches!(expression, Expression::Unquote(_)) {
+                                TemplateMacroUnquoteKind::Unquote
+                            } else {
+                                TemplateMacroUnquoteKind::UnquoteSplicing
+                            },
+                            expression: format_expression(inner),
+                        });
+                    }
+                    // The unquoted expression executes outside this quasiquote;
+                    // inspect any quasiquotes that its computation contains.
+                    pending.push((inner, 0));
+                } else if quasiquote_depth > 1 {
+                    pending.push((inner, quasiquote_depth - 1));
+                } else {
+                    pending.push((inner, 0));
+                }
+            }
+            Expression::List(items) => {
+                pending.extend(items.iter().rev().map(|item| (item, quasiquote_depth)));
+            }
+            Expression::QuoteList(items) if quasiquote_depth > 0 => {
+                // The legacy template expander descends into quote lists while
+                // processing a surrounding quasiquote, so preserve that model.
+                pending.extend(items.iter().rev().map(|item| (item, quasiquote_depth)));
+            }
+            Expression::Symbol(_)
+            | Expression::Keyword(_)
+            | Expression::String(_)
+            | Expression::QuoteSymbol(_)
+            | Expression::Number(_)
+            | Expression::QuoteList(_) => {}
+        }
+    }
+}
+
 fn infer_macro_outputs(body: &[Expression]) -> Vec<String> {
     let Some(return_expr) = body.last() else {
         return Vec::new();
@@ -1055,5 +1158,73 @@ mod tests {
         write_package(&root, "expected", "(defmacro other (x) x)");
         let error = DefmacroLibrary::load(&root).unwrap_err();
         assert!(matches!(error, DefmacroLibraryError::InvalidPackage { .. }));
+    }
+
+    #[test]
+    fn template_macro_lint_reports_unquoted_non_parameters() {
+        let issues = lint_template_macro_compatibility(
+            "(defmacro unsafe (x &rest xs) `(list ,x ,@xs ,helper ,(first xs)))",
+        )
+        .unwrap();
+
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().any(|issue| {
+            issue.macro_name == "unsafe"
+                && issue.kind == TemplateMacroUnquoteKind::Unquote
+                && issue.expression == "helper"
+        }));
+        assert!(issues.iter().any(|issue| {
+            issue.macro_name == "unsafe"
+                && issue.kind == TemplateMacroUnquoteKind::Unquote
+                && issue.expression == "(first xs)"
+        }));
+    }
+
+    #[test]
+    fn template_macro_lint_accepts_direct_parameter_unquotes() {
+        let issues = lint_template_macro_compatibility(
+            "(defmacro safe (head &rest tail) `(list ,head ,@tail))",
+        )
+        .unwrap();
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn checked_in_template_macros_are_procedural_expansion_compatible() {
+        fn lisp_files_below(root: &Path) -> Vec<PathBuf> {
+            let mut pending = vec![root.to_path_buf()];
+            let mut files = Vec::new();
+            while let Some(path) = pending.pop() {
+                for entry in fs::read_dir(&path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("lisp") {
+                        files.push(path);
+                    }
+                }
+            }
+            files.sort();
+            files
+        }
+
+        let content_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let mut audited_macros = 0usize;
+        let mut failures = Vec::new();
+        for path in lisp_files_below(&content_root) {
+            let source = fs::read_to_string(&path).unwrap();
+            let exprs = parse_exprs(&source, Some(path.clone())).unwrap();
+            audited_macros += exprs.iter().filter_map(parse_defmacro).count();
+            for issue in lint_template_macro_compatibility(&source).unwrap() {
+                failures.push(format!("{}: {issue}", path.display()));
+            }
+        }
+
+        assert!(
+            audited_macros >= 100,
+            "audit unexpectedly found only {audited_macros} macros"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
