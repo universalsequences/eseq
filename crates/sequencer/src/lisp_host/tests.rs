@@ -9692,6 +9692,36 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!((first_duration - 0.0625).abs() < 1e-6, "stac scene: {first_duration}");
         assert!((second_duration - 0.2).abs() < 1e-6, "plain scene: {second_duration}");
 
+        // The add/remove handlers are the other two plain-`set!` edits the panel
+        // exposes; they must keep the trailing route intact so the shipped tick
+        // stays runnable, and the count guard must refuse to empty the figure list.
+        let figure_source = |runtime: &mut Runtime| match runtime
+            .eval_str("(source jb-figures)")
+            .expect("read builder body")
+            .expect("builder body value")
+        {
+            Value::String(source) => source,
+            other => panic!("expected source string, got {other:?}"),
+        };
+        runtime.eval_str("(jb-add-figure)").expect("add a figure");
+        assert_eq!(
+            figure_source(&mut runtime),
+            "((fig (. . . .) (stac)) (fig (. . . .)) -> 0)",
+            "adding must append after the figures and keep the route last",
+        );
+        runtime.eval_str("(jb-remove-figure 1)").expect("remove the added figure");
+        assert_eq!(
+            figure_source(&mut runtime),
+            "((fig (. . . .) (stac)) -> 0)",
+            "removing must drop only the named figure and keep the route last",
+        );
+        runtime.eval_str("(jb-remove-figure 0)").expect("attempt to remove the last figure");
+        assert_eq!(
+            figure_source(&mut runtime),
+            "((fig (. . . .) (stac)) -> 0)",
+            "the last figure must survive so the published tick still has a body",
+        );
+
         runtime.eval_str("(jb-bake)").expect("bake current body");
         let baked = runtime
             .eval_str("jb-baked-code")
