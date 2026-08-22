@@ -7443,14 +7443,10 @@ impl EffectDescriptor {
             ParamDescriptor {
                 name: "slice".to_string(),
                 min: 0.0,
-                max: 2.0,
+                max: 1.0,
                 default: 0.0,
                 kind: ParamKind::Enum {
-                    labels: vec![
-                        "off".to_string(),
-                        "transient".to_string(),
-                        "division".to_string(),
-                    ],
+                    labels: vec!["off".to_string(), "transient".to_string()],
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,
@@ -7479,25 +7475,6 @@ impl EffectDescriptor {
                 default: 0.0,
                 kind: ParamKind::Continuous {
                     unit: Some("st".to_string()),
-                },
-                scaling: ParamScaling::Linear,
-                node_param_idx: u32::MAX,
-                node_param_span: 1,
-                host_control: None,
-                ui_metadata: None,
-            },
-            ParamDescriptor {
-                name: "div".to_string(),
-                min: 0.0,
-                max: 3.0,
-                default: crate::instruments::sampler::SLICE_DIVISION_DEFAULT,
-                kind: ParamKind::Enum {
-                    labels: vec![
-                        "1/4".to_string(),
-                        "1/8".to_string(),
-                        "1/16".to_string(),
-                        "1/32".to_string(),
-                    ],
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,

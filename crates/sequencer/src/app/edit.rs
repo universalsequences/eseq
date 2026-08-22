@@ -10569,13 +10569,6 @@ mod tests {
                     .copied(),
                 Some(0.5),
             );
-            assert_eq!(
-                data.instrument_slot
-                    .defaults
-                    .get(crate::instruments::sampler::SLOT_PARAM_SLICE_DIVISION)
-                    .copied(),
-                Some(crate::instruments::sampler::SLICE_DIVISION_DEFAULT),
-            );
         });
     }
 

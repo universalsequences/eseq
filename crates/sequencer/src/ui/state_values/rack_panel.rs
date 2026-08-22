@@ -580,19 +580,6 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                         })
                         .collect();
                     frames
-                } else if slice_mode == 2.0 {
-                    let division = rack_slot_param_value(
-                        rack,
-                        slot_idx,
-                        slot,
-                        &desc,
-                        sequencer::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
-                        selected_step,
-                    );
-                    table
-                        .division_slice_starts(division)
-                        .map(|starts| starts.collect())
-                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -606,9 +593,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                     .collect()
             })
             .unwrap_or_default();
-        if slice_active.len() != slices.len() {
-            slice_active = slices.iter().map(|_| value_cell(Value::Number(1.0))).collect();
-        }
+        debug_assert_eq!(slice_active.len(), slices.len());
         panel_map.insert("slices".to_string(), value_cell(Value::List(slices)));
         panel_map.insert("slice-active".to_string(), value_cell(Value::List(slice_active)));
     }

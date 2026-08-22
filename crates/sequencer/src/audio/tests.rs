@@ -1296,37 +1296,6 @@ fn transient_slice_resolution_selects_bounds_and_preserves_explicit_range_locks(
 }
 
 #[test]
-fn division_slice_resolution_uses_analysis_grid() {
-    let state = SequencerState::new(1, Vec::new());
-    state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
-    let table = OnsetTableShared {
-        onsets_frames: vec![],
-        sample_len_frames: 100_000,
-        sample_rate: 48_000,
-        bpm: 120.0,
-        downbeat_frame: Some(6_000),
-        manual_edits: None,
-    };
-    let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
-    state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
-    state.runtime.sampler_onset_ptr_hi[0].store(hi.to_bits(), Ordering::Relaxed);
-
-    let mut params = ScheduledSamplerParams {
-        slice_mode: 2.0,
-        slice_division: 0.0,
-        ..ScheduledSamplerParams::default()
-    };
-    let mut transpose = 2.0;
-    assert_eq!(
-        resolve_slice(&state, 0, &mut params, &mut transpose),
-        SliceTriggerVerdict::Fire
-    );
-    assert!((params.start_point - 30_000.0 / 100_000.0).abs() < 1.0e-6);
-    assert!((params.end_point - 54_000.0 / 100_000.0).abs() < 1.0e-6);
-    assert_eq!(transpose, 0.0);
-}
-
-#[test]
 fn sampler_warp_repitch_mode_needs_no_analysis() {
     let state = SequencerState::new(1, Vec::new());
     state.transport.bpm.store(120, Ordering::Relaxed);

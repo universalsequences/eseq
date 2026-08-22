@@ -518,18 +518,6 @@ pub(crate) fn build_sampler_panel_value(
                     })
                     .collect();
                 frames
-            } else if slice_mode == 2.0 {
-                let division = sampler_slice_param_value(
-                    slot,
-                    &desc,
-                    plock_step,
-                    sequencer::instruments::sampler::SLOT_PARAM_SLICE_DIVISION,
-                )
-                .unwrap_or(sequencer::instruments::sampler::SLICE_DIVISION_DEFAULT);
-                table
-                    .division_slice_starts(division)
-                    .map(|starts| starts.collect())
-                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -599,13 +587,7 @@ pub(crate) fn build_sampler_panel_value(
         "onsets".to_string(),
         Rc::new(RefCell::new(Value::List(onset_values))),
     );
-    if slice_active_values.len() != slice_values.len() {
-        // Division slices are all active; keep the flag list in lockstep.
-        slice_active_values = slice_values
-            .iter()
-            .map(|_| Rc::new(RefCell::new(Value::Number(1.0))))
-            .collect();
-    }
+    debug_assert_eq!(slice_active_values.len(), slice_values.len());
     panel_map.insert(
         "slices".to_string(),
         Rc::new(RefCell::new(Value::List(slice_values))),

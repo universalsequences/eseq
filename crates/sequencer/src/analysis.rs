@@ -274,25 +274,6 @@ impl SliceTableShared {
         }
     }
 
-    pub fn division_slice_starts(&self, division: f32) -> Option<DivisionSliceStarts> {
-        let anchor = self.downbeat_frame? as f64;
-        let division_frames = slice_division_frames(self.bpm, self.sample_rate, division)?;
-        Some(DivisionSliceStarts {
-            sample_len_frames: self.sample_len_frames,
-            anchor,
-            division_frames,
-            next_index: 0,
-        })
-    }
-
-    /// Resolve one beat-division slice without allocating on the audio thread.
-    pub fn division_slice_bounds(&self, selector: usize, division: f32) -> Option<(u32, u32)> {
-        let mut starts = self.division_slice_starts(division)?;
-        let start = starts.nth(selector)?;
-        let end = starts.next().unwrap_or(self.sample_len_frames);
-        Some((start, end))
-    }
-
     pub fn with_edits(&self, edits: Option<&SamplerSliceEdits>) -> Self {
         Self {
             onsets_frames: self.onsets_frames.clone(),
@@ -301,49 +282,6 @@ impl SliceTableShared {
             bpm: self.bpm,
             downbeat_frame: self.downbeat_frame,
             manual_edits: edits.cloned(),
-        }
-    }
-}
-
-/// Beat length for the slice division enum: 0=1/4, 1=1/8, 2=1/16, 3=1/32.
-fn slice_division_frames(bpm: f32, sample_rate: u32, division: f32) -> Option<f64> {
-    if !bpm.is_finite() || bpm <= 0.0 || !division.is_finite() {
-        return None;
-    }
-    let beats = match division.round() as i32 {
-        0 => 1.0,
-        1 => 0.5,
-        2 => 0.25,
-        3 => 0.125,
-        _ => return None,
-    };
-    Some((60.0 / bpm as f64 * sample_rate.max(1) as f64 * beats).max(1.0))
-}
-
-pub struct DivisionSliceStarts {
-    sample_len_frames: u32,
-    anchor: f64,
-    division_frames: f64,
-    next_index: usize,
-}
-
-impl Iterator for DivisionSliceStarts {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next_index == 0 {
-            self.next_index = 1;
-            return (self.sample_len_frames > 0).then_some(0);
-        }
-        let first_k = ((-self.anchor) / self.division_frames).floor() + 1.0;
-        loop {
-            let k = first_k + (self.next_index - 1) as f64;
-            let frame = (self.anchor + k * self.division_frames).round() as u32;
-            self.next_index += 1;
-            if frame == 0 {
-                continue;
-            }
-            return (frame < self.sample_len_frames).then_some(frame);
         }
     }
 }
@@ -712,58 +650,6 @@ mod tests {
             table.slice_starts(1.0).collect::<Vec<_>>(),
             vec![0, 400, 4_000, 4_400]
         );
-    }
-
-    #[test]
-    fn division_slices_follow_analysis_bpm_and_downbeat() {
-        let table = SliceTableShared {
-            onsets_frames: vec![],
-            sample_len_frames: 100_000,
-            sample_rate: 48_000,
-            bpm: 120.0,
-            downbeat_frame: Some(6_000),
-            manual_edits: None,
-        };
-
-        assert_eq!(
-            table.division_slice_starts(0.0).unwrap().collect::<Vec<_>>(),
-            vec![0, 6_000, 30_000, 54_000, 78_000],
-        );
-        assert_eq!(table.division_slice_bounds(2, 0.0), Some((30_000, 54_000)));
-        assert_eq!(table.division_slice_bounds(4, 0.0), Some((78_000, 100_000)));
-        assert_eq!(table.division_slice_bounds(5, 0.0), None);
-    }
-
-    #[test]
-    fn division_slices_extend_grid_before_downbeat() {
-        let table = SliceTableShared {
-            onsets_frames: vec![],
-            sample_len_frames: 40_000,
-            sample_rate: 48_000,
-            bpm: 120.0,
-            downbeat_frame: Some(30_000),
-            manual_edits: None,
-        };
-
-        assert_eq!(
-            table.division_slice_starts(1.0).unwrap().collect::<Vec<_>>(),
-            vec![0, 6_000, 18_000, 30_000],
-        );
-        assert!(table.division_slice_starts(4.0).is_none());
-    }
-
-    #[test]
-    fn division_slices_require_a_downbeat() {
-        let table = SliceTableShared {
-            onsets_frames: vec![],
-            sample_len_frames: 40_000,
-            sample_rate: 48_000,
-            bpm: 120.0,
-            downbeat_frame: None,
-            manual_edits: None,
-        };
-
-        assert!(table.division_slice_starts(0.0).is_none());
     }
 
     /// Sensitivity deactivates markers rather than removing them, so the

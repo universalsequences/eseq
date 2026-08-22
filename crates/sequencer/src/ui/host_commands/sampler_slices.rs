@@ -109,9 +109,7 @@ pub(super) fn handle(
         };
         (buffer_id, hash, mode, sensitivity)
     };
-    // Beat-division slices are derived from analysis and are not authored
-    // markers. Ignore edit gestures rather than persisting overrides that the
-    // selected mode cannot consume.
+    // Marker edits only mean something while slicing is on.
     if target.2.round() != 1.0 {
         return;
     }

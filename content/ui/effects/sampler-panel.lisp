@@ -275,10 +275,9 @@
     (get p :name)))
 
 ;; Slice mode replaces the old `slice` dropdown: the Classic/Slice switch left
-;; of the waveform is the only way to reach it, and turning slicing on picks
-;; transient detection. Projects (or p-locks) that already select "division"
-;; keep it — the switch reads any non-off mode as Slice — so the beat-division
-;; work stays reachable without a second control in the strip.
+;; of the waveform is the only way to reach it. The mode is a two-value enum
+;; (off / transient); markers are fine-tuned by dragging, not by a detector
+;; picker.
 (def sampler-slice-mode-param (params)
   (sampler-param-by-name params "slice"))
 
@@ -339,7 +338,6 @@
         (not (= name "slice"))
         (not (= name "sens"))
         (not (= name "slice base"))
-        (not (= name "div"))
         (not (sampler-base-note-param? p))
         (not (= name "attack"))
         (not (= name "release"))
@@ -396,14 +394,11 @@
       (sampler-param-control-number-picker p))))
 
 (def sampler-slice-controls (params)
-  (let ((mode (sampler-slice-mode-param params)))
-    (if (sampler-slice-active? params)
-      (h-stack :debug-name "sampler-slice-enabled-params" :gap 0.85 :align :start
-        (if (= (get mode :text-value) "transient")
-          (sampler-param-control (sampler-param-by-name params "sens"))
-          (sampler-param-control (sampler-param-by-name params "div")))
-        (sampler-param-control (sampler-param-by-name params "slice base")))
-      (box :width 0.01 :height 0.01))))
+  (if (sampler-slice-active? params)
+    (h-stack :debug-name "sampler-slice-enabled-params" :gap 0.85 :align :start
+      (sampler-param-control (sampler-param-by-name params "sens"))
+      (sampler-param-control (sampler-param-by-name params "slice base")))
+    (box :width 0.01 :height 0.01)))
 
 (def sampler-param-knobs (params inst)
   (h-stack :debug-name "sampler-main-param-row" :gap 0.85 :padding 0.15 :align :start

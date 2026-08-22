@@ -75,12 +75,11 @@ descriptor-length mismatch path must be verified (regression test exists:
 
 | param | type | default | meaning |
 |---|---|---|---|
-| `slice` | enum {off, transient, division} | off | slice mode + detection source |
+| `slice` | enum {off, transient} | off | slice mode |
 | `sens` | 0..1 | 0.5 | transient sensitivity: filters the aubio onset list by strength / min-spacing |
-| `div` | enum {1/4 … 1/32} | 1/16 | grid division when `slice = division` (uses analysis BPM + downbeat) |
 | `slice base` | note | C4 | note that fires slice 0 |
 
-`slice`, `sens`, `div` are p-lockable like any scalar but are expected to be
+`slice` and `sens` are p-lockable like any scalar but are expected to be
 patch-level in practice. Per-slice playback shaping (1-shot vs gate, choke) is
 out of scope for v1 — the existing global `gate`/`loop`/envelope params apply
 to every slice uniformly.
@@ -170,13 +169,16 @@ Extends the existing waveform widget
    switch sits to the left of the waveform, Simpler-style. It is the only way
    to reach slice mode: the `slice` dropdown is gone from the param strip.
    - `classic` writes `slice = off`; `slice` writes `slice = transient`.
-     Detection source is no longer a user choice — transient is the starting
-     point and the user fine-tunes by dragging markers.
-   - The switch reads *any* non-off mode as "slice", so a project or p-lock
-     that already selects `division` keeps it (and keeps showing the `div`
-     knob) rather than being silently rewritten.
+     Detection source is not a user choice — transient is the starting point
+     and the user fine-tunes by dragging markers.
+   - **Beat-division slicing was removed** (2026-08-22). It was never reachable
+     once the switch replaced the dropdown, no saved project used it, and it
+     carried a whole parallel resolve path (`division_slice_bounds`, a grid
+     iterator, a `div` param, a downbeat dependency) for no user-visible
+     benefit. `slice` is now a two-value enum and `div` is gone from the
+     descriptor — it was the tail parameter, so no saved p-lock index moved.
 4. **Each mode shows only its own controls.**
-   - classic: no `sens` / `slice base` / `div`.
+   - classic: no `sens` / `slice base`.
    - slice: no `loop`, no `xfade` — a slice trigger is a bounded region picked
      by note, so a continuous loop window has no meaning there.
    - slice: no `start` / `end` either, and no start/end overlay on the
@@ -229,8 +231,7 @@ Extends the existing waveform widget
    add/move/delete actions + undo; panel param row.
 3. **Manual edits + serialization** — user override layer, project
    round-trip keyed by sample hash, drop-on-sample-change.
-4. **Division slicing** — grid slices from analysis BPM/downbeat; `div`
-   param.
+4. ~~**Division slicing**~~ — built, then removed; see §6.3.
 
 ## 9. Out of scope / future
 
