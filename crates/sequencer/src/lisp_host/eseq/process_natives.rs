@@ -254,6 +254,35 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_authoring_for_channel_handle = Arc::clone(&process_authoring);
+    let chain_state_for_channel_handle = process_chain_state.clone();
+    runtime.register_native_with_docs(
+        "channel-handle",
+        "(channel-handle name)",
+        "Return the callable handle for an already-declared process channel.",
+        move |args, _ctx| {
+            let name = process_symbol_name(
+                args.first()
+                    .ok_or_else(|| "channel-handle expects a channel name".to_string())?,
+            )?;
+            let registry = process_authoring_for_channel_handle
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let handle_id = registry
+                .channels
+                .iter()
+                .find(|channel| channel.name.as_deref() == Some(name.as_str()))
+                .map(|channel| channel.handle_id)
+                .ok_or_else(|| format!("unknown channel '{name}'"))?;
+            drop(registry);
+            Ok(process_channel_handle(
+                Arc::clone(&process_authoring_for_channel_handle),
+                chain_state_for_channel_handle.clone(),
+                handle_id,
+            ))
+        },
+    );
+
     let process_authoring_for_jaki_channels = Arc::clone(&process_authoring);
     let publish_for_jaki_channels = publish.clone();
     let chain_state_for_jaki_channels = process_chain_state.clone();

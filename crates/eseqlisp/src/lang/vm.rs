@@ -1132,6 +1132,8 @@ fn static_inline_value(expr: &Expr) -> Option<Value> {
         ExprKind::String(value) => Some(Value::String(value.clone())),
         ExprKind::Keyword(value) => Some(Value::Keyword(value.clone())),
         ExprKind::Symbol(value) if value == "nil" => Some(Value::Nil),
+        ExprKind::Symbol(value) if value == "true" => Some(Value::Bool(true)),
+        ExprKind::Symbol(value) if value == "false" => Some(Value::Bool(false)),
         ExprKind::List(items) if matches!(items.first().map(|item| &item.kind), Some(ExprKind::Symbol(name)) if name == "lane") =>
         {
             let mut values = vec![Rc::new(RefCell::new(Value::Keyword(
@@ -5012,6 +5014,31 @@ impl VM {
         }
     }
 
+    pub fn attach_inline_widget_runtime_target_by_source_identity(
+        &mut self,
+        source_revision: String,
+        start_byte: usize,
+        end_byte: usize,
+        inlet: &str,
+        target: Value,
+    ) -> bool {
+        let source_identity = (source_revision, start_byte, end_byte);
+        let Some(Value::Map(map)) = self.pending_inline_widgets.iter_mut().find(|widget| {
+            inline_widget_source_identity(widget).as_ref() == Some(&source_identity)
+        }) else {
+            return false;
+        };
+        map.insert(
+            "__inline-runtime-target".to_string(),
+            Rc::new(RefCell::new(target)),
+        );
+        map.insert(
+            INLINE_PARENT_INLET_PROP.to_string(),
+            Rc::new(RefCell::new(Value::String(inlet.to_string()))),
+        );
+        true
+    }
+
     pub fn attach_inline_widget_runtime_target(
         &mut self,
         callee: &str,
@@ -8656,6 +8683,47 @@ counter
             target_at(20),
             Some(Value::String("second-handle".to_string()))
         );
+    }
+
+    #[test]
+    fn runtime_target_attaches_to_a_static_widget_by_source_identity() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        vm.set_current_effect_context(Some(42));
+        vm.begin_inline_widget_capture();
+        let mut widget = crate::widgets::build_widget(
+            "hslider",
+            vec![Value::Keyword("value".to_string()), Value::Number(0.5)],
+        );
+        let Value::Map(map) = &mut widget else {
+            panic!("inline widget map");
+        };
+        for (key, value) in [
+            (SOURCE_REVISION_PROP, Value::String("revision-7".to_string())),
+            (SOURCE_START_BYTE_PROP, Value::Number(12.0)),
+            (SOURCE_END_BYTE_PROP, Value::Number(44.0)),
+        ] {
+            map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+        }
+        vm.registering_static_inline_widget = true;
+        vm.register_inline_widget(widget);
+        vm.registering_static_inline_widget = false;
+
+        assert_eq!(
+            vm.eval_str(
+                r#"(__bind-inline-widget-target "revision-7" 12 44 "set" "channel-handle")"#,
+            ),
+            Ok(Some(Value::Bool(true)))
+        );
+        let widgets = vm.take_inline_widgets();
+        assert!(matches!(
+            map_prop(&widgets[0], "__inline-runtime-target").as_deref(),
+            Some(Value::String(target)) if target == "channel-handle"
+        ));
+        assert!(matches!(
+            map_prop(&widgets[0], super::INLINE_PARENT_INLET_PROP).as_deref(),
+            Some(Value::String(inlet)) if inlet == "set"
+        ));
     }
 
     #[test]

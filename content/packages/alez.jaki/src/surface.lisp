@@ -41,33 +41,54 @@
 (def channel-tail2 (items)
   (if (empty? items) (list) (rest (rest items))))
 
-(def channel-property (args)
+(def channel-property (args key)
   (if (empty? args)
       (dict :found false :value nil)
-      (if (= (first args) :chan)
+      (if (= (first args) key)
           (dict :found true :value (nth args 1))
-          (channel-property (channel-tail2 args)))))
+          (channel-property (channel-tail2 args) key))))
+
+(def channel-binding (form name)
+  (let ((args (channel-tail2 form)))
+    (let ((revision (get (channel-property args :__source-revision) :value))
+          (start-byte (get (channel-property args :__source-start-byte) :value))
+          (end-byte (get (channel-property args :__source-end-byte) :value)))
+      (if (and revision (and start-byte end-byte))
+          (list name revision start-byte end-byte)
+          nil))))
+
+(def bind-channel-widgets (bindings)
+  (if (empty? bindings)
+      true
+      (let ((binding (first bindings)))
+        (if (__bind-inline-widget-target
+              (nth binding 1) (nth binding 2) (nth binding 3) "set"
+              (channel-handle (nth binding 0)))
+            (bind-channel-widgets (rest bindings))
+            false))))
 
 ;; The counter is threaded through the recursive result so naming is stable and
 ;; independent of evaluator-global state. It advances for every channel widget,
 ;; named or anonymous, making the suffix its pre-order channel index.
 (def channel-walk-list (forms seq-name index)
   (if (empty? forms)
-      (dict :forms (list) :decls (list) :next index)
+      (dict :forms (list) :decls (list) :bindings (list) :next index)
       (let ((first-result (channel-walk (first forms) seq-name index)))
         (let ((rest-result
                 (channel-walk-list (rest forms) seq-name (get first-result :next))))
           (dict :forms (cons (get first-result :form) (get rest-result :forms))
                 :decls (append (get first-result :decls) (get rest-result :decls))
+                :bindings (append (get first-result :bindings)
+                                  (get rest-result :bindings))
                 :next (get rest-result :next))))))
 
 (def channel-walk (form seq-name index)
   (let ((head (nth form 0)))
     (if (= head nil)
-        (dict :form form :decls (list) :next index)
+        (dict :form form :decls (list) :bindings (list) :next index)
         (let ((property
                 (if (channel-widget? form)
-                    (channel-property (channel-tail2 form))
+                    (channel-property (channel-tail2 form) :chan)
                     (dict :found false :value nil))))
           (if (get property :found)
               (let ((marker (get property :value))
@@ -76,12 +97,15 @@
                         (if (or (= marker true) (= marker 'true))
                             (str seq-name "#" index)
                             marker)))
-                  (dict :form (list 'chan channel-name initial)
-                        :decls (list (list channel-name initial))
-                        :next (+ index 1))))
+                  (let ((binding (channel-binding form channel-name)))
+                    (dict :form (list 'chan channel-name initial)
+                          :decls (list (list channel-name initial))
+                          :bindings (if binding (list binding) (list))
+                          :next (+ index 1)))))
               (let ((walked (channel-walk-list form seq-name index)))
                 (dict :form (get walked :forms)
                       :decls (get walked :decls)
+                      :bindings (get walked :bindings)
                       :next (get walked :next))))))))
 
 (def channel-register (name res body)
@@ -90,14 +114,16 @@
     ;; not let a later registration overwrite that status and publish a body
     ;; whose channel declarations failed.
     (if (__jaki-declare-value-channels (get walked :decls))
-        ;; Build scheduler source after the walk, rather than letting the compiler
-        ;; auto-quote the unrewritten source as `def-sequencer` would. `source`
-        ;; provides canonical escaping for every authored literal in the body.
-        (def-sequencer name
-          :resolution res
-          :tick-source
-            (str "(do (alez.jaki.core/init " (source res)
-                 ") (alez.jaki.core/run '" (source (get walked :forms)) "))"))
+        (if (bind-channel-widgets (get walked :bindings))
+            ;; Build scheduler source after the walk, rather than letting the compiler
+            ;; auto-quote the unrewritten source as `def-sequencer` would. `source`
+            ;; provides canonical escaping for every authored literal in the body.
+            (def-sequencer name
+              :resolution res
+              :tick-source
+                (str "(do (alez.jaki.core/init " (source res)
+                     ") (alez.jaki.core/run '" (source (get walked :forms)) "))"))
+            false)
         false)))
 
 (defmacro jak (name res &rest body)

@@ -95,9 +95,44 @@ pub fn register_widget_natives(vm: &mut VM) {
             widget
         });
     }
+    register_inline_widget_target_binding_native(vm);
     register_inline_value_widget_natives(vm);
     register_inline_scope_native(vm);
     register_inline_lane_native(vm);
+}
+
+fn register_inline_widget_target_binding_native(vm: &mut VM) {
+    vm.register_native_with_vm("__bind-inline-widget-target", |args, vm| {
+        if !vm.inline_widget_registration_enabled() {
+            return Value::Bool(true);
+        }
+        let [
+            Value::String(revision),
+            Value::Number(start_byte),
+            Value::Number(end_byte),
+            Value::String(inlet),
+            target,
+        ] = args.as_slice()
+        else {
+            return Value::Bool(false);
+        };
+        if !start_byte.is_finite()
+            || *start_byte < 0.0
+            || start_byte.fract() != 0.0
+            || !end_byte.is_finite()
+            || *end_byte < *start_byte
+            || end_byte.fract() != 0.0
+        {
+            return Value::Bool(false);
+        }
+        Value::Bool(vm.attach_inline_widget_runtime_target_by_source_identity(
+            revision.clone(),
+            *start_byte as usize,
+            *end_byte as usize,
+            inlet,
+            target.clone(),
+        ))
+    });
 }
 
 fn register_inline_value_widget_natives(vm: &mut VM) {
@@ -148,7 +183,14 @@ fn register_inline_value_widget_natives(vm: &mut VM) {
                     value.clone()
                 };
                 let mut widget_args = vec![Value::Keyword("value".to_string()), display_value];
-                widget_args.extend(args.iter().skip(1).cloned());
+                let mut property_index = 1usize;
+                while property_index + 1 < args.len() {
+                    if !matches!(&args[property_index], Value::Keyword(key) if key == "chan") {
+                        widget_args.push(args[property_index].clone());
+                        widget_args.push(args[property_index + 1].clone());
+                    }
+                    property_index += 2;
+                }
                 if !args
                     .iter()
                     .any(|arg| matches!(arg, Value::Keyword(key) if key == "min"))

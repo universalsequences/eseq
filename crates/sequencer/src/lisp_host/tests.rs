@@ -8146,6 +8146,32 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
     }
 
+    fn jaki_authoring_runtime(state: Arc<SequencerState>) -> Runtime {
+        let mut runtime = Runtime::new();
+        let paths = crate::app_paths::app_paths();
+        runtime.set_load_root(paths.factory_root());
+        runtime.set_scoped_module_load_path(paths.module_load_roots().0);
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            ui_epoch,
+        );
+        runtime.register_native_with_docs_and_keywords(
+            "def-sequencer",
+            crate::lisp_host::DEF_SEQUENCER_SIGNATURE,
+            crate::lisp_host::DEF_SEQUENCER_DOCS,
+            crate::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
+            move |args, _ctx| {
+                let published = crate::lisp_host::published_sequencer_from_def_args(&args)?;
+                let name = published.name.clone();
+                state.publish_sequencer(published);
+                Ok(Value::String(name))
+            },
+        );
+        runtime
+    }
+
     fn jaki_nums(value: &Value) -> Vec<f64> {
         let Value::List(items) = value else {
             panic!("expected a list of numbers, got {value:?}");
@@ -8788,31 +8814,80 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
-    fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
+    fn jaki_surface_channel_widgets_bind_named_and_anonymous_handles_by_source() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let mut authoring = Runtime::new();
-        let paths = crate::app_paths::app_paths();
-        authoring.set_load_root(paths.factory_root());
-        authoring.set_scoped_module_load_path(paths.module_load_roots().0);
-        let ui_epoch = Arc::new(AtomicUsize::new(0));
-        register_published_process_authoring_natives(
-            &mut authoring,
-            Arc::clone(&state),
-            Arc::clone(&ui_epoch),
-        );
-        let state_for_def = Arc::clone(&state);
-        authoring.register_native_with_docs_and_keywords(
-            "def-sequencer",
-            crate::lisp_host::DEF_SEQUENCER_SIGNATURE,
-            crate::lisp_host::DEF_SEQUENCER_DOCS,
-            crate::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
-            move |args, _ctx| {
-                let published = crate::lisp_host::published_sequencer_from_def_args(&args)?;
-                let name = published.name.clone();
-                state_for_def.publish_sequencer(published);
-                Ok(Value::String(name))
+        let runtime = jaki_authoring_runtime(Arc::clone(&state));
+        let init_source = r#"
+            (def eval-buffer-command () (eval-current-buffer))
+            (bind-key "C-x C-b" "eval-buffer-command")
+        "#
+        .to_string();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init_source),
+                ..EditorConfig::default()
             },
         );
+        let source_path = std::env::temp_dir().join(format!(
+            "eseq-jaki-channel-bindings-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(
+            &source_path,
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "live" :16
+                 . -
+                 (dotdecay (~slider 0.3 :min 0 :max 1 :chan "live.decay"))
+                 (dashdecay (~knob 0.4 :min 0 :max 1 :chan true)))"#,
+        )
+        .expect("write Jaki source fixture");
+        editor
+            .open_file_buffer_with_mode(&source_path, BufferMode::ESeqLisp)
+            .expect("open Jaki source fixture");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        editor.refresh_runtime_side_effects();
+        let _ = std::fs::remove_file(&source_path);
+
+        let bindings = editor.active_buffer().inline_widget_runtime_bindings();
+        assert_eq!(
+            bindings.len(),
+            2,
+            "widgets={} buffer={} minibuffer={:?}",
+            editor.active_buffer().inline_code_widgets().len(),
+            editor.active_buffer().name,
+            editor.minibuffer,
+        );
+        for (_, target, inlet) in bindings {
+            assert_eq!(inlet, "set");
+            editor
+                .runtime_mut()
+                .invoke(
+                    target,
+                    vec![Value::Keyword(inlet), Value::Number(0.75)],
+                )
+                .expect("write through inline channel target");
+        }
+        assert_eq!(
+            state.take_process_channel_writes(),
+            vec![
+                (
+                    "live.decay".to_string(),
+                    crate::process::ProcessLiteral::Number(0.75),
+                ),
+                (
+                    "live#1".to_string(),
+                    crate::process::ProcessLiteral::Number(0.75),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = jaki_authoring_runtime(Arc::clone(&state));
 
         authoring
             .eval_str(
@@ -12283,6 +12358,37 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("invoke band-ear conform run");
         assert_eq!(result.target_writes.len(), 1, "one conform write");
         assert_eq!(result.target_writes[0].value, -1.0);
+    }
+
+    #[test]
+    fn channel_handle_resolves_an_existing_channel_without_redeclaring_it() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval("(defchan shared 0.25)")
+            .expect("declare channel");
+        let original = runtime.process_authoring_snapshot().channels[0].handle_id;
+
+        runtime
+            .eval("((channel-handle \"shared\") :set 0.75)")
+            .expect("write through resolved handle");
+
+        let channels = runtime.process_authoring_snapshot().channels;
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].handle_id, original);
+        assert_eq!(
+            state.take_process_channel_writes(),
+            vec![(
+                "shared".to_string(),
+                crate::process::ProcessLiteral::Number(0.75),
+            )]
+        );
     }
 
     /// docs/jaki-live-channel-widgets-spec.md 7: handle writes queue for the
