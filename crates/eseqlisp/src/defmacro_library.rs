@@ -1250,9 +1250,21 @@ mod tests {
         // `defmacro_library_root` resolves to), while `crates/` covers the
         // examples, musicplayer and shipped effect sources that live next to
         // the Rust.
+        // eseq-dvs.7 migrated `sig` and `jak` off source strings, making them the
+        // first checked-in macros that deliberately compute their expansion:
+        // both bind walk/parse results with `let` and unquote those locals,
+        // which the legacy substituting expander could never have reproduced.
+        // Record them as named exceptions rather than dropping the audit, so
+        // every other checked-in macro stays covered.
+        const DELIBERATELY_PROCEDURAL: [(&str, &str); 2] = [
+            ("content/packages/alez.jaki/src/surface.lisp", "jak"),
+            ("content/packages/alez.sig/src/surface.lisp", "sig"),
+        ];
+
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut audited_macros = 0usize;
         let mut template_macros = 0usize;
+        let mut exempted = [0usize; DELIBERATELY_PROCEDURAL.len()];
         let mut failures = Vec::new();
         // `content` and `crates` must always carry macros; `docs` is linted too
         // but legitimately holds only example programs.
@@ -1268,7 +1280,16 @@ mod tests {
                     }
                 }
                 for issue in lint_template_macro_compatibility(&source).unwrap() {
-                    failures.push(format!("{}: {issue}", path.display()));
+                    let exception =
+                        DELIBERATELY_PROCEDURAL
+                            .iter()
+                            .position(|(exempt_path, exempt_macro)| {
+                                *exempt_macro == issue.macro_name && path.ends_with(exempt_path)
+                            });
+                    match exception {
+                        Some(index) => exempted[index] += 1,
+                        None => failures.push(format!("{}: {issue}", path.display())),
+                    }
                 }
             }
             assert!(
@@ -1290,6 +1311,15 @@ mod tests {
             template_macros >= 40,
             "audit found only {template_macros} quasiquote-bodied macros"
         );
+        // An exception that stops firing means the macro was rewritten or moved;
+        // the entry must then be removed rather than left shadowing the audit.
+        for (index, (path, macro_name)) in DELIBERATELY_PROCEDURAL.iter().enumerate() {
+            assert!(
+                exempted[index] > 0,
+                "`{macro_name}` in {path} no longer needs a procedural-expansion \
+                 exception — drop it from DELIBERATELY_PROCEDURAL"
+            );
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
