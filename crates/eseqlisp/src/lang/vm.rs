@@ -1,6 +1,7 @@
 use super::SOURCE_ORIGIN_NATIVE;
 use crate::compiler::{
-    Chunk, Compiler, CompilerError, MacroCompilerState, MacroDef, MacroExpansionSite, OpCode,
+    Chunk, Compiler, CompilerError, ExpansionOrigin, MacroCompilerState, MacroDef,
+    MacroExpansionSite, OpCode,
 };
 use crate::host::BufferId;
 use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
@@ -44,6 +45,10 @@ pub enum VMError {
     ExpansionUnsafe {
         macro_name: String,
         operation: String,
+    },
+    ExpandedFrom {
+        error: Box<VMError>,
+        diagnostic: String,
     },
 }
 
@@ -1791,6 +1796,18 @@ fn gensym_native(args: Vec<Value>, vm: &mut VM) -> Value {
     Value::Symbol(format!("{base}__g{:016x}_{counter}", site.identity_hash))
 }
 
+fn macroexpand_native(args: Vec<Value>, vm: &mut VM) -> Value {
+    let [form] = args.as_slice() else {
+        return Value::Nil;
+    };
+    let Ok(expression) = VM::macro_value_to_expression(form) else {
+        return Value::Nil;
+    };
+    vm.expand_macros_expression(&expression)
+        .map(|expansion| VM::expression_to_macro_value(&expansion))
+        .unwrap_or(Value::Nil)
+}
+
 fn source_origin_native(args: Vec<Value>) -> Value {
     let [start, end, revision, value] = args.as_slice() else {
         return args.last().cloned().unwrap_or(Value::Nil);
@@ -2202,6 +2219,7 @@ pub struct VM {
     /// Some callback-oriented natives historically turn callback errors into
     /// Lisp `nil`. Sandbox violations must never be swallowed that way.
     expansion_violation: Option<VMError>,
+    active_execution_origins: Vec<ExpansionOrigin>,
 }
 
 pub struct VmStateSnapshot {
@@ -3127,6 +3145,11 @@ pub fn register_core_natives(vm: &mut VM) {
     // counter live in the VM rather than Lisp state so Rule 2 remains pure.
     vm.register_native_with_vm("gensym", gensym_native);
 
+    // Expand a quoted form in the current authoring VM. This intentionally is
+    // not expansion-safe: invoking expansion recursively from an expander would
+    // make site identity and purity auditing ambiguous.
+    vm.register_native_with_vm("macroexpand", macroexpand_native);
+
     // (source val ...) → concatenated evaluable Lisp source
     vm.register_native("source", |args| {
         let mut s = String::new();
@@ -3892,6 +3915,7 @@ impl VM {
             active_expander: None,
             active_expansion_site: None,
             expansion_violation: None,
+            active_execution_origins: Vec::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
         };
@@ -4344,6 +4368,9 @@ impl VM {
     ) -> Result<Expression, String> {
         let chunks = std::mem::take(&mut self.chunks);
         let names = std::mem::take(&mut self.global_names);
+        let source_label = self
+            .current_effect_source_buffer_id
+            .map(|buffer_id| format!("buf#{buffer_id}"));
         let mut compiler = Compiler::new_repl(
             vec![],
             chunks,
@@ -4354,6 +4381,7 @@ impl VM {
             self.dag.next_id,
             self.macros.clone(),
             self.source_manager.current_source_file(),
+            source_label,
         );
         compiler.set_macro_evaluator(|mac, args, site, state| {
             self.evaluate_compiled_macro(mac, args, site, state)
@@ -4431,6 +4459,9 @@ impl VM {
 
             let macros = self.macros.clone();
             let source_file = self.source_manager.current_source_file();
+            let source_label = self
+                .current_effect_source_buffer_id
+                .map(|buffer_id| format!("buf#{buffer_id}"));
             let module_exports = self.module_exports.clone();
             let compile_result = {
                 let mut compiler = Compiler::new_repl(
@@ -4443,6 +4474,7 @@ impl VM {
                     next_node_id,
                     macros,
                     source_file,
+                    source_label,
                 );
                 compiler.set_module_exports(module_exports.clone());
                 // Continuation segments belong to the same unit: the module
@@ -4807,6 +4839,9 @@ impl VM {
 
         let macros = self.macros.clone();
         let source_file = self.source_manager.current_source_file();
+        let source_label = self
+            .current_effect_source_buffer_id
+            .map(|buffer_id| format!("buf#{buffer_id}"));
         let compile_started = std::time::Instant::now();
         let compile_result = {
             let mut compiler = Compiler::new_repl(
@@ -4819,6 +4854,7 @@ impl VM {
                 next_node_id,
                 macros,
                 source_file,
+                source_label,
             );
             compiler.set_module_exports(self.module_exports.clone());
             compiler.set_macro_evaluator(|mac, args, site, state| {
@@ -5886,11 +5922,31 @@ impl VM {
         }
     }
 
+    fn finish_expansion_origin_boundary(
+        &mut self,
+        result: Result<Option<Value>, VMError>,
+        origin_depth: usize,
+    ) -> Result<Option<Value>, VMError> {
+        let origin = self.active_execution_origins.get(origin_depth..).and_then(|origins| {
+            origins.last().cloned()
+        });
+        self.active_execution_origins.truncate(origin_depth);
+        result.map_err(|error| match (origin, &error) {
+            (Some(_), VMError::ExpandedFrom { .. }) => error,
+            (Some(origin), _) => VMError::ExpandedFrom {
+                error: Box::new(error),
+                diagnostic: origin.diagnostic(),
+            },
+            (None, _) => error,
+        })
+    }
+
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
+        let origin_depth = self.active_execution_origins.len();
         self.execution_depth = self.execution_depth.saturating_add(1);
         let previous_chunk = self.current_chunk;
         self.current_chunk = entry_chunk;
-        let result = self.execute();
+        let mut result = self.execute();
         self.current_chunk = previous_chunk;
         self.execution_depth = self.execution_depth.saturating_sub(1);
         if result.is_ok()
@@ -5898,17 +5954,20 @@ impl VM {
             && !self.processing_reactive
             && self.active_expander.is_none()
         {
-            self.process_dirty_reactive()?;
+            if let Err(error) = self.process_dirty_reactive() {
+                result = Err(error);
+            }
         }
-        result
+        self.finish_expansion_origin_boundary(result, origin_depth)
     }
 
     pub fn invoke(&mut self, callable: Value, args: Vec<Value>) -> Result<Option<Value>, VMError> {
-        match callable {
+        let origin_depth = self.active_execution_origins.len();
+        let result = (|| match callable {
             Value::Closure(chunk_idx, upvalues) => {
                 self.execution_depth = self.execution_depth.saturating_add(1);
                 let current_chunk = self.current_chunk;
-                let result = self.execute_callable_chunk(chunk_idx, upvalues, args);
+                let mut result = self.execute_callable_chunk(chunk_idx, upvalues, args);
                 self.current_chunk = current_chunk;
                 self.execution_depth = self.execution_depth.saturating_sub(1);
                 if result.is_ok()
@@ -5916,7 +5975,9 @@ impl VM {
                     && !self.processing_reactive
                     && self.active_expander.is_none()
                 {
-                    self.process_dirty_reactive()?;
+                    if let Err(error) = self.process_dirty_reactive() {
+                        result = Err(error);
+                    }
                 }
                 result
             }
@@ -5960,7 +6021,8 @@ impl VM {
                 Ok(Some(result))
             }
             _ => Err(VMError::ExpectedFunction),
-        }
+        })();
+        self.finish_expansion_origin_boundary(result, origin_depth)
     }
 
     fn execute_callable_chunk(
@@ -6651,6 +6713,14 @@ impl VM {
                 }
                 OpCode::PushNil => {
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::ExpansionOriginBegin(origin) => {
+                    self.active_execution_origins.push(origin);
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::ExpansionOriginEnd => {
+                    let _ = self.active_execution_origins.pop();
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::Add(arity) => {
@@ -9031,6 +9101,85 @@ counter
                 Rc::new(RefCell::new(Value::Number(22.0))),
             ]))
         );
+    }
+
+    #[test]
+    fn macroexpand_returns_fully_expanded_syntax_without_running_it() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.eval_str(
+            "(defmacro inner (value) `(+ ,value 1))\n\
+             (defmacro outer (value) `(inner ,value))",
+        )
+        .expect("macro definitions");
+
+        let expansion = vm
+            .eval_str("(macroexpand '(outer 41))")
+            .expect("macroexpand call")
+            .expect("expanded syntax");
+
+        assert_eq!(
+            expansion,
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Symbol("+".to_string()))),
+                Rc::new(RefCell::new(Value::Number(41.0))),
+                Rc::new(RefCell::new(Value::Number(1.0))),
+            ])
+        );
+    }
+
+    #[test]
+    fn macro_residue_runtime_error_carries_call_site_origin() {
+        let mut vm = VM::new(Vec::new());
+        vm.set_current_effect_context(Some(9));
+        let source = "(defmacro broken () 'missing-generated-value)\n(broken)";
+        let start = source.rfind("(broken)").expect("macro call offset");
+
+        let error = vm.eval_str(source).expect_err("generated read must fail");
+
+        let VMError::ExpandedFrom { error, diagnostic } = error else {
+            panic!("expected expansion origin, got {error:?}");
+        };
+        assert_eq!(*error, VMError::UnknownVariable("missing-generated-value".to_string()));
+        assert!(diagnostic.contains(&format!("expanded from `broken` at buf#9:{start}")));
+        assert!(diagnostic.contains("revision "));
+    }
+
+    #[test]
+    fn generated_closure_keeps_macro_origin_when_called_later() {
+        let mut vm = VM::new(Vec::new());
+        let definition = "(defmacro broken-later () '(lambda () missing-generated-value))\n\
+                          (def delayed (broken-later))";
+        let start = definition
+            .rfind("(broken-later)")
+            .expect("macro call offset");
+        vm.eval_str(definition).expect("define generated closure");
+
+        let error = vm
+            .eval_str("(delayed)")
+            .expect_err("generated closure must fail");
+
+        let VMError::ExpandedFrom { error, diagnostic } = error else {
+            panic!("expected expansion origin, got {error:?}");
+        };
+        assert_eq!(*error, VMError::UnknownVariable("missing-generated-value".to_string()));
+        assert!(diagnostic.contains(&format!(
+            "expanded from `broken-later` at scratch:{start}"
+        )));
+    }
+
+    #[test]
+    fn macro_residue_compile_error_carries_call_site_origin() {
+        let mut vm = VM::new(Vec::new());
+        let source = "(defmacro broken () '(unquote value))\n(broken)";
+        let start = source.rfind("(broken)").expect("macro call offset");
+
+        assert_eq!(vm.eval_str(source), Err(VMError::CompileError));
+
+        let diagnostics = vm.take_source_load_errors();
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.contains(&format!(
+            "expanded from `broken` at scratch:{start}"
+        ))), "diagnostics: {diagnostics:?}");
     }
 
     #[test]

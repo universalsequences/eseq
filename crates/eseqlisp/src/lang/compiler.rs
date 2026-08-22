@@ -40,6 +40,32 @@ pub enum CompilerError {
     Message(String),
 }
 
+fn compiler_error_description(error: &CompilerError) -> &str {
+    match error {
+        CompilerError::UnknownOperator => "unknown operator",
+        CompilerError::InvalidArg => "invalid argument",
+        CompilerError::Message(message) => message,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpansionOrigin {
+    pub macro_name: String,
+    pub source: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub revision: String,
+}
+
+impl ExpansionOrigin {
+    pub fn diagnostic(&self) -> String {
+        format!(
+            "expanded from `{}` at {}:{} (revision {})",
+            self.macro_name, self.source, self.start_byte, self.revision
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum OpCode {
     Push,
@@ -99,6 +125,8 @@ pub enum OpCode {
     JumpIfFalse(usize),
     PushBool(bool),
     PushNil,
+    ExpansionOriginBegin(ExpansionOrigin),
+    ExpansionOriginEnd,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +182,7 @@ pub struct Compiler<'a> {
     next_node_id: u32,
     next_temp_id: u32,
     source_file: Option<PathBuf>,
+    source_label: Option<String>,
     /// The module bare global names qualify under: the implicit
     /// `eseq.vanilla` until a `(module …)` header switches it (spec §2).
     current_module: String,
@@ -181,6 +210,7 @@ pub struct Compiler<'a> {
     macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
     next_macro_expansion_ordinal: usize,
     compiling_macro_body: usize,
+    active_expansion_origin: Option<ExpansionOrigin>,
 }
 
 fn is_widget_name(name: &str) -> bool {
@@ -376,6 +406,7 @@ impl<'a> Compiler<'a> {
             next_node_id: 0,
             next_temp_id: 0,
             source_file: None,
+            source_label: None,
             current_module: super::modules::IMPLICIT_MODULE.to_string(),
             module_declared: false,
             import_aliases: HashMap::new(),
@@ -388,6 +419,7 @@ impl<'a> Compiler<'a> {
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
+            active_expansion_origin: None,
         }
     }
 
@@ -403,6 +435,7 @@ impl<'a> Compiler<'a> {
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
         source_file: Option<PathBuf>,
+        source_label: Option<String>,
     ) -> Self {
         Compiler {
             expressions,
@@ -416,6 +449,7 @@ impl<'a> Compiler<'a> {
             next_node_id,
             next_temp_id: 0,
             source_file,
+            source_label,
             current_module: super::modules::IMPLICIT_MODULE.to_string(),
             module_declared: false,
             import_aliases: HashMap::new(),
@@ -428,6 +462,7 @@ impl<'a> Compiler<'a> {
             macro_evaluator: None,
             next_macro_expansion_ordinal: 0,
             compiling_macro_body: 0,
+            active_expansion_origin: None,
         }
     }
 
@@ -1715,6 +1750,11 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn new_chunk(&mut self, mut chunk: Chunk) -> (usize, usize) {
+        // Generated function/effect chunks can execute long after the top-level expansion has
+        // returned. Give each such chunk its own balanced provenance scope.
+        if let Some(origin) = self.active_expansion_origin.clone() {
+            chunk.ops.push(OpCode::ExpansionOriginBegin(origin));
+        }
         // Stamp every chunk with the module current at its creation
         // (None = implicit eseq.vanilla). The entry chunk of a unit whose
         // (module …) form appears mid-file is re-stamped by that form.
@@ -1735,6 +1775,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit(&mut self, op: OpCode) {
+        if matches!(&op, OpCode::Return) && self.active_expansion_origin.is_some() {
+            self.chunk_mut().unwrap().ops.push(OpCode::ExpansionOriginEnd);
+        }
         self.chunk_mut().unwrap().ops.push(op);
     }
 
@@ -2083,6 +2126,56 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        // Calls parsed from authored source are wrapped with their byte range and revision.
+        // Keep the wrapper around the expansion while compiling so both compile-time failures
+        // and later execution of generated closures retain the macro call site's provenance.
+        if let [
+            Expression::Symbol(origin_native),
+            Expression::Number(start),
+            Expression::Number(end),
+            Expression::String(revision),
+            payload @ Expression::List(payload_items),
+        ] = list
+            && origin_native == SOURCE_ORIGIN_NATIVE
+            && let Some(Expression::Symbol(macro_name)) = payload_items.first()
+            && self.lookup_macro(macro_name).is_some()
+        {
+            let source = self
+                .source_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .or_else(|| self.source_label.clone())
+                .unwrap_or_else(|| "scratch".to_string());
+            let origin = ExpansionOrigin {
+                macro_name: macro_name.clone(),
+                source,
+                start_byte: *start as usize,
+                end_byte: *end as usize,
+                revision: revision.clone(),
+            };
+            let expanded = self.expand_macros(payload, 0).map_err(|error| {
+                CompilerError::Message(format!(
+                    "{}; {}",
+                    compiler_error_description(&error),
+                    origin.diagnostic()
+                ))
+            })?;
+            let previous_origin = self.active_expansion_origin.replace(origin.clone());
+            self.emit(OpCode::ExpansionOriginBegin(origin.clone()));
+            let result = self.compile_expression(&expanded);
+            if result.is_ok() {
+                self.emit(OpCode::ExpansionOriginEnd);
+            }
+            self.active_expansion_origin = previous_origin;
+            return result.map_err(|error| {
+                CompilerError::Message(format!(
+                    "{}; {}",
+                    compiler_error_description(&error),
+                    origin.diagnostic()
+                ))
+            });
+        }
+
         // Macro expansion: if the head is a macro name, expand and compile the result
         if let Some(Expression::Symbol(name)) = list.first() {
             if let Some(mac) = self.lookup_macro(name) {
