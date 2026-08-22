@@ -10123,7 +10123,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
-    fn process_run_callback_cache_invalidates_after_macro_redefinition() {
+    fn process_run_source_is_expanded_before_shipping() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut scratch = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -10162,18 +10162,28 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             reads: crate::process::ProcessReadSnapshot::default(),
             seed: 1,
         };
+        assert!(
+            !invocation.source.contains("cached-process-write"),
+            "shipped source must contain only expansion residue: {}",
+            invocation.source
+        );
+        assert!(
+            invocation.source.contains("(target-set! 1)"),
+            "shipped source must contain the expanded kernel form: {}",
+            invocation.source
+        );
         let first = scratch
             .invoke_process_run(invocation.clone())
-            .expect("invoke initially compiled process");
+            .expect("invoke expanded process source");
         assert_eq!(first.target_writes[0].value, 1.0);
 
         scratch
             .eval("(defmacro cached-process-write () `(target-set! 2))")
-            .expect("redefine process macro");
-        let recompiled = scratch
+            .expect("redefine authoring-side macro");
+        let unchanged = scratch
             .invoke_process_run(invocation)
-            .expect("invoke process after macro redefinition");
-        assert_eq!(recompiled.target_writes[0].value, 2.0);
+            .expect("invoke already-shipped process after macro redefinition");
+        assert_eq!(unchanged.target_writes[0].value, 1.0);
     }
 
     #[test]

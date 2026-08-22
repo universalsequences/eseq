@@ -10139,21 +10139,115 @@ counter
     }
 
     #[test]
-    fn def_sequencer_tick_capture_preserves_inner_quotes_through_source_roundtrip() {
+    fn def_process_capture_expands_macros_before_quoting() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-process", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured process clause"),
+            ))
+        });
+        let result = vm
+            .eval_str(
+                r#"
+                (defmacro process-kernel (value) `(target-set! ,value))
+                (def-process expanded :run (process-kernel 7))
+                "#,
+            )
+            .expect("eval")
+            .expect("value");
+        let Value::String(source) = result else {
+            panic!("expected captured process source, got {result:?}");
+        };
+        assert!(source.contains("(target-set! 7)"), "expanded source: {source}");
+        assert!(!source.contains("process-kernel"), "expanded source: {source}");
+    }
+
+    #[test]
+    fn process_sugar_captures_expand_macros_before_quoting() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        for name in ["every", "after", "on", "tap"] {
+            vm.register_native(name, |args| {
+                Value::String(super::format_lisp_source(
+                    args.last().expect("captured process-sugar body"),
+                ))
+            });
+        }
+        vm.eval_str("(defmacro process-kernel (value) `(target-set! ,value))")
+            .expect("define macro");
+
+        for name in ["every", "after", "on", "tap"] {
+            let source = format!("({name} :trigger (process-kernel 9))");
+            let result = vm
+                .eval_str(&source)
+                .expect("eval process sugar")
+                .expect("captured process-sugar source");
+            let Value::String(captured) = result else {
+                panic!("expected {name} to return captured source, got {result:?}");
+            };
+            assert!(captured.contains("(target-set! 9)"), "{name}: {captured}");
+            assert!(!captured.contains("process-kernel"), "{name}: {captured}");
+        }
+    }
+
+    #[test]
+    fn def_sequencer_tick_and_init_capture_expand_macros_and_preserve_quotes() {
         let mut vm = VM::new(Vec::new());
         super::register_core_natives(&mut vm);
         vm.register_native("def-sequencer", |args| {
             Value::String(super::format_lisp_source(
-                args.last().expect("captured tick body"),
+                args.last().expect("captured sequencer body"),
+            ))
+        });
+        vm.eval_str(
+            r#"(defmacro pattern-kernel (form symbol) `(jaki/from-list ,form ,symbol))"#,
+        )
+        .expect("define macro");
+
+        for clause in ["tick", "init"] {
+            let source = format!(
+                r#"(def-sequencer "j" :{clause} (pattern-kernel '(. . -) 'sym))"#
+            );
+            let result = vm
+                .eval_str(&source)
+                .expect("eval sequencer")
+                .expect("captured sequencer source");
+            let Value::String(captured) = result else {
+                panic!("expected :{clause} to return captured source, got {result:?}");
+            };
+            assert!(
+                captured.contains("(jaki/from-list '(. . -) 'sym)"),
+                ":{clause}: {captured}"
+            );
+            assert!(!captured.contains("pattern-kernel"), ":{clause}: {captured}");
+        }
+    }
+
+    #[test]
+    fn def_sequencer_graph_capture_expands_nested_macros_before_quoting() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        vm.register_native("def-sequencer", |args| {
+            Value::String(super::format_lisp_source(
+                args.last().expect("captured graph form"),
             ))
         });
         let result = vm
-            .eval_str(r#"(def-sequencer "j" :tick (jaki/pat '(. . - (every 2 swap)) 'sym))"#)
+            .eval_str(
+                r#"
+                (defmacro graph-edge () `(edge "a" "b"))
+                (def-sequencer "g"
+                  (def-node "a" :type :source)
+                  (edges (graph-edge)))
+                "#,
+            )
             .expect("eval")
             .expect("value");
-        let Value::String(tick_source) = result else {
-            panic!("expected the captured tick source, got {result:?}");
+        let Value::String(source) = result else {
+            panic!("expected captured graph source, got {result:?}");
         };
-        assert_eq!(tick_source, "(jaki/pat '(. . - (every 2 swap)) 'sym)");
+        assert!(source.contains("(edge \"a\" \"b\")"), "expanded source: {source}");
+        assert!(!source.contains("graph-edge"), "expanded source: {source}");
     }
 }

@@ -638,6 +638,22 @@ impl<'a> Compiler<'a> {
         ]))
     }
 
+    fn compile_expanded_quoted_expression(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        let expanded = self.expand_macros(expression, 0)?;
+        self.compile_quoted_expression(&expanded)
+    }
+
+    fn compile_expanded_quoted_expression_preserving_quotes(
+        &mut self,
+        expression: &Expression,
+    ) -> Result<(), CompilerError> {
+        let expanded = self.expand_macros(expression, 0)?;
+        self.compile_quoted_expression_preserving_quotes(&expanded)
+    }
+
     fn compile_quoted_expression(&mut self, expression: &Expression) -> Result<(), CompilerError> {
         match expression {
             Expression::List(items) | Expression::QuoteList(items) => {
@@ -2523,29 +2539,45 @@ impl<'a> Compiler<'a> {
                 });
             let mut quote_next = false;
             let mut quote_next_preserving = false;
+            let mut expand_quote_next = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
                 if is_graph_sequencer {
                     match elem {
                         Expression::Unquote(inner) => self.compile_expression(inner)?,
-                        _ => self.compile_quoted_expression(elem)?,
+                        _ => self.compile_expanded_quoted_expression(elem)?,
                     }
                     continue;
                 }
                 if quote_next {
-                    if quote_next_preserving {
+                    if expand_quote_next {
+                        if quote_next_preserving {
+                            self.compile_expanded_quoted_expression_preserving_quotes(elem)?;
+                        } else {
+                            self.compile_expanded_quoted_expression(elem)?;
+                        }
+                    } else if quote_next_preserving {
                         self.compile_quoted_expression_preserving_quotes(elem)?;
                     } else {
                         self.compile_quoted_expression(elem)?;
                     }
                     quote_next = false;
                     quote_next_preserving = false;
+                    expand_quote_next = false;
                     continue;
                 }
                 if is_def_accumulator && list.len() == 3 && i == 1 {
                     self.compile_quoted_expression(elem)?;
                     continue;
                 }
-                if is_process_sugar || is_def_song {
+                if is_process_sugar {
+                    if i == 0 {
+                        self.compile_quoted_expression(elem)?;
+                    } else {
+                        self.compile_expanded_quoted_expression(elem)?;
+                    }
+                    continue;
+                }
+                if is_def_song {
                     self.compile_quoted_expression(elem)?;
                     continue;
                 }
@@ -2594,6 +2626,7 @@ impl<'a> Compiler<'a> {
                         if is_def_sequencer && (k == "tick" || k == "init") {
                             quote_next = true;
                             quote_next_preserving = true;
+                            expand_quote_next = true;
                         }
                         if is_def_process
                             && (k == "in"
@@ -2611,6 +2644,7 @@ impl<'a> Compiler<'a> {
                                 || k.starts_with("on-"))
                         {
                             quote_next = true;
+                            expand_quote_next = true;
                         }
                         if is_def_accumulator
                             && (k == "target"
