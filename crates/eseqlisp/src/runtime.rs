@@ -443,21 +443,10 @@ fn summarize_reactive_value(value: Option<&Value>) -> String {
 
 fn expand_sdf_expression(
     expr: &crate::parser::Expression,
-    macros: &HashMap<String, crate::compiler::MacroDef>,
-) -> crate::parser::Expression {
-    let compiler = crate::compiler::Compiler::new_repl(
-        vec![],
-        vec![],
-        vec![],
-        std::collections::HashSet::new(),
-        HashMap::new(),
-        HashMap::new(),
-        0,
-        macros.clone(),
-        None,
-    );
+    vm: &mut VM,
+) -> Result<crate::parser::Expression, String> {
     // Module-owned shader macros must be referenced with qualified names.
-    compiler.expand_macros(expr, 0)
+    vm.expand_macros_expression(expr)
 }
 
 struct SdfCompileResult {
@@ -468,11 +457,11 @@ struct SdfCompileResult {
 
 fn compile_sdf_value(
     value: &Value,
-    macros: &HashMap<String, crate::compiler::MacroDef>,
+    vm: &mut VM,
     state_bindings: &std::collections::HashSet<String>,
 ) -> Result<SdfCompileResult, String> {
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
-    let expanded = expand_sdf_expression(&expr, macros);
+    let expanded = expand_sdf_expression(&expr, vm)?;
     let mut state_symbols =
         crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
@@ -616,7 +605,7 @@ fn build_material_shader_expr(
 fn compile_widget_material(
     widget_type: &str,
     material_val: &Value,
-    macros: &HashMap<String, crate::compiler::MacroDef>,
+    vm: &mut VM,
     state_binding_keys: &[String],
     prop_binding_keys: &[String],
 ) -> Result<String, String> {
@@ -632,7 +621,7 @@ fn compile_widget_material(
     if widget_type == "vslider" {
         bindings.insert("origin_t".to_string());
     }
-    let expanded = expand_sdf_expression(&shader_expr, macros);
+    let expanded = expand_sdf_expression(&shader_expr, vm)?;
     let mut hasher = DefaultHasher::new();
     widget_type.hash(&mut hasher);
     expr_to_source(&expanded).hash(&mut hasher);
@@ -1326,16 +1315,11 @@ impl Runtime {
             let _ = runtime.eval_str(sdf_src);
         }
         // Register sdf->metal: takes a quoted SDF expression, returns Metal shader string
-        let sdf_macros = runtime.vm.macros.clone();
-        runtime.vm.register_native("sdf->metal", move |args| {
+        runtime.vm.register_native_with_vm("sdf->metal", move |args, vm| {
             let Some(val) = args.first() else {
                 return Value::String("error: sdf->metal requires 1 argument".into());
             };
-            match compile_sdf_value(
-                val,
-                &sdf_macros,
-                &std::collections::HashSet::new(),
-            ) {
+            match compile_sdf_value(val, vm, &std::collections::HashSet::new()) {
                 Ok(result) => Value::String(result.output.shader_source),
                 Err(e) => Value::String(format!("error: {}", e)),
             }
@@ -1428,11 +1412,7 @@ impl Runtime {
                 for name in &widget_state_names {
                     state_bindings.insert(name.clone());
                 }
-                let compiled = match compile_sdf_value(
-                    &shader_val,
-                    &vm.macros,
-                    &state_bindings,
-                ) {
+                let compiled = match compile_sdf_value(&shader_val, vm, &state_bindings) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
                 };
@@ -1500,8 +1480,8 @@ impl Runtime {
                                 match compile_widget_material(
                                     &wtype,
                                     &material_val,
-                                    &vm.macros,
-                                                    &keys,
+                                    vm,
+                                    &keys,
                                     &prop_keys,
                                 ) {
                                     Ok(shader_name) => {
@@ -1889,6 +1869,13 @@ impl Runtime {
 
     pub fn macros(&self) -> &std::collections::HashMap<String, crate::compiler::MacroDef> {
         &self.vm.macros
+    }
+
+    pub(crate) fn expand_macros_expression(
+        &mut self,
+        expr: &crate::parser::Expression,
+    ) -> Result<crate::parser::Expression, String> {
+        self.vm.expand_macros_expression(expr)
     }
 
     /// Modules declared via `(module NAME)` → declaring file, if any

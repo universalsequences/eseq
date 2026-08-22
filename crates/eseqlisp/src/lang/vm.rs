@@ -1,4 +1,6 @@
-use crate::compiler::{Chunk, Compiler, CompilerError, MacroDef, OpCode};
+use crate::compiler::{
+    Chunk, Compiler, CompilerError, MacroCompilerState, MacroDef, OpCode,
+};
 use crate::host::BufferId;
 use crate::hot_reload::{SourceStackEntry, SourceManager, extract_defined_symbols_from_source};
 use crate::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
@@ -3964,6 +3966,128 @@ impl VM {
         self.macros.keys().cloned().collect()
     }
 
+    fn expression_to_macro_value(expr: &Expression) -> Value {
+        match expr {
+            Expression::Symbol(symbol) | Expression::QuoteSymbol(symbol) => {
+                Value::Symbol(symbol.clone())
+            }
+            Expression::Keyword(keyword) => Value::Keyword(keyword.clone()),
+            Expression::String(string) => Value::String(string.clone()),
+            Expression::Number(number) => Value::Number(*number),
+            Expression::List(items) | Expression::QuoteList(items) => Value::List(
+                items
+                    .iter()
+                    .map(|item| Rc::new(RefCell::new(Self::expression_to_macro_value(item))))
+                    .collect(),
+            ),
+            Expression::Quasiquote(inner) => Self::expression_to_macro_value(inner),
+            Expression::Unquote(inner) | Expression::UnquoteSplicing(inner) => {
+                Self::expression_to_macro_value(inner)
+            }
+        }
+    }
+
+    fn macro_value_to_expression(value: &Value) -> Result<Expression, String> {
+        match value {
+            Value::Number(number) => Ok(Expression::Number(*number)),
+            Value::Bool(true) => Ok(Expression::Symbol("true".to_string())),
+            Value::Bool(false) => Ok(Expression::Symbol("false".to_string())),
+            Value::Nil => Ok(Expression::Symbol("nil".to_string())),
+            Value::String(string) => Ok(Expression::String(string.clone())),
+            Value::Symbol(symbol) => Ok(Expression::Symbol(symbol.clone())),
+            Value::Keyword(keyword) => Ok(Expression::Keyword(keyword.clone())),
+            Value::List(items)
+                if items.len() == 2
+                    && matches!(&*items[0].borrow(), Value::Symbol(symbol) if symbol == "quote") =>
+            {
+                match Self::macro_value_to_expression(&items[1].borrow())? {
+                    Expression::List(items) => Ok(Expression::QuoteList(items)),
+                    Expression::Symbol(symbol) => Ok(Expression::QuoteSymbol(symbol)),
+                    other => Ok(other),
+                }
+            }
+            Value::List(items) => Ok(Expression::List(
+                items
+                    .iter()
+                    .map(|item| Self::macro_value_to_expression(&item.borrow()))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            other => Err(format!(
+                "expander returned non-syntax value {}",
+                format_lisp_value(other)
+            )),
+        }
+    }
+
+    fn evaluate_compiled_macro(
+        &mut self,
+        mac: &MacroDef,
+        args: Vec<Expression>,
+        state: &mut MacroCompilerState,
+    ) -> Result<Expression, String> {
+        let mut values = args
+            .iter()
+            .take(mac.params.len())
+            .map(Self::expression_to_macro_value)
+            .collect::<Vec<_>>();
+        if mac.rest_param.is_some() {
+            values.push(Value::List(
+                args[mac.params.len()..]
+                    .iter()
+                    .map(|arg| Rc::new(RefCell::new(Self::expression_to_macro_value(arg))))
+                    .collect(),
+            ));
+        }
+
+        self.chunks = std::mem::take(&mut state.chunks);
+        self.global_names = std::mem::take(&mut state.global_symbols);
+        if self.globals.len() < self.global_names.len() {
+            self.globals.resize_with(self.global_names.len(), || None);
+        }
+        let result = self.invoke(Value::Closure(mac.function_chunk, Vec::new()), values);
+        state.chunks = std::mem::take(&mut self.chunks);
+        state.global_symbols = std::mem::take(&mut self.global_names);
+
+        let value = result
+            .map_err(|error| format!("expander execution failed: {error:?}"))?
+            .unwrap_or(Value::Nil);
+        Self::macro_value_to_expression(&value)
+    }
+
+    pub(crate) fn expand_macros_expression(
+        &mut self,
+        expr: &Expression,
+    ) -> Result<Expression, String> {
+        let chunks = std::mem::take(&mut self.chunks);
+        let names = std::mem::take(&mut self.global_names);
+        let mut compiler = Compiler::new_repl(
+            vec![],
+            chunks,
+            names,
+            self.reactive_namespaces.clone(),
+            self.derived_bindings.clone(),
+            self.state_bindings.clone(),
+            self.dag.next_id,
+            self.macros.clone(),
+            self.source_manager.current_source_file(),
+        );
+        compiler.set_macro_evaluator(|mac, args, state| {
+            self.evaluate_compiled_macro(mac, args, state)
+        });
+        let result = compiler
+            .expand_macros(expr, 0)
+            .map_err(|error| match error {
+                CompilerError::Message(message) => message,
+                _ => "macro expansion failed".to_string(),
+            });
+        let chunks = compiler.take_chunks();
+        let names = compiler.take_global_names();
+        drop(compiler);
+        self.chunks = chunks;
+        self.global_names = names;
+        result
+    }
+
     /// Compile and run `code` in this VM's existing context (globals persist).
     ///
     /// The unit is split at top-level `(import …)` forms (spec §4: import's
@@ -4023,53 +4147,92 @@ impl VM {
 
             let macros = self.macros.clone();
             let source_file = self.source_manager.current_source_file();
-            let mut compiler = Compiler::new_repl(
-                exprs,
-                existing,
-                names,
-                reactive_namespaces,
-                derived_bindings,
-                state_bindings,
-                next_node_id,
-                macros,
-                source_file,
-            );
-            compiler.set_module_exports(self.module_exports.clone());
-            // Continuation segments belong to the same unit: the module
-            // declaration and any :as/:refer bindings compiled in earlier
-            // segments carry forward.
-            if let Some(context) = module_context.take() {
-                compiler.set_module_context(context);
-            }
-            match compiler.compile() {
-                Ok(chunks) => {
+            let module_exports = self.module_exports.clone();
+            let compile_result = {
+                let mut compiler = Compiler::new_repl(
+                    exprs,
+                    existing,
+                    names,
+                    reactive_namespaces,
+                    derived_bindings,
+                    state_bindings,
+                    next_node_id,
+                    macros,
+                    source_file,
+                );
+                compiler.set_module_exports(module_exports.clone());
+                // Continuation segments belong to the same unit: the module
+                // declaration and any :as/:refer bindings compiled in earlier
+                // segments carry forward.
+                if let Some(context) = module_context.take() {
+                    compiler.set_module_context(context);
+                }
+                compiler.set_macro_evaluator(|mac, args, state| {
+                    self.evaluate_compiled_macro(mac, args, state)
+                });
+                match compiler.compile() {
+                    Ok(chunks) => {
+                        let names = compiler.take_global_names();
+                        let derived = compiler.take_derived_bindings();
+                        let states = compiler.take_state_bindings();
+                        let next_node_id = compiler.next_node_id();
+                        let macros = compiler.take_macros();
+                        let warnings = compiler.take_warnings();
+                        let refer_error = compiler.validate_refers(&module_exports).err();
+                        let context = compiler.take_module_context();
+                        Ok((
+                            chunks,
+                            names,
+                            derived,
+                            states,
+                            next_node_id,
+                            macros,
+                            warnings,
+                            refer_error,
+                            context,
+                        ))
+                    }
+                    Err(error) => Err((
+                        error,
+                        compiler.take_chunks(),
+                        compiler.take_global_names(),
+                    )),
+                }
+            };
+            match compile_result {
+                Ok((
+                    chunks,
+                    names,
+                    derived,
+                    states,
+                    next_node_id,
+                    macros,
+                    warnings,
+                    refer_error,
+                    context,
+                )) => {
                     self.chunks = chunks;
-                    self.global_names = compiler.take_global_names();
-                    self.derived_bindings = compiler.take_derived_bindings();
-                    self.state_bindings = compiler.take_state_bindings();
-                    self.dag.next_id = compiler.next_node_id();
-                    // The compiler's macro table started from this VM's, so
-                    // taking it wholesale keeps every existing macro and
-                    // merges any new definitions.
-                    self.macros = compiler.take_macros();
-                    for warning in compiler.take_warnings() {
+                    self.global_names = names;
+                    self.derived_bindings = derived;
+                    self.state_bindings = states;
+                    self.dag.next_id = next_node_id;
+                    self.macros = macros;
+                    for warning in warnings {
                         self.source_manager.push_diagnostic(warning);
                     }
                     last_value = self.execute_from(entry_idx)?;
-                    if let Err(message) = compiler.validate_refers(&self.module_exports) {
+                    if let Some(message) = refer_error {
                         self.source_load_errors.push(message);
                         return Err(VMError::CompileError);
                     }
-                    module_context = Some(compiler.take_module_context());
+                    module_context = Some(context);
                 }
-                Err(error) => {
+                Err((error, mut chunks, mut names)) => {
                     if let CompilerError::Message(message) = &error {
                         self.source_load_errors.push(message.clone());
                     }
-                    let mut chunks = compiler.take_chunks();
                     chunks.truncate(entry_idx);
                     self.chunks = chunks;
-                    let mut names = compiler.take_global_names();
                     names.truncate(names_len);
                     self.global_names = names;
                     return Err(VMError::CompileError);
@@ -4361,38 +4524,57 @@ impl VM {
         let macros = self.macros.clone();
         let source_file = self.source_manager.current_source_file();
         let compile_started = std::time::Instant::now();
-        let mut compiler = Compiler::new_repl(
-            exprs,
-            existing,
-            names,
-            reactive_namespaces,
-            derived_bindings,
-            state_bindings,
-            next_node_id,
-            macros,
-            source_file,
-        );
-        compiler.set_module_exports(self.module_exports.clone());
-        match compiler.compile() {
-            Ok(chunks) => {
+        let compile_result = {
+            let mut compiler = Compiler::new_repl(
+                exprs,
+                existing,
+                names,
+                reactive_namespaces,
+                derived_bindings,
+                state_bindings,
+                next_node_id,
+                macros,
+                source_file,
+            );
+            compiler.set_module_exports(self.module_exports.clone());
+            compiler.set_macro_evaluator(|mac, args, state| {
+                self.evaluate_compiled_macro(mac, args, state)
+            });
+            match compiler.compile() {
+                Ok(chunks) => Ok((
+                    chunks,
+                    compiler.take_global_names(),
+                    compiler.take_derived_bindings(),
+                    compiler.take_state_bindings(),
+                    compiler.next_node_id(),
+                    compiler.take_macros(),
+                    compiler.take_warnings(),
+                )),
+                Err(error) => Err((
+                    error,
+                    compiler.take_chunks(),
+                    compiler.take_global_names(),
+                )),
+            }
+        };
+        match compile_result {
+            Ok((chunks, names, derived, states, next_node_id, macros, warnings)) => {
                 self.chunks = chunks;
-                self.global_names = compiler.take_global_names();
-                self.derived_bindings = compiler.take_derived_bindings();
-                self.state_bindings = compiler.take_state_bindings();
-                self.dag.next_id = compiler.next_node_id();
-                self.macros = compiler.take_macros();
-                for warning in compiler.take_warnings() {
+                self.global_names = names;
+                self.derived_bindings = derived;
+                self.state_bindings = states;
+                self.dag.next_id = next_node_id;
+                self.macros = macros;
+                for warning in warnings {
                     self.source_manager.push_diagnostic(warning);
                 }
             }
-            Err(error) => {
+            Err((error, mut chunks, mut names)) => {
                 if let CompilerError::Message(message) = &error {
                     self.source_load_errors.push(message.clone());
                 }
-                let mut chunks = compiler.take_chunks();
                 chunks.truncate(entry_idx);
                 self.chunks = chunks;
-                let mut names = compiler.take_global_names();
                 names.truncate(names_len);
                 self.global_names = names;
                 return Err(VMError::CompileError);
@@ -6343,6 +6525,23 @@ impl VM {
                     stack.push(Rc::new(RefCell::new(Value::List(list))));
                     frames.last_mut().unwrap().pc += 1;
                 }
+                OpCode::ConcatLists(arity) => {
+                    if stack.len() < arity {
+                        return Err(VMError::StackUnderflow);
+                    }
+                    let mut segments: Vec<_> =
+                        (0..arity).filter_map(|_| stack.pop()).collect();
+                    segments.reverse();
+                    let mut list = Vec::new();
+                    for segment in segments {
+                        let Value::List(items) = &*segment.borrow() else {
+                            return Err(VMError::IncorrectType);
+                        };
+                        list.extend(items.iter().cloned());
+                    }
+                    stack.push(Rc::new(RefCell::new(Value::List(list))));
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 OpCode::Jump(pc) => {
                     if let Some(frame) = frames.last_mut() {
                         frame.pc += pc;
@@ -7037,7 +7236,7 @@ mod tests {
         EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
         ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
-        Value, debug_assert_cell_not_frozen, freeze_widget_tree,
+        VMError, Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
 
     fn hook_test_vm() -> (VM, Rc<RefCell<Vec<f64>>>) {
@@ -8480,6 +8679,67 @@ counter
             vm.global_value("generated-global-4104"),
             Some(Value::Number(4104.0))
         );
+    }
+
+    #[test]
+    fn procedural_macro_body_is_evaluated_in_definition_order() {
+        let mut vm = VM::new(Vec::new());
+
+        let result = vm
+            .eval_str(
+                "(defmacro choose-offset (form)\n\
+                   (if (= form 0) `(+ ,form 10) `(+ ,form 20)))\n\
+                 (list (choose-offset 0) (choose-offset 2))",
+            )
+            .expect("define and expand procedural macro in one compile unit");
+
+        assert_eq!(
+            result,
+            Some(Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(10.0))),
+                Rc::new(RefCell::new(Value::Number(22.0))),
+            ]))
+        );
+    }
+
+    #[test]
+    fn procedural_macro_calls_functions_in_the_owning_vm() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(def macro-add-form (form) (list '+ form 5))")
+            .expect("define expansion helper in owning VM");
+
+        let result = vm
+            .eval_str(
+                "(defmacro add-through-vm (form) (macro-add-form form))\n\
+                 (add-through-vm 7)",
+            )
+            .expect("evaluate macro through owning VM callback");
+
+        assert_eq!(result, Some(Value::Number(12.0)));
+    }
+
+    #[test]
+    fn procedural_macro_execution_error_aborts_compilation_with_macro_name() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro broken (form) (missing-expander-helper form))")
+            .expect("compile macro body before it is called");
+
+        assert_eq!(vm.eval_str("(broken 1)"), Err(VMError::CompileError));
+        assert!(vm.take_source_load_errors().iter().any(|message| {
+            message.contains("error expanding macro `broken`")
+                && message.contains("missing-expander-helper")
+        }));
+    }
+
+    #[test]
+    fn procedural_macro_can_evaluate_non_parameter_unquotes() {
+        let mut vm = VM::new(Vec::new());
+
+        let result = vm
+            .eval_str("(defmacro add-computed (form) `(+ ,form ,(+ 1 2))) (add-computed 4)")
+            .expect("computed unquote expansion");
+
+        assert_eq!(result, Some(Value::Number(7.0)));
     }
 
     #[test]

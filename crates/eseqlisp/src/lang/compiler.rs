@@ -68,6 +68,7 @@ pub enum OpCode {
     Lte,
     Gte,
     MakeList(usize),
+    ConcatLists(usize),
     Call(usize),
     MakeFunc(usize),
     MakeClosure(usize, usize),
@@ -103,8 +104,23 @@ pub enum OpCode {
 pub struct MacroDef {
     pub params: Vec<String>,
     pub rest_param: Option<String>,
-    pub body: Expression,
+    /// Chunk containing the compiled expander function. Macro definitions are
+    /// compile-time declarations, so this closure does not need to be emitted
+    /// into or initialized by the unit's entry chunk.
+    pub function_chunk: usize,
 }
+
+pub struct MacroCompilerState {
+    pub chunks: Vec<Chunk>,
+    pub global_symbols: Vec<String>,
+}
+
+type MacroEvaluator<'a> = dyn FnMut(
+        &MacroDef,
+        Vec<Expression>,
+        &mut MacroCompilerState,
+    ) -> Result<Expression, String>
+    + 'a;
 
 /// Compiler-local module state carried across the segment compilers of one
 /// compile unit (see `Compiler::take_module_context`).
@@ -117,7 +133,7 @@ pub struct ModuleCompileContext {
     known_namespaces: HashSet<String>,
 }
 
-pub struct Compiler {
+pub struct Compiler<'a> {
     expressions: Vec<Expression>,
     chunks: Vec<Chunk>,
     scopes: Vec<Scope>,
@@ -153,6 +169,8 @@ pub struct Compiler {
     /// forms) recorded mid-compile and reported when `compile` finishes.
     errors: Vec<String>,
     pub macros: HashMap<String, MacroDef>,
+    macro_evaluator: Option<Box<MacroEvaluator<'a>>>,
+    compiling_macro_body: usize,
 }
 
 fn is_widget_name(name: &str) -> bool {
@@ -273,7 +291,7 @@ fn extract_zip_sources(source: &Expression) -> Option<Vec<Expression>> {
     (name == "zip").then(|| items[1..].to_vec())
 }
 
-impl Compiler {
+impl<'a> Compiler<'a> {
     pub fn new(expressions: Vec<Expression>) -> Self {
         Compiler {
             expressions,
@@ -296,6 +314,8 @@ impl Compiler {
             warnings: Vec::new(),
             errors: Vec::new(),
             macros: HashMap::new(),
+            macro_evaluator: None,
+            compiling_macro_body: 0,
         }
     }
 
@@ -333,7 +353,21 @@ impl Compiler {
             warnings: Vec::new(),
             errors: Vec::new(),
             macros,
+            macro_evaluator: None,
+            compiling_macro_body: 0,
         }
+    }
+
+    pub fn set_macro_evaluator(
+        &mut self,
+        evaluator: impl FnMut(
+                &MacroDef,
+                Vec<Expression>,
+                &mut MacroCompilerState,
+            ) -> Result<Expression, String>
+            + 'a,
+    ) {
+        self.macro_evaluator = Some(Box::new(evaluator));
     }
 
     /// The compiler-local module state a compile unit accumulates as its
@@ -435,109 +469,52 @@ impl Compiler {
             .or_else(|| self.macros.get(name))
     }
 
-    pub fn expand_macros(&self, expr: &Expression, depth: usize) -> Expression {
+    pub fn expand_macros(
+        &mut self,
+        expr: &Expression,
+        depth: usize,
+    ) -> Result<Expression, CompilerError> {
         if depth > 100 {
-            return expr.clone();
+            return Ok(expr.clone());
         }
         match expr {
             Expression::List(items) if !items.is_empty() => {
-                if let Expression::Symbol(name) = &items[0] {
-                    if let Some(mac) = self.lookup_macro(name) {
-                        let args = &items[1..];
-                        let arity_matches = match &mac.rest_param {
-                            Some(_) => args.len() >= mac.params.len(),
-                            None => args.len() == mac.params.len(),
+                if let Expression::Symbol(name) = &items[0]
+                    && let Some(mac) = self.lookup_macro(name).cloned()
+                {
+                    let args = &items[1..];
+                    let arity_matches = match &mac.rest_param {
+                        Some(_) => args.len() >= mac.params.len(),
+                        None => args.len() == mac.params.len(),
+                    };
+                    if arity_matches {
+                        let mut state = MacroCompilerState {
+                            chunks: std::mem::take(&mut self.chunks),
+                            global_symbols: std::mem::take(&mut self.global_symbols),
                         };
-                        if arity_matches {
-                            // Build parameter bindings: expand macro args first.
-                            let mut bindings = HashMap::new();
-                            for (param, arg) in mac.params.iter().zip(args) {
-                                bindings.insert(param.clone(), self.expand_macros(arg, depth + 1));
-                            }
-                            if let Some(rest_param) = &mac.rest_param {
-                                bindings.insert(
-                                    rest_param.clone(),
-                                    Expression::List(
-                                        args[mac.params.len()..]
-                                            .iter()
-                                            .map(|arg| self.expand_macros(arg, depth + 1))
-                                            .collect(),
-                                    ),
-                                );
-                            }
-                            if let Some(expanded) = Self::expand_quasiquote(&mac.body, &bindings) {
-                                return self.expand_macros(&expanded, depth + 1);
-                            }
-                        }
+                        let expansion = match self.macro_evaluator.as_mut() {
+                            Some(evaluator) => evaluator(&mac, args.to_vec(), &mut state)
+                                .map_err(|message| {
+                                    CompilerError::Message(format!(
+                                        "error expanding macro `{name}`: {message}"
+                                    ))
+                                }),
+                            None => Err(CompilerError::Message(format!(
+                                "cannot expand procedural macro `{name}` without a VM evaluator"
+                            ))),
+                        };
+                        self.chunks = state.chunks;
+                        self.global_symbols = state.global_symbols;
+                        return self.expand_macros(&expansion?, depth + 1);
                     }
                 }
-                // Not a macro call — recursively expand children
-                Expression::List(
-                    items
-                        .iter()
-                        .map(|item| self.expand_macros(item, depth + 1))
-                        .collect(),
-                )
-            }
-            _ => expr.clone(),
-        }
-    }
-
-    fn expand_quasiquote(
-        expr: &Expression,
-        bindings: &HashMap<String, Expression>,
-    ) -> Option<Expression> {
-        match expr {
-            Expression::Quasiquote(inner) => Self::expand_quasiquote_inner(inner, bindings),
-            // If the macro body isn't quasiquoted, just return it as-is.
-            _ => Some(expr.clone()),
-        }
-    }
-
-    fn expand_quasiquote_inner(
-        expr: &Expression,
-        bindings: &HashMap<String, Expression>,
-    ) -> Option<Expression> {
-        match expr {
-            Expression::Unquote(inner) => {
-                // Substitute if the unquoted expression is a bound parameter.
-                if let Expression::Symbol(name) = inner.as_ref() {
-                    if let Some(replacement) = bindings.get(name) {
-                        return Some(replacement.clone());
-                    }
-                }
-                // Not a bound parameter — return inner as-is.
-                Some(*inner.clone())
-            }
-            Expression::UnquoteSplicing(_) => None,
-            Expression::List(items) | Expression::QuoteList(items) => {
                 let mut expanded = Vec::with_capacity(items.len());
                 for item in items {
-                    if let Expression::UnquoteSplicing(inner) = item {
-                        let Expression::Symbol(name) = inner.as_ref() else {
-                            return None;
-                        };
-                        let Some(replacement) = bindings.get(name) else {
-                            return None;
-                        };
-                        match replacement {
-                            Expression::List(values) | Expression::QuoteList(values) => {
-                                expanded.extend(values.iter().cloned());
-                            }
-                            _ => return None,
-                        }
-                    } else {
-                        expanded.push(Self::expand_quasiquote_inner(item, bindings)?);
-                    }
+                    expanded.push(self.expand_macros(item, depth + 1)?);
                 }
-                Some(if matches!(expr, Expression::QuoteList(_)) {
-                    Expression::QuoteList(expanded)
-                } else {
-                    Expression::List(expanded)
-                })
+                Ok(Expression::List(expanded))
             }
-            // Everything else inside quasiquote is literal.
-            _ => Some(expr.clone()),
+            _ => Ok(expr.clone()),
         }
     }
 
@@ -1702,6 +1679,93 @@ impl Compiler {
         idx
     }
 
+    fn compile_macro_quasiquote(&mut self, expr: &Expression) -> Result<(), CompilerError> {
+        match expr {
+            Expression::Unquote(inner) => self.compile_expression(inner),
+            Expression::UnquoteSplicing(_) => Err(CompilerError::InvalidArg),
+            Expression::List(items) => {
+                let has_splice = items
+                    .iter()
+                    .any(|item| matches!(item, Expression::UnquoteSplicing(_)));
+                if !has_splice {
+                    for item in items {
+                        self.compile_macro_quasiquote(item)?;
+                    }
+                    self.emit(OpCode::MakeList(items.len()));
+                    return Ok(());
+                }
+                for item in items {
+                    if let Expression::UnquoteSplicing(inner) = item {
+                        self.compile_expression(inner)?;
+                    } else {
+                        self.compile_macro_quasiquote(item)?;
+                        self.emit(OpCode::MakeList(1));
+                    }
+                }
+                self.emit(OpCode::ConcatLists(items.len()));
+                Ok(())
+            }
+            Expression::QuoteList(items) => {
+                let quote_idx = self.use_string_constant("quote");
+                self.emit(OpCode::PushSymbol(quote_idx));
+                self.compile_macro_quasiquote(&Expression::List(items.clone()))?;
+                self.emit(OpCode::MakeList(2));
+                Ok(())
+            }
+            Expression::Symbol(symbol) => {
+                let idx = self.use_string_constant(symbol);
+                self.emit(OpCode::PushSymbol(idx));
+                Ok(())
+            }
+            Expression::QuoteSymbol(symbol) => {
+                let quote_idx = self.use_string_constant("quote");
+                self.emit(OpCode::PushSymbol(quote_idx));
+                let symbol_idx = self.use_string_constant(symbol);
+                self.emit(OpCode::PushSymbol(symbol_idx));
+                self.emit(OpCode::MakeList(2));
+                Ok(())
+            }
+            Expression::Quasiquote(inner) => self.compile_macro_quasiquote(inner),
+            other => self.compile_expression(other),
+        }
+    }
+
+    fn compile_macro_function(
+        &mut self,
+        name: &str,
+        params: &[String],
+        rest_param: Option<&str>,
+        body: &Expression,
+    ) -> Result<usize, CompilerError> {
+        let mut symbols = params.to_vec();
+        if let Some(rest) = rest_param {
+            symbols.push(rest.to_string());
+        }
+        let (chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
+            ops: vec![],
+            constants: vec![],
+            strings: vec![],
+            symbols,
+            upvalues: vec![],
+            source_symbol: Some(name.to_string()),
+            source_file: self.source_file.clone(),
+            source_module: self.declared_module(),
+        });
+        self.compiling_macro_body += 1;
+        let compile_result = self.compile_expression(body);
+        self.compiling_macro_body -= 1;
+        compile_result?;
+        let scope = self.scopes.pop().unwrap();
+        self.emit(OpCode::Return);
+        self.current_chunk = previous_chunk_idx;
+        if !scope.upvalues.is_empty() {
+            return Err(CompilerError::Message(format!(
+                "macro `{name}` unexpectedly captured lexical bindings"
+            )));
+        }
+        Ok(chunk_idx)
+    }
+
     pub fn compile_function(
         &mut self,
         name: Option<String>,
@@ -1900,7 +1964,7 @@ impl Compiler {
                     return Err(CompilerError::InvalidArg);
                 }
                 let call_expr = Expression::List(list.to_vec());
-                let expanded = self.expand_macros(&call_expr, 0);
+                let expanded = self.expand_macros(&call_expr, 0)?;
                 if expanded == call_expr {
                     return Err(CompilerError::InvalidArg);
                 }
@@ -2332,12 +2396,18 @@ impl Compiler {
                 } else {
                     name.clone()
                 };
+                let function_chunk = self.compile_macro_function(
+                    &key,
+                    &params,
+                    rest_param.as_deref(),
+                    &list[3],
+                )?;
                 self.macros.insert(
                     key,
                     MacroDef {
                         params,
                         rest_param,
-                        body: list[3].clone(),
+                        function_chunk,
                     },
                 );
                 self.emit(OpCode::PushNil);
@@ -2673,8 +2743,12 @@ impl Compiler {
                 self.emit(OpCode::MakeList(items.len()));
             }
             Expression::Quasiquote(inner) => {
-                // Outside of macro context, quasiquote behaves like quote
-                self.compile_quoted_expression(inner)?;
+                if self.compiling_macro_body > 0 {
+                    self.compile_macro_quasiquote(inner)?;
+                } else {
+                    // Outside of macro context, quasiquote behaves like quote.
+                    self.compile_quoted_expression(inner)?;
+                }
             }
             Expression::Unquote(_) | Expression::UnquoteSplicing(_) => {
                 // Unquote outside quasiquote is an error.
