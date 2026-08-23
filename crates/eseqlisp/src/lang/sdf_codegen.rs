@@ -71,7 +71,11 @@ impl ShaderEmitter {
     }
 
     fn wgsl(uniform_symbols: HashMap<String, String>) -> Self {
-        Self::new(ShaderLanguage::Wgsl, uniform_symbols, theme::current())
+        Self::wgsl_with_theme(uniform_symbols, theme::current())
+    }
+
+    fn wgsl_with_theme(uniform_symbols: HashMap<String, String>, theme: theme::Theme) -> Self {
+        Self::new(ShaderLanguage::Wgsl, uniform_symbols, theme)
     }
 
     fn new(
@@ -195,10 +199,8 @@ impl ShaderEmitter {
     fn expr_is_bool(&self, expr: &Expression) -> bool {
         match expr {
             Expression::Symbol(name) => {
-                matches!(
-                    name.as_str(),
-                    "true" | "false" | "hit/hover" | "hit/active"
-                ) || self.resolve_symbol_type(name) == Some("bool")
+                matches!(name.as_str(), "true" | "false" | "hit/hover" | "hit/active")
+                    || self.resolve_symbol_type(name) == Some("bool")
             }
             Expression::List(items) => matches!(
                 items.first(),
@@ -321,11 +323,11 @@ impl ShaderEmitter {
             }
 
             // Quasiquote/Unquote should be expanded before codegen
-            Expression::Quasiquote(_)
-            | Expression::Unquote(_)
-            | Expression::UnquoteSplicing(_) => Err(CodegenError::UnsupportedExpression(
-                "unexpanded quasiquote/unquote".into(),
-            )),
+            Expression::Quasiquote(_) | Expression::Unquote(_) | Expression::UnquoteSplicing(_) => {
+                Err(CodegenError::UnsupportedExpression(
+                    "unexpanded quasiquote/unquote".into(),
+                ))
+            }
 
             Expression::String(s) => Err(CodegenError::UnsupportedExpression(format!(
                 "string literal: \"{}\"",
@@ -383,8 +385,7 @@ impl ShaderEmitter {
         // Evaluate the SDF distance
         let dist = self.emit_expr(sdf_expr)?;
         let d = self.fresh_var();
-        self.statements
-            .push(self.declaration("float", &d, &dist));
+        self.statements.push(self.declaration("float", &d, &dist));
 
         // AA mask
         let aa = self.fresh_var();
@@ -428,7 +429,12 @@ impl ShaderEmitter {
         let fill_result = self.fresh_var();
         let fill_expr = format!(
             "{}({}.rgb * {}.a * {}, {}.a * {})",
-            self.constructor("float4"), clr, clr, mask, clr, mask
+            self.constructor("float4"),
+            clr,
+            clr,
+            mask,
+            clr,
+            mask
         );
         self.statements
             .push(self.declaration("float4", &fill_result, &fill_expr));
@@ -657,7 +663,10 @@ impl ShaderEmitter {
         self.scopes.pop();
         let right = self.fresh_var();
         let right_expr = if let Some(ref rb) = right_bump {
-            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, right_sdf, rb)
+            format!(
+                "smoothstep({}, {}, {}) + {}",
+                edge_min, edge_max, right_sdf, rb
+            )
         } else {
             format!("smoothstep({}, {}, {})", edge_min, edge_max, right_sdf)
         };
@@ -680,7 +689,10 @@ impl ShaderEmitter {
         self.scopes.pop();
         let left = self.fresh_var();
         let left_expr = if let Some(ref lb) = left_bump {
-            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, left_sdf, lb)
+            format!(
+                "smoothstep({}, {}, {}) + {}",
+                edge_min, edge_max, left_sdf, lb
+            )
         } else {
             format!("smoothstep({}, {}, {})", edge_min, edge_max, left_sdf)
         };
@@ -703,7 +715,10 @@ impl ShaderEmitter {
         self.scopes.pop();
         let up = self.fresh_var();
         let up_expr = if let Some(ref ub) = up_bump {
-            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, up_sdf, ub)
+            format!(
+                "smoothstep({}, {}, {}) + {}",
+                edge_min, edge_max, up_sdf, ub
+            )
         } else {
             format!("smoothstep({}, {}, {})", edge_min, edge_max, up_sdf)
         };
@@ -726,7 +741,10 @@ impl ShaderEmitter {
         self.scopes.pop();
         let down = self.fresh_var();
         let down_expr = if let Some(ref db) = down_bump {
-            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, down_sdf, db)
+            format!(
+                "smoothstep({}, {}, {}) + {}",
+                edge_min, edge_max, down_sdf, db
+            )
         } else {
             format!("smoothstep({}, {}, {})", edge_min, edge_max, down_sdf)
         };
@@ -745,7 +763,9 @@ impl ShaderEmitter {
         let normal = self.fresh_var();
         let normal_expr = format!(
             "normalize({}({}, {}, 1.0))",
-            self.constructor("float3"), dx, dy
+            self.constructor("float3"),
+            dx,
+            dy
         );
         self.statements
             .push(self.declaration("float3", &normal, &normal_expr));
@@ -850,7 +870,10 @@ impl ShaderEmitter {
         self.statements
             .push(self.declaration("float", &shadow_soft, &shadow_soft_expr));
         let shadow_mask = self.fresh_var();
-        let shadow_mask_expr = format!("smoothstep({}, -({}), {})", shadow_soft, shadow_soft, shadow_d);
+        let shadow_mask_expr = format!(
+            "smoothstep({}, -({}), {})",
+            shadow_soft, shadow_soft, shadow_d
+        );
         self.statements
             .push(self.declaration("float", &shadow_mask, &shadow_mask_expr));
         let shadow_color = self.fresh_var();
@@ -859,7 +882,12 @@ impl ShaderEmitter {
         let shadow_result = self.fresh_var();
         let shadow_result_expr = format!(
             "{}({}.rgb * {}.a * {}, {}.a * {})",
-            self.constructor("float4"), shadow_color, shadow_color, shadow_mask, shadow_color, shadow_mask
+            self.constructor("float4"),
+            shadow_color,
+            shadow_color,
+            shadow_mask,
+            shadow_color,
+            shadow_mask
         );
         self.statements
             .push(self.declaration("float4", &shadow_result, &shadow_result_expr));
@@ -894,8 +922,7 @@ impl ShaderEmitter {
         // Evaluate the SDF distance
         let dist = self.emit_expr(&args[0])?;
         let d = self.fresh_var();
-        self.statements
-            .push(self.declaration("float", &d, &dist));
+        self.statements.push(self.declaration("float", &d, &dist));
 
         // Convert to stroke: abs(d) - width
         let width = self.emit_expr(&args[1])?;
@@ -924,7 +951,12 @@ impl ShaderEmitter {
         let result = self.fresh_var();
         let result_expr = format!(
             "{}({}.rgb * {}.a * {}, {}.a * {})",
-            self.constructor("float4"), clr, clr, mask, clr, mask
+            self.constructor("float4"),
+            clr,
+            clr,
+            mask,
+            clr,
+            mask
         );
         self.statements
             .push(self.declaration("float4", &result, &result_expr));
@@ -966,8 +998,7 @@ impl ShaderEmitter {
             // Emit value before inserting binding (sequential let: sees prior bindings only)
             let val = self.emit_expr(&pair[1])?;
             let var = self.fresh_var();
-            let type_name = if self.language == ShaderLanguage::Wgsl
-                && self.expr_is_bool(&pair[1])
+            let type_name = if self.language == ShaderLanguage::Wgsl && self.expr_is_bool(&pair[1])
             {
                 "bool"
             } else {
@@ -1298,9 +1329,20 @@ pub fn compile_sdf_to_metal_with_state(
     expr: &Expression,
     state_symbols: &[String],
 ) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_metal_with_state_and_theme(expr, state_symbols, theme::current())
+}
+
+/// Same as [`compile_sdf_to_metal_with_state`], but against an explicit theme
+/// instead of the process-global one. Tests use this so a concurrently running
+/// test that swaps the active theme cannot perturb their output.
+fn compile_sdf_to_metal_with_state_and_theme(
+    expr: &Expression,
+    state_symbols: &[String],
+    theme: theme::Theme,
+) -> Result<SdfShaderOutput, CodegenError> {
     let returns_color = expr_returns_float4(expr);
 
-    let mut emitter = ShaderEmitter::metal(uniform_layout(state_symbols));
+    let mut emitter = ShaderEmitter::metal_with_theme(uniform_layout(state_symbols), theme);
     let result_expr = emitter.emit_expr(expr)?;
     let region_count = emitter.next_region_id;
 
@@ -1394,8 +1436,18 @@ pub fn compile_sdf_to_wgsl_with_state(
     expr: &Expression,
     state_symbols: &[String],
 ) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_wgsl_with_state_and_theme(expr, state_symbols, theme::current())
+}
+
+/// Theme-pinned counterpart to [`compile_sdf_to_wgsl_with_state`]. See
+/// [`compile_sdf_to_metal_with_state_and_theme`].
+fn compile_sdf_to_wgsl_with_state_and_theme(
+    expr: &Expression,
+    state_symbols: &[String],
+    theme: theme::Theme,
+) -> Result<SdfShaderOutput, CodegenError> {
     let returns_color = expr_returns_float4(expr);
-    let mut emitter = ShaderEmitter::wgsl(uniform_layout(state_symbols));
+    let mut emitter = ShaderEmitter::wgsl_with_theme(uniform_layout(state_symbols), theme);
     let result_expr = emitter.emit_expr(expr)?;
     let region_count = emitter.next_region_id;
 
@@ -1451,7 +1503,11 @@ pub fn compile_sdf_to_wgsl_with_state(
 
     if region_count > 0 {
         writeln!(shader, "    let hit_region: f32 = input.color_b.x;").unwrap();
-        writeln!(shader, "    let hit_pressed: bool = input.color_b.y != 0.0;").unwrap();
+        writeln!(
+            shader,
+            "    let hit_pressed: bool = input.color_b.y != 0.0;"
+        )
+        .unwrap();
     }
     for (idx, name) in state_symbols.iter().enumerate() {
         let register = match idx / 4 {
@@ -1520,9 +1576,7 @@ pub fn compile_sdf_expr(expr: &Expression) -> Result<(Vec<String>, String), Code
 }
 
 /// Compile only the WGSL SDF expression (no shader wrapper).
-pub fn compile_sdf_expr_to_wgsl(
-    expr: &Expression,
-) -> Result<(Vec<String>, String), CodegenError> {
+pub fn compile_sdf_expr_to_wgsl(expr: &Expression) -> Result<(Vec<String>, String), CodegenError> {
     let mut emitter = ShaderEmitter::wgsl(HashMap::new());
     let result = emitter.emit_expr(expr)?;
     Ok((emitter.statements, result))
@@ -1635,9 +1689,10 @@ mod tests {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 content_lisp_files(&path, out);
-            } else if path.extension().is_some_and(|extension| extension == "lisp")
-                && std::fs::read_to_string(&path)
-                    .is_ok_and(|source| source.contains(":shader"))
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "lisp")
+                && std::fs::read_to_string(&path).is_ok_and(|source| source.contains(":shader"))
             {
                 out.push(path);
             }
@@ -1813,25 +1868,44 @@ mod tests {
                         *name = format!("{module}/{name}");
                     }
                     let qualified = Expression::List(qualified);
-                    runtime.eval_str(&expression_source(&qualified)).unwrap_or_else(|error| {
-                        panic!("failed to register corpus macro from {}: {error:?}", path.display())
-                    });
+                    runtime
+                        .eval_str(&expression_source(&qualified))
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "failed to register corpus macro from {}: {error:?}",
+                                path.display()
+                            )
+                        });
                     continue;
                 }
 
                 let Some((shader, state_symbols)) = shader_from_defwidget(&expression) else {
                     continue;
                 };
-                let expanded = runtime.expand_macros_expression(shader).unwrap_or_else(|error| {
-                    panic!("failed to expand shader from {}: {error}", path.display())
-                });
+                let expanded = runtime
+                    .expand_macros_expression(shader)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to expand shader from {}: {error}", path.display())
+                    });
                 let state_bindings = state_symbols.into_iter().collect::<HashSet<_>>();
                 let mut state_symbols = collect_state_symbols(&expanded, &state_bindings);
                 state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-                let metal = compile_sdf_to_metal_with_state(&expanded, &state_symbols)
-                    .unwrap_or_else(|error| panic!("MSL codegen failed for {}: {error}", path.display()));
-                let wgsl = compile_sdf_to_wgsl_with_state(&expanded, &state_symbols)
-                    .unwrap_or_else(|error| panic!("WGSL codegen failed for {}: {error}", path.display()));
+                let metal = compile_sdf_to_metal_with_state_and_theme(
+                    &expanded,
+                    &state_symbols,
+                    theme::default_theme(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("MSL codegen failed for {}: {error}", path.display())
+                });
+                let wgsl = compile_sdf_to_wgsl_with_state_and_theme(
+                    &expanded,
+                    &state_symbols,
+                    theme::default_theme(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("WGSL codegen failed for {}: {error}", path.display())
+                });
                 assert_eq!(metal.region_count, wgsl.region_count, "{}", path.display());
                 metal_snapshot.update(metal.shader_source.as_bytes());
                 metal_snapshot.update([0]);
@@ -1841,7 +1915,10 @@ mod tests {
                 shader_count += 1;
             }
         }
-        assert!(shader_count >= 60, "expected the full content shader corpus");
+        assert!(
+            shader_count >= 60,
+            "expected the full content shader corpus"
+        );
         let metal_snapshot = metal_snapshot
             .finalize()
             .iter()
@@ -1896,9 +1973,11 @@ mod tests {
         let output = compile_sdf_to_wgsl_with_state(&expr, &[String::from("radius")]).unwrap();
         assert_eq!(output.region_count, 1);
         assert_valid_wgsl(&output.shader_source);
-        assert!(output
-            .shader_source
-            .contains("let sdf_state_radius: f32 = input.uniform_a.x;"));
+        assert!(
+            output
+                .shader_source
+                .contains("let sdf_state_radius: f32 = input.uniform_a.x;")
+        );
         assert!(output.shader_source.contains("select("));
     }
 
