@@ -1162,12 +1162,15 @@ impl TextMeasurer for FixedWidthTextMeasurer {
 
 /// One cell-width-times-`PRIMED_GLYPH_ADVANCE_CELLS` per character, whatever
 /// the text: the geometry fixtures below are written against a uniform advance.
+#[cfg(target_os = "macos")]
 struct MonospaceTextMeasurer;
 
 /// Glyph advance, in layout cells per character, the patcher geometry fixtures
 /// are dimensioned for.
+#[cfg(target_os = "macos")]
 const PRIMED_GLYPH_ADVANCE_CELLS: f32 = 1.16;
 
+#[cfg(target_os = "macos")]
 impl TextMeasurer for MonospaceTextMeasurer {
     fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
         text.chars().count() as f32 * PRIMED_GLYPH_ADVANCE_CELLS * 10.0
@@ -1186,6 +1189,7 @@ impl TextMeasurer for MonospaceTextMeasurer {
 /// Every node's drawn label and its editable text go in, which also pins the
 /// average advance the width estimator calibrates against, so labels not listed
 /// here come out at the same uniform advance.
+#[cfg(target_os = "macos")]
 fn prime_patcher_text_metrics(patch: &Patch) {
     let measurer = MonospaceTextMeasurer;
     let measure_ctx = MeasureCtx {
@@ -20507,6 +20511,7 @@ fn default_layout_never_overlaps_wide_params_and_named_inputs() {
                 "node {id} with label {label:?} should be wider than the minimum: {rect:?}"
             );
         }
+        #[cfg(target_os = "macos")]
         for scale in [1.0_f64, 2.0] {
             let rendered = rendered_label_width_cells(&label, node_font_size(node), scale);
             assert!(
@@ -20595,6 +20600,7 @@ fn default_layout_keeps_named_inputs_clear_of_the_param_stack() {
 /// device pixels, over a monospace cell of `MONO_CELL_POINTS * scale` device
 /// pixels. Both sides carry the scale factor, so the ratio cancels it - which
 /// is exactly what a cells-per-character estimate has to reproduce.
+#[cfg(target_os = "macos")]
 fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
     use crate::glyph_atlas::SizedFontCache;
 
@@ -20608,6 +20614,7 @@ fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn estimated_label_width_matches_the_rendered_width_at_every_display_scale() {
     let labels = [
         "param attack 0.01 0.001 2",

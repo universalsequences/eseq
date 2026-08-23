@@ -651,6 +651,7 @@ pub(crate) fn closest_char_index_for_x(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn closest_char_index_in_range_for_x(
     text: &str,
     font_size: f32,
@@ -699,10 +700,14 @@ fn closest_char_index_for_text_input(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        (target_x.max(0.0) / 0.6).round() as usize
+        // Clamp exactly as the measured branch does: an unclamped column lands
+        // past the end of a short (or empty) value and the caret then indexes
+        // outside the string.
+        ((target_x.max(0.0) / 0.6).round() as usize).min(text.chars().count())
     }
 }
 
+#[cfg(target_os = "macos")]
 fn closest_char_index_for_textbox(
     node: &LayoutNode,
     local_col: f32,
@@ -1217,6 +1222,7 @@ impl WidgetDefinition for TextboxWidget {
         _cell_h: f32,
     ) -> MouseEventOutcome {
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
+        #[cfg(target_os = "macos")]
         let cursor_pos =
             closest_char_index_for_textbox(node, local_col, local_row, font_size, 10.0)
                 .min(get_text(&node.props).chars().count());

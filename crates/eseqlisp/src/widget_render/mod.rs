@@ -1683,7 +1683,7 @@ pub fn build_gpu_primitive_run_index(runs: &[GpuPrimitiveRun]) -> GpuPrimitiveRu
     result
 }
 
-pub fn refresh_metal_primitive_runs_retained_in_place(
+pub fn refresh_gpu_primitive_runs_retained_in_place(
     node: &LayoutNode,
     viewport: WidgetViewport,
     scroll_top: f32,
@@ -1722,7 +1722,7 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
     for run in runs.iter_mut() {
         run.reused_from_previous = true;
     }
-    refresh_metal_primitive_runs_retained_in_place_recursive(
+    refresh_gpu_primitive_runs_retained_in_place_recursive(
         node,
         viewport,
         scroll_top,
@@ -2469,7 +2469,7 @@ fn collect_gpu_primitive_runs_retained_recursive(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn refresh_metal_primitive_runs_retained_in_place_recursive(
+fn refresh_gpu_primitive_runs_retained_in_place_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
     _scroll_top: f32,
@@ -2542,7 +2542,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
             let rebuilt_start = rebuilt_indices.len();
-            refresh_metal_primitive_runs_retained_in_place_recursive(
+            refresh_gpu_primitive_runs_retained_in_place_recursive(
                 child,
                 node_viewport,
                 _scroll_top,
@@ -2627,7 +2627,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
-            refresh_metal_primitive_runs_retained_in_place_recursive(
+            refresh_gpu_primitive_runs_retained_in_place_recursive(
                 child,
                 child_viewport,
                 _scroll_top,
@@ -2692,7 +2692,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
     child_ancestor_widget_ids.push(node.widget_id);
     for child in &node.children {
-        refresh_metal_primitive_runs_retained_in_place_recursive(
+        refresh_gpu_primitive_runs_retained_in_place_recursive(
             child,
             node_viewport,
             _scroll_top,
@@ -3659,7 +3659,7 @@ mod tests {
         let after = make_layout("17");
         let (mut cached_runs, _) = collect_gpu_primitive_runs(&before, viewport, 0.0, 24);
         let run_indices = build_gpu_primitive_run_index(&cached_runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &after,
             viewport,
             0.0,
@@ -3729,7 +3729,7 @@ mod tests {
         let after = make_layout(false);
         let (mut cached_runs, _) = collect_gpu_primitive_runs(&before, viewport, 0.0, 24);
         let run_indices = build_gpu_primitive_run_index(&cached_runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &after,
             viewport,
             0.0,
@@ -3786,7 +3786,7 @@ mod tests {
         let viewport = test_viewport();
         let (mut cached_runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
         let run_indices = build_gpu_primitive_run_index(&cached_runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &root,
             viewport,
             0.0,
@@ -3862,7 +3862,7 @@ mod tests {
         let viewport = test_viewport();
         let (mut runs, _) = collect_gpu_primitive_runs(&root, viewport, 0.0, 24);
         let run_index = build_gpu_primitive_run_index(&runs);
-        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+        let (_overlay, stats) = refresh_gpu_primitive_runs_retained_in_place(
             &root, viewport, 0.0, 24, &mut runs, &run_index, &active,
         );
         assert!(stats.rebuilt_runs > 0);

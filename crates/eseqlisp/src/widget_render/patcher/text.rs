@@ -12,6 +12,7 @@ use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
     node_edit_key, note_touched_node,
 };
+#[cfg(target_os = "macos")]
 use super::text_metrics::measured_closest_char_index;
 
 pub(super) const PATCHER_AUTOCOMPLETE_MAX_ITEMS: usize = 8;

@@ -3005,14 +3005,14 @@
                 scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
                 inherited_hover: false,
             };
-            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                 initial_layout,
                 viewport,
                 viewport.scroll_top,
                 70,
             );
             let retained_run_indices =
-                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
             let step_clipboard = Arc::new(Mutex::new(None));
             let step_center = |editor: &mut Editor, step: usize| {
                 let layout = editor.widget_layout().expect("sequencer layout");
@@ -3102,7 +3102,7 @@
                     .as_ref()
                     .expect("sequencer layout after pianohold action");
                 let (_, stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         layout,
                         viewport,
                         viewport.scroll_top,
@@ -3562,13 +3562,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -3989,7 +3989,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -4004,14 +4004,14 @@
                         // Production fallback (metal_backend.rs): a tile whose
                         // widget structure changed rebuilds its whole run
                         // scene, and that cost stays inside the timed region.
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -4956,13 +4956,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -5350,7 +5350,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -5362,14 +5362,14 @@
                     let structural_rebuild =
                         stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
                     if structural_rebuild {
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -6173,13 +6173,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -6575,7 +6575,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -6587,14 +6587,14 @@
                     let structural_rebuild =
                         stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
                     if structural_rebuild {
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -7501,13 +7501,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -7918,7 +7918,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -7930,14 +7930,14 @@
                     let structural_rebuild =
                         stats.missing_previous_runs > 0 || stats.invalid_previous_runs > 0;
                     if structural_rebuild {
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -8702,13 +8702,13 @@
                     scroll_left: tile.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     layout,
                     viewport,
                     viewport.scroll_top,
                     vp_rows,
                 );
-                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                let indices = eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                 tile_retained.push(TileRetained {
                     buffer_name: tile.frame.buffer_name.clone(),
                     viewport,
@@ -8844,7 +8844,7 @@
                     });
                     let tile_started = Instant::now();
                     let (_, stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
@@ -8872,14 +8872,14 @@
                         // scene in full (metal_backend.rs,
                         // refresh_widget_run_scene_for_dirty_layout). That
                         // real cost stays inside the timed region.
-                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                        let (runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                             layout,
                             entry.viewport,
                             entry.viewport.scroll_top,
                             vp_rows,
                         );
                         entry.indices =
-                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                            eseqlisp::widget_render::build_gpu_primitive_run_index(&runs);
                         entry.runs = runs;
                     }
                     tile_stats.push((
@@ -9204,14 +9204,14 @@
                 scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
                 inherited_hover: false,
             };
-            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                 initial_layout,
                 viewport,
                 viewport.scroll_top,
                 70,
             );
             let retained_run_indices =
-                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
             let step_clipboard = Arc::new(Mutex::new(None));
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
@@ -9367,7 +9367,7 @@
                     .expect("sequencer layout after benchmark action");
                 let frame_done = Instant::now();
                 let (_, stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         layout,
                         viewport,
                         viewport.scroll_top,
@@ -9852,14 +9852,14 @@
                     scroll_left: initial_fx_frame.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     initial_fx_layout,
                     initial_viewport,
                     initial_viewport.scroll_top,
                     70,
                 );
                 let retained_run_indices =
-                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                    eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
 
                 let mut samples = RackMacroPerfSamples {
                     total: Vec::with_capacity(SAMPLES),
@@ -9961,7 +9961,7 @@
                         inherited_hover: false,
                     };
                     let (_, retained_stats) =
-                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                             fx_layout,
                             viewport,
                             viewport.scroll_top,
@@ -10107,14 +10107,14 @@
                 inherited_hover: false,
             };
             let (mut direct_retained_runs, _) =
-                eseqlisp::widget_render::collect_metal_primitive_runs(
+                eseqlisp::widget_render::collect_gpu_primitive_runs(
                     initial_fx_layout,
                     initial_viewport,
                     initial_viewport.scroll_top,
                     70,
                 );
             let direct_retained_indices =
-                eseqlisp::widget_render::build_metal_primitive_run_index(&direct_retained_runs);
+                eseqlisp::widget_render::build_gpu_primitive_run_index(&direct_retained_runs);
             let mut direct_samples = RackMacroPerfSamples {
                 total: Vec::with_capacity(SAMPLES),
                 host: Vec::with_capacity(SAMPLES),
@@ -10237,7 +10237,7 @@
                     inherited_hover: false,
                 };
                 let (_, retained_stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         fx_layout,
                         viewport,
                         viewport.scroll_top,
@@ -10423,14 +10423,14 @@
                     scroll_left: sequencer_frame.frame.widget_layout_scroll_left,
                     inherited_hover: false,
                 };
-                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
                     selected_layout,
                     viewport,
                     viewport.scroll_top,
                     70,
                 );
                 let retained_run_indices =
-                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                    eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
                 let selected_step_frame = frame
                     .tiles
                     .iter()
@@ -10514,7 +10514,7 @@
                     .as_ref()
                     .expect("visible sequencer layout after Escape");
                 let (_, retained_stats) =
-                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         deselected_layout,
                         viewport,
                         viewport.scroll_top,
@@ -10542,7 +10542,7 @@
                     .as_ref()
                     .expect("visible step layout after Escape");
                 let (deselected_step_runs, _) =
-                    eseqlisp::widget_render::collect_metal_primitive_runs(
+                    eseqlisp::widget_render::collect_gpu_primitive_runs(
                         deselected_step_layout,
                         step_viewport,
                         step_viewport.scroll_top,
@@ -11196,14 +11196,14 @@
             scroll_left: initial_arr_frame.frame.widget_layout_scroll_left,
             inherited_hover: false,
         };
-        let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+        let (mut retained_runs, _) = eseqlisp::widget_render::collect_gpu_primitive_runs(
             initial_layout,
             viewport,
             viewport.scroll_top,
             VIEW_H as u16,
         );
         let retained_run_indices =
-            eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+            eseqlisp::widget_render::build_gpu_primitive_run_index(&retained_runs);
         // The arrangement tile's screen origin: widget layouts are
         // tile-content-local, while handle_mouse_precise takes screen cells.
         let tile_origin = (
@@ -11317,7 +11317,7 @@
                 .expect("arrangement layout after benchmark action");
             let frame_done = Instant::now();
             let (_, stats) =
-                eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                eseqlisp::widget_render::refresh_gpu_primitive_runs_retained_in_place(
                     layout,
                     viewport,
                     viewport.scroll_top,

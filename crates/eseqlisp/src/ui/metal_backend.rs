@@ -2850,7 +2850,7 @@ fragment float4 live_spectrogram_frag(
             self.cached_widget_scenes.remove(&cache_key);
             if let Some(scene) = self.cached_widget_run_scenes.get_mut(&cache_key) {
                 let (overlay, retained_stats) =
-                    widget_render::refresh_metal_primitive_runs_retained_in_place(
+                    widget_render::refresh_gpu_primitive_runs_retained_in_place(
                         layout,
                         viewport,
                         scroll_top,
