@@ -15,12 +15,10 @@ use crate::layout::{
 };
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetInstance,
+    GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, WidgetInstance,
     WidgetViewport, ndc_bounds,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -516,7 +514,6 @@ fn cursor_line_col(text: &str, cursor_pos: usize, max_chars: usize) -> (usize, u
     (row, col.min(max_chars))
 }
 
-#[cfg(target_os = "macos")]
 fn measured_cursor_line(lines: &[WrappedLine], cursor_pos: usize) -> usize {
     lines
         .iter()
@@ -572,7 +569,6 @@ fn move_cursor_vertically(text: &str, cursor_pos: usize, max_chars: usize, delta
 /// the caret/selection metrics cannot rely on measure()-side caching alone.
 /// Only render paths call this — they pass the real viewport cell width, which
 /// keeps cached widths consistent with measure-pass entries.
-#[cfg(target_os = "macos")]
 fn ensure_char_widths_cached_at_render(text: &str, font_size: f32, cell_w: f32) {
     if text.is_empty() || cell_w <= 0.0 {
         return;
@@ -593,7 +589,6 @@ fn ensure_char_widths_cached_at_render(text: &str, font_size: f32, cell_w: f32) 
 }
 
 /// Sum per-character widths up to cursor_pos from cache. Falls back to approximation.
-#[cfg(target_os = "macos")]
 pub(crate) fn cursor_x_from_char_cache(
     text: &str,
     font_size: f32,
@@ -611,7 +606,6 @@ pub(crate) fn cursor_x_from_char_cache(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn text_range_width_from_char_cache(
     text: &str,
     font_size: f32,
@@ -633,7 +627,6 @@ fn text_range_width_from_char_cache(
     })
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn closest_char_index_for_x(
     text: &str,
     font_size: f32,
@@ -658,7 +651,6 @@ pub(crate) fn closest_char_index_for_x(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn closest_char_index_in_range_for_x(
     text: &str,
     font_size: f32,
@@ -711,7 +703,6 @@ fn closest_char_index_for_text_input(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn closest_char_index_for_textbox(
     node: &LayoutNode,
     local_col: f32,
@@ -947,18 +938,16 @@ impl WidgetDefinition for TextInputWidget {
         true
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(super::ROUNDED_RECT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let text = get_text(&node.props);
         let placeholder = get_placeholder(&node.props);
         let state = get_state(node.widget_id);
@@ -1011,7 +1000,7 @@ impl WidgetDefinition for TextInputWidget {
             let (ndc_min, ndc_max) = ndc_bounds(ring_rect, viewport);
             let px_w = ring_rect.width * viewport.cell_w;
             let px_h = ring_rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "text-input".to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -1039,7 +1028,7 @@ impl WidgetDefinition for TextInputWidget {
             let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
             let px_w = node.rect.width * viewport.cell_w;
             let px_h = node.rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "text-input".to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -1097,7 +1086,7 @@ impl WidgetDefinition for TextInputWidget {
                 viewport.cell_w,
             );
             if selection_width > 0.0 {
-                prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                     rect: Rect {
                         row: node.rect.row + TEXT_PADDING_V,
                         col: x0,
@@ -1110,8 +1099,8 @@ impl WidgetDefinition for TextInputWidget {
         }
 
         if !display_text.is_empty() {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: text_row,
                     col: text_col,
                     align_width: 0.0,
@@ -1138,7 +1127,7 @@ impl WidgetDefinition for TextInputWidget {
                 width: 0.08,
                 height: node.rect.height - TEXT_PADDING_V * 2.0 - 0.1,
             };
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: cursor_rect,
                 color: cursor_color,
             }));
@@ -1228,7 +1217,6 @@ impl WidgetDefinition for TextboxWidget {
         _cell_h: f32,
     ) -> MouseEventOutcome {
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
-        #[cfg(target_os = "macos")]
         let cursor_pos =
             closest_char_index_for_textbox(node, local_col, local_row, font_size, 10.0)
                 .min(get_text(&node.props).chars().count());
@@ -1324,18 +1312,16 @@ impl WidgetDefinition for TextboxWidget {
         true
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(super::ROUNDED_RECT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let text = get_text(&node.props);
         let placeholder = get_placeholder(&node.props);
         let state = get_state(node.widget_id);
@@ -1382,7 +1368,7 @@ impl WidgetDefinition for TextboxWidget {
             let (ndc_min, ndc_max) = ndc_bounds(ring_rect, viewport);
             let px_w = ring_rect.width * viewport.cell_w;
             let px_h = ring_rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "textbox".to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -1409,7 +1395,7 @@ impl WidgetDefinition for TextboxWidget {
             let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
             let px_w = node.rect.width * viewport.cell_w;
             let px_h = node.rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "textbox".to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -1490,7 +1476,7 @@ impl WidgetDefinition for TextboxWidget {
                     viewport.cell_w.max(1.0),
                 );
                 if width > 0.0 {
-                    prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                         rect: Rect {
                             row: node.rect.row + TEXT_PADDING_V + line_idx as f32 * line_height,
                             col: x0,
@@ -1509,8 +1495,8 @@ impl WidgetDefinition for TextboxWidget {
             .take(max_lines)
             .enumerate()
         {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: node.rect.row + TEXT_PADDING_V + line_idx as f32 * line_height,
                     col: node.rect.col + TEXT_PADDING_H,
                     align_width: 0.0,
@@ -1548,7 +1534,7 @@ impl WidgetDefinition for TextboxWidget {
                 width: 0.08,
                 height: (line_height - 0.1).max(0.2),
             };
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: cursor_rect,
                 color: cursor_color,
             }));
@@ -1571,7 +1557,6 @@ mod tests {
         assert_eq!(selection_range(&state), Some((0, 8)));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn render_pass_populates_char_cache_on_measure_miss() {
         struct FixedMeasurer;

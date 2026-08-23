@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::{
-    CellBuffer, Constraints, LayoutNode, MeasureCtx, MetalPrimitive, Rect, Size, WidgetViewport,
+    CellBuffer, Constraints, LayoutNode, MeasureCtx, GpuPrimitive, Rect, Size, WidgetViewport,
 };
 use crate::parser::Expression;
 use crate::vm::Value;
@@ -105,14 +105,12 @@ pub fn current_sdf_time_fallback_seconds() -> f32 {
     SDF_TIME_ORIGIN.with(|origin| origin.elapsed().as_secs_f32())
 }
 
-#[cfg(target_os = "macos")]
 pub fn note_sdf_frame_presented(time_seconds: f32) {
     SDF_LAST_PRESENTED_TIME_SECONDS.with(|slot| {
         *slot.borrow_mut() = Some(time_seconds.max(0.0));
     });
 }
 
-#[cfg(target_os = "macos")]
 pub fn sdf_visual_animations_active(time_seconds: f32) -> bool {
     let deadline_active =
         SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| time_seconds < *deadline.borrow());
@@ -128,7 +126,6 @@ pub fn sdf_visual_animations_active(time_seconds: f32) -> bool {
     })
 }
 
-#[cfg(target_os = "macos")]
 pub fn sdf_visual_animation_debug_status(time_seconds: f32) -> Option<(usize, usize, f32)> {
     let deadline_remaining =
         SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| *deadline.borrow() - time_seconds);
@@ -512,7 +509,6 @@ pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
 }
 
-#[cfg(target_os = "macos")]
 pub fn sdf_widget_registry_generation() -> u64 {
     SDF_WIDGET_REGISTRY_GENERATION.load(Ordering::Relaxed)
 }
@@ -543,14 +539,14 @@ pub fn sdf_widget_tui_render(
 }
 
 /// Build the material overlay layer (Layer 2) for a slider with a :material shader.
-/// Packs state uniforms and returns the overlay MetalPrimitive.
+/// Packs state uniforms and returns the overlay GpuPrimitive.
 pub fn build_material_overlay(
     node: &LayoutNode,
     def: &SdfWidgetDef,
     shader_type: &str,
     viewport: WidgetViewport,
     value_t: f32,
-) -> MetalPrimitive {
+) -> GpuPrimitive {
     let paint_rect = sdf_widget_paint_rect(node.rect, def.paint_margin);
     let (ndc_min, ndc_max) = super::ndc_bounds(paint_rect, viewport);
     let logical_uv = sdf_widget_logical_uv_bounds(node.rect, paint_rect);
@@ -582,7 +578,7 @@ pub fn build_material_overlay(
     let px_h = node.rect.height * viewport.cell_h;
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
 
-    MetalPrimitive::WidgetInstance {
+    GpuPrimitive::WidgetInstance {
         widget_type: shader_type.to_string(),
         instance: super::WidgetInstance {
             ndc_min,
@@ -780,12 +776,11 @@ pub fn estimate_shadow_paint_margin(expr: &Expression, width: f32, height: f32) 
 }
 
 /// Build Metal primitives for an SDF widget.
-#[cfg(target_os = "macos")]
 pub fn sdf_widget_metal_primitives(
     widget_type: &str,
     node: &LayoutNode,
     viewport: WidgetViewport,
-) -> Vec<MetalPrimitive> {
+) -> Vec<GpuPrimitive> {
     use super::{WidgetInstance, ndc_bounds};
 
     let def = match sdf_widget_def(widget_type) {
@@ -829,7 +824,7 @@ pub fn sdf_widget_metal_primitives(
         }
     }
 
-    vec![MetalPrimitive::WidgetInstance {
+    vec![GpuPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -859,14 +854,13 @@ pub fn sdf_widget_metal_primitives(
 
 /// Build Metal primitives for an SDF widget used as a container background.
 /// Uses the container's rect instead of the widget's own rect.
-#[cfg(target_os = "macos")]
 pub fn sdf_widget_background_primitives(
     widget_type: &str,
     widget_id: u64,
     rect: Rect,
     viewport: WidgetViewport,
     props: &HashMap<String, Value>,
-) -> Vec<MetalPrimitive> {
+) -> Vec<GpuPrimitive> {
     use super::{WidgetInstance, ndc_bounds};
 
     let def = match sdf_widget_def(widget_type) {
@@ -908,7 +902,7 @@ pub fn sdf_widget_background_primitives(
         }
     }
 
-    vec![MetalPrimitive::WidgetInstance {
+    vec![GpuPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -941,7 +935,6 @@ pub fn sdf_widget_background_primitives(
 }
 
 /// Collect shader sources for all registered SDF widgets.
-#[cfg(target_os = "macos")]
 pub fn sdf_widget_shader_sources() -> Vec<(String, String)> {
     SDF_WIDGETS.with(|w| {
         w.borrow()
@@ -1143,10 +1136,9 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn background_primitives_apply_paint_margin() {
-        use super::super::{MetalPrimitive, WidgetViewport};
+        use super::super::{GpuPrimitive, WidgetViewport};
 
         register_sdf_widget(SdfWidgetDef {
             name: "sdf-background-margin".to_string(),
@@ -1189,7 +1181,7 @@ mod tests {
             &HashMap::new(),
         );
 
-        let MetalPrimitive::WidgetInstance { instance, .. } = &prims[0] else {
+        let GpuPrimitive::WidgetInstance { instance, .. } = &prims[0] else {
             panic!("expected widget instance");
         };
         for (actual, expected) in instance

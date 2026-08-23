@@ -2963,12 +2963,12 @@ mod tests {
             inherited_hover: false,
         };
         let (primitives, _) =
-            crate::widget_render::collect_metal_primitives(layout, viewport, 0.0, 24);
+            crate::widget_render::collect_gpu_primitives(layout, viewport, 0.0, 24);
         let selected_bg = crate::theme::WIDGET_FOCUS_BG();
         primitives
             .iter()
             .filter(|primitive| {
-                let crate::widget_render::MetalPrimitive::WidgetInstance {
+                let crate::widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..

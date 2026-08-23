@@ -15,13 +15,10 @@ use crate::layout::{
 };
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    GpuPrimitive, GpuProportionalTextPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
-#[cfg(target_os = "macos")]
 use crate::theme;
 
 // ── Tree state ───────────────────────────────────────────────────────────────
@@ -688,7 +685,6 @@ impl WidgetDefinition for TreeWidget {
         &["tree"]
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(TREE_CHEVRON_SHADER)
     }
@@ -1134,13 +1130,12 @@ impl WidgetDefinition for TreeWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
         let widget_key = tree_state_key(node);
@@ -1213,7 +1208,7 @@ impl WidgetDefinition for TreeWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(row_rect, _viewport);
                 let px_w = row_rect.width * _viewport.cell_w;
                 let px_h = row_rect.height * _viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "tree-row".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -1252,7 +1247,7 @@ impl WidgetDefinition for TreeWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(chevron_rect, _viewport);
                 let px_w = chevron_rect.width * _viewport.cell_w;
                 let px_h = chevron_rect.height * _viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "tree".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -1316,7 +1311,7 @@ impl WidgetDefinition for TreeWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(icon_rect, _viewport);
                 let px_w = icon_rect.width * _viewport.cell_w;
                 let px_h = icon_rect.height * _viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "button-icon".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -1352,8 +1347,8 @@ impl WidgetDefinition for TreeWidget {
             let label_max_chars =
                 (label_available_width / LABEL_APPROX_CHAR_WIDTH).floor() as usize;
             let label_text = truncate_with_ellipsis(&row.label, label_max_chars);
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: text_y,
                     col: label_x,
                     align_width: 0.0,
@@ -1372,8 +1367,8 @@ impl WidgetDefinition for TreeWidget {
 
             if let Some((detail, detail_width, detail_col)) = detail_layout {
                 if detail_col > label_x {
-                    prims.push(MetalPrimitive::ProportionalText(
-                        MetalProportionalTextPrimitive {
+                    prims.push(GpuPrimitive::ProportionalText(
+                        GpuProportionalTextPrimitive {
                             row: text_y,
                             col: detail_col,
                             align_width: detail_width,
@@ -1441,7 +1436,6 @@ impl WidgetDefinition for TreeRowBgWidget {
         None
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(super::ROUNDED_RECT_SHADER)
     }
@@ -1449,7 +1443,6 @@ impl WidgetDefinition for TreeRowBgWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
 const TREE_CHEVRON_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {

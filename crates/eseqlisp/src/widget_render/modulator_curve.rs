@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
+    CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -88,18 +88,16 @@ impl WidgetDefinition for ModulatorCurveWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(MODULATOR_CURVE_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let max_ms = prop_num(&node.props, "max-ms", 5000.0).max(1.0);
         let rise_t = normalized_time_ms(prop_num(&node.props, "rise", 0.0), max_ms);
         let fall_t = normalized_time_ms(prop_num(&node.props, "fall", 0.0), max_ms);
@@ -129,7 +127,7 @@ impl WidgetDefinition for ModulatorCurveWidget {
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
 
-        vec![MetalPrimitive::WidgetInstance {
+        vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -153,7 +151,6 @@ impl WidgetDefinition for ModulatorCurveWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
 const MODULATOR_CURVE_SHADER: &str = r#"
 float mc_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;

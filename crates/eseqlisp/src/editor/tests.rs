@@ -6716,7 +6716,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         .filter(|primitive| {
             matches!(
                 primitive,
-                crate::widget_render::MetalPrimitive::WidgetInstance { widget_type, .. }
+                crate::widget_render::GpuPrimitive::WidgetInstance { widget_type, .. }
                     if widget_type == "knob-number"
             )
         })
@@ -6724,7 +6724,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     let range_uniforms = primitives
         .iter()
         .filter_map(|primitive| match primitive {
-            crate::widget_render::MetalPrimitive::WidgetInstance {
+            crate::widget_render::GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 ..
@@ -6735,7 +6735,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     let text = primitives
         .iter()
         .filter_map(|primitive| match primitive {
-            crate::widget_render::MetalPrimitive::ProportionalText(text) => {
+            crate::widget_render::GpuPrimitive::ProportionalText(text) => {
                 Some(text.text.as_str())
             }
             _ => None,
@@ -8218,7 +8218,7 @@ fn dropdown_overlay_captures_move_and_mouse_up_without_selecting_the_tile_below(
     }
 
     assert_eq!(editor.active_tile, transport_tile);
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &transport_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -12378,7 +12378,7 @@ fn register_active_layout_overlays(editor: &mut Editor) {
     // space, so the tile's live scroll has to reach the collector.
     let scroll_left = editor.widget_layout_scroll_left();
     let scroll_top = editor.total_scroll_top();
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -12847,7 +12847,7 @@ fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
 
     // Re-register the overlay entry from the panel tile's layout, as its
     // live frame collection does each draw.
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &panel_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -12931,7 +12931,7 @@ fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
     assert!((prop("_frame_height") - 30.0).abs() < 0.01);
 
     // Register the resized inactive tile's overlay as the backend does.
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &panel_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,
@@ -13062,7 +13062,7 @@ fn inactive_modal_close_button_still_dispatches_after_resize() {
     let button = find_widget_of_type(&panel_layout, "button")
         .expect("close button")
         .clone();
-    let _ = crate::widget_render::collect_metal_primitives(
+    let _ = crate::widget_render::collect_gpu_primitives(
         &panel_layout,
         crate::widget_render::WidgetViewport {
             cell_w: 10.0,

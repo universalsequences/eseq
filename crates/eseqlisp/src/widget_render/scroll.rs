@@ -8,8 +8,7 @@ use crate::layout::{
 };
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, WidgetInstance, WidgetViewport, ndc_bounds};
+use super::{GpuPrimitive, WidgetInstance, WidgetViewport, ndc_bounds};
 
 // ── Scroll state ─────────────────────────────────────────────────────────────
 
@@ -326,18 +325,16 @@ impl WidgetDefinition for ScrollWidget {
         Some(WidgetEvent::Custom(Value::Nil))
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(SCROLL_FRAGMENT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let state = sync_node_state(node);
         let content_height = state.content_height;
         let viewport_height = state.viewport_height;
@@ -364,7 +361,7 @@ impl WidgetDefinition for ScrollWidget {
         let scroll_ratio = state.offset_y / max_scroll;
         let thumb_ratio = (viewport_height / content_height).clamp(0.05, 1.0);
 
-        vec![MetalPrimitive::WidgetInstance {
+        vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -393,7 +390,6 @@ impl WidgetDefinition for ScrollWidget {
 
 // ── Metal shader ─────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
 const SCROLL_FRAGMENT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {

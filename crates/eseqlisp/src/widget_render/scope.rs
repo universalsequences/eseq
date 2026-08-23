@@ -4,8 +4,7 @@ use super::live_audio::{
     LiveAudioSourceSelector, TapPoint, source_from_props, tap_point_from_props,
 };
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
@@ -131,13 +130,12 @@ impl WidgetDefinition for ScopeWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let request = request_from_props(&node.props);
         let sample_count = (node.rect.width * 4.0).round().clamp(32.0, 512.0) as usize;
         let samples = sampled_values(&request.data_key, sample_count);
@@ -151,7 +149,7 @@ impl WidgetDefinition for ScopeWidget {
             "waveform-color",
             Color::rgba(0.25, 0.9, 0.72, 1.0),
         );
-        let mut primitives = vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: background,
         })];
@@ -163,7 +161,7 @@ impl WidgetDefinition for ScopeWidget {
             let x1 = node.rect.col + node.rect.width * index as f32 / (samples.len() - 1) as f32;
             let y0 = top + (1.0 - (samples[index - 1] + 1.0) * 0.5) * plot_height;
             let y1 = top + (1.0 - (samples[index] + 1.0) * 0.5) * plot_height;
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: y0.min(y1),
                     col: x0,

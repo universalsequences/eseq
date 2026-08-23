@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive,
+    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
     WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -354,13 +354,12 @@ impl WidgetDefinition for LabelWidget {
         tui_render(props, rect, buf);
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &crate::layout::LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let Some(Value::String(text)) = node.props.get("text") else {
             return Vec::new();
         };
@@ -384,7 +383,7 @@ impl WidgetDefinition for LabelWidget {
             .unwrap_or(DEFAULT_FONT_SIZE);
         let mut prims = Vec::new();
         if !bg_transparent {
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }));
@@ -400,8 +399,8 @@ impl WidgetDefinition for LabelWidget {
             if row >= node.rect.row + node.rect.height {
                 break;
             }
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row,
                     col: node.rect.col,
                     align_width: node.rect.width,

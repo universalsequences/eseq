@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
-    get_f32_prop, metal_widget_instance, ndc_bounds, styled_cell,
+    CellBuffer, EventOutput, GpuPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
+    get_f32_prop, gpu_widget_instance, ndc_bounds, styled_cell,
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
@@ -14,7 +14,6 @@ pub struct KnobWidget;
 
 pub static KNOB_WIDGET: KnobWidget = KnobWidget;
 
-#[cfg(target_os = "macos")]
 const KNOB_FRAGMENT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -240,22 +239,20 @@ impl WidgetDefinition for KnobWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(KNOB_FRAGMENT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
-        metal_widget_instance(
+        gpu_widget_instance(
             widget_type,
             super::WidgetInstance {
                 ndc_min,

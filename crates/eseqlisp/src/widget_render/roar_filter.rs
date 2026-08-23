@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
+    CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -165,18 +165,16 @@ impl WidgetDefinition for RoarFilterWidget {
         false
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(ROAR_FILTER_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let display = display_from_props(&node.props);
         let bg_color = resolve_named_color(
             &node.props,
@@ -196,7 +194,7 @@ impl WidgetDefinition for RoarFilterWidget {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
         let px_h = node.rect.height * viewport.cell_h;
-        vec![MetalPrimitive::WidgetInstance {
+        vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -221,7 +219,6 @@ impl WidgetDefinition for RoarFilterWidget {
 }
 
 // Dual-maintained with `filter_magnitude` above.
-#[cfg(target_os = "macos")]
 const ROAR_FILTER_SHADER: &str = r#"
 float roarFilterMagnitude(int filterType, float cutoff, float res, float freq)
 {

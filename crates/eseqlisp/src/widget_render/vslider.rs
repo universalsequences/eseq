@@ -2,11 +2,10 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
-#[cfg(target_os = "macos")]
 use super::sdf_widget;
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
-    WidgetDefinition, WidgetEvent, get_f32_prop, mapped_haptic_value, metal_widget_instance,
+    CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, MouseEventOutcome,
+    WidgetDefinition, WidgetEvent, get_f32_prop, mapped_haptic_value, gpu_widget_instance,
     ndc_bounds, plock_active, plock_color, resolve_named_color, should_trigger_integer_haptic,
     styled_cell, trigger_level_change_haptic,
 };
@@ -170,7 +169,6 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-#[cfg(target_os = "macos")]
 const VSLIDER_FRAGMENT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -330,18 +328,16 @@ impl WidgetDefinition for VerticalSliderWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(VSLIDER_FRAGMENT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         if !items(&node.props).is_empty() {
             let font_size = node
                 .props
@@ -354,8 +350,8 @@ impl WidgetDefinition for VerticalSliderWidget {
             let mut prims = Vec::new();
             render_item_chars(&node.props, node.rect, |row, col, ch, fg| {
                 if ch != ' ' {
-                    prims.push(MetalPrimitive::ProportionalText(
-                        MetalProportionalTextPrimitive {
+                    prims.push(GpuPrimitive::ProportionalText(
+                        GpuProportionalTextPrimitive {
                             row: row as f32,
                             col: col as f32,
                             align_width: 0.0,
@@ -383,7 +379,7 @@ impl WidgetDefinition for VerticalSliderWidget {
         if let Some(Value::String(shader_type)) = node.props.get(sdf_widget::SHADER_TYPE_PROP) {
             if let Some(def) = sdf_widget::sdf_widget_def(shader_type) {
                 // Layer 1: dots only (value_t=0 hides flat fill)
-                let mut prims = metal_widget_instance(
+                let mut prims = gpu_widget_instance(
                     widget_type,
                     super::WidgetInstance {
                         ndc_min,
@@ -416,7 +412,7 @@ impl WidgetDefinition for VerticalSliderWidget {
         }
 
         // Default hardcoded shader path
-        metal_widget_instance(
+        gpu_widget_instance(
             widget_type,
             super::WidgetInstance {
                 ndc_min,

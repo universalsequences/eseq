@@ -9,8 +9,7 @@ use crate::vm::Value;
 use super::live_audio::{
     LiveAudioSourceSelector, TapPoint, prop_keyword, source_from_props, tap_point_from_props,
 };
-#[cfg(target_os = "macos")]
-use super::{MetalLiveSpectrogramPrimitive, MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuLiveSpectrogramPrimitive, GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 
 pub struct SpectrogramWidget;
 
@@ -57,7 +56,6 @@ pub struct SpectrogramRequest {
 }
 
 impl SpectrogramMode {
-    #[cfg(target_os = "macos")]
     fn metal_value(self) -> u32 {
         match self {
             SpectrogramMode::Waterfall => 0,
@@ -67,7 +65,6 @@ impl SpectrogramMode {
 }
 
 impl SpectrogramFreqScale {
-    #[cfg(target_os = "macos")]
     fn metal_value(self) -> u32 {
         match self {
             SpectrogramFreqScale::Log => 0,
@@ -138,24 +135,23 @@ impl WidgetDefinition for SpectrogramWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let request = request_from_props(&node.props);
         let mode = mode_from_props(&node.props);
         let freq_scale = freq_scale_from_props(&node.props);
         let (min_hz, max_hz) =
             display_hz_range(&node.props, DEFAULT_DISPLAY_MIN_HZ, DEFAULT_DISPLAY_MAX_HZ);
         vec![
-            MetalPrimitive::Rect(MetalRectPrimitive {
+            GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: background_color(&node.props),
             }),
-            MetalPrimitive::LiveSpectrogram(MetalLiveSpectrogramPrimitive {
+            GpuPrimitive::LiveSpectrogram(GpuLiveSpectrogramPrimitive {
                 rect: node.rect,
                 data_key: request.data_key,
                 mode: mode.metal_value(),
@@ -578,7 +574,6 @@ mod tests {
         assert!(collect_spectrogram_requests(&node).is_empty());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn emits_live_spectrogram_metal_primitive() {
         let node = layout_node(HashMap::new());
@@ -598,7 +593,7 @@ mod tests {
         let primitives = SPECTROGRAM_WIDGET.build_metal_primitives("spectrogram", &node, viewport);
         assert!(matches!(
             primitives.get(1),
-            Some(MetalPrimitive::LiveSpectrogram(_))
+            Some(GpuPrimitive::LiveSpectrogram(_))
         ));
     }
 }

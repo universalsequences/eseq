@@ -10,8 +10,7 @@ use std::collections::HashMap;
 
 use super::live_audio::{LiveAudioSourceSelector, source_from_props};
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, MetalRectPrimitive, MetalTrianglePrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuRectPrimitive, GpuTrianglePrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::live_audio::CompressorMeterFrame;
@@ -194,13 +193,12 @@ impl WidgetDefinition for CompressorDisplayWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let request = request_from_props(&node.props);
         let frame = crate::live_audio::compressor_meter_frame(&request.data_key);
         // One sample point per ~2.5 device pixels; the geometry below joins
@@ -231,7 +229,7 @@ impl WidgetDefinition for CompressorDisplayWidget {
         );
 
         let rect = node.rect;
-        let mut primitives = vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect,
             color: background,
         })];
@@ -252,11 +250,11 @@ impl WidgetDefinition for CompressorDisplayWidget {
             if p0[1] >= bottom - 0.01 && p1[1] >= bottom - 0.01 {
                 continue;
             }
-            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+            primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
                 points: [p0, p1, [p1[0], bottom]],
                 color: level_color,
             }));
-            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+            primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
                 points: [p0, [p1[0], bottom], [p0[0], bottom]],
                 color: level_color,
             }));
@@ -320,17 +318,17 @@ impl WidgetDefinition for CompressorDisplayWidget {
             ]));
         }
         for i in 1..values.len() {
-            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+            primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
                 points: [left[i - 1], left[i], right[i]],
                 color: gr_color,
             }));
-            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+            primitives.push(GpuPrimitive::Triangle(GpuTrianglePrimitive {
                 points: [left[i - 1], right[i], right[i - 1]],
                 color: gr_color,
             }));
         }
         // Threshold line.
-        primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+        primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
             rect: Rect {
                 row: rect.row + axis_norm(threshold) * rect.height,
                 col: rect.col,

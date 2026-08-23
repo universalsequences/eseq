@@ -8,14 +8,12 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetCursor, WidgetDefinition, WidgetEvent,
     styled_cell,
 };
-#[cfg(target_os = "macos")]
 use super::{
-    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalLiveSpectrogramPrimitive, MetalPrimitive,
-    MetalRectPrimitive, WidgetViewport, resolve_named_color,
+    GpuCirclePrimitive, GpuCircleVisibleHalf, GpuLiveSpectrogramPrimitive, GpuPrimitive,
+    GpuRectPrimitive, WidgetViewport, resolve_named_color,
 };
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
-#[cfg(target_os = "macos")]
 use crate::theme;
 use crate::vm::Value;
 
@@ -497,7 +495,6 @@ fn response_y_t(db: f32, min_db: f32, max_db: f32) -> f32 {
     ((db - min_db) / (max_db - min_db).max(0.001)).clamp(0.0, 1.0)
 }
 
-#[cfg(target_os = "macos")]
 fn color_with_alpha(color: Color, alpha: f32) -> Color {
     let [r, g, b, a] = color.to_rgba();
     Color::rgba(r, g, b, (a * alpha).clamp(0.0, 1.0))
@@ -694,13 +691,12 @@ impl WidgetDefinition for Eq8EditorWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let mut bands = prop_bands(&node.props);
         let table_response = table_response(&node.props);
         if let Some(live) = live_band(node.widget_id) {
@@ -732,11 +728,11 @@ impl WidgetDefinition for Eq8EditorWidget {
         let (min_hz, max_hz) =
             super::spectrogram::display_hz_range(&node.props, DEFAULT_FREQ_MIN, DEFAULT_FREQ_MAX);
         let mut primitives = vec![
-            MetalPrimitive::Rect(MetalRectPrimitive {
+            GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: background,
             }),
-            MetalPrimitive::LiveSpectrogram(MetalLiveSpectrogramPrimitive {
+            GpuPrimitive::LiveSpectrogram(GpuLiveSpectrogramPrimitive {
                 rect: node.rect,
                 data_key: spectrum.data_key,
                 mode: 1,
@@ -777,11 +773,11 @@ impl WidgetDefinition for Eq8EditorWidget {
             let y_t = response_y_t(db, min_db, max_db);
             for idx in 0..80 {
                 let x_t = idx as f32 / 79.0;
-                primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+                primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center: plot_point(node.rect, x_t, y_t),
                     radius_px: if db == 0.0 { 0.95 } else { 0.7 },
                     color: grid_color,
-                    visible_half: MetalCircleVisibleHalf::Full,
+                    visible_half: GpuCircleVisibleHalf::Full,
                 }));
             }
         }
@@ -790,11 +786,11 @@ impl WidgetDefinition for Eq8EditorWidget {
             let x_t = freq_to_t(freq, DEFAULT_FREQ_MIN, DEFAULT_FREQ_MAX);
             for idx in 0..32 {
                 let y_t = idx as f32 / 31.0;
-                primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+                primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center: plot_point(node.rect, x_t, y_t),
                     radius_px: 0.7,
                     color: grid_color,
-                    visible_half: MetalCircleVisibleHalf::Full,
+                    visible_half: GpuCircleVisibleHalf::Full,
                 }));
             }
         }
@@ -809,11 +805,11 @@ impl WidgetDefinition for Eq8EditorWidget {
                 .unwrap_or_else(|| combined_response_db(&bands, freq, sample_rate))
                 .clamp(min_db, max_db);
             let y_t = response_y_t(db, min_db, max_db);
-            primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                 center: plot_point(node.rect, x_t, y_t),
                 radius_px: 1.45,
                 color: curve_color,
-                visible_half: MetalCircleVisibleHalf::Full,
+                visible_half: GpuCircleVisibleHalf::Full,
             }));
         }
 
@@ -829,18 +825,18 @@ impl WidgetDefinition for Eq8EditorWidget {
             } else {
                 curve_color
             };
-            primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+            primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                 center,
                 radius_px: if band.selected { 12.0 } else { 10.0 },
                 color,
-                visible_half: MetalCircleVisibleHalf::Full,
+                visible_half: GpuCircleVisibleHalf::Full,
             }));
             if band.enabled && !band.selected {
-                primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+                primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center,
                     radius_px: 5.4,
                     color: color_with_alpha(background, 0.95),
-                    visible_half: MetalCircleVisibleHalf::Full,
+                    visible_half: GpuCircleVisibleHalf::Full,
                 }));
             }
           }
@@ -1071,7 +1067,6 @@ mod tests {
         assert!(high.magnitude_at(200.0) > high.magnitude_at(100.0) * 100.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn emits_spectrum_and_response_primitives() {
         let viewport = WidgetViewport {
@@ -1090,7 +1085,7 @@ mod tests {
         let primitives =
             EQ8_EDITOR_WIDGET.build_metal_primitives("eq8-editor", &layout_node(), viewport);
         let spectrogram = primitives.iter().find_map(|primitive| match primitive {
-            MetalPrimitive::LiveSpectrogram(spectrogram) => Some(spectrogram),
+            GpuPrimitive::LiveSpectrogram(spectrogram) => Some(spectrogram),
             _ => None,
         });
         let spectrogram = spectrogram.expect("eq8 editor should emit a live spectrum primitive");
@@ -1099,7 +1094,7 @@ mod tests {
         assert!(
             primitives
                 .iter()
-                .filter(|primitive| matches!(primitive, MetalPrimitive::Circle(_)))
+                .filter(|primitive| matches!(primitive, GpuPrimitive::Circle(_)))
                 .count()
                 >= RESPONSE_POINTS
         );

@@ -4,7 +4,7 @@ use std::{cell::RefCell, rc::Rc};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetCursor, WidgetDefinition,
+    CellBuffer, EventOutput, GpuPrimitive, MouseEventOutcome, WidgetCursor, WidgetDefinition,
     WidgetEvent, WidgetInstance, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -181,7 +181,6 @@ fn handle_insets(pixel_aspect: f32) -> (f32, f32) {
     )
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.0;
@@ -508,18 +507,16 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(RESPONSE_CURVE_EDITOR_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let live = live_band(node.widget_id);
         let bands: Vec<ResponseBand> = prop_bands(&node.props)
             .into_iter()
@@ -577,7 +574,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
             if !band.enabled {
                 continue;
             }
-            primitives.push(MetalPrimitive::WidgetInstance {
+            primitives.push(GpuPrimitive::WidgetInstance {
                 widget_type: widget_type.to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -606,7 +603,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         }
 
         if primitives.is_empty() {
-            primitives.push(MetalPrimitive::WidgetInstance {
+            primitives.push(GpuPrimitive::WidgetInstance {
                 widget_type: widget_type.to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -633,7 +630,6 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
 const RESPONSE_CURVE_EDITOR_SHADER: &str = r#"
 float rce_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;

@@ -6,14 +6,11 @@ use super::{CellBuffer, WidgetDefinition};
 use crate::layout::{Constraints, MeasureCtx, Size, f64_to_f32, get_prop_num};
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, WidgetInstance, WidgetViewport, get_f32_prop, metal_widget_instance,
+    GpuPrimitive, WidgetInstance, WidgetViewport, get_f32_prop, gpu_widget_instance,
     ndc_bounds, resolve_named_color,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
-#[cfg(target_os = "macos")]
 use crate::layout::{LayoutNode, Rect};
 
 pub struct SoundGlyphWidget;
@@ -38,7 +35,6 @@ pub fn source_key(props: &HashMap<String, Value>) -> Option<String> {
 /// palette, 2026-08-03) so every glyph surface — palette cards, mixer
 /// pattern cells — shares one look with zero props; any prop still overrides
 /// per call site for live tuning sessions.
-#[cfg(target_os = "macos")]
 const TUNING_PROPS: [(&str, f32); 16] = [
     // Height profile: the smoothstep window + power curve that turns the SDF
     // into the height field the finite-difference normals sample.
@@ -68,7 +64,6 @@ const TUNING_PROPS: [(&str, f32); 16] = [
     ("interior-width", 0.22),
 ];
 
-#[cfg(target_os = "macos")]
 fn tint_channel(props: &HashMap<String, Value>, name: &str, default: f32) -> f32 {
     match props.get(name) {
         Some(Value::Number(value)) => (*value as f32).clamp(0.0, 1.0),
@@ -76,7 +71,6 @@ fn tint_channel(props: &HashMap<String, Value>, name: &str, default: f32) -> f32
     }
 }
 
-#[cfg(target_os = "macos")]
 fn tuning(props: &HashMap<String, Value>) -> [f32; 16] {
     let mut packed = [0.0f32; 16];
     for (slot, (name, default)) in TUNING_PROPS.iter().enumerate() {
@@ -92,7 +86,6 @@ fn tuning(props: &HashMap<String, Value>) -> [f32; 16] {
 /// one float uniform. Sound-glyph already uses this representation for its
 /// lattice payload; unlike `itime`, this field participates in the retained
 /// primitive cache token, so live style changes cannot reuse stale colors.
-#[cfg(target_os = "macos")]
 fn pack_rgb24(color: Color) -> f32 {
     let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
     (channel(color.r) | (channel(color.g) << 8) | (channel(color.b) << 16)) as f32
@@ -137,18 +130,16 @@ impl WidgetDefinition for SoundGlyphWidget {
     ) {
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(DELTA_GLYPH_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let Some(source) = source_key(&node.props) else {
             return Vec::new();
         };
@@ -233,7 +224,7 @@ impl WidgetDefinition for SoundGlyphWidget {
             .round() as u32;
         let frame_flags =
             u32::from(frame.anchor) | (u32::from(frame.incompatible) << 1) | (pixelate << 2);
-        metal_widget_instance(
+        gpu_widget_instance(
             widget_type,
             WidgetInstance {
                 ndc_min,
@@ -278,7 +269,6 @@ impl WidgetDefinition for SoundGlyphWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
 const DELTA_GLYPH_SHADER: &str = r#"
 // Geometry constants mirror sequencer::delta_glyph (spec §6). Radius and k are
 // FIXED: magnitude rides occupancy (which cells a piece claims) and luminance.
@@ -657,7 +647,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn play_style_resolves_live_numeric_props_and_color_into_shader_uniforms() {
         use std::cell::RefCell;
@@ -730,11 +719,11 @@ mod tests {
             scroll_left: 0.0,
             inherited_hover: false,
         };
-        let instance = |primitives: Vec<MetalPrimitive>| {
+        let instance = |primitives: Vec<GpuPrimitive>| {
             primitives
                 .into_iter()
                 .find_map(|primitive| match primitive {
-                    MetalPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                    GpuPrimitive::WidgetInstance { instance, .. } => Some(instance),
                     _ => None,
                 })
                 .expect("sound glyph shader instance")

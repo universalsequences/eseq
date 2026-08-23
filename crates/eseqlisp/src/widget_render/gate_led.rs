@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use super::live_audio::{LiveAudioSourceSelector, source_from_props};
 use super::{
-    CellBuffer, MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPrimitive, WidgetDefinition,
+    CellBuffer, GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPrimitive, WidgetDefinition,
     WidgetViewport, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -107,13 +107,12 @@ impl WidgetDefinition for GateLedWidget {
         );
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let request = request_from_props(&node.props);
         let (gate_on, env) = read_gate_env(&request.data_key);
         let on_color =
@@ -148,17 +147,17 @@ impl WidgetDefinition for GateLedWidget {
             off_color
         };
         vec![
-            MetalPrimitive::Circle(MetalCirclePrimitive {
+            GpuPrimitive::Circle(GpuCirclePrimitive {
                 center,
                 radius_px: outer_px,
                 color: bezel_color,
-                visible_half: MetalCircleVisibleHalf::Full,
+                visible_half: GpuCircleVisibleHalf::Full,
             }),
-            MetalPrimitive::Circle(MetalCirclePrimitive {
+            GpuPrimitive::Circle(GpuCirclePrimitive {
                 center,
                 radius_px: lamp_px,
                 color: lamp_color,
-                visible_half: MetalCircleVisibleHalf::Full,
+                visible_half: GpuCircleVisibleHalf::Full,
             }),
         ]
     }

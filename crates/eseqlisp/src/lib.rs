@@ -3886,7 +3886,7 @@ mod modal_layout_tests {
     #[test]
     fn open_modal_emits_overlay_primitives_beyond_a_short_tile() {
         use crate::widget_render::{
-            OverlayKind, WidgetViewport, clear_overlay, collect_metal_primitives, topmost_overlay,
+            OverlayKind, WidgetViewport, clear_overlay, collect_gpu_primitives, topmost_overlay,
         };
 
         clear_overlay();
@@ -3912,7 +3912,7 @@ mod modal_layout_tests {
             inherited_hover: false,
         };
 
-        let (tile_prims, overlay_prims) = collect_metal_primitives(&layout, viewport, 0.0, 8);
+        let (tile_prims, overlay_prims) = collect_gpu_primitives(&layout, viewport, 0.0, 8);
         assert!(
             !overlay_prims.is_empty(),
             "open modal must emit overlay primitives"
@@ -3928,7 +3928,7 @@ mod modal_layout_tests {
         let tile_text: Vec<String> = tile_prims
             .iter()
             .filter_map(|prim| match prim {
-                crate::widget_render::MetalPrimitive::ProportionalText(t) => Some(t.text.clone()),
+                crate::widget_render::GpuPrimitive::ProportionalText(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect();

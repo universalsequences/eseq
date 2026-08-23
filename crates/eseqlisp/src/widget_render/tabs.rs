@@ -305,13 +305,12 @@ impl WidgetDefinition for TabsWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<super::MetalPrimitive> {
+    ) -> Vec<super::GpuPrimitive> {
         let items = get_items(&node.props);
         if items.is_empty() {
             return Vec::new();
@@ -358,8 +357,8 @@ impl WidgetDefinition for TabsWidget {
 
             let label_len = label.chars().count() as f32;
             let text_pad = ((tab_width - label_len) / 2.0).max(0.0);
-            prims.push(super::MetalPrimitive::ProportionalText(
-                super::MetalProportionalTextPrimitive {
+            prims.push(super::GpuPrimitive::ProportionalText(
+                super::GpuProportionalTextPrimitive {
                     row: header_rect.row,
                     col: tab_col + text_pad,
                     align_width: 0.0,
@@ -374,7 +373,7 @@ impl WidgetDefinition for TabsWidget {
 
             if is_selected {
                 let underline_height = 0.15;
-                prims.push(super::MetalPrimitive::Quad(super::MetalQuadPrimitive {
+                prims.push(super::GpuPrimitive::Quad(super::GpuQuadPrimitive {
                     x: tab_col * viewport.cell_w,
                     y: (header_rect.row + header_h - underline_height) * viewport.cell_w,
                     width: tab_width * viewport.cell_w,

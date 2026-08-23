@@ -2,12 +2,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
-#[cfg(target_os = "macos")]
 use super::{
-    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPrimitive, MetalRectPrimitive,
+    GpuCirclePrimitive, GpuCircleVisibleHalf, GpuPrimitive, GpuRectPrimitive,
     WidgetInstance, WidgetViewport, get_f32_prop, ndc_bounds, resolve_named_color,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -63,7 +61,6 @@ fn prop_truthy(props: &std::collections::HashMap<String, Value>, key: &str) -> b
     }
 }
 
-#[cfg(target_os = "macos")]
 fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str) -> bool {
     match props.get(key) {
         Some(Value::Bool(value)) => *value,
@@ -73,7 +70,6 @@ fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str)
     }
 }
 
-#[cfg(target_os = "macos")]
 fn state_color_prop<'a>(
     props: &'a std::collections::HashMap<String, Value>,
     base_prop: &'a str,
@@ -230,7 +226,6 @@ fn box_drag_value(node: &LayoutNode, drag_type: &str) -> Value {
     Value::Map(map)
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
@@ -239,9 +234,8 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
     ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
-#[cfg(target_os = "macos")]
 fn push_rounded_rect(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: Color,
     viewport: WidgetViewport,
@@ -250,7 +244,7 @@ fn push_rounded_rect(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "box".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -273,7 +267,6 @@ fn push_rounded_rect(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn inset_rect(rect: Rect, inset_x: f32, inset_y: f32) -> Rect {
     Rect {
         row: rect.row + inset_y,
@@ -642,18 +635,16 @@ impl WidgetDefinition for BoxWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(super::ROUNDED_RECT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let mut prims = Vec::new();
         let corner_radius_px = match node.props.get("corner-radius") {
             Some(Value::Number(n)) => (*n as f32).max(0.0),
@@ -781,7 +772,7 @@ impl WidgetDefinition for BoxWidget {
                         ..node.rect
                     };
                     for rect in [top, bottom, left, right] {
-                        prims.push(MetalPrimitive::Rect(MetalRectPrimitive { rect, color }));
+                        prims.push(GpuPrimitive::Rect(GpuRectPrimitive { rect, color }));
                     }
                 }
             }
@@ -817,11 +808,11 @@ impl WidgetDefinition for BoxWidget {
                 (outer_px * 0.5, Color::rgba(0.02, 0.04, 0.025, 1.0)),
                 (inner_px * 0.5, Color::rgba(0.12, 0.95, 0.38, 1.0)),
             ] {
-                prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
+                prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center,
                     radius_px,
                     color,
-                    visible_half: MetalCircleVisibleHalf::Full,
+                    visible_half: GpuCircleVisibleHalf::Full,
                 }));
             }
         }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive,
+    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
     WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -86,13 +86,12 @@ impl WidgetDefinition for MixerMeterWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let level_l = get_f32_prop(&node.props, "level-l", 0.0).clamp(0.0, 1.0);
         let level_r = get_f32_prop(&node.props, "level-r", 0.0).clamp(0.0, 1.0);
         let label_color = resolve_named_color(&node.props, "label-color", theme::WIDGET_LABEL_FG());
@@ -113,7 +112,7 @@ impl WidgetDefinition for MixerMeterWidget {
         for si in 0..segments {
             let threshold = (segments - si) as f32 / segments as f32;
             let y = node.rect.row + si as f32 * (segment_h + segment_gap);
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: y,
                     col: node.rect.col,
@@ -122,7 +121,7 @@ impl WidgetDefinition for MixerMeterWidget {
                 },
                 color: meter_color(level_l, threshold),
             }));
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: y,
                     col: node.rect.col + bar_w + bar_gap,
@@ -135,8 +134,8 @@ impl WidgetDefinition for MixerMeterWidget {
 
         let label_col = node.rect.col + bar_w * 2.0 + bar_gap + label_gap;
         for (position, text) in LABELS {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: label_row(node.rect, position, font_height, label_top_inset),
                     col: label_col,
                     align_width: 0.0,
@@ -217,14 +216,14 @@ mod tests {
         let first_bar_row = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::Rect(rect) => Some(rect.rect.row),
+                GpuPrimitive::Rect(rect) => Some(rect.rect.row),
                 _ => None,
             })
             .unwrap();
         let top_label_row = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::ProportionalText(text) if text.text == "0" => Some(text.row),
+                GpuPrimitive::ProportionalText(text) if text.text == "0" => Some(text.row),
                 _ => None,
             })
             .unwrap();
@@ -283,11 +282,11 @@ mod tests {
             inherited_hover: false,
         };
 
-        let near_top_left_color = |prims: Vec<MetalPrimitive>| {
+        let near_top_left_color = |prims: Vec<GpuPrimitive>| {
             prims
                 .into_iter()
                 .filter_map(|prim| match prim {
-                    MetalPrimitive::Rect(rect) => Some(rect.color),
+                    GpuPrimitive::Rect(rect) => Some(rect.color),
                     _ => None,
                 })
                 .nth(2)

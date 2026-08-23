@@ -21772,7 +21772,7 @@
         let modal = find_modal(&layout).expect("open sound palette modal").clone();
 
         // Register the overlay entry exactly as a live frame draw would.
-        let _ = eseqlisp::widget_render::collect_metal_primitives(
+        let _ = eseqlisp::widget_render::collect_gpu_primitives(
             &layout,
             eseqlisp::widget_render::WidgetViewport {
                 cell_w: 10.0,
@@ -27053,7 +27053,7 @@
         let input_color = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                eseqlisp::widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -39838,14 +39838,14 @@
         }
         #[cfg(target_os = "macos")]
         fn knob_metal_instance_modes(node: &eseqlisp::layout::LayoutNode) -> Vec<f32> {
-            use eseqlisp::widget_render::MetalPrimitive;
+            use eseqlisp::widget_render::GpuPrimitive;
 
             let primitives =
                 eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport());
             primitives
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::WidgetInstance {
+                    GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         ..
@@ -39856,14 +39856,14 @@
         }
         #[cfg(target_os = "macos")]
         fn knob_mod_range_instance_count(node: &eseqlisp::layout::LayoutNode) -> usize {
-            use eseqlisp::widget_render::MetalPrimitive;
+            use eseqlisp::widget_render::GpuPrimitive;
 
             eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport())
                 .iter()
                 .filter(|primitive| {
                     matches!(
                         primitive,
-                        MetalPrimitive::WidgetInstance { widget_type, .. }
+                        GpuPrimitive::WidgetInstance { widget_type, .. }
                             if widget_type == "knob-number-mod-range"
                     )
                 })
@@ -39887,12 +39887,12 @@
         }
         #[cfg(target_os = "macos")]
         fn knob_proportional_texts(node: &eseqlisp::layout::LayoutNode) -> Vec<String> {
-            use eseqlisp::widget_render::MetalPrimitive;
+            use eseqlisp::widget_render::GpuPrimitive;
 
             eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport())
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::ProportionalText(text) => Some(text.text.clone()),
+                    GpuPrimitive::ProportionalText(text) => Some(text.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -45172,7 +45172,7 @@
 
         #[cfg(target_os = "macos")]
         {
-            use eseqlisp::widget_render::{MetalPrimitive, WidgetViewport};
+            use eseqlisp::widget_render::{GpuPrimitive, WidgetViewport};
 
             let viewport = WidgetViewport {
                 cell_w: 10.0,
@@ -45188,13 +45188,13 @@
                 inherited_hover: false,
             };
             let (primitives, _) =
-                eseqlisp::widget_render::collect_metal_primitives(&layout, viewport, 0.0, 18);
+                eseqlisp::widget_render::collect_gpu_primitives(&layout, viewport, 0.0, 18);
             let knob_instances = primitives
                 .iter()
                 .filter(|primitive| {
                     matches!(
                         primitive,
-                        MetalPrimitive::WidgetInstance { widget_type, .. }
+                        GpuPrimitive::WidgetInstance { widget_type, .. }
                             if widget_type == "knob-number"
                     )
                 })
@@ -45202,7 +45202,7 @@
             let knob_text = primitives
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+                    GpuPrimitive::ProportionalText(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .filter(|text| matches!(*text, "sweep" | "FM" | "body" | "drv"))
@@ -47923,7 +47923,7 @@
 
         #[cfg(target_os = "macos")]
         {
-            use eseqlisp::widget_render::{MetalPrimitive, WidgetViewport};
+            use eseqlisp::widget_render::{GpuPrimitive, WidgetViewport};
 
             let viewport = WidgetViewport {
                 cell_w: 10.0,
@@ -47958,11 +47958,11 @@
             }
 
             let (full_primitives, _) =
-                eseqlisp::widget_render::collect_metal_primitives(&layout, viewport, 0.0, 30);
+                eseqlisp::widget_render::collect_gpu_primitives(&layout, viewport, 0.0, 30);
             let full_bus_button_backgrounds = full_primitives
                 .iter()
                 .filter(|primitive| {
-                    let MetalPrimitive::WidgetInstance {
+                    let GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         is_background: true,
@@ -47983,13 +47983,13 @@
             );
 
             let bus_primitives =
-                eseqlisp::widget_render::collect_metal_primitives(bus_a_strip, viewport, 0.0, 30).0;
+                eseqlisp::widget_render::collect_gpu_primitives(bus_a_strip, viewport, 0.0, 30).0;
             let subtree_bus_button_backgrounds = bus_primitives
                 .iter()
                 .filter(|primitive| {
                     matches!(
                         primitive,
-                        MetalPrimitive::WidgetInstance {
+                        GpuPrimitive::WidgetInstance {
                             widget_type,
                             is_background: true,
                             ..

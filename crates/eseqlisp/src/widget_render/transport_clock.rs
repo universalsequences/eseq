@@ -7,8 +7,7 @@ use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32,
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, WidgetViewport};
 
 pub struct TransportClockWidget;
 pub static TRANSPORT_CLOCK_WIDGET: TransportClockWidget = TransportClockWidget;
@@ -76,13 +75,12 @@ impl WidgetDefinition for TransportClockWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let (bar, beat, sixteenth) = clock_parts(clock_sixteenth_position(&node.props));
         let font_size = get_f32_prop(&node.props, "font-size", 15.0);
         let fg = resolve_named_color(&node.props, "color", theme::WIDGET_LABEL_FG());
@@ -95,14 +93,14 @@ impl WidgetDefinition for TransportClockWidget {
         ];
         let mut prims = Vec::with_capacity(4);
         if !matches!(node.props.get("bg"), Some(Value::Keyword(k)) if k == "transparent") {
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }));
         }
         for (text, col, align_width) in columns {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row,
                     col,
                     align_width,

@@ -8,9 +8,7 @@ use crate::layout::{Constraints, MeasureCtx, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, MetalRectPrimitive, MetalWavetablePrimitive, WidgetViewport};
-#[cfg(target_os = "macos")]
+use super::{GpuPrimitive, GpuRectPrimitive, GpuWavetablePrimitive, WidgetViewport};
 use crate::layout::LayoutNode;
 
 pub struct WavetableViewerWidget;
@@ -245,19 +243,18 @@ impl WidgetDefinition for WavetableViewerWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let bg_color = resolve_named_color(
             &node.props,
             "background-color",
             Color::rgba(0.035, 0.038, 0.042, 1.0),
         );
-        let mut primitives = vec![MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
             color: bg_color,
         })];
@@ -302,7 +299,7 @@ impl WidgetDefinition for WavetableViewerWidget {
         );
 
         let magnitude = matches!(node.props.get("domain"), Some(Value::Keyword(value)) if value == "magnitude");
-        primitives.push(MetalPrimitive::Wavetable(MetalWavetablePrimitive {
+        primitives.push(GpuPrimitive::Wavetable(GpuWavetablePrimitive {
             rect: node.rect,
             bank_key,
             data: bank.data.clone(),

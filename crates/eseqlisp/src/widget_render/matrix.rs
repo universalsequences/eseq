@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
+    CellBuffer, EventOutput, GpuPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     WidgetInstance, WidgetViewport, bump_widget_state_generation, get_bool_prop, get_f32_prop,
     ndc_bounds, resolve_named_color, styled_cell,
 };
@@ -525,7 +525,6 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-#[cfg(target_os = "macos")]
 const MATRIX_FRAGMENT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -827,18 +826,16 @@ impl WidgetDefinition for MatrixWidget {
         super::AnimationFramePolicy::RuntimeState
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(MATRIX_FRAGMENT_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let rows = matrix_rows_from_props(&node.props);
         let cols = matrix_cols_from_props(&node.props);
         let matrix = parse_matrix_value(&node.props, rows, cols);
@@ -913,7 +910,7 @@ impl WidgetDefinition for MatrixWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
                 let px_w = cell_w * viewport.cell_w;
                 let px_h = cell_h * viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: widget_type.to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -1398,7 +1395,6 @@ mod tests {
         assert_eq!(output.args, vec![Value::Number(1.0), Value::Number(3.0)]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_primitives_use_shader_instances_for_antialiased_cells() {
         let mut props = HashMap::new();
@@ -1431,12 +1427,11 @@ mod tests {
         assert!(prims.iter().all(|prim| {
             matches!(
                 prim,
-                MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "matrix"
+                GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "matrix"
             )
         }));
     }
 
-    #[cfg(target_os = "macos")]
     fn test_viewport() -> WidgetViewport {
         WidgetViewport {
             cell_w: 10.0,
@@ -1453,7 +1448,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn empty_fill_color_overrides_the_disc_layer() {
         let mut props = HashMap::new();
@@ -1470,7 +1464,7 @@ mod tests {
         let node = matrix_node(props);
 
         let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
-        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+        let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
         assert_eq!(
@@ -1484,7 +1478,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn stroke_props_feed_uniforms_and_active_only_gates_empty_cells() {
         let mut props = HashMap::new();
@@ -1506,7 +1499,7 @@ mod tests {
         let instances: Vec<_> = prims
             .iter()
             .map(|prim| match prim {
-                MetalPrimitive::WidgetInstance { instance, .. } => instance,
+                GpuPrimitive::WidgetInstance { instance, .. } => instance,
                 _ => panic!("expected widget instance"),
             })
             .collect();
@@ -1521,7 +1514,6 @@ mod tests {
         assert_eq!(instances[1].uniform_b[1], 1.0, "non-zero cell draws stroke");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn stroke_defaults_off_without_a_stroke_color() {
         let mut props = HashMap::new();
@@ -1534,14 +1526,13 @@ mod tests {
         let node = matrix_node(props);
 
         let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
-        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+        let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
         assert_eq!(instance.uniform_b[1], 0.0);
         assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.0]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn pie_control_encodes_sign_in_uniform_and_color() {
         let mut props = HashMap::new();
@@ -1569,7 +1560,7 @@ mod tests {
         let instances: Vec<_> = prims
             .iter()
             .map(|prim| match prim {
-                MetalPrimitive::WidgetInstance { instance, .. } => instance,
+                GpuPrimitive::WidgetInstance { instance, .. } => instance,
                 _ => panic!("expected widget instance"),
             })
             .collect();
@@ -1593,7 +1584,6 @@ mod tests {
         assert_eq!(instances[2].value_t, 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn pie_control_emits_every_cell_on_the_full_grid() {
         // A 4x4 pie matrix must place all 16 cells on a 4x4 lattice — including
@@ -1624,7 +1614,7 @@ mod tests {
         let instances: Vec<_> = prims
             .iter()
             .filter_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                GpuPrimitive::WidgetInstance { instance, .. } => Some(instance),
                 _ => None,
             })
             .collect();
@@ -1646,7 +1636,6 @@ mod tests {
         assert_eq!(ys.len(), 4, "expected 4 distinct rows");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn non_pie_modes_leave_sign_uniform_neutral() {
         let mut props = HashMap::new();
@@ -1659,14 +1648,13 @@ mod tests {
         let node = matrix_node(props);
 
         let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
-        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+        let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
         assert_eq!(instance.uniform_a[0], 0.0);
         assert_eq!(instance.uniform_a[3], 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn grid_control_sets_square_alpha_shader_mode() {
         let mut props = HashMap::new();
@@ -1698,7 +1686,7 @@ mod tests {
         };
 
         let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, viewport);
-        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+        let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
         assert_eq!(instance.value_t, 0.5);

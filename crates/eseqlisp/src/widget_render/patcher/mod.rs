@@ -1010,8 +1010,7 @@ use text::{
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key};
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
-#[cfg(target_os = "macos")]
-use super::{MetalPrimitive, WidgetViewport};
+use super::{GpuPrimitive, WidgetViewport};
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_stable_widget_id,
 };
@@ -1557,13 +1556,12 @@ impl WidgetDefinition for PatcherWidget {
         true
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         render::build_metal_primitives_for_patcher(node, viewport)
     }
 }

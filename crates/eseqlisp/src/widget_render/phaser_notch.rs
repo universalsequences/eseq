@@ -11,10 +11,9 @@
 
 use std::collections::HashMap;
 
-#[cfg(target_os = "macos")]
-use super::MetalLiveSpectrogramPrimitive;
+use super::GpuLiveSpectrogramPrimitive;
 use super::{
-    CellBuffer, MetalPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
+    CellBuffer, GpuPrimitive, WidgetDefinition, WidgetInstance, WidgetViewport, ndc_bounds,
     resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -290,18 +289,16 @@ impl WidgetDefinition for PhaserNotchWidget {
         true
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(PHASER_NOTCH_SHADER)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let display = display_from_props(&node.props);
         let bg_color = resolve_named_color(
             &node.props,
@@ -327,8 +324,8 @@ impl WidgetDefinition for PhaserNotchWidget {
         let mut primitives = Vec::with_capacity(2);
         if display.mode == 0 {
             let spectrum = super::spectrogram::request_from_props(&node.props);
-            primitives.push(MetalPrimitive::LiveSpectrogram(
-                MetalLiveSpectrogramPrimitive {
+            primitives.push(GpuPrimitive::LiveSpectrogram(
+                GpuLiveSpectrogramPrimitive {
                     rect: node.rect,
                     data_key: spectrum.data_key,
                     mode: 1,
@@ -344,7 +341,7 @@ impl WidgetDefinition for PhaserNotchWidget {
                 },
             ));
         }
-        primitives.push(MetalPrimitive::WidgetInstance {
+        primitives.push(GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -384,7 +381,6 @@ impl WidgetDefinition for PhaserNotchWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
 const PHASER_NOTCH_SHADER: &str = r#"
 float phaserFlangerLfo(int shape, float phase)
 {

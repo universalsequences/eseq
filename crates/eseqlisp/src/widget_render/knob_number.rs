@@ -16,10 +16,9 @@ use crate::layout::{
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
 use super::{
-    FocusCornerStyle, FocusDecoration, MetalPrimitive, MetalProportionalTextPrimitive,
-    MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    FocusCornerStyle, FocusDecoration, GpuPrimitive, GpuProportionalTextPrimitive,
+    GpuRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -89,7 +88,6 @@ fn display_decimals(props: &HashMap<String, Value>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
     use std::rc::Rc;
 
     fn numeric_props(min: f64, max: f64, decimals: f64) -> HashMap<String, Value> {
@@ -242,12 +240,10 @@ mod tests {
         assert_eq!(new_value, 50.0);
     }
 
-    #[cfg(target_os = "macos")]
     fn value_cell(value: Value) -> Rc<RefCell<Value>> {
         Rc::new(RefCell::new(value))
     }
 
-    #[cfg(target_os = "macos")]
     fn mod_range(slot: f64, depth: f64) -> Value {
         Value::Map(HashMap::from([
             ("slot".to_string(), value_cell(Value::Number(slot))),
@@ -255,7 +251,6 @@ mod tests {
         ]))
     }
 
-    #[cfg(target_os = "macos")]
     fn test_viewport() -> WidgetViewport {
         WidgetViewport {
             cell_w: 10.0,
@@ -272,7 +267,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn test_knob_node(props: HashMap<String, Value>) -> LayoutNode {
         LayoutNode {
             widget_id: 42,
@@ -294,7 +288,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn assert_rect_contains(outer: Rect, inner: Rect) {
         let epsilon = 0.000_01;
         assert!(
@@ -315,7 +308,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn oversized_knob_is_clamped_inside_default_overlay_layout() {
         let mut node = test_knob_node(HashMap::from([
@@ -344,7 +336,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn knob_size_is_clamped_by_width_with_non_square_cells() {
         let mut node = test_knob_node(HashMap::from([
@@ -373,7 +364,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn short_overlay_layout_does_not_overlap_label_and_value_bands() {
         let mut node = test_knob_node(HashMap::from([
@@ -394,7 +384,6 @@ mod tests {
         assert!(label_band.row + label_band.height <= value_band.row);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn overlay_value_band_tracks_knob_bottom_instead_of_widget_bottom() {
         let mut node = test_knob_node(HashMap::from([
@@ -423,7 +412,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn wide_overlay_value_is_centered_in_the_lower_band() {
         let mut node = test_knob_node(HashMap::from([
@@ -456,7 +444,6 @@ mod tests {
         assert_eq!(layout.value_text_rect, layout.text_rect);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn wider_widget_can_keep_the_same_range_value_in_the_compact_pocket() {
         let mut node = test_knob_node(HashMap::from([
@@ -498,7 +485,6 @@ mod tests {
         assert_rect_contains(node.rect, wide.value_band.expect("value band"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn compact_value_pocket_starts_at_the_projected_45_degree_arc_endpoint() {
         let knob_rect = Rect {
@@ -524,7 +510,6 @@ mod tests {
         assert!(pocket.col + pocket.width <= text_rect.col + text_rect.width);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn hidden_value_does_not_require_a_compact_value_pocket() {
         let node = test_knob_node(HashMap::from([
@@ -540,7 +525,6 @@ mod tests {
         assert_rect_contains(node.rect, layout.label_band.expect("label band"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn pan_layout_uses_widest_range_endpoint_instead_of_current_value() {
         let mut props = numeric_props(-1.0, 1.0, 2.0);
@@ -568,7 +552,6 @@ mod tests {
         assert_eq!(positive.value_text_rect, negative.value_text_rect);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn centered_value_layout_contains_all_three_component_bands() {
         let node = test_knob_node(HashMap::from([
@@ -600,7 +583,6 @@ mod tests {
         assert_eq!(layout.value_h_align, 0.5);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn rich_mod_ranges_emit_base_knob_text_and_range_primitives() {
         let node = test_knob_node(HashMap::from([
@@ -626,7 +608,7 @@ mod tests {
         let base_instances = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -637,7 +619,7 @@ mod tests {
         let range_instances = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -648,7 +630,7 @@ mod tests {
         let text = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+                GpuPrimitive::ProportionalText(text) => Some(text.text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -665,7 +647,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_knob_receives_normalized_bipolar_origin() {
         let node = test_knob_node(HashMap::from([
@@ -680,7 +661,7 @@ mod tests {
         let instance = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -693,7 +674,6 @@ mod tests {
         assert_eq!(instance.uniform_a[3], 0.5);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn mod_range_arc_uses_display_domain_for_percent_depths() {
         let node = test_knob_node(HashMap::from([
@@ -716,7 +696,7 @@ mod tests {
         let range = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -729,7 +709,6 @@ mod tests {
         assert_eq!(range.uniform_b[2], 1.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn log_taper_places_mod_range_arcs_at_log_positions() {
         let node = test_knob_node(HashMap::from([
@@ -755,7 +734,7 @@ mod tests {
         let base = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -766,7 +745,7 @@ mod tests {
         let range = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -780,7 +759,6 @@ mod tests {
         assert!((range.uniform_b[2] - 1.0).abs() < 0.001);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn outer_mod_range_radius_keeps_stroke_inside_primitive_bounds() {
         let selected_radius = mod_range_ring_radius(0, true);
@@ -879,7 +857,6 @@ fn normalized_value_with_origin(props: &HashMap<String, Value>) -> (f32, f32) {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn value_as_f32(value: &Value) -> Option<f32> {
     let value = match value {
         Value::Number(n) => Some(*n as f32),
@@ -889,7 +866,6 @@ fn value_as_f32(value: &Value) -> Option<f32> {
     value.is_finite().then_some(value)
 }
 
-#[cfg(target_os = "macos")]
 fn map_f32(
     map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
     key: &str,
@@ -897,7 +873,6 @@ fn map_f32(
     map.get(key).and_then(|value| value_as_f32(&value.borrow()))
 }
 
-#[cfg(target_os = "macos")]
 fn mod_slot_color(slot: i32, selected: bool) -> Color {
     let mut color = match slot {
         1 => Color {
@@ -971,21 +946,18 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
     color
 }
 
-#[cfg(target_os = "macos")]
 fn mod_range_ring_half_width(selected: bool) -> f32 {
     // Keep these in sync with the Metal shader's halfWidth constants below;
     // CPU radius clamping relies on the same stroke width to stay in bounds.
     if selected { 0.056 } else { 0.040 }
 }
 
-#[cfg(target_os = "macos")]
 fn mod_range_ring_radius(range_index: usize, selected: bool) -> f32 {
     const OUTER_EDGE_MARGIN: f32 = 0.004;
     let preferred = (0.98 - (range_index.min(4) as f32 * 0.085)).max(0.64);
     preferred.min(1.0 - mod_range_ring_half_width(selected) - OUTER_EDGE_MARGIN)
 }
 
-#[cfg(target_os = "macos")]
 fn cache_font_metrics(
     font_size: f32,
     chars: &str,
@@ -1012,7 +984,6 @@ fn cache_font_metrics(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
     let fallback = font_size * 0.55 / cell_w.max(0.000_001);
     CHAR_WIDTHS.with(|cache| {
@@ -1028,7 +999,6 @@ fn text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn widest_range_display_text(
     props: &HashMap<String, Value>,
     decimals: u32,
@@ -1046,7 +1016,6 @@ fn widest_range_display_text(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn line_height_cells(font_size: f32, cell_h: f32) -> f32 {
     LINE_HEIGHTS.with(|cache| {
         cache
@@ -1057,7 +1026,6 @@ fn line_height_cells(font_size: f32, cell_h: f32) -> f32 {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn compact_overlay_value_text_rect(
     knob_rect: Rect,
     text_rect: Rect,
@@ -1092,7 +1060,6 @@ fn compact_overlay_value_text_rect(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn cursor_x_from_cache(
     text: &str,
     cursor_pos: usize,
@@ -1121,7 +1088,6 @@ fn cursor_x_from_cache(
     })
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug)]
 struct KnobNumberComponentLayout {
     knob_rect: Rect,
@@ -1134,7 +1100,6 @@ struct KnobNumberComponentLayout {
     value_h_align: f32,
 }
 
-#[cfg(target_os = "macos")]
 fn fit_font_size(
     text: &str,
     requested_font_size: f32,
@@ -1156,7 +1121,6 @@ fn fit_font_size(
     requested_font_size * width_scale.min(height_scale).min(1.0).max(0.0) * 0.98
 }
 
-#[cfg(target_os = "macos")]
 fn knob_number_component_layout(
     node: &LayoutNode,
     viewport: WidgetViewport,
@@ -1430,7 +1394,6 @@ impl WidgetDefinition for KnobNumberWidget {
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        #[cfg(target_os = "macos")]
         if let Some(measurer) = ctx.text_measurer {
             let font_size = get_prop_num(node, "font-size")
                 .map(f64_to_f32)
@@ -1686,12 +1649,10 @@ impl WidgetDefinition for KnobNumberWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn renders_own_focus(&self) -> bool {
         true
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
         match widget_type {
             "knob-number" => Some(KNOB_NUMBER_SHADER),
@@ -1700,7 +1661,6 @@ impl WidgetDefinition for KnobNumberWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
         FocusDecoration::Corners(FocusCornerStyle::new(resolve_named_color(
             &node.props,
@@ -1709,13 +1669,12 @@ impl WidgetDefinition for KnobNumberWidget {
         )))
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let value = quantized_value(&node.props, get_f32_prop(&node.props, "value", 0.0));
         let decimals = display_decimals(&node.props);
         let state = get_state(node.widget_id);
@@ -1816,7 +1775,7 @@ impl WidgetDefinition for KnobNumberWidget {
         } else {
             0.0
         };
-        let mut prims = vec![MetalPrimitive::WidgetInstance {
+        let mut prims = vec![GpuPrimitive::WidgetInstance {
             widget_type: widget_type.to_string(),
             instance: WidgetInstance {
                 ndc_min,
@@ -1898,7 +1857,7 @@ impl WidgetDefinition for KnobNumberWidget {
                 let end_t = taper_normalize(taper, base_min, base_max, base_value + depth);
                 let selected = slot == selected_slot;
                 let color = mod_slot_color(slot, selected);
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "knob-number-mod-range".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -1930,8 +1889,8 @@ impl WidgetDefinition for KnobNumberWidget {
         if let Some(label_band) = component_layout.label_band
             && component_layout.label_font_size >= 0.5
         {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: label_band.row + label_band.height * 0.5 - 0.5,
                     col: component_layout.text_rect.col,
                     align_width: component_layout.text_rect.width,
@@ -1953,8 +1912,8 @@ impl WidgetDefinition for KnobNumberWidget {
         if let Some(value_band) = component_layout.value_band
             && component_layout.value_font_size >= 0.5
         {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: value_band.row + value_band.height * 0.5 - 0.5,
                     col: component_layout.value_text_rect.col,
                     align_width: component_layout.value_text_rect.width,
@@ -2004,7 +1963,7 @@ impl WidgetDefinition for KnobNumberWidget {
                 component_layout.value_text_rect.col + component_layout.value_text_rect.width
                     - cursor_width,
             );
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: value_band.row + value_band.height * 0.08,
                     col: cursor_col,
@@ -2019,7 +1978,6 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 }
 
-#[cfg(target_os = "macos")]
 const KNOB_NUMBER_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -2077,7 +2035,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 }
 "#;
 
-#[cfg(target_os = "macos")]
 const KNOB_NUMBER_MOD_RANGE_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {

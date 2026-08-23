@@ -14,12 +14,10 @@ use crate::layout::{
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
 use super::{
-    FocusCornerStyle, FocusDecoration, MetalPrimitive, MetalProportionalTextPrimitive,
-    MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    FocusCornerStyle, FocusDecoration, GpuPrimitive, GpuProportionalTextPrimitive,
+    GpuRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -43,7 +41,6 @@ pub struct NumberPickerEditState {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     fn color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
         Value::List(
             [r, g, b, a]
@@ -53,7 +50,6 @@ mod tests {
         )
     }
 
-    #[cfg(target_os = "macos")]
     fn test_viewport() -> WidgetViewport {
         WidgetViewport {
             vp_w: 100.0,
@@ -70,7 +66,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn test_number_picker_node(props: HashMap<String, Value>) -> LayoutNode {
         LayoutNode {
             widget_id: 1,
@@ -151,7 +146,6 @@ mod tests {
         assert_eq!(quantize_value(0.63, 0.0, 1.0, step), 0.75);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn number_picker_metal_background_uses_button_surface_detail_colors() {
         let node = test_number_picker_node(HashMap::from([
@@ -173,7 +167,7 @@ mod tests {
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background: true,
@@ -189,7 +183,6 @@ mod tests {
         assert!(instance.corner_radius > 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn focused_noui_number_picker_uses_shared_focus_corners_only() {
         let rect = Rect {
@@ -208,10 +201,10 @@ mod tests {
         };
         let primitives =
             crate::widget_render::widget_primitives_for_node(&noui_node, focused_viewport);
-        let corners: Vec<&MetalRectPrimitive> = primitives
+        let corners: Vec<&GpuRectPrimitive> = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::ForegroundRect(corner) => Some(corner),
+                GpuPrimitive::ForegroundRect(corner) => Some(corner),
                 _ => None,
             })
             .collect();
@@ -238,7 +231,7 @@ mod tests {
         assert!(
             graphical_primitives
                 .iter()
-                .all(|primitive| !matches!(primitive, MetalPrimitive::ForegroundRect(_)))
+                .all(|primitive| !matches!(primitive, GpuPrimitive::ForegroundRect(_)))
         );
     }
 }
@@ -286,7 +279,6 @@ fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
     value * value_scale(props)
 }
 
-#[cfg(target_os = "macos")]
 fn number_picker_edit_color(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(
         props,
@@ -415,7 +407,6 @@ pub fn handle_number_picker_edit_key_for_widget(
 }
 
 /// Compute text X offset in cells by summing cached per-character widths.
-#[cfg(target_os = "macos")]
 fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f32) -> f32 {
     let key = font_size.to_bits();
     CHAR_WIDTHS.with(|cw| {
@@ -432,7 +423,6 @@ fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f3
     })
 }
 
-#[cfg(target_os = "macos")]
 fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
     props
         .get("background-color")
@@ -441,22 +431,18 @@ fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
         .unwrap_or_else(theme::DROPDOWN_BG)
 }
 
-#[cfg(target_os = "macos")]
 fn number_picker_border(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "border-color", theme::BUTTON_BORDER())
 }
 
-#[cfg(target_os = "macos")]
 fn number_picker_highlight(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "highlight-color", theme::BUTTON_HIGHLIGHT())
 }
 
-#[cfg(target_os = "macos")]
 fn number_picker_shadow(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
@@ -746,7 +732,6 @@ impl WidgetDefinition for NumberPickerWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn renders_own_focus(&self) -> bool {
         true
     }
@@ -759,7 +744,6 @@ impl WidgetDefinition for NumberPickerWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
         if !get_bool_prop(&node.props, "noui", false) {
             return FocusDecoration::None;
@@ -771,13 +755,12 @@ impl WidgetDefinition for NumberPickerWidget {
         )))
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let value = get_f32_prop(&node.props, "value", 0.0);
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
         let state = get_state(node.widget_id);
@@ -850,7 +833,7 @@ impl WidgetDefinition for NumberPickerWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(ring_rect, viewport);
                 let px_w = ring_rect.width * viewport.cell_w;
                 let px_h = ring_rect.height * viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "number-picker".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -878,7 +861,7 @@ impl WidgetDefinition for NumberPickerWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
                 let px_w = node.rect.width * viewport.cell_w;
                 let px_h = node.rect.height * viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "number-picker".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -914,7 +897,7 @@ impl WidgetDefinition for NumberPickerWidget {
                 let (ndc_min, ndc_max) = ndc_bounds(tri_rect, viewport);
                 let px_w = tri_rect.width * viewport.cell_w;
                 let px_h = tri_rect.height * viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
+                prims.push(GpuPrimitive::WidgetInstance {
                     widget_type: "number-picker-tri".to_string(),
                     instance: WidgetInstance {
                         ndc_min,
@@ -978,8 +961,8 @@ impl WidgetDefinition for NumberPickerWidget {
         };
 
         if !display_text.is_empty() {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: text_row,
                     col: text_col,
                     align_width: 0.0,
@@ -1005,7 +988,7 @@ impl WidgetDefinition for NumberPickerWidget {
                 width: 0.08,
                 height: node.rect.height - 0.3,
             };
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: cursor_rect,
                 color: cursor_color,
             }));
@@ -1018,7 +1001,7 @@ impl WidgetDefinition for NumberPickerWidget {
                 width: node.rect.width,
                 height: 0.06,
             };
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            prims.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: underline_rect,
                 color: if active { active_color } else { plock_color },
             }));
@@ -1030,7 +1013,6 @@ impl WidgetDefinition for NumberPickerWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
 const NUMBER_PICKER_TRI_SHADER: &str = r#"
 float number_picker_segment_distance(float2 p, float2 a, float2 b)
 {

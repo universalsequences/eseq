@@ -14,11 +14,9 @@ use crate::layout::{
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    GpuPrimitive, GpuProportionalTextPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
-#[cfg(target_os = "macos")]
 use crate::backend::Color;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -813,7 +811,6 @@ impl WidgetDefinition for DropdownWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
         match widget_type {
             "dropdown" | "menu-button" => Some(super::ROUNDED_RECT_SHADER),
@@ -822,13 +819,12 @@ impl WidgetDefinition for DropdownWidget {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         let selected = get_selected(&node.props);
         let options = get_options(&node.props);
         let action_menu = is_action_menu(&node.props);
@@ -911,8 +907,8 @@ impl WidgetDefinition for DropdownWidget {
 
         let text_row = trigger_text_row(&node.props, node.rect);
         if action_menu {
-            prims.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            prims.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: text_row,
                     col: node.rect.col,
                     align_width: node.rect.width,
@@ -936,9 +932,9 @@ impl WidgetDefinition for DropdownWidget {
             let selected_display =
                 truncate_text_to_width(&selected, text_clip_rect.width, font_size);
             if !selected_display.is_empty() && text_clip_rect.width > 0.0 {
-                prims.push(MetalPrimitive::PushClipRect(text_clip_rect));
-                prims.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                prims.push(GpuPrimitive::PushClipRect(text_clip_rect));
+                prims.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: text_row,
                         col: text_col,
                         align_width: 0.0,
@@ -950,7 +946,7 @@ impl WidgetDefinition for DropdownWidget {
                         bg: transparent,
                     },
                 ));
-                prims.push(MetalPrimitive::PopClipRect);
+                prims.push(GpuPrimitive::PopClipRect);
             }
 
             // ── Chevron badge + arrows ──
@@ -968,7 +964,7 @@ impl WidgetDefinition for DropdownWidget {
             let (ndc_min, ndc_max) = ndc_bounds(ch_rect, viewport);
             let px_w = ch_rect.width * viewport.cell_w;
             let px_h = ch_rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
+            prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "dropdown-chevron".to_string(),
                 instance: WidgetInstance {
                     ndc_min,
@@ -1065,7 +1061,7 @@ impl WidgetDefinition for DropdownWidget {
                 border_color,
                 viewport,
             );
-            super::push_overlay_primitive(MetalPrimitive::PushClipRect(menu_rect));
+            super::push_overlay_primitive(GpuPrimitive::PushClipRect(menu_rect));
 
             // Menu items — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
@@ -1101,8 +1097,8 @@ impl WidgetDefinition for DropdownWidget {
 
                 // Check mark for selected item
                 if !action_menu && sel_idx == Some(i) {
-                    super::push_overlay_primitive(MetalPrimitive::ProportionalText(
-                        MetalProportionalTextPrimitive {
+                    super::push_overlay_primitive(GpuPrimitive::ProportionalText(
+                        GpuProportionalTextPrimitive {
                             row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
                             col: label_col,
                             align_width: 0.0,
@@ -1122,8 +1118,8 @@ impl WidgetDefinition for DropdownWidget {
                 if option_display.is_empty() {
                     continue;
                 }
-                super::push_overlay_primitive(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                super::push_overlay_primitive(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
                         col: item_text_col,
                         align_width: 0.0,
@@ -1136,7 +1132,7 @@ impl WidgetDefinition for DropdownWidget {
                     },
                 ));
             }
-            super::push_overlay_primitive(MetalPrimitive::PopClipRect);
+            super::push_overlay_primitive(GpuPrimitive::PopClipRect);
 
             // Scrollbar indicator (when content is taller than visible area)
             if needs_scrollbar {
@@ -1181,7 +1177,6 @@ impl WidgetDefinition for DropdownWidget {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     // The shared shader's radius is normalized to half the primitive height.
     // Converting from pixels keeps dropdown corners intentional across widths,
@@ -1194,9 +1189,8 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
     ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
-#[cfg(target_os = "macos")]
 fn emit_rounded_rect(
-    prims: &mut Vec<MetalPrimitive>,
+    prims: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: Color,
     viewport: WidgetViewport,
@@ -1206,7 +1200,7 @@ fn emit_rounded_rect(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    prims.push(MetalPrimitive::WidgetInstance {
+    prims.push(GpuPrimitive::WidgetInstance {
         widget_type: "dropdown".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -1231,7 +1225,6 @@ fn emit_rounded_rect(
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
 const DROPDOWN_CHEVRON_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -1435,7 +1428,6 @@ mod tests {
         assert!(geometry.max_scroll > 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn open_menu_emits_a_finite_overlay_beyond_a_short_tile() {
         let widget_id = 91_337;
@@ -1493,7 +1485,7 @@ mod tests {
         assert!(matches!(outcome, MouseEventOutcome::Consume));
 
         let (_tile_primitives, overlay_primitives) =
-            crate::widget_render::collect_metal_primitives(&node, viewport, 0.0, 2);
+            crate::widget_render::collect_gpu_primitives(&node, viewport, 0.0, 2);
         let overlay_rect =
             super::super::get_overlay_rect().expect("open dropdown should register hit bounds");
 

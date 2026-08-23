@@ -647,8 +647,8 @@ vertex WidgetVaryings widget_vert(
                 .unwrap_or_else(|err| panic!("wavetable shader failed to compile: {err:?}"));
         }
 
-        fn prop_text_run(text: &str) -> widget_render::MetalProportionalTextPrimitive {
-            widget_render::MetalProportionalTextPrimitive {
+        fn prop_text_run(text: &str) -> widget_render::GpuProportionalTextPrimitive {
+            widget_render::GpuProportionalTextPrimitive {
                 row: 2.0,
                 col: 3.0,
                 align_width: 8.0,
@@ -1621,7 +1621,7 @@ fragment float4 live_spectrogram_frag(
 
     impl ProportionalTextVertexKey {
         fn new(
-            run: &widget_render::MetalProportionalTextPrimitive,
+            run: &widget_render::GpuProportionalTextPrimitive,
             mono_cell_w: f32,
             mono_cell_h: f32,
             vp_w: f32,
@@ -1697,7 +1697,7 @@ fragment float4 live_spectrogram_frag(
 
         fn layout_for_run(
             &mut self,
-            run: &widget_render::MetalProportionalTextPrimitive,
+            run: &widget_render::GpuProportionalTextPrimitive,
             prop_atlas: &mut ProportionalGlyphAtlas,
         ) -> Option<&CachedProportionalTextLayout> {
             let key = ProportionalTextLayoutKey {
@@ -1782,7 +1782,7 @@ fragment float4 live_spectrogram_frag(
         last_used_frame: u64,
     }
 
-    struct OffsetMetalPrimitiveRun {
+    struct OffsetGpuPrimitiveRun {
         widget_id: u64,
         widget_type: String,
         ancestor_widget_ids: Vec<u64>,
@@ -1935,13 +1935,13 @@ fragment float4 live_spectrogram_frag(
 
     #[derive(Clone)]
     struct CachedWidgetScene {
-        primitives: Vec<widget_render::MetalPrimitive>,
+        primitives: Vec<widget_render::GpuPrimitive>,
     }
 
     #[derive(Clone)]
     struct CachedWidgetRunScene {
-        runs: Vec<widget_render::MetalPrimitiveRun>,
-        run_indices: widget_render::MetalPrimitiveRunIndex,
+        runs: Vec<widget_render::GpuPrimitiveRun>,
+        run_indices: widget_render::GpuPrimitiveRunIndex,
     }
 
     struct ImageTextureResource {
@@ -2051,25 +2051,25 @@ fragment float4 live_spectrogram_frag(
         )
     }
 
-    fn primitive_run_supported_for_cache(primitives: &[widget_render::MetalPrimitive]) -> bool {
+    fn primitive_run_supported_for_cache(primitives: &[widget_render::GpuPrimitive]) -> bool {
         !primitives.is_empty()
             && primitives.iter().all(|primitive| {
                 matches!(
                     widget_render::innermost_primitive(primitive),
-                    widget_render::MetalPrimitive::Rect(_)
-                        | widget_render::MetalPrimitive::ForegroundRect(_)
-                        | widget_render::MetalPrimitive::Quad(_)
-                        | widget_render::MetalPrimitive::Triangle(_)
-                        | widget_render::MetalPrimitive::GlyphRun(_)
-                        | widget_render::MetalPrimitive::ProportionalText(_)
-                        | widget_render::MetalPrimitive::Circle(_)
-                        | widget_render::MetalPrimitive::WidgetInstance { .. }
+                    widget_render::GpuPrimitive::Rect(_)
+                        | widget_render::GpuPrimitive::ForegroundRect(_)
+                        | widget_render::GpuPrimitive::Quad(_)
+                        | widget_render::GpuPrimitive::Triangle(_)
+                        | widget_render::GpuPrimitive::GlyphRun(_)
+                        | widget_render::GpuPrimitive::ProportionalText(_)
+                        | widget_render::GpuPrimitive::Circle(_)
+                        | widget_render::GpuPrimitive::WidgetInstance { .. }
                 )
             })
     }
 
     fn widget_run_or_ancestor_dirty(
-        run: &OffsetMetalPrimitiveRun,
+        run: &OffsetGpuPrimitiveRun,
         dirty_widget_ids: &[u64],
     ) -> bool {
         dirty_widget_ids.contains(&run.widget_id)
@@ -2134,24 +2134,24 @@ fragment float4 live_spectrogram_frag(
                 .is_some_and(|definition| definition.animates)
     }
 
-    fn hash_metal_primitive(primitive: &widget_render::MetalPrimitive, hasher: &mut DefaultHasher) {
+    fn hash_metal_primitive(primitive: &widget_render::GpuPrimitive, hasher: &mut DefaultHasher) {
         match primitive {
-            widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
+            widget_render::GpuPrimitive::ZLayer { z_index, primitive } => {
                 0u8.hash(hasher);
                 z_index.hash(hasher);
                 hash_metal_primitive(primitive, hasher);
             }
-            widget_render::MetalPrimitive::Rect(rect) => {
+            widget_render::GpuPrimitive::Rect(rect) => {
                 1u8.hash(hasher);
                 hash_rect(rect.rect, hasher);
                 hash_color(rect.color, hasher);
             }
-            widget_render::MetalPrimitive::ForegroundRect(rect) => {
+            widget_render::GpuPrimitive::ForegroundRect(rect) => {
                 2u8.hash(hasher);
                 hash_rect(rect.rect, hasher);
                 hash_color(rect.color, hasher);
             }
-            widget_render::MetalPrimitive::Quad(quad) => {
+            widget_render::GpuPrimitive::Quad(quad) => {
                 3u8.hash(hasher);
                 hash_f32(quad.x, hasher);
                 hash_f32(quad.y, hasher);
@@ -2159,14 +2159,14 @@ fragment float4 live_spectrogram_frag(
                 hash_f32(quad.height, hasher);
                 hash_color(quad.color, hasher);
             }
-            widget_render::MetalPrimitive::Triangle(triangle) => {
+            widget_render::GpuPrimitive::Triangle(triangle) => {
                 4u8.hash(hasher);
                 for point in triangle.points {
                     hash_f32_array(point, hasher);
                 }
                 hash_color(triangle.color, hasher);
             }
-            widget_render::MetalPrimitive::GlyphRun(run) => {
+            widget_render::GpuPrimitive::GlyphRun(run) => {
                 5u8.hash(hasher);
                 hash_f32(run.row, hasher);
                 run.col.hash(hasher);
@@ -2174,7 +2174,7 @@ fragment float4 live_spectrogram_frag(
                 hash_color(run.fg, hasher);
                 hash_color(run.bg, hasher);
             }
-            widget_render::MetalPrimitive::ProportionalText(run) => {
+            widget_render::GpuPrimitive::ProportionalText(run) => {
                 6u8.hash(hasher);
                 hash_f32(run.row, hasher);
                 hash_f32(run.col, hasher);
@@ -2186,14 +2186,14 @@ fragment float4 live_spectrogram_frag(
                 hash_color(run.fg, hasher);
                 hash_color(run.bg, hasher);
             }
-            widget_render::MetalPrimitive::Circle(circle) => {
+            widget_render::GpuPrimitive::Circle(circle) => {
                 7u8.hash(hasher);
                 hash_f32_array(circle.center, hasher);
                 hash_f32(circle.radius_px, hasher);
                 hash_color(circle.color, hasher);
                 std::mem::discriminant(&circle.visible_half).hash(hasher);
             }
-            widget_render::MetalPrimitive::WidgetInstance {
+            widget_render::GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 is_background,
@@ -2203,7 +2203,7 @@ fragment float4 live_spectrogram_frag(
                 is_background.hash(hasher);
                 hash_widget_instance(widget_type, instance, hasher);
             }
-            widget_render::MetalPrimitive::Wavetable(wavetable) => {
+            widget_render::GpuPrimitive::Wavetable(wavetable) => {
                 9u8.hash(hasher);
                 hash_rect(wavetable.rect, hasher);
                 wavetable.bank_key.hash(hasher);
@@ -2216,12 +2216,12 @@ fragment float4 live_spectrogram_frag(
                 hash_color(wavetable.inactive_color, hasher);
                 hash_color(wavetable.bg_color, hasher);
             }
-            widget_render::MetalPrimitive::PatchCable(_)
-            | widget_render::MetalPrimitive::Waveform(_)
-            | widget_render::MetalPrimitive::LiveSpectrogram(_)
-            | widget_render::MetalPrimitive::Image(_)
-            | widget_render::MetalPrimitive::PushClipRect(_)
-            | widget_render::MetalPrimitive::PopClipRect => {
+            widget_render::GpuPrimitive::PatchCable(_)
+            | widget_render::GpuPrimitive::Waveform(_)
+            | widget_render::GpuPrimitive::LiveSpectrogram(_)
+            | widget_render::GpuPrimitive::Image(_)
+            | widget_render::GpuPrimitive::PushClipRect(_)
+            | widget_render::GpuPrimitive::PopClipRect => {
                 255u8.hash(hasher);
             }
         }
@@ -2230,7 +2230,7 @@ fragment float4 live_spectrogram_frag(
     fn widget_run_cache_key(
         widget_id: u64,
         widget_type: &str,
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -2589,15 +2589,15 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn refresh_widget_scene_time(
-            primitives: &mut [widget_render::MetalPrimitive],
+            primitives: &mut [widget_render::GpuPrimitive],
             time_seconds: f32,
         ) {
             for primitive in primitives {
-                if let widget_render::MetalPrimitive::ZLayer { primitive, .. } = primitive {
+                if let widget_render::GpuPrimitive::ZLayer { primitive, .. } = primitive {
                     Self::refresh_widget_scene_time(std::slice::from_mut(primitive), time_seconds);
                     continue;
                 }
-                if let widget_render::MetalPrimitive::WidgetInstance {
+                if let widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     ..
@@ -2665,13 +2665,13 @@ fragment float4 live_spectrogram_frag(
             scroll_top: f32,
             max_rows: u16,
         ) -> (
-            Vec<widget_render::MetalPrimitive>,
-            Vec<widget_render::MetalPrimitive>,
+            Vec<widget_render::GpuPrimitive>,
+            Vec<widget_render::GpuPrimitive>,
         ) {
             if widget_render::any_overlay_active() {
                 self.stats.note_widget_scene_overlay_bypass();
                 let (mut primitives, overlay) =
-                    widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
+                    widget_render::collect_gpu_primitives(layout, viewport, scroll_top, max_rows);
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
                 return (primitives, overlay);
@@ -2694,7 +2694,7 @@ fragment float4 live_spectrogram_frag(
                 let mut primitives = self
                     .cached_widget_run_scenes
                     .get(&cache_key)
-                    .map(|scene| widget_render::flatten_metal_primitive_runs(&scene.runs))
+                    .map(|scene| widget_render::flatten_gpu_primitive_runs(&scene.runs))
                     .unwrap_or_default();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
@@ -2724,7 +2724,7 @@ fragment float4 live_spectrogram_frag(
                 && let Some(scene) = self.cached_widget_run_scenes.get(&cache_key)
             {
                 self.stats.note_widget_scene_cache_hit();
-                let mut primitives = widget_render::flatten_metal_primitive_runs(&scene.runs);
+                let mut primitives = widget_render::flatten_gpu_primitive_runs(&scene.runs);
                 if self.cached_widget_scenes.len() >= 128 {
                     self.cached_widget_scenes.clear();
                     self.cached_widget_run_scenes.clear();
@@ -2757,8 +2757,8 @@ fragment float4 live_spectrogram_frag(
             }
 
             let (runs, overlay) =
-                widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows);
-            let mut primitives = widget_render::flatten_metal_primitive_runs(&runs);
+                widget_render::collect_gpu_primitive_runs(layout, viewport, scroll_top, max_rows);
+            let mut primitives = widget_render::flatten_gpu_primitive_runs(&runs);
             if self.cached_widget_scenes.len() >= 128 {
                 self.cached_widget_scenes.clear();
                 self.cached_widget_run_scenes.clear();
@@ -2771,7 +2771,7 @@ fragment float4 live_spectrogram_frag(
                     primitives: primitives.clone(),
                 },
             );
-            let run_indices = widget_render::build_metal_primitive_run_index(&runs);
+            let run_indices = widget_render::build_gpu_primitive_run_index(&runs);
             self.cached_widget_run_scenes
                 .insert(cache_key, CachedWidgetRunScene { runs, run_indices });
             Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
@@ -2787,7 +2787,7 @@ fragment float4 live_spectrogram_frag(
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
-            runs: &[widget_render::MetalPrimitiveRun],
+            runs: &[widget_render::GpuPrimitiveRun],
         ) {
             if widget_render::any_overlay_active() {
                 return;
@@ -2810,10 +2810,10 @@ fragment float4 live_spectrogram_frag(
                 self.widget_scene_last_keys.clear();
                 self.stats.note_widget_scene_cache_clear();
             }
-            let primitives = widget_render::flatten_metal_primitive_runs(runs);
+            let primitives = widget_render::flatten_gpu_primitive_runs(runs);
             self.cached_widget_scenes
                 .insert(cache_key, CachedWidgetScene { primitives });
-            let run_indices = widget_render::build_metal_primitive_run_index(runs);
+            let run_indices = widget_render::build_gpu_primitive_run_index(runs);
             self.cached_widget_run_scenes.insert(
                 cache_key,
                 CachedWidgetRunScene {
@@ -2832,7 +2832,7 @@ fragment float4 live_spectrogram_frag(
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
-        ) -> (u64, Vec<widget_render::MetalPrimitive>) {
+        ) -> (u64, Vec<widget_render::GpuPrimitive>) {
             let cache_parts = self.widget_scene_cache_parts(
                 owner_frame_key,
                 layout,
@@ -2868,10 +2868,10 @@ fragment float4 live_spectrogram_frag(
                     retained_stats.invalid_previous_runs,
                 );
                 if should_rebuild_full {
-                    let (runs, overlay) = widget_render::collect_metal_primitive_runs(
+                    let (runs, overlay) = widget_render::collect_gpu_primitive_runs(
                         layout, viewport, scroll_top, max_rows,
                     );
-                    scene.run_indices = widget_render::build_metal_primitive_run_index(&runs);
+                    scene.run_indices = widget_render::build_gpu_primitive_run_index(&runs);
                     scene.runs = runs;
                     return (cache_key, overlay);
                 }
@@ -2880,8 +2880,8 @@ fragment float4 live_spectrogram_frag(
 
             self.stats.note_widget_retained_run_collection_miss();
             let (runs, overlay) =
-                widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows);
-            let run_indices = widget_render::build_metal_primitive_run_index(&runs);
+                widget_render::collect_gpu_primitive_runs(layout, viewport, scroll_top, max_rows);
+            let run_indices = widget_render::build_gpu_primitive_run_index(&runs);
             if self.cached_widget_run_scenes.len() >= 128 {
                 self.cached_widget_scenes.clear();
                 self.cached_widget_run_scenes.clear();
@@ -2935,7 +2935,7 @@ fragment float4 live_spectrogram_frag(
 
         fn compile_simple_widget_run(
             &mut self,
-            primitives: &[widget_render::MetalPrimitive],
+            primitives: &[widget_render::GpuPrimitive],
             cell_w: f32,
             cell_h: f32,
             vp_w: f32,
@@ -3044,7 +3044,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             widget_id: u64,
             widget_type: &str,
-            primitives: &[widget_render::MetalPrimitive],
+            primitives: &[widget_render::GpuPrimitive],
             dirty_widget_ids: &[u64],
             cell_w: f32,
             cell_h: f32,
@@ -3159,7 +3159,7 @@ fragment float4 live_spectrogram_frag(
         fn draw_dynamic_widget_run_phase(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-            primitives: &[widget_render::MetalPrimitive],
+            primitives: &[widget_render::GpuPrimitive],
             phase: WidgetRunCommandPhase,
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             prop_atlas_texture: Option<&ProtocolObject<dyn MTLTexture>>,
@@ -3285,7 +3285,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             seg_scissor: MTLScissorRect,
-            seg_prims: &[widget_render::MetalPrimitive],
+            seg_prims: &[widget_render::GpuPrimitive],
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             cell_w: f32,
             cell_h: f32,
@@ -3489,9 +3489,9 @@ fragment float4 live_spectrogram_frag(
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             seg_scissor: MTLScissorRect,
             segment_range: Range<usize>,
-            offset_prims: &[widget_render::MetalPrimitive],
+            offset_prims: &[widget_render::GpuPrimitive],
             run_indices: &[usize],
-            offset_runs: &[OffsetMetalPrimitiveRun],
+            offset_runs: &[OffsetGpuPrimitiveRun],
             dirty_widget_ids: &[u64],
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             cell_w: f32,
@@ -3503,7 +3503,7 @@ fragment float4 live_spectrogram_frag(
         ) -> Duration {
             if offset_prims[segment_range.clone()]
                 .iter()
-                .any(|primitive| matches!(primitive, widget_render::MetalPrimitive::ZLayer { .. }))
+                .any(|primitive| matches!(primitive, widget_render::GpuPrimitive::ZLayer { .. }))
             {
                 self.stats.note_widget_run_cache_bypass_complex();
                 return self.draw_dynamic_segment_all(
@@ -4439,7 +4439,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-            primitives: &[widget_render::MetalWaveformPrimitive],
+            primitives: &[widget_render::GpuWaveformPrimitive],
             cell_w: f32,
             cell_h: f32,
             vp_w: f32,
@@ -4541,7 +4541,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-            primitives: &[widget_render::MetalWavetablePrimitive],
+            primitives: &[widget_render::GpuWavetablePrimitive],
             cell_w: f32,
             cell_h: f32,
             vp_w: f32,
@@ -4661,7 +4661,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-            primitives: &[widget_render::MetalLiveSpectrogramPrimitive],
+            primitives: &[widget_render::GpuLiveSpectrogramPrimitive],
             cell_w: f32,
             cell_h: f32,
             vp_w: f32,
@@ -4748,7 +4748,7 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-            images: &[widget_render::MetalImagePrimitive],
+            images: &[widget_render::GpuImagePrimitive],
             scissor: Option<MTLScissorRect>,
             load_budget: &mut usize,
             cell_w: f32,
@@ -4798,7 +4798,7 @@ fragment float4 live_spectrogram_frag(
 
         fn effective_image_rotation(
             &mut self,
-            image: &widget_render::MetalImagePrimitive,
+            image: &widget_render::GpuImagePrimitive,
             time_seconds: f32,
         ) -> f32 {
             const SEEK_SNAP_THRESHOLD_RADIANS: f32 = 1.0;
@@ -5160,7 +5160,7 @@ fragment float4 live_spectrogram_frag(
                                 offset_run_indices.push(run_index);
                                 offset_prims.push(offset);
                             }
-                            offset_runs.push(OffsetMetalPrimitiveRun {
+                            offset_runs.push(OffsetGpuPrimitiveRun {
                                 widget_id: run.widget_id,
                                 widget_type: run.widget_type.clone(),
                                 ancestor_widget_ids: run.ancestor_widget_ids.clone(),
@@ -5579,8 +5579,8 @@ fragment float4 live_spectrogram_frag(
                     } else {
                         theme::BUFFER_TAB_FG()
                     };
-                    tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
-                        widget_render::MetalProportionalTextPrimitive {
+                    tab_text_prims.push(widget_render::GpuPrimitive::ProportionalText(
+                        widget_render::GpuProportionalTextPrimitive {
                             row: tab.label_rect.row + (tab.label_rect.height - 1.0) * 0.5,
                             col: tab.label_rect.col,
                             align_width: tab.label_rect.width.max(0.0),
@@ -5599,8 +5599,8 @@ fragment float4 live_spectrogram_frag(
                     if tab.close_visible
                         && let Some(close_rect) = tab.close_rect
                     {
-                        tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
-                            widget_render::MetalProportionalTextPrimitive {
+                        tab_text_prims.push(widget_render::GpuPrimitive::ProportionalText(
+                            widget_render::GpuProportionalTextPrimitive {
                                 row: close_rect.row + (close_rect.height - 1.0) * 0.5 - 0.08,
                                 col: close_rect.col,
                                 align_width: close_rect.width.max(0.0),
@@ -7482,7 +7482,7 @@ fragment float4 live_spectrogram_frag(
     /// Build vertices for proportional text primitives.
     /// Each glyph is rendered as a separate quad with alpha blending.
     fn build_proportional_text_quads_cached(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         prop_atlas: &mut ProportionalGlyphAtlas,
         layout_cache: &mut ProportionalTextLayoutCache,
         stats: &mut RenderStats,
@@ -7496,7 +7496,7 @@ fragment float4 live_spectrogram_frag(
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
 
         for prim in primitives {
-            let widget_render::MetalPrimitive::ProportionalText(run) =
+            let widget_render::GpuPrimitive::ProportionalText(run) =
                 widget_render::innermost_primitive(prim)
             else {
                 continue;
@@ -7966,7 +7966,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn build_widget_primitive_quads(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         atlas: &mut GlyphAtlas,
         vp_w: f32,
         vp_h: f32,
@@ -7976,19 +7976,19 @@ fragment float4 live_spectrogram_frag(
         let mut verts = Vec::new();
         for primitive in primitives {
             match widget_render::innermost_primitive(primitive) {
-                widget_render::MetalPrimitive::Rect(rect) => {
+                widget_render::GpuPrimitive::Rect(rect) => {
                     push_solid_rect_vertices(
                         rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts,
                     );
                 }
-                widget_render::MetalPrimitive::ForegroundRect(_) => {}
-                widget_render::MetalPrimitive::Quad(quad) => {
+                widget_render::GpuPrimitive::ForegroundRect(_) => {}
+                widget_render::GpuPrimitive::Quad(quad) => {
                     push_solid_quad_vertices(*quad, cell_w, cell_h, vp_w, vp_h, &mut verts);
                 }
-                widget_render::MetalPrimitive::Triangle(triangle) => {
+                widget_render::GpuPrimitive::Triangle(triangle) => {
                     push_solid_triangle_vertices(*triangle, cell_w, cell_h, vp_w, vp_h, &mut verts);
                 }
-                widget_render::MetalPrimitive::GlyphRun(run) => {
+                widget_render::GpuPrimitive::GlyphRun(run) => {
                     for (idx, ch) in run.text.chars().enumerate() {
                         if ch == ' ' {
                             continue;
@@ -8010,24 +8010,24 @@ fragment float4 live_spectrogram_frag(
                     }
                 }
                 // Proportional text is rendered in a separate pass with its own atlas.
-                widget_render::MetalPrimitive::ProportionalText(_) => {}
-                widget_render::MetalPrimitive::PatchCable(_) => {}
-                widget_render::MetalPrimitive::Circle(_) => {}
-                widget_render::MetalPrimitive::Waveform(_) => {}
-                widget_render::MetalPrimitive::Wavetable(_) => {}
-                widget_render::MetalPrimitive::LiveSpectrogram(_) => {}
-                widget_render::MetalPrimitive::Image(_) => {}
-                widget_render::MetalPrimitive::WidgetInstance { .. } => {}
-                widget_render::MetalPrimitive::PushClipRect(_)
-                | widget_render::MetalPrimitive::PopClipRect
-                | widget_render::MetalPrimitive::ZLayer { .. } => {}
+                widget_render::GpuPrimitive::ProportionalText(_) => {}
+                widget_render::GpuPrimitive::PatchCable(_) => {}
+                widget_render::GpuPrimitive::Circle(_) => {}
+                widget_render::GpuPrimitive::Waveform(_) => {}
+                widget_render::GpuPrimitive::Wavetable(_) => {}
+                widget_render::GpuPrimitive::LiveSpectrogram(_) => {}
+                widget_render::GpuPrimitive::Image(_) => {}
+                widget_render::GpuPrimitive::WidgetInstance { .. } => {}
+                widget_render::GpuPrimitive::PushClipRect(_)
+                | widget_render::GpuPrimitive::PopClipRect
+                | widget_render::GpuPrimitive::ZLayer { .. } => {}
             }
         }
         verts
     }
 
     fn build_foreground_rect_quads(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -8035,7 +8035,7 @@ fragment float4 live_spectrogram_frag(
     ) -> Vec<Vertex> {
         let mut verts = Vec::new();
         for primitive in primitives {
-            let widget_render::MetalPrimitive::ForegroundRect(rect) =
+            let widget_render::GpuPrimitive::ForegroundRect(rect) =
                 widget_render::innermost_primitive(primitive)
             else {
                 continue;
@@ -8048,7 +8048,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn build_circle_quads(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -8056,7 +8056,7 @@ fragment float4 live_spectrogram_frag(
     ) -> Vec<Vertex> {
         let mut verts = Vec::new();
         for primitive in primitives {
-            let widget_render::MetalPrimitive::Circle(circle) =
+            let widget_render::GpuPrimitive::Circle(circle) =
                 widget_render::innermost_primitive(primitive)
             else {
                 continue;
@@ -8076,13 +8076,13 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn collect_image_primitives(
-        primitives: &[widget_render::MetalPrimitive],
-    ) -> Vec<widget_render::MetalImagePrimitive> {
+        primitives: &[widget_render::GpuPrimitive],
+    ) -> Vec<widget_render::GpuImagePrimitive> {
         primitives
             .iter()
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
-                    widget_render::MetalPrimitive::Image(image) => Some(image.clone()),
+                    widget_render::GpuPrimitive::Image(image) => Some(image.clone()),
                     _ => None,
                 },
             )
@@ -8090,13 +8090,13 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn collect_waveform_primitives(
-        primitives: &[widget_render::MetalPrimitive],
-    ) -> Vec<widget_render::MetalWaveformPrimitive> {
+        primitives: &[widget_render::GpuPrimitive],
+    ) -> Vec<widget_render::GpuWaveformPrimitive> {
         primitives
             .iter()
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
-                    widget_render::MetalPrimitive::Waveform(waveform) => Some(waveform.clone()),
+                    widget_render::GpuPrimitive::Waveform(waveform) => Some(waveform.clone()),
                     _ => None,
                 },
             )
@@ -8104,13 +8104,13 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn collect_wavetable_primitives(
-        primitives: &[widget_render::MetalPrimitive],
-    ) -> Vec<widget_render::MetalWavetablePrimitive> {
+        primitives: &[widget_render::GpuPrimitive],
+    ) -> Vec<widget_render::GpuWavetablePrimitive> {
         primitives
             .iter()
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
-                    widget_render::MetalPrimitive::Wavetable(wavetable) => Some(wavetable.clone()),
+                    widget_render::GpuPrimitive::Wavetable(wavetable) => Some(wavetable.clone()),
                     _ => None,
                 },
             )
@@ -8118,13 +8118,13 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn collect_live_spectrogram_primitives(
-        primitives: &[widget_render::MetalPrimitive],
-    ) -> Vec<widget_render::MetalLiveSpectrogramPrimitive> {
+        primitives: &[widget_render::GpuPrimitive],
+    ) -> Vec<widget_render::GpuLiveSpectrogramPrimitive> {
         primitives
             .iter()
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
-                    widget_render::MetalPrimitive::LiveSpectrogram(spectrogram) => {
+                    widget_render::GpuPrimitive::LiveSpectrogram(spectrogram) => {
                         Some(spectrogram.clone())
                     }
                     _ => None,
@@ -8134,7 +8134,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn collect_patch_cable_primitives(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         base_clip: MTLScissorRect,
         cell_w: f32,
         cell_h: f32,
@@ -8149,7 +8149,7 @@ fragment float4 live_spectrogram_frag(
         let mut cables = Vec::new();
         for primitive in primitives {
             match primitive {
-                widget_render::MetalPrimitive::PushClipRect(rect) => {
+                widget_render::GpuPrimitive::PushClipRect(rect) => {
                     let current = *clips.last().unwrap();
                     let nested = MTLScissorRect {
                         x: (rect.col * cell_w).max(0.0) as usize,
@@ -8159,13 +8159,13 @@ fragment float4 live_spectrogram_frag(
                     };
                     clips.push(intersect_scissor_rects(current, nested));
                 }
-                widget_render::MetalPrimitive::PopClipRect => {
+                widget_render::GpuPrimitive::PopClipRect => {
                     if clips.len() > 1 {
                         clips.pop();
                     }
                 }
                 _ => {
-                    if let widget_render::MetalPrimitive::PatchCable(cable) =
+                    if let widget_render::GpuPrimitive::PatchCable(cable) =
                         widget_render::innermost_primitive(primitive)
                         && let Some(instance) = patch_cable_draw_instance_from_primitive(
                             cable,
@@ -8185,7 +8185,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn patch_cable_draw_instance_from_primitive(
-        cable: &widget_render::MetalPatchCablePrimitive,
+        cable: &widget_render::GpuPatchCablePrimitive,
         clip: MTLScissorRect,
         cell_w: f32,
         cell_h: f32,
@@ -8653,7 +8653,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn image_vertices(
-        image: &widget_render::MetalImagePrimitive,
+        image: &widget_render::GpuImagePrimitive,
         image_w: u32,
         image_h: u32,
         cell_w: f32,
@@ -8743,7 +8743,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn image_intersects_scissor(
-        image: &widget_render::MetalImagePrimitive,
+        image: &widget_render::GpuImagePrimitive,
         scissor: MTLScissorRect,
         cell_w: f32,
         cell_h: f32,
@@ -8872,7 +8872,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn push_solid_quad_vertices(
-        quad: widget_render::MetalQuadPrimitive,
+        quad: widget_render::GpuQuadPrimitive,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -8903,7 +8903,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn push_solid_triangle_vertices(
-        triangle: widget_render::MetalTrianglePrimitive,
+        triangle: widget_render::GpuTrianglePrimitive,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -9020,7 +9020,7 @@ fragment float4 live_spectrogram_frag(
         cy: f32,
         radius: f32,
         color: Color,
-        visible_half: widget_render::MetalCircleVisibleHalf,
+        visible_half: widget_render::GpuCircleVisibleHalf,
         vp_w: f32,
         vp_h: f32,
     ) {
@@ -9028,9 +9028,9 @@ fragment float4 live_spectrogram_frag(
             return;
         }
         let segments = match visible_half {
-            widget_render::MetalCircleVisibleHalf::Full => 32usize,
-            widget_render::MetalCircleVisibleHalf::Top
-            | widget_render::MetalCircleVisibleHalf::Bottom => 16usize,
+            widget_render::GpuCircleVisibleHalf::Full => 32usize,
+            widget_render::GpuCircleVisibleHalf::Top
+            | widget_render::GpuCircleVisibleHalf::Bottom => 16usize,
         };
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
@@ -9043,11 +9043,11 @@ fragment float4 live_spectrogram_frag(
         };
         for i in 0..segments {
             let (start_angle, sweep) = match visible_half {
-                widget_render::MetalCircleVisibleHalf::Full => (0.0, std::f32::consts::TAU),
-                widget_render::MetalCircleVisibleHalf::Top => {
+                widget_render::GpuCircleVisibleHalf::Full => (0.0, std::f32::consts::TAU),
+                widget_render::GpuCircleVisibleHalf::Top => {
                     (std::f32::consts::PI, std::f32::consts::PI)
                 }
-                widget_render::MetalCircleVisibleHalf::Bottom => (0.0, std::f32::consts::PI),
+                widget_render::GpuCircleVisibleHalf::Bottom => (0.0, std::f32::consts::PI),
             };
             let a0 = start_angle + (i as f32 / segments as f32) * sweep;
             let a1 = start_angle + ((i + 1) as f32 / segments as f32) * sweep;
@@ -9509,17 +9509,17 @@ fragment float4 live_spectrogram_frag(
     /// Each segment gets an associated scissor rect. Clip rects are intersected with the
     /// current scissor (stacked) so nested scroll containers work correctly.
     fn split_prim_segments<'a>(
-        primitives: &'a [widget_render::MetalPrimitive],
+        primitives: &'a [widget_render::GpuPrimitive],
         base_scissor: MTLScissorRect,
         cell_w: f32,
         cell_h: f32,
-    ) -> Vec<(MTLScissorRect, &'a [widget_render::MetalPrimitive])> {
+    ) -> Vec<(MTLScissorRect, &'a [widget_render::GpuPrimitive])> {
         // Fast path: no clip rects at all
         let has_clips = primitives.iter().any(|p| {
             matches!(
                 p,
-                widget_render::MetalPrimitive::PushClipRect(_)
-                    | widget_render::MetalPrimitive::PopClipRect
+                widget_render::GpuPrimitive::PushClipRect(_)
+                    | widget_render::GpuPrimitive::PopClipRect
             )
         });
         if !has_clips {
@@ -9532,7 +9532,7 @@ fragment float4 live_spectrogram_frag(
 
         for (i, prim) in primitives.iter().enumerate() {
             match prim {
-                widget_render::MetalPrimitive::PushClipRect(rect) => {
+                widget_render::GpuPrimitive::PushClipRect(rect) => {
                     // Flush the current segment (excluding this marker)
                     if i > seg_start {
                         segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..i]));
@@ -9555,7 +9555,7 @@ fragment float4 live_spectrogram_frag(
                     scissor_stack.push(new_scissor);
                     seg_start = i + 1;
                 }
-                widget_render::MetalPrimitive::PopClipRect => {
+                widget_render::GpuPrimitive::PopClipRect => {
                     // Flush the current segment
                     if i > seg_start {
                         segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..i]));
@@ -9574,7 +9574,7 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn split_prim_segment_ranges(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
         base_scissor: MTLScissorRect,
         cell_w: f32,
         cell_h: f32,
@@ -9582,8 +9582,8 @@ fragment float4 live_spectrogram_frag(
         if !primitives.iter().any(|primitive| {
             matches!(
                 primitive,
-                widget_render::MetalPrimitive::PushClipRect(_)
-                    | widget_render::MetalPrimitive::PopClipRect
+                widget_render::GpuPrimitive::PushClipRect(_)
+                    | widget_render::GpuPrimitive::PopClipRect
             )
         }) {
             return vec![(base_scissor, 0..primitives.len())];
@@ -9595,7 +9595,7 @@ fragment float4 live_spectrogram_frag(
 
         for (i, prim) in primitives.iter().enumerate() {
             match prim {
-                widget_render::MetalPrimitive::PushClipRect(rect) => {
+                widget_render::GpuPrimitive::PushClipRect(rect) => {
                     if i > seg_start {
                         segments.push((*scissor_stack.last().unwrap(), seg_start..i));
                     }
@@ -9616,7 +9616,7 @@ fragment float4 live_spectrogram_frag(
                     scissor_stack.push(new_scissor);
                     seg_start = i + 1;
                 }
-                widget_render::MetalPrimitive::PopClipRect => {
+                widget_render::GpuPrimitive::PopClipRect => {
                     if i > seg_start {
                         segments.push((*scissor_stack.last().unwrap(), seg_start..i));
                     }
@@ -9633,18 +9633,18 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn z_ordered_primitive_layers(
-        primitives: &[widget_render::MetalPrimitive],
-    ) -> Vec<Vec<widget_render::MetalPrimitive>> {
+        primitives: &[widget_render::GpuPrimitive],
+    ) -> Vec<Vec<widget_render::GpuPrimitive>> {
         let has_layers = primitives
             .iter()
-            .any(|primitive| matches!(primitive, widget_render::MetalPrimitive::ZLayer { .. }));
+            .any(|primitive| matches!(primitive, widget_render::GpuPrimitive::ZLayer { .. }));
         if !has_layers {
             return vec![primitives.to_vec()];
         }
-        let mut buckets: BTreeMap<i32, Vec<widget_render::MetalPrimitive>> = BTreeMap::new();
+        let mut buckets: BTreeMap<i32, Vec<widget_render::GpuPrimitive>> = BTreeMap::new();
         for primitive in primitives {
             match primitive {
-                widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
+                widget_render::GpuPrimitive::ZLayer { z_index, primitive } => {
                     buckets
                         .entry(*z_index)
                         .or_default()
@@ -9673,7 +9673,7 @@ fragment float4 live_spectrogram_frag(
 
     /// Partition widget instances into background and foreground runs in a single pass.
     fn partition_widget_instance_runs(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
     ) -> (
         Vec<(String, Vec<WidgetInstance>)>,
         Vec<(String, Vec<WidgetInstance>)>,
@@ -9681,7 +9681,7 @@ fragment float4 live_spectrogram_frag(
         let mut bg_runs: Vec<(String, Vec<WidgetInstance>)> = Vec::new();
         let mut fg_runs: Vec<(String, Vec<WidgetInstance>)> = Vec::new();
         for primitive in primitives {
-            if let widget_render::MetalPrimitive::WidgetInstance {
+            if let widget_render::GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 is_background,
@@ -9705,12 +9705,12 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn contains_agent_instrument_stub_animation(
-        primitives: &[widget_render::MetalPrimitive],
+        primitives: &[widget_render::GpuPrimitive],
     ) -> bool {
         primitives.iter().any(|primitive| {
             matches!(
                 widget_render::innermost_primitive(primitive),
-                widget_render::MetalPrimitive::WidgetInstance { widget_type, .. }
+                widget_render::GpuPrimitive::WidgetInstance { widget_type, .. }
                     if is_agent_instrument_stub_animation_widget_type(widget_type)
             )
         })
@@ -9740,19 +9740,19 @@ fragment float4 live_spectrogram_frag(
     }
 
     fn extend_right_edge_primitive(
-        prim: widget_render::MetalPrimitive,
+        prim: widget_render::GpuPrimitive,
         layout_width: f32,
         extra_cols: f32,
         cell_w: f32,
         vp_w: f32,
-    ) -> widget_render::MetalPrimitive {
+    ) -> widget_render::GpuPrimitive {
         if extra_cols <= 0.001 || layout_width <= 0.0 {
             return prim;
         }
         let reaches_right = |right: f32| (right - layout_width).abs() <= 0.01;
         match prim {
-            widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
-                widget_render::MetalPrimitive::ZLayer {
+            widget_render::GpuPrimitive::ZLayer { z_index, primitive } => {
+                widget_render::GpuPrimitive::ZLayer {
                     z_index,
                     primitive: Box::new(extend_right_edge_primitive(
                         *primitive,
@@ -9763,76 +9763,76 @@ fragment float4 live_spectrogram_frag(
                     )),
                 }
             }
-            widget_render::MetalPrimitive::Rect(mut r) => {
+            widget_render::GpuPrimitive::Rect(mut r) => {
                 if reaches_right(r.rect.col + r.rect.width) {
                     r.rect.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::Rect(r)
+                widget_render::GpuPrimitive::Rect(r)
             }
-            widget_render::MetalPrimitive::ForegroundRect(mut r) => {
+            widget_render::GpuPrimitive::ForegroundRect(mut r) => {
                 if reaches_right(r.rect.col + r.rect.width) {
                     r.rect.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::ForegroundRect(r)
+                widget_render::GpuPrimitive::ForegroundRect(r)
             }
-            widget_render::MetalPrimitive::Quad(mut q) => {
+            widget_render::GpuPrimitive::Quad(mut q) => {
                 if reaches_right(q.x + q.width) {
                     q.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::Quad(q)
+                widget_render::GpuPrimitive::Quad(q)
             }
-            widget_render::MetalPrimitive::Triangle(mut t) => {
+            widget_render::GpuPrimitive::Triangle(mut t) => {
                 for point in &mut t.points {
                     if reaches_right(point[0]) {
                         point[0] += extra_cols;
                     }
                 }
-                widget_render::MetalPrimitive::Triangle(t)
+                widget_render::GpuPrimitive::Triangle(t)
             }
-            widget_render::MetalPrimitive::ProportionalText(mut p) => {
+            widget_render::GpuPrimitive::ProportionalText(mut p) => {
                 if p.align_width > 0.0 && reaches_right(p.col + p.align_width) {
                     p.align_width += extra_cols;
                 }
-                widget_render::MetalPrimitive::ProportionalText(p)
+                widget_render::GpuPrimitive::ProportionalText(p)
             }
-            widget_render::MetalPrimitive::PatchCable(mut c) => {
+            widget_render::GpuPrimitive::PatchCable(mut c) => {
                 if reaches_right(c.end[0]) {
                     c.end[0] += extra_cols;
                     c.control2[0] += extra_cols;
                 }
-                widget_render::MetalPrimitive::PatchCable(c)
+                widget_render::GpuPrimitive::PatchCable(c)
             }
-            widget_render::MetalPrimitive::Circle(mut c) => {
+            widget_render::GpuPrimitive::Circle(mut c) => {
                 if reaches_right(c.center[0]) {
                     c.center[0] += extra_cols;
                 }
-                widget_render::MetalPrimitive::Circle(c)
+                widget_render::GpuPrimitive::Circle(c)
             }
-            widget_render::MetalPrimitive::Waveform(mut w) => {
+            widget_render::GpuPrimitive::Waveform(mut w) => {
                 if reaches_right(w.rect.col + w.rect.width) {
                     w.rect.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::Waveform(w)
+                widget_render::GpuPrimitive::Waveform(w)
             }
-            widget_render::MetalPrimitive::Wavetable(mut w) => {
+            widget_render::GpuPrimitive::Wavetable(mut w) => {
                 if reaches_right(w.rect.col + w.rect.width) {
                     w.rect.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::Wavetable(w)
+                widget_render::GpuPrimitive::Wavetable(w)
             }
-            widget_render::MetalPrimitive::LiveSpectrogram(mut s) => {
+            widget_render::GpuPrimitive::LiveSpectrogram(mut s) => {
                 if reaches_right(s.rect.col + s.rect.width) {
                     s.rect.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::LiveSpectrogram(s)
+                widget_render::GpuPrimitive::LiveSpectrogram(s)
             }
-            widget_render::MetalPrimitive::Image(mut i) => {
+            widget_render::GpuPrimitive::Image(mut i) => {
                 if reaches_right(i.rect.col + i.rect.width) {
                     i.rect.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::Image(i)
+                widget_render::GpuPrimitive::Image(i)
             }
-            widget_render::MetalPrimitive::WidgetInstance {
+            widget_render::GpuPrimitive::WidgetInstance {
                 widget_type,
                 mut instance,
                 is_background,
@@ -9846,77 +9846,77 @@ fragment float4 live_spectrogram_frag(
                         instance.pixel_aspect *= new_width / old_width;
                     }
                 }
-                widget_render::MetalPrimitive::WidgetInstance {
+                widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background,
                 }
             }
-            widget_render::MetalPrimitive::PushClipRect(mut r) => {
+            widget_render::GpuPrimitive::PushClipRect(mut r) => {
                 if reaches_right(r.col + r.width) {
                     r.width += extra_cols;
                 }
-                widget_render::MetalPrimitive::PushClipRect(r)
+                widget_render::GpuPrimitive::PushClipRect(r)
             }
             other => other,
         }
     }
 
-    /// Offset a MetalPrimitive by (col_off, row_off) cells.
+    /// Offset a GpuPrimitive by (col_off, row_off) cells.
     /// For Rect/Quad/GlyphRun: shift cell coordinates.
     /// For WidgetInstance: shift NDC bounds using the pixel conversion.
-    /// Offset a MetalPrimitive by (col_off, row_off) cells (signed for scroll).
+    /// Offset a GpuPrimitive by (col_off, row_off) cells (signed for scroll).
     fn offset_primitive(
-        prim: widget_render::MetalPrimitive,
+        prim: widget_render::GpuPrimitive,
         col_off: f32,
         row_off: f32,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
-    ) -> widget_render::MetalPrimitive {
+    ) -> widget_render::GpuPrimitive {
         match prim {
-            widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
-                widget_render::MetalPrimitive::ZLayer {
+            widget_render::GpuPrimitive::ZLayer { z_index, primitive } => {
+                widget_render::GpuPrimitive::ZLayer {
                     z_index,
                     primitive: Box::new(offset_primitive(
                         *primitive, col_off, row_off, cell_w, cell_h, vp_w, vp_h,
                     )),
                 }
             }
-            widget_render::MetalPrimitive::Rect(mut r) => {
+            widget_render::GpuPrimitive::Rect(mut r) => {
                 r.rect.col += col_off;
                 r.rect.row += row_off;
-                widget_render::MetalPrimitive::Rect(r)
+                widget_render::GpuPrimitive::Rect(r)
             }
-            widget_render::MetalPrimitive::ForegroundRect(mut r) => {
+            widget_render::GpuPrimitive::ForegroundRect(mut r) => {
                 r.rect.col += col_off;
                 r.rect.row += row_off;
-                widget_render::MetalPrimitive::ForegroundRect(r)
+                widget_render::GpuPrimitive::ForegroundRect(r)
             }
-            widget_render::MetalPrimitive::Quad(mut q) => {
+            widget_render::GpuPrimitive::Quad(mut q) => {
                 q.x += col_off;
                 q.y += row_off;
-                widget_render::MetalPrimitive::Quad(q)
+                widget_render::GpuPrimitive::Quad(q)
             }
-            widget_render::MetalPrimitive::Triangle(mut t) => {
+            widget_render::GpuPrimitive::Triangle(mut t) => {
                 for point in &mut t.points {
                     point[0] += col_off;
                     point[1] += row_off;
                 }
-                widget_render::MetalPrimitive::Triangle(t)
+                widget_render::GpuPrimitive::Triangle(t)
             }
-            widget_render::MetalPrimitive::GlyphRun(mut g) => {
+            widget_render::GpuPrimitive::GlyphRun(mut g) => {
                 g.col += col_off.round() as i32;
                 g.row += row_off;
-                widget_render::MetalPrimitive::GlyphRun(g)
+                widget_render::GpuPrimitive::GlyphRun(g)
             }
-            widget_render::MetalPrimitive::ProportionalText(mut p) => {
+            widget_render::GpuPrimitive::ProportionalText(mut p) => {
                 p.col += col_off;
                 p.row += row_off;
-                widget_render::MetalPrimitive::ProportionalText(p)
+                widget_render::GpuPrimitive::ProportionalText(p)
             }
-            widget_render::MetalPrimitive::PatchCable(mut c) => {
+            widget_render::GpuPrimitive::PatchCable(mut c) => {
                 c.start[0] += col_off;
                 c.start[1] += row_off;
                 c.control1[0] += col_off;
@@ -9926,34 +9926,34 @@ fragment float4 live_spectrogram_frag(
                 c.end[0] += col_off;
                 c.end[1] += row_off;
                 c.segment_row += row_off;
-                widget_render::MetalPrimitive::PatchCable(c)
+                widget_render::GpuPrimitive::PatchCable(c)
             }
-            widget_render::MetalPrimitive::Circle(mut c) => {
+            widget_render::GpuPrimitive::Circle(mut c) => {
                 c.center[0] += col_off;
                 c.center[1] += row_off;
-                widget_render::MetalPrimitive::Circle(c)
+                widget_render::GpuPrimitive::Circle(c)
             }
-            widget_render::MetalPrimitive::Waveform(mut w) => {
+            widget_render::GpuPrimitive::Waveform(mut w) => {
                 w.rect.col += col_off;
                 w.rect.row += row_off;
-                widget_render::MetalPrimitive::Waveform(w)
+                widget_render::GpuPrimitive::Waveform(w)
             }
-            widget_render::MetalPrimitive::Wavetable(mut w) => {
+            widget_render::GpuPrimitive::Wavetable(mut w) => {
                 w.rect.col += col_off;
                 w.rect.row += row_off;
-                widget_render::MetalPrimitive::Wavetable(w)
+                widget_render::GpuPrimitive::Wavetable(w)
             }
-            widget_render::MetalPrimitive::LiveSpectrogram(mut s) => {
+            widget_render::GpuPrimitive::LiveSpectrogram(mut s) => {
                 s.rect.col += col_off;
                 s.rect.row += row_off;
-                widget_render::MetalPrimitive::LiveSpectrogram(s)
+                widget_render::GpuPrimitive::LiveSpectrogram(s)
             }
-            widget_render::MetalPrimitive::Image(mut i) => {
+            widget_render::GpuPrimitive::Image(mut i) => {
                 i.rect.col += col_off;
                 i.rect.row += row_off;
-                widget_render::MetalPrimitive::Image(i)
+                widget_render::GpuPrimitive::Image(i)
             }
-            widget_render::MetalPrimitive::WidgetInstance {
+            widget_render::GpuPrimitive::WidgetInstance {
                 widget_type,
                 mut instance,
                 is_background,
@@ -9964,19 +9964,19 @@ fragment float4 live_spectrogram_frag(
                 instance.ndc_max[0] += ndc_dx;
                 instance.ndc_min[1] += ndc_dy;
                 instance.ndc_max[1] += ndc_dy;
-                widget_render::MetalPrimitive::WidgetInstance {
+                widget_render::GpuPrimitive::WidgetInstance {
                     widget_type,
                     instance,
                     is_background,
                 }
             }
-            widget_render::MetalPrimitive::PushClipRect(mut r) => {
+            widget_render::GpuPrimitive::PushClipRect(mut r) => {
                 r.col += col_off;
                 r.row += row_off;
-                widget_render::MetalPrimitive::PushClipRect(r)
+                widget_render::GpuPrimitive::PushClipRect(r)
             }
-            widget_render::MetalPrimitive::PopClipRect => {
-                widget_render::MetalPrimitive::PopClipRect
+            widget_render::GpuPrimitive::PopClipRect => {
+                widget_render::GpuPrimitive::PopClipRect
             }
         }
     }
@@ -10184,7 +10184,7 @@ fragment float4 live_spectrogram_frag(
         use crate::layout::LayoutNode;
         use crate::live_audio::{SpectrogramFrame, clear_spectrogram_frames};
         use crate::vm::Value;
-        use crate::widget_render::{MetalPrimitive, WidgetViewport};
+        use crate::widget_render::{GpuPrimitive, WidgetViewport};
         use std::sync::Arc;
 
         fn prop_string(value: &str) -> Value {
@@ -10403,7 +10403,7 @@ fragment float4 live_spectrogram_frag(
                 height,
             });
             backend.upload_arena.begin_frame(&mut backend.stats);
-            let primitive = widget_render::MetalLiveSpectrogramPrimitive {
+            let primitive = widget_render::GpuLiveSpectrogramPrimitive {
                 rect: Rect {
                     col: 1.0,
                     row: 1.0,
@@ -10525,7 +10525,7 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn test_widget_run_cache_key(
-            primitives: &[MetalPrimitive],
+            primitives: &[GpuPrimitive],
             cell_w: f32,
             cell_h: f32,
             vp_w: f32,
@@ -10546,8 +10546,8 @@ fragment float4 live_spectrogram_frag(
             )
         }
 
-        fn test_widget_instance_primitive(widget_type: &str, itime: f32) -> MetalPrimitive {
-            MetalPrimitive::WidgetInstance {
+        fn test_widget_instance_primitive(widget_type: &str, itime: f32) -> GpuPrimitive {
+            GpuPrimitive::WidgetInstance {
                 widget_type: widget_type.to_string(),
                 instance: WidgetInstance {
                     ndc_min: [-0.5, -0.5],
@@ -10641,11 +10641,11 @@ fragment float4 live_spectrogram_frag(
             };
 
             let (primitives, _) =
-                widget_render::collect_metal_primitives(&strip, viewport, 0.0, 24);
+                widget_render::collect_gpu_primitives(&strip, viewport, 0.0, 24);
             let button_bg_rect = primitives
                 .iter()
                 .find_map(|primitive| match primitive {
-                    MetalPrimitive::WidgetInstance {
+                    GpuPrimitive::WidgetInstance {
                         widget_type,
                         instance,
                         is_background: true,
@@ -10656,7 +10656,7 @@ fragment float4 live_spectrogram_frag(
 
             let covering_rect_dispatched_after_button_background =
                 primitives.iter().find(|primitive| match primitive {
-                    MetalPrimitive::Rect(rect) => rect_contains(rect.rect, button_bg_rect),
+                    GpuPrimitive::Rect(rect) => rect_contains(rect.rect, button_bg_rect),
                     _ => false,
                 });
 
@@ -10674,7 +10674,7 @@ fragment float4 live_spectrogram_frag(
             );
             assert!(layout_contains_agent_instrument_stub_animation(&namespaced));
             assert!(contains_agent_instrument_stub_animation(&[
-                MetalPrimitive::WidgetInstance {
+                GpuPrimitive::WidgetInstance {
                     widget_type: "custom_ui_agent_draft___agent_instrument_stub_bg".to_string(),
                     instance: WidgetInstance {
                         ndc_min: [-1.0, -1.0],
@@ -10718,8 +10718,8 @@ fragment float4 live_spectrogram_frag(
 
         #[test]
         fn widget_run_cache_key_reuses_unchanged_label_primitives() {
-            let primitives = vec![MetalPrimitive::ProportionalText(
-                widget_render::MetalProportionalTextPrimitive {
+            let primitives = vec![GpuPrimitive::ProportionalText(
+                widget_render::GpuProportionalTextPrimitive {
                     row: 1.0,
                     col: 2.0,
                     align_width: 6.0,
@@ -10740,8 +10740,8 @@ fragment float4 live_spectrogram_frag(
 
         #[test]
         fn widget_run_cache_key_invalidates_changed_text() {
-            let mut primitives = vec![MetalPrimitive::ProportionalText(
-                widget_render::MetalProportionalTextPrimitive {
+            let mut primitives = vec![GpuPrimitive::ProportionalText(
+                widget_render::GpuProportionalTextPrimitive {
                     row: 1.0,
                     col: 2.0,
                     align_width: 6.0,
@@ -10755,7 +10755,7 @@ fragment float4 live_spectrogram_frag(
             )];
 
             let before = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let MetalPrimitive::ProportionalText(text) = &mut primitives[0] {
+            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
                 text.text = "17".to_string();
             }
             let after = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
@@ -10765,8 +10765,8 @@ fragment float4 live_spectrogram_frag(
 
         #[test]
         fn widget_run_cache_key_invalidates_text_style_and_view_metrics() {
-            let mut primitives = vec![MetalPrimitive::ProportionalText(
-                widget_render::MetalProportionalTextPrimitive {
+            let mut primitives = vec![GpuPrimitive::ProportionalText(
+                widget_render::GpuProportionalTextPrimitive {
                     row: 1.0,
                     col: 2.0,
                     align_width: 6.0,
@@ -10780,7 +10780,7 @@ fragment float4 live_spectrogram_frag(
             )];
 
             let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let MetalPrimitive::ProportionalText(text) = &mut primitives[0] {
+            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
                 text.font_size = 14.0;
             }
             assert_ne!(
@@ -10788,7 +10788,7 @@ fragment float4 live_spectrogram_frag(
                 test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
             );
 
-            if let MetalPrimitive::ProportionalText(text) = &mut primitives[0] {
+            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
                 text.font_size = 12.0;
                 text.h_align = 1.0;
             }
@@ -10797,7 +10797,7 @@ fragment float4 live_spectrogram_frag(
                 test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
             );
 
-            if let MetalPrimitive::ProportionalText(text) = &mut primitives[0] {
+            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
                 text.h_align = 0.0;
                 text.fg = theme::ACCENT();
             }
@@ -10806,7 +10806,7 @@ fragment float4 live_spectrogram_frag(
                 test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
             );
 
-            if let MetalPrimitive::ProportionalText(text) = &mut primitives[0] {
+            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
                 text.fg = theme::FG();
             }
             assert_ne!(
@@ -10817,8 +10817,8 @@ fragment float4 live_spectrogram_frag(
 
         #[test]
         fn widget_run_cache_key_invalidates_atlas_recreation() {
-            let primitives = vec![MetalPrimitive::ProportionalText(
-                widget_render::MetalProportionalTextPrimitive {
+            let primitives = vec![GpuPrimitive::ProportionalText(
+                widget_render::GpuProportionalTextPrimitive {
                     row: 1.0,
                     col: 2.0,
                     align_width: 6.0,
@@ -10846,7 +10846,7 @@ fragment float4 live_spectrogram_frag(
         fn widget_run_cache_key_ignores_itime_for_non_animated_widget_instances() {
             let mut primitives = vec![test_widget_instance_primitive("button", 1.0)];
             let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
+            if let GpuPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
                 instance.itime = 42.0;
             }
 
@@ -10878,7 +10878,7 @@ fragment float4 live_spectrogram_frag(
                 1.0,
             )];
             let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
+            if let GpuPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
                 instance.itime = 42.0;
             }
 
@@ -10892,7 +10892,7 @@ fragment float4 live_spectrogram_frag(
         fn widget_run_cache_key_keeps_itime_for_animated_builtin_widgets() {
             let mut primitives = vec![test_widget_instance_primitive("phaser-notch", 1.0)];
             let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
+            if let GpuPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
                 instance.itime = 42.0;
             }
 

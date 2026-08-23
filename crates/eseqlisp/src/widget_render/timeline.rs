@@ -5,8 +5,8 @@ use std::rc::Rc;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive,
-    MetalRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
+    CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, GpuQuadPrimitive,
+    GpuRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
     WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
@@ -25,7 +25,6 @@ pub(super) struct TimelineCursorMarkerWidget;
 pub(super) static TIMELINE_CURSOR_MARKER_WIDGET: TimelineCursorMarkerWidget =
     TimelineCursorMarkerWidget;
 
-#[cfg(target_os = "macos")]
 const TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
@@ -338,7 +337,6 @@ fn timeline_hover_edge_for(widget_id: u64, item_id: &Value) -> Option<HoverEdge>
     })
 }
 
-#[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
@@ -347,9 +345,8 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
     ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
-#[cfg(target_os = "macos")]
 fn push_rounded_rect(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: crate::backend::Color,
     viewport: WidgetViewport,
@@ -358,7 +355,7 @@ fn push_rounded_rect(
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
-    primitives.push(MetalPrimitive::WidgetInstance {
+    primitives.push(GpuPrimitive::WidgetInstance {
         widget_type: "box".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -381,9 +378,8 @@ fn push_rounded_rect(
     });
 }
 
-#[cfg(target_os = "macos")]
 fn push_cursor_marker(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     center_x: f32,
     top: f32,
     width: f32,
@@ -409,7 +405,7 @@ fn push_cursor_marker(
         height: instance_height_px / viewport.cell_h,
     };
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
-    primitives.push(MetalPrimitive::WidgetInstance {
+    primitives.push(GpuPrimitive::WidgetInstance {
         widget_type: "timeline-cursor-marker".to_string(),
         instance: WidgetInstance {
             ndc_min,
@@ -456,7 +452,6 @@ impl WidgetDefinition for TimelineCursorMarkerWidget {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER)
     }
@@ -827,13 +822,12 @@ impl WidgetDefinition for TimelineWidget {
         !vertical_scroll_passthrough(&node.props)
     }
 
-    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         build_metal_primitives(node, viewport)
     }
 
@@ -856,7 +850,6 @@ impl WidgetDefinition for TimelineWidget {
 /// one of them must land on the SAME grid — it is what both the drawn lines
 /// and `:grid` snapping quantize to. This exists so a test can assert that
 /// across instances, which no public render output makes checkable.
-#[cfg(target_os = "macos")]
 pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
     let view = TimelineView::from_props(&node.props, node.rect);
     let vp = view.time_viewport();
@@ -870,11 +863,10 @@ pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
     )
 }
 
-#[cfg(target_os = "macos")]
 fn build_metal_primitives(
     node: &LayoutNode,
     viewport: super::WidgetViewport,
-) -> Vec<MetalPrimitive> {
+) -> Vec<GpuPrimitive> {
     if node.widget_type != "timeline" {
         return Vec::new();
     }
@@ -896,7 +888,7 @@ fn build_metal_primitives(
         } else {
             None
         };
-        primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+        primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
             rect: Rect {
                 row: rect.row,
                 col: rect.col,
@@ -906,7 +898,7 @@ fn build_metal_primitives(
             color: theme::STATUS_BG(),
         }));
         if let Some((x, y, width, height)) = loop_band {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width,
@@ -918,7 +910,7 @@ fn build_metal_primitives(
             }));
         }
         for (x, _) in view.metal_grid_lines() {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: x - 0.0625,
                 y: rect.row,
                 width: 0.125,
@@ -935,7 +927,7 @@ fn build_metal_primitives(
                 } else {
                     0.06
                 };
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                 rect: Rect {
                     row: label_row - 0.04,
                     col: label_col - 0.10,
@@ -944,8 +936,8 @@ fn build_metal_primitives(
                 },
                 color: theme::STATUS_BG(),
             }));
-            primitives.push(MetalPrimitive::ProportionalText(
-                MetalProportionalTextPrimitive {
+            primitives.push(GpuPrimitive::ProportionalText(
+                GpuProportionalTextPrimitive {
                     row: label_row,
                     col: label_col,
                     align_width: 0.0,
@@ -975,7 +967,7 @@ fn build_metal_primitives(
                 if x1 <= x0 {
                     return;
                 }
-                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: x0,
                     y,
                     width: x1 - x0,
@@ -998,7 +990,7 @@ fn build_metal_primitives(
                 if marker >= view.view_start && marker < view_end && marker < content_len {
                     let x = view.x_for_time(marker);
                     if x >= content.col && x <= content.col + content.width {
-                        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                             x: x - 0.09,
                             y,
                             width: 0.18,
@@ -1016,8 +1008,8 @@ fn build_metal_primitives(
                 let band_end = view
                     .x_for_time(content_len.min(view_end))
                     .min(content.col + content.width);
-                primitives.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                primitives.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: y + (height - 0.86).max(0.0) * 0.5,
                         col: (band_end - text.chars().count() as f32 * 0.62 - 0.3).max(content.col),
                         align_width: 0.0,
@@ -1038,28 +1030,28 @@ fn build_metal_primitives(
             };
             let h = (1.0 / viewport.cell_h).min(height);
             let v = (1.0 / viewport.cell_w).min(width);
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width,
                 height: h,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y: y + height - h,
                 width,
                 height: h,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width: v,
                 height,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: x + width - v,
                 y,
                 width: v,
@@ -1080,7 +1072,7 @@ fn build_metal_primitives(
                 let white_key = theme::WHITE();
                 let border_color = crate::backend::Color::from_hex(0x1a, 0x1a, 0x1d);
                 let is_black_key = sidebar_bg == theme::BLACK();
-                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: rect.col,
                     y: row_start,
                     width: view.sidebar_width,
@@ -1112,7 +1104,7 @@ fn build_metal_primitives(
                     };
                     let cap_width = (black_height * 0.7).min(black_width);
                     let body_width = (black_width - cap_width * 0.5).max(0.0);
-                    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                         x: black_rect.col,
                         y: black_rect.row,
                         width: body_width,
@@ -1133,7 +1125,7 @@ fn build_metal_primitives(
                     );
                 }
             } else {
-                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: rect.col,
                     y: row_start,
                     width: view.sidebar_width,
@@ -1145,8 +1137,8 @@ fn build_metal_primitives(
             let label = lane.label.as_deref().unwrap_or("");
             if !label.is_empty() {
                 let label_fg = lane.label_fg.unwrap_or(theme::FG());
-                primitives.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                primitives.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: row_start + ((lane_height - 1.0).max(0.0) * 0.5)
                             - 0.02
                             - if view.sidebar_style == SidebarStyle::Piano {
@@ -1183,7 +1175,7 @@ fn build_metal_primitives(
                 crate::backend::Color::from_hex(0x0d, 0x0d, 0x0f)
             }
         });
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x: content.col,
             y: row_start,
             width: content.width,
@@ -1194,7 +1186,7 @@ fn build_metal_primitives(
 
     let grid_lines = view.metal_grid_lines();
     for &(x, is_major) in &grid_lines {
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x: x - 0.0625,
             y: content.row,
             width: 0.125,
@@ -1208,7 +1200,7 @@ fn build_metal_primitives(
     }
 
     if let Some((x, y, width, height)) = view.unavailable_rect() {
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x,
             y,
             width,
@@ -1235,7 +1227,7 @@ fn build_metal_primitives(
             // clip's body takes, so an empty lane and a clip body inside the
             // selection read as one band (Ableton's arrangement region).
             // Clips draw over this and re-light their own bodies below.
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width,
@@ -1252,7 +1244,7 @@ fn build_metal_primitives(
                 if grid_x <= x || grid_x >= x + width {
                     continue;
                 }
-                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: grid_x - 0.0625,
                     y,
                     width: 0.125,
@@ -1266,7 +1258,7 @@ fn build_metal_primitives(
                 }));
             }
         } else {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width,
@@ -1285,28 +1277,28 @@ fn build_metal_primitives(
                 a: 0.78,
             };
             let thickness = 0.07;
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width,
                 height: thickness,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y: y + height - thickness,
                 width,
                 height: thickness,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width: thickness,
                 height,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: x + width - thickness,
                 y,
                 width: thickness,
@@ -1447,7 +1439,7 @@ fn build_metal_primitives(
             );
             let bar_bottom = y + bar_height;
             primitives.extend(bar_primitives.into_iter().filter_map(|primitive| {
-                let MetalPrimitive::Quad(mut quad) = primitive else {
+                let GpuPrimitive::Quad(mut quad) = primitive else {
                     return Some(primitive);
                 };
                 let bottom = (quad.y + quad.height).min(bar_bottom);
@@ -1455,10 +1447,10 @@ fn build_metal_primitives(
                     return None;
                 }
                 quad.height = bottom - quad.y;
-                Some(MetalPrimitive::Quad(quad))
+                Some(GpuPrimitive::Quad(quad))
             }));
             let hairline = (1.0 / viewport.cell_h).min(height - bar_height);
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y: y + bar_height,
                 width,
@@ -1480,7 +1472,7 @@ fn build_metal_primitives(
             if grid_x <= x + 0.1 || grid_x >= x + width - 0.1 {
                 continue;
             }
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: grid_x - 0.0625,
                 y: content_rect.1,
                 width: 0.125,
@@ -1521,7 +1513,7 @@ fn build_metal_primitives(
                 }
                 // Nudged slightly below true center to sit on the label's
                 // optical line (the text row leans low in the bar).
-                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                     x: x + 0.30,
                     y: y + ((label_height - side_rows).max(0.0) * 0.5) + 0.04,
                     width: side_cols,
@@ -1533,14 +1525,14 @@ fn build_metal_primitives(
         }
         if let Some(label) = &item.label {
             if width >= 3.0 && label_height >= 0.85 {
-                primitives.push(MetalPrimitive::PushClipRect(Rect {
+                primitives.push(GpuPrimitive::PushClipRect(Rect {
                     row: y,
                     col: x,
                     width,
                     height: label_height,
                 }));
-                primitives.push(MetalPrimitive::ProportionalText(
-                    MetalProportionalTextPrimitive {
+                primitives.push(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
                         row: y + ((label_height - 0.80).max(0.0) * 0.5) - 0.02,
                         col: label_col,
                         align_width: 0.0,
@@ -1552,7 +1544,7 @@ fn build_metal_primitives(
                         bg: item_color,
                     },
                 ));
-                primitives.push(MetalPrimitive::PopClipRect);
+                primitives.push(GpuPrimitive::PopClipRect);
             }
         }
         push_item_content_primitives(
@@ -1588,28 +1580,28 @@ fn build_metal_primitives(
         // Rounded items were already outlined under their fill, in the loop
         // above; only the square ones get edge quads here.
         if item_radius <= 0.0 {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width,
                 height: thickness,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y: y + height - thickness,
                 width,
                 height: thickness,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x,
                 y,
                 width: thickness,
                 height,
                 color: border_color,
             }));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: x + width - thickness,
                 y,
                 width: thickness,
@@ -1681,7 +1673,7 @@ fn build_metal_primitives(
             };
         let line_height = (content.row + content.height - line_y).max(0.0);
         if view.cursor_line_visible && line_height > 0.0 {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: cursor_x - line_width * 0.5,
                 y: line_y,
                 width: line_width,
@@ -1693,7 +1685,7 @@ fn build_metal_primitives(
 
     if let Some(playhead_x) = view.metal_playhead_x() {
         if view.header_height > 0.0 {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                 x: playhead_x - 0.0625,
                 y: rect.row,
                 width: 0.125,
@@ -1701,7 +1693,7 @@ fn build_metal_primitives(
                 color: theme::YELLOW(),
             }));
         }
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
             x: playhead_x - 0.0625,
             y: content.row,
             width: 0.125,
@@ -1713,7 +1705,6 @@ fn build_metal_primitives(
     primitives
 }
 
-#[cfg(target_os = "macos")]
 const ITEM_BORDER_COLOR: crate::backend::Color = crate::backend::Color {
     r: 0.02,
     g: 0.025,
@@ -1721,7 +1712,6 @@ const ITEM_BORDER_COLOR: crate::backend::Color = crate::backend::Color {
     a: 0.72,
 };
 
-#[cfg(target_os = "macos")]
 const SELECTED_ITEM_BORDER_COLOR: crate::backend::Color = crate::backend::Color {
     r: 0.725,
     g: 0.933,
@@ -1732,12 +1722,10 @@ const SELECTED_ITEM_BORDER_COLOR: crate::backend::Color = crate::backend::Color 
 /// A title-barred clip shows selection through its lit body, so it keeps the
 /// ordinary dark outline; bar-less hosts (piano roll) still get the bright
 /// selected border.
-#[cfg(target_os = "macos")]
 fn selected_border(selected: bool, title_bar_height: Option<f32>) -> bool {
     selected && title_bar_height.is_none()
 }
 
-#[cfg(target_os = "macos")]
 fn item_border_thickness(width: f32, height: f32, selected: bool) -> f32 {
     if selected { 0.16_f32 } else { 0.08_f32 }
         .min(width * 0.5)
@@ -1746,14 +1734,12 @@ fn item_border_thickness(width: f32, height: f32, selected: bool) -> f32 {
 
 /// Corner arc resolution cap: one slab per device pixel of radius, bounded so
 /// a huge radius cannot flood the primitive list.
-#[cfg(target_os = "macos")]
 const ITEM_CORNER_ROWS_MAX: usize = 24;
 
 /// Render all loop play-through fills. Segment rects abut exactly and are
 /// clipped only at the item's/view's true visible bounds.
-#[cfg(target_os = "macos")]
 fn push_item_segment_fills(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     segments: &[Rect],
     color: crate::backend::Color,
     viewport: super::WidgetViewport,
@@ -1777,9 +1763,8 @@ fn push_item_segment_fills(
 /// pixel is drawn at fractional alpha equal to its coverage — the same
 /// coverage an `fwidth` mask computes, resolved on the CPU, blending against
 /// whatever is already beneath the clip.
-#[cfg(target_os = "macos")]
 fn push_item_fill(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: crate::backend::Color,
     viewport: super::WidgetViewport,
@@ -1873,9 +1858,8 @@ fn push_item_fill(
 
 /// Push one quad clipped to a horizontal `[min, max]` window, dropping it when
 /// nothing of it is visible. Horizontal only: lanes already clip vertically.
-#[cfg(target_os = "macos")]
 fn push_clipped_quad(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     rect: Rect,
     color: crate::backend::Color,
     clip: (f32, f32),
@@ -1885,7 +1869,7 @@ fn push_clipped_quad(
     if right <= left || rect.height <= 0.0 {
         return;
     }
-    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
         x: left,
         y: rect.row,
         width: right - left,
@@ -1898,7 +1882,6 @@ fn push_clipped_quad(
 /// (docs/arrangement-region-editing-spec.md 3.1): a fixed warm light tint,
 /// the same for every clip color, so selection reads at a glance the way
 /// Ableton's does. The bar keeps the clip's own color.
-#[cfg(target_os = "macos")]
 const SELECTED_ITEM_BODY_COLOR: crate::backend::Color = crate::backend::Color {
     r: 0.94,
     g: 0.87,
@@ -1909,10 +1892,8 @@ const SELECTED_ITEM_BODY_COLOR: crate::backend::Color = crate::backend::Color {
 /// Minimum on-screen item width (px) below which item content is skipped
 /// entirely — narrower than this the dots/bars would only alias
 /// (docs/arrangement-timeline-ui-spec.md 7.3).
-#[cfg(target_os = "macos")]
 const ITEM_CONTENT_MIN_WIDTH_PX: f32 = 14.0;
 
-#[cfg(target_os = "macos")]
 fn item_cycle_separator_xs(
     view: &TimelineView,
     item: &TimelineItem,
@@ -1969,7 +1950,6 @@ fn item_cycle_separator_xs(
 /// Separators outside the viewport are intentionally absent. The first and
 /// last returned rects still extend to the item's true (possibly off-screen)
 /// edges, so horizontal clipping cannot invent rounded corners at the view.
-#[cfg(target_os = "macos")]
 fn item_loop_segment_rects(rect: Rect, separator_xs: &[f32]) -> Vec<Rect> {
     let right = rect.col + rect.width;
     let mut segments = Vec::with_capacity(separator_xs.len() + 1);
@@ -1999,7 +1979,6 @@ fn item_loop_segment_rects(rect: Rect, separator_xs: &[f32]) -> Vec<Rect> {
     segments
 }
 
-#[cfg(target_os = "macos")]
 fn item_cycle_width_px(
     view: &TimelineView,
     item: &TimelineItem,
@@ -2021,9 +2000,8 @@ fn item_cycle_width_px(
 /// when it has one. Rounded title-barred clips express visible repeats through
 /// their abutting fill segments; square or bar-less hosts retain the explicit
 /// separator rule.
-#[cfg(target_os = "macos")]
 fn push_item_content_primitives(
-    primitives: &mut Vec<MetalPrimitive>,
+    primitives: &mut Vec<GpuPrimitive>,
     view: &TimelineView,
     item: &TimelineItem,
     rect: (f32, f32, f32, f32),
@@ -2072,7 +2050,7 @@ fn push_item_content_primitives(
                     None => (y, height),
                 };
                 for line_x in item_cycle_separator_xs(view, item, viewport) {
-                    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                         x: line_x - 0.0625,
                         y: separator_y,
                         width: 0.125,
@@ -2133,7 +2111,7 @@ fn push_item_content_primitives(
                     } else {
                         dot_width
                     };
-                    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    primitives.push(GpuPrimitive::Quad(GpuQuadPrimitive {
                         x: dot_x,
                         y: dot_y,
                         width: quad_width,
@@ -2865,7 +2843,6 @@ impl TimelineView {
     /// then only appear at the item's real edges — an item scrolled partly
     /// off-screen is cut square at the viewport edge instead of looking like
     /// a shorter clip that begins there.
-    #[cfg(target_os = "macos")]
     fn item_fill_rect(&self, item: &TimelineItem, row: f32, height: f32) -> (Rect, (f32, f32)) {
         let content = self.content_rect();
         let left = self.unclamped_x_for_time(item.start);
@@ -2884,7 +2861,6 @@ impl TimelineView {
     /// `x_for_time` clamps to the visible window; this doesn't, so off-screen
     /// item edges keep their true position (bounded to one viewport width
     /// either side, which is off-screen enough and keeps the math finite).
-    #[cfg(target_os = "macos")]
     fn unclamped_x_for_time(&self, time: f64) -> f32 {
         let content = self.content_rect();
         if content.width == 0.0 {
@@ -4518,10 +4494,9 @@ mod tests {
         )
     }
 
-    #[cfg(target_os = "macos")]
-    fn cursor_marker_instance(primitives: &[MetalPrimitive]) -> Option<WidgetInstance> {
+    fn cursor_marker_instance(primitives: &[GpuPrimitive]) -> Option<WidgetInstance> {
         primitives.iter().find_map(|primitive| match primitive {
-            MetalPrimitive::WidgetInstance {
+            GpuPrimitive::WidgetInstance {
                 widget_type,
                 instance,
                 ..
@@ -5328,7 +5303,6 @@ mod tests {
     /// clip's title bar keeps the clip colour — so the highlight reads as one
     /// continuous band across clips and the gaps between them, and never
     /// hides the clips behind a veil the way the marquee style would.
-    #[cfg(target_os = "macos")]
     #[test]
     fn region_selection_style_lights_the_lane_and_clip_bodies() {
         const CLIP: crate::backend::Color = crate::backend::Color {
@@ -5412,11 +5386,11 @@ mod tests {
         };
         // Last quad of a given colour covering a point — i.e. what the eye
         // actually sees there once everything has been painted.
-        let top_color_at = |primitives: &[MetalPrimitive], x: f32, y: f32| {
+        let top_color_at = |primitives: &[GpuPrimitive], x: f32, y: f32| {
             primitives
                 .iter()
                 .filter_map(|primitive| match primitive {
-                    MetalPrimitive::Quad(quad)
+                    GpuPrimitive::Quad(quad)
                         if quad.color.a >= 0.999
                             && x >= quad.x
                             && x < quad.x + quad.width
@@ -5429,9 +5403,9 @@ mod tests {
                 })
                 .next_back()
         };
-        let marquee_blue = |primitives: &[MetalPrimitive]| {
+        let marquee_blue = |primitives: &[GpuPrimitive]| {
             primitives.iter().any(|primitive| {
-                matches!(primitive, MetalPrimitive::Quad(quad)
+                matches!(primitive, GpuPrimitive::Quad(quad)
                     if (quad.color.r - 0.38).abs() < 0.001
                         && (quad.color.g - 0.68).abs() < 0.001
                         && (quad.color.b - 0.92).abs() < 0.001)
@@ -5480,7 +5454,7 @@ mod tests {
         // redrawn over it: bar lines stay legible inside the selection, in
         // the same dark wash a clip body uses for its own grid continuation.
         let grid_over_region = region.iter().any(|primitive| {
-            matches!(primitive, MetalPrimitive::Quad(quad)
+            matches!(primitive, GpuPrimitive::Quad(quad)
                 if quad.width < 0.2
                     && quad.color.a < 0.5
                     && quad.color.r < 0.05
@@ -5509,7 +5483,6 @@ mod tests {
     /// A take stretched past its source end (`:wrap false`, cycle < 1 —
     /// e.g. the grow-resize ghost) must read as GROWTH: one pass of dots,
     /// no tiled repeats, no loop-boundary segmentation.
-    #[cfg(target_os = "macos")]
     #[test]
     fn non_wrapping_take_content_never_tiles_dots_or_loop_segments() {
         let props = HashMap::from([
@@ -5585,7 +5558,7 @@ mod tests {
         let dot_quads: Vec<_> = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::Quad(quad)
+                GpuPrimitive::Quad(quad)
                     if (quad.color.a - 0.78).abs() < f32::EPSILON
                         && (quad.color.r - 0.02).abs() < f32::EPSILON =>
                 {
@@ -5608,7 +5581,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn title_barred_loop_clip_uses_abutting_rounded_fill_segments() {
         const CLIP: crate::backend::Color = crate::backend::Color {
@@ -5685,7 +5657,7 @@ mod tests {
         let clip_grid_lines: Vec<_> = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::Quad(quad)
+                GpuPrimitive::Quad(quad)
                     if quad.width == 0.125
                         && (quad.color.r - 0.02).abs() < f32::EPSILON
                         && (quad.color.g - 0.025).abs() < f32::EPSILON
@@ -5708,9 +5680,9 @@ mod tests {
                 .all(|line| line.y == 1.0 && line.height == 3.0),
             "continued grid lines must cover only the body below the one-cell title bar"
         );
-        let clip_fill_covers = |primitives: &[MetalPrimitive], x: f32, y: f32| {
+        let clip_fill_covers = |primitives: &[GpuPrimitive], x: f32, y: f32| {
             primitives.iter().any(|primitive| {
-                matches!(primitive, MetalPrimitive::Quad(quad)
+                matches!(primitive, GpuPrimitive::Quad(quad)
                     if quad.color == CLIP
                         && x >= quad.x
                         && x < quad.x + quad.width
@@ -5740,7 +5712,7 @@ mod tests {
         );
         assert!(
             !primitives.iter().any(|primitive| {
-                matches!(primitive, MetalPrimitive::Quad(quad)
+                matches!(primitive, GpuPrimitive::Quad(quad)
                     if quad.width == 0.125
                         && (quad.color.a - 0.42).abs() < f32::EPSILON)
             }),
@@ -5764,7 +5736,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn item_label_is_scissored_to_its_visible_title_bar() {
         let props = HashMap::from([
@@ -5830,9 +5801,9 @@ mod tests {
             .windows(3)
             .find_map(|window| match window {
                 [
-                    MetalPrimitive::PushClipRect(clip),
-                    MetalPrimitive::ProportionalText(text),
-                    MetalPrimitive::PopClipRect,
+                    GpuPrimitive::PushClipRect(clip),
+                    GpuPrimitive::ProportionalText(text),
+                    GpuPrimitive::PopClipRect,
                 ] if text.text == "Pattern 123456789" => Some((*clip, text)),
                 _ => None,
             })
@@ -5872,7 +5843,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn background_color_prop_styles_the_timeline_lane() {
         let color = crate::backend::Color {
@@ -5927,7 +5897,7 @@ mod tests {
 
         let primitives = build_metal_primitives(&node, viewport);
         assert!(primitives.iter().any(|primitive| {
-            matches!(primitive, MetalPrimitive::Quad(quad)
+            matches!(primitive, GpuPrimitive::Quad(quad)
                 if quad.x == rect.col
                     && quad.y == rect.row
                     && quad.width == rect.width
@@ -5941,7 +5911,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn dot_content_phase_keeps_partial_cycle_notes_aligned() {
         let dots = list_value_raw(vec![
@@ -6029,7 +5998,7 @@ mod tests {
         let rendered = primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                MetalPrimitive::Quad(quad) if quad.color == dot_color => Some((quad.x, quad.y)),
+                GpuPrimitive::Quad(quad) if quad.color == dot_color => Some((quad.x, quad.y)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -6045,7 +6014,6 @@ mod tests {
         assert!((rendered[1].1 - 3.465).abs() < 0.001);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_cursor_marker_starts_below_ruler_with_antialiased_marker() {
         let props = HashMap::from([
@@ -6099,7 +6067,7 @@ mod tests {
         let line = primitives
             .iter()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::Quad(quad)
+                GpuPrimitive::Quad(quad)
                     if quad.color == theme::CURSOR() && (quad.y - marker_tip_row).abs() < 0.001 =>
                 {
                     Some(*quad)
@@ -6114,7 +6082,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn metal_cursor_marker_and_line_can_render_independently_with_scaled_sdf_marker() {
         let props = HashMap::from([
@@ -6179,7 +6146,7 @@ mod tests {
         assert!(
             !marker_only.iter().any(|primitive| matches!(
                 primitive,
-                MetalPrimitive::Quad(quad) if quad.color == theme::CURSOR()
+                GpuPrimitive::Quad(quad) if quad.color == theme::CURSOR()
             )),
             "marker-only mode must not draw a cursor line"
         );
@@ -6196,7 +6163,7 @@ mod tests {
         let line = line_only
             .iter()
             .find_map(|primitive| match primitive {
-                MetalPrimitive::Quad(quad) if quad.color == theme::CURSOR() => Some(*quad),
+                GpuPrimitive::Quad(quad) if quad.color == theme::CURSOR() => Some(*quad),
                 _ => None,
             })
             .expect("cursor line");

@@ -1,6 +1,6 @@
 //! Reusable Metal focus decorations for measured widget bounds.
 
-use super::{MetalPrimitive, MetalRectPrimitive, WidgetViewport};
+use super::{GpuPrimitive, GpuRectPrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::Rect;
 
@@ -17,7 +17,7 @@ impl FocusDecoration {
         self,
         rect: Rect,
         viewport: WidgetViewport,
-    ) -> Vec<MetalPrimitive> {
+    ) -> Vec<GpuPrimitive> {
         match self {
             Self::None => Vec::new(),
             Self::Corners(style) => style.metal_primitives(rect, viewport),
@@ -45,7 +45,7 @@ impl FocusCornerStyle {
         }
     }
 
-    fn metal_primitives(self, rect: Rect, viewport: WidgetViewport) -> Vec<MetalPrimitive> {
+    fn metal_primitives(self, rect: Rect, viewport: WidgetViewport) -> Vec<GpuPrimitive> {
         if !rect.row.is_finite()
             || !rect.col.is_finite()
             || !rect.width.is_finite()
@@ -148,7 +148,7 @@ impl FocusCornerStyle {
         rects
             .into_iter()
             .map(|rect| {
-                MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+                GpuPrimitive::ForegroundRect(GpuRectPrimitive {
                     rect,
                     color: self.color,
                 })
@@ -177,11 +177,11 @@ mod tests {
         }
     }
 
-    fn focus_rects(primitives: &[MetalPrimitive]) -> Vec<Rect> {
+    fn focus_rects(primitives: &[GpuPrimitive]) -> Vec<Rect> {
         primitives
             .iter()
             .map(|primitive| match primitive {
-                MetalPrimitive::ForegroundRect(rect) => rect.rect,
+                GpuPrimitive::ForegroundRect(rect) => rect.rect,
                 _ => panic!("focus corners must render as foreground rectangles"),
             })
             .collect()

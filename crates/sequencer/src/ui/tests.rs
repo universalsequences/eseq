@@ -3538,8 +3538,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -4932,8 +4932,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -6149,8 +6149,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -7477,8 +7477,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -8680,8 +8680,8 @@
             struct TileRetained {
                 buffer_name: String,
                 viewport: eseqlisp::widget_render::WidgetViewport,
-                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
-                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+                runs: Vec<eseqlisp::widget_render::GpuPrimitiveRun>,
+                indices: eseqlisp::widget_render::GpuPrimitiveRunIndex,
             }
             let mut tile_retained: Vec<TileRetained> = Vec::new();
             for tile in &initial_frame.tiles {
@@ -8747,7 +8747,7 @@
                     .filter(|primitive| {
                         matches!(
                             eseqlisp::widget_render::innermost_primitive(primitive),
-                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                            eseqlisp::widget_render::GpuPrimitive::WidgetInstance {
                                 widget_type,
                                 instance,
                                 ..
@@ -10558,7 +10558,7 @@
                     .filter(|primitive| {
                         matches!(
                             eseqlisp::widget_render::innermost_primitive(primitive),
-                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                            eseqlisp::widget_render::GpuPrimitive::WidgetInstance {
                                 widget_type,
                                 instance,
                                 ..
