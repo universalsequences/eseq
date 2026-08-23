@@ -230,7 +230,7 @@ impl WidgetDefinition for RoarShaperWidget {
         }
     }
 
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         false
     }
 

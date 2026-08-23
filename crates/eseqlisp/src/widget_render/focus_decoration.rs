@@ -13,14 +13,14 @@ pub enum FocusDecoration {
 }
 
 impl FocusDecoration {
-    pub(crate) fn metal_primitives(
+    pub(crate) fn primitives(
         self,
         rect: Rect,
         viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
         match self {
             Self::None => Vec::new(),
-            Self::Corners(style) => style.metal_primitives(rect, viewport),
+            Self::Corners(style) => style.primitives(rect, viewport),
         }
     }
 }
@@ -45,7 +45,7 @@ impl FocusCornerStyle {
         }
     }
 
-    fn metal_primitives(self, rect: Rect, viewport: WidgetViewport) -> Vec<GpuPrimitive> {
+    fn primitives(self, rect: Rect, viewport: WidgetViewport) -> Vec<GpuPrimitive> {
         if !rect.row.is_finite()
             || !rect.col.is_finite()
             || !rect.width.is_finite()
@@ -204,7 +204,7 @@ mod tests {
             height: 4.0,
         };
         let primitives = FocusDecoration::Corners(FocusCornerStyle::new(Color::WHITE))
-            .metal_primitives(rect, viewport(10.0, 20.0));
+            .primitives(rect, viewport(10.0, 20.0));
         let rects = focus_rects(&primitives);
 
         assert_eq!(rects.len(), 8);
@@ -232,7 +232,7 @@ mod tests {
             ..FocusCornerStyle::new(Color::WHITE)
         };
         let rects = focus_rects(
-            &FocusDecoration::Corners(style).metal_primitives(rect, viewport(10.0, 10.0)),
+            &FocusDecoration::Corners(style).primitives(rect, viewport(10.0, 10.0)),
         );
 
         assert_eq!(rects.len(), 8);
@@ -253,7 +253,7 @@ mod tests {
         };
         assert!(
             FocusDecoration::Corners(FocusCornerStyle::new(Color::WHITE))
-                .metal_primitives(rect, viewport(10.0, 20.0))
+                .primitives(rect, viewport(10.0, 20.0))
                 .is_empty()
         );
     }

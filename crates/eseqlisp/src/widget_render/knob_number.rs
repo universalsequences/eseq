@@ -1665,7 +1665,7 @@ impl WidgetDefinition for KnobNumberWidget {
         }
     }
 
-    fn metal_focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
+    fn focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
         FocusDecoration::Corners(FocusCornerStyle::new(resolve_named_color(
             &node.props,
             "focus-color",

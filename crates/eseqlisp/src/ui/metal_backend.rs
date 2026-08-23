@@ -2131,7 +2131,7 @@ fragment float4 live_spectrogram_frag(
 
     fn widget_instance_shader_uses_time(widget_type: &str) -> bool {
         widget_render::widget_definition(widget_type)
-            .is_some_and(|definition| definition.metal_shader_uses_time())
+            .is_some_and(|definition| definition.shader_uses_time())
             || widget_render::sdf_widget::sdf_widget_def(widget_type)
                 .is_some_and(|definition| definition.animates)
     }

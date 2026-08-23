@@ -776,7 +776,7 @@ pub fn estimate_shadow_paint_margin(expr: &Expression, width: f32, height: f32) 
 }
 
 /// Build Metal primitives for an SDF widget.
-pub fn sdf_widget_metal_primitives(
+pub fn sdf_widget_primitives(
     widget_type: &str,
     node: &LayoutNode,
     viewport: WidgetViewport,

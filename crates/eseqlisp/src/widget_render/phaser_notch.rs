@@ -285,7 +285,7 @@ impl WidgetDefinition for PhaserNotchWidget {
         super::AnimationFramePolicy::LayoutStatic
     }
 
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         true
     }
 

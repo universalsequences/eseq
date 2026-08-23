@@ -748,7 +748,7 @@ impl WidgetDefinition for NumberPickerWidget {
         }
     }
 
-    fn metal_focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
+    fn focus_decoration(&self, node: &LayoutNode) -> FocusDecoration {
         if !get_bool_prop(&node.props, "noui", false) {
             return FocusDecoration::None;
         }

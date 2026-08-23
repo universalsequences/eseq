@@ -161,7 +161,7 @@ impl WidgetDefinition for RoarFilterWidget {
         }
     }
 
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         false
     }
 

@@ -1025,9 +1025,9 @@ pub trait WidgetDefinition: Sync {
     fn animation_frame_policy(&self) -> AnimationFramePolicy {
         AnimationFramePolicy::Never
     }
-    /// Whether this widget's Metal shader reads `WidgetInstance::itime`.
+    /// Whether this widget's fragment shader reads `WidgetInstance::itime`.
     /// Time-dependent instances must include `itime` in primitive cache keys.
-    fn metal_shader_uses_time(&self) -> bool {
+    fn shader_uses_time(&self) -> bool {
         false
     }
     fn fragment_shader(
@@ -1046,7 +1046,7 @@ pub trait WidgetDefinition: Sync {
     }
     /// Optional framework-rendered focus decoration. The decoration is added
     /// after this widget's own primitives and is bounded by its measured rect.
-    fn metal_focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
+    fn focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
         FocusDecoration::None
     }
     fn build_primitives(
@@ -1550,8 +1550,8 @@ pub fn widget_primitives_for_node(
         if node.focusable && viewport.focused_widget_id == Some(node.widget_id) {
             primitives.extend(
                 definition
-                    .metal_focus_decoration(node)
-                    .metal_primitives(node.rect, viewport),
+                    .focus_decoration(node)
+                    .primitives(node.rect, viewport),
             );
         }
         if let Some(cache_key) = cache_key {
@@ -1565,7 +1565,7 @@ pub fn widget_primitives_for_node(
         }
         primitives
     } else if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
-        sdf_widget::sdf_widget_metal_primitives(&node.widget_type, node, viewport)
+        sdf_widget::sdf_widget_primitives(&node.widget_type, node, viewport)
     } else {
         Vec::new()
     }
@@ -1935,7 +1935,7 @@ fn suppresses_default_focus(node: &LayoutNode) -> bool {
         .map(|definition| {
             definition.renders_own_focus()
                 || !matches!(
-                    definition.metal_focus_decoration(node),
+                    definition.focus_decoration(node),
                     FocusDecoration::None
                 )
         })
@@ -2999,6 +2999,61 @@ mod tests {
 
         assert_eq!(sources.source(ShaderBackend::Msl), Some("msl source"));
         assert_eq!(sources.source(ShaderBackend::Wgsl), Some("wgsl source"));
+    }
+
+    /// Every widget can be asked for either backend's source without panicking
+    /// or falling back to the other language. MSL is fully populated today;
+    /// WGSL bodies land in the shader-port bead, so a widget answers WGSL only
+    /// once it actually has a WGSL body.
+    #[test]
+    fn every_widget_answers_both_backends() {
+        for definition in WIDGET_DEFINITIONS {
+            for &name in definition.names() {
+                for backend in [ShaderBackend::Msl, ShaderBackend::Wgsl] {
+                    if let Some(fragment) = definition.fragment_shader(name, backend) {
+                        assert!(
+                            !fragment.is_empty(),
+                            "{name} returned an empty {backend:?} fragment shader"
+                        );
+                    }
+                    if let Some(vertex) = definition.vertex_shader(name, backend) {
+                        assert!(
+                            !vertex.is_empty(),
+                            "{name} returned an empty {backend:?} vertex shader"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The MSL enumeration must stay non-empty and must never leak a body that
+    /// was registered for the other backend.
+    #[test]
+    fn widget_shader_sources_are_scoped_to_the_requested_backend() {
+        let msl = widget_shader_sources(ShaderBackend::Msl);
+        assert!(!msl.is_empty(), "MSL enumeration lost every widget shader");
+
+        for (name, vertex, fragment) in &msl {
+            assert!(
+                fragment.contains("fragment") || fragment.contains("float4"),
+                "{name} MSL fragment shader does not look like MSL"
+            );
+            assert!(
+                !fragment.contains("@fragment"),
+                "{name} MSL slot is serving WGSL"
+            );
+            if let Some(vertex) = vertex {
+                assert!(!vertex.is_empty(), "{name} has an empty MSL vertex shader");
+            }
+        }
+
+        for (name, _, fragment) in widget_shader_sources(ShaderBackend::Wgsl) {
+            assert!(
+                !fragment.contains("[[stage_in]]"),
+                "{name} WGSL slot is serving MSL"
+            );
+        }
     }
 
     #[test]
