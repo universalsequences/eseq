@@ -8925,3 +8925,55 @@
         assert_eq!(resumed.first().map(|trigger| trigger.step), Some(3));
         assert!(resumed.iter().any(|trigger| trigger.step == 4));
     }
+
+/// The bug this pins: a song row schedules from a snapshot prebuilt at
+/// preflight. A slot overridden after that preflight lives only in live state,
+/// so scheduling the row's frozen `scene_slots` pushed an EMPTY store at the
+/// generator runtime every chunk and every shipped tick fell back to its
+/// declaration default — the override looked inert with no error anywhere.
+#[test]
+fn a_prebuilt_chunk_reads_live_scene_slots_not_its_preflight_copy() {
+    use crate::sequencer::{SceneSlotStore, SequencerSnapshot};
+    use std::sync::Arc;
+
+    let overridden = {
+        let mut slots = SceneSlotStore::default();
+        slots
+            .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
+            .expect("portable value");
+        slots
+    };
+    let mut base = SequencerSnapshot::empty();
+    base.transport.current_pattern = 0;
+    base.scene_slot_table = Arc::new(vec![SceneSlotStore::default(), overridden.clone()]);
+
+    // The row was preflighted before the write: it plays scene 1 and carries
+    // an empty slot store.
+    let mut row = SequencerSnapshot::empty();
+    row.transport.current_pattern = 1;
+    assert_eq!(row.scene_slots.get("ds-vel"), None);
+
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &row).get("ds-vel"),
+        Some(&crate::process::ProcessLiteral::Number(0.1)),
+        "a prebuilt chunk must resolve its scene against live state"
+    );
+
+    // The chunk still chooses WHICH scene plays: scene 0 has no override.
+    let mut other_row = SequencerSnapshot::empty();
+    other_row.transport.current_pattern = 0;
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &other_row).get("ds-vel"),
+        None
+    );
+
+    // A scene index the live table no longer has falls back to the frozen copy
+    // rather than silently dropping every override.
+    let mut deleted_scene = SequencerSnapshot::empty();
+    deleted_scene.transport.current_pattern = 9;
+    deleted_scene.scene_slots = overridden;
+    assert_eq!(
+        super::lookahead::scene_slots_for_chunk(&base, &deleted_scene).get("ds-vel"),
+        Some(&crate::process::ProcessLiteral::Number(0.1))
+    );
+}

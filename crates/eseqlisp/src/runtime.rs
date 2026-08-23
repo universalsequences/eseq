@@ -1983,6 +1983,15 @@ impl Runtime {
     /// Configure ordered module import roots. This is separate from the raw
     /// `(load …)` root so user modules can shadow package and factory modules
     /// without changing relative loads inside any source file.
+    /// Drain module/source load errors accumulated by `(import …)` /
+    /// `(load …)` evaluated through `eval_str`, which (unlike the
+    /// path-based eval entry points) does not consume them itself. Callers
+    /// that programmatically import modules use this to fail loudly and to
+    /// keep a stale entry from poisoning a later path-based eval.
+    pub fn take_source_load_errors(&mut self) -> Vec<String> {
+        self.vm.take_source_load_errors()
+    }
+
     pub fn set_module_load_path(&mut self, roots: Vec<std::path::PathBuf>) {
         self.vm.source_manager.set_module_load_roots(roots);
     }

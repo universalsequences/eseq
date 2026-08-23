@@ -128,6 +128,18 @@ The same source text means the right thing in both VMs. Scheduler-side reads
 are snapshot reads at tick boundaries — processes and ticks never see a
 half-written value.
 
+**Declarations cross by publication (eseq-85a.2).** Each VM keeps a local
+declaration table for the `defscene` forms it evaluated itself, but a
+scheduler runtime compiling a shipped tick never evaluates the authoring
+source. `__defscene-register` therefore also publishes the `(name, default)`
+pair into a shared table on `SequencerState`, and `__defscene-resolve` /
+`__defscene-set` fall back to that table when the local one misses. The
+default cannot ride the shipped read itself because it is an arbitrary
+expression whose *value* only exists after authoring-side evaluation. One
+consequence: deleting a `defscene` from the authoring file leaves its
+published default behind until restart — defaults only, values still resolve
+through the scene-slot snapshot.
+
 ## Storage, resolution, serialization
 
 The store is a per-pattern `name → literal` map, structurally parallel to

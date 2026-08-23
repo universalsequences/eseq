@@ -950,7 +950,41 @@ impl ScratchControlRuntime {
         name: String,
         resolution: Timebase,
         tick_source: String,
+        requires: &[String],
     ) -> Result<(), String> {
+        // Import the tick's declared modules (`:requires`) before compiling.
+        // This runtime carries the full package module load path, so shipped
+        // ticks that call package functions resolve without the authoring
+        // file's source ever crossing the VM boundary. `__import-module`
+        // reports failure through its return value (and load-once dedups
+        // repeat registrations), so a bad module fails registration loudly
+        // instead of surfacing as per-tick UnknownVariable errors.
+        for module in requires {
+            if !eseqlisp::modules::is_valid_module_name(module) {
+                return Err(format!(
+                    "sequencer {name} ({id}): invalid :requires module name '{module}'"
+                ));
+            }
+            let result = self.runtime.eval_str(&format!("(import {module})"));
+            // `eval_str` does not consume load errors itself; drain them so a
+            // failure is reported here and can never poison a later
+            // path-based eval on this runtime.
+            let load_errors = self.runtime.take_source_load_errors();
+            match result {
+                Ok(_) if load_errors.is_empty() => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "sequencer {name} ({id}): failed to import required module: {}",
+                        load_errors.join("; ")
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "sequencer {name} ({id}): failed to import required module {module}: {error:?}"
+                    ));
+                }
+            }
+        }
         if let Err(error) = self.sequencer_tick_callback(id, &tick_source) {
             self.sequencers
                 .lock()

@@ -116,6 +116,9 @@
 (defmacro register (name res body)
   `(def-sequencer ,name
      :resolution ,res
+     ;; The shipped tick calls package functions; the scheduler VM imports
+     ;; them through its module load path before compiling the tick.
+     :requires (alez.jaki.core)
      :tick (do
        (alez.jaki.core/init ,res)
        (alez.jaki.core/run ,body))))
@@ -132,6 +135,7 @@
            (if (alez.jaki.surface/bind-channel-widgets ,bindings)
                (def-sequencer ,name
                  :resolution ,res
+                 :requires (alez.jaki.core)
                  :tick (do
                    (alez.jaki.core/init ,res)
                    (alez.jaki.core/run ,forms)))

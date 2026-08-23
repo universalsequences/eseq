@@ -255,6 +255,15 @@ pub(crate) fn run_event_loop(
                 }
             }
         }
+        // Generator tick failures (eseq-85a.5): the scheduler reports the
+        // first failure per generator and parks it; surface it here instead
+        // of letting a broken :tick play as silence.
+        for notice in shared.state.drain_generator_tick_errors() {
+            editor.handle_host_event(HostEvent::Error(format!(
+                "Sequencer '{}' tick failed (generator parked until its source changes): {}",
+                notice.name, notice.error
+            )));
+        }
         app.graph_controller().reap_due_rack_teardowns();
         let queued_transport_scene = shared
             .state

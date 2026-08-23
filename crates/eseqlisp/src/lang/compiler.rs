@@ -3152,6 +3152,12 @@ impl<'a> Compiler<'a> {
                             quote_next_preserving = true;
                             expand_quote_next = true;
                         }
+                        // `:requires (module …)` is a list of module *names* for
+                        // the scheduler VM to import before compiling the shipped
+                        // tick — data, never a call.
+                        if is_def_sequencer && k == "requires" {
+                            quote_next = true;
+                        }
                         if is_def_process
                             && (k == "in"
                                 || k == "out"

@@ -520,15 +520,11 @@ pub(crate) fn normalize_command_shortcuts(
 ) -> crossterm::event::KeyEvent {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    if matches!(
-        key.code,
-        KeyCode::Char('a')
-            | KeyCode::Char('A')
-            | KeyCode::Char('c')
-            | KeyCode::Char('C')
-            | KeyCode::Char('v')
-            | KeyCode::Char('V')
-    ) && key.modifiers.contains(KeyModifiers::SUPER)
+    // Editor and widget clipboard handlers understand the platform-native
+    // SUPER modifier directly. Preserve Cmd-C/Cmd-V so text buffers can reach
+    // the editor's OS clipboard commands instead of receiving Ctrl-C/Ctrl-V.
+    if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+        && key.modifiers.contains(KeyModifiers::SUPER)
     {
         let mut modifiers = key.modifiers;
         modifiers.remove(KeyModifiers::SUPER);
@@ -601,7 +597,17 @@ fn current_sequencer_param_mode(editor: &mut Editor) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::widget_type_captures_text_input;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{normalize_command_shortcuts, widget_type_captures_text_input};
+
+    #[test]
+    fn command_clipboard_shortcuts_keep_the_native_modifier_for_text_buffers() {
+        for key in ['c', 'v'] {
+            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::SUPER);
+            assert_eq!(normalize_command_shortcuts(event), event);
+        }
+    }
 
     #[test]
     fn only_text_entry_widgets_capture_text_input_by_type() {

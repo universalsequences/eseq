@@ -8,6 +8,46 @@
     use crate::process::{ParamTarget, ProcessInstanceId, TrackProcessSlot};
     use crate::sequencer::ModDestination;
 
+    /// A song row schedules from a snapshot frozen at preflight, so the
+    /// published snapshot has to carry EVERY scene's live overrides, not just
+    /// the capturing scene's. Without this table a slot written while a song
+    /// plays is silently inert: the row's preflight copy wins and the reader
+    /// falls back to the declaration default.
+    #[test]
+    fn published_snapshots_carry_live_scene_slots_for_every_scene() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.replace_pattern_repository(
+            vec![
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+                crate::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state
+            .set_scene_slot_override(
+                crate::sequencer::SceneId(2),
+                "rate",
+                Some(crate::process::ProcessLiteral::Number(7.0)),
+            )
+            .expect("override the scene the transport is not sitting on");
+
+        let snapshot = state.latest_scheduler_snapshot();
+        assert_eq!(
+            snapshot.scene_slot_table.len(),
+            2,
+            "every scene needs an entry, not just the current one"
+        );
+        assert_eq!(
+            snapshot.scene_slot_table[1].get("rate"),
+            Some(&crate::process::ProcessLiteral::Number(7.0))
+        );
+        assert_eq!(
+            snapshot.scene_slot_table[0].get("rate"),
+            None,
+            "a scene without an override must stay on its declaration default"
+        );
+    }
+
     #[test]
     fn scene_slot_write_publishes_value_and_epoch_to_scheduler_snapshot() {
         let state = SequencerState::new(1, vec![vec![]]);

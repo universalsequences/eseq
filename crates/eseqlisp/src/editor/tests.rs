@@ -2286,11 +2286,12 @@ fn alt_w_copies_region_and_ctrl_y_yanks_it() {
 }
 
 #[test]
-fn cmd_c_copies_region_to_system_clipboard() {
+fn cmd_c_copies_region_to_system_clipboard_in_text_only_mode() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.set_test_clipboard("");
     editor.open_scratch_buffer("*test*", "abc def");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
     editor.active_buffer_mut().cursor = (0, 0);
 
     editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
@@ -2305,11 +2306,12 @@ fn cmd_c_copies_region_to_system_clipboard() {
 }
 
 #[test]
-fn cmd_v_pastes_system_clipboard_and_replaces_region() {
+fn cmd_v_pastes_system_clipboard_and_replaces_region_in_text_only_mode() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.set_test_clipboard("XYZ");
     editor.open_scratch_buffer("*test*", "abc def");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
     editor.active_buffer_mut().cursor = (0, 0);
 
     editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
@@ -2538,6 +2540,30 @@ fn vim_delete_word_operator_accepts_count_between_keys() {
 
     assert_eq!(editor.active_buffer().text(), "three four");
     assert_eq!(editor.active_buffer().cursor, (0, 0));
+}
+
+#[test]
+fn vim_dollar_operator_deletes_to_line_end_and_is_undoable() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*test*", "one two\nthree");
+    editor.active_buffer_mut().cursor = (0, 4);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::SHIFT));
+
+    assert_eq!(editor.active_buffer().text(), "one \nthree");
+    assert_eq!(editor.active_buffer().cursor, (0, 4));
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "one two\nthree");
+    assert_eq!(editor.active_buffer().cursor, (0, 4));
 }
 
 #[test]

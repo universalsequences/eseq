@@ -24,6 +24,53 @@ impl SequencerState {
         self.published_sequencers_version
             .fetch_add(1, Ordering::AcqRel);
     }
+    /// Publish (upsert) one `defscene` declaration so runtimes that never
+    /// evaluated the declaring source — the scheduler's scratch runtime
+    /// compiling a shipped tick — can resolve the slot's default by name.
+    pub fn publish_scene_slot_declaration(
+        &self,
+        name: String,
+        default: crate::process::ProcessLiteral,
+    ) {
+        self.published_scene_slot_declarations
+            .lock()
+            .unwrap()
+            .insert(name, default);
+    }
+
+    /// The published default for a `defscene` declaration, if any authoring
+    /// VM has evaluated it. The fallback read for scene-slot resolution in
+    /// runtimes whose local declaration table misses the name.
+    pub fn published_scene_slot_declaration(
+        &self,
+        name: &str,
+    ) -> Option<crate::process::ProcessLiteral> {
+        self.published_scene_slot_declarations
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+    }
+
+    /// Scheduler side: report a generator tick failure. One pending entry per
+    /// generator id and a hard cap keep this bounded; repeat failures of a
+    /// parked generator never re-report.
+    pub fn report_generator_tick_error(&self, id: u64, name: String, error: String) {
+        const MAX_PENDING_TICK_ERRORS: usize = 32;
+        let mut errors = self.generator_tick_errors.lock().unwrap();
+        if errors.len() >= MAX_PENDING_TICK_ERRORS
+            || errors.iter().any(|notice| notice.id == id)
+        {
+            return;
+        }
+        errors.push(crate::sequencer::GeneratorTickErrorNotice { id, name, error });
+    }
+
+    /// UI side: drain pending generator tick errors for display.
+    pub fn drain_generator_tick_errors(&self) -> Vec<crate::sequencer::GeneratorTickErrorNotice> {
+        std::mem::take(&mut *self.generator_tick_errors.lock().unwrap())
+    }
+
     pub fn unpublish_sequencer_by_name(&self, name: &str) -> bool {
         let removed = {
             let mut list = self.published_sequencers.lock().unwrap();

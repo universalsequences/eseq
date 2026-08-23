@@ -304,6 +304,22 @@ impl SequencerState {
             .unwrap_or_default()
     }
 
+    /// Live scene-slot overrides for every scene, indexed by scene position.
+    ///
+    /// Captured into each published snapshot so scheduler-side readers can
+    /// resolve a chunk's scene without locking the bank on the scheduling
+    /// thread, and without trusting a prebuilt snapshot's preflight copy.
+    pub fn scene_slot_table(&self) -> Vec<SceneSlotStore> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scenes
+            .iter()
+            .map(|scene| scene.scene_slots.clone())
+            .collect()
+    }
+
     pub fn current_scene_slots(&self) -> SceneSlotStore {
         self.pattern
             .scenes

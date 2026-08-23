@@ -97,6 +97,16 @@ pub struct SequencerSnapshot {
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub scene_slots: SceneSlotStore,
+    /// Live scene-slot overrides for EVERY scene, indexed by scene position.
+    ///
+    /// `scene_slots` above is only the capturing scene's store. A chunk that
+    /// schedules from a prebuilt snapshot — a song row, or a quantized launch
+    /// awaiting its mirror — froze its slots at preflight, so a slot written
+    /// while that song plays would never reach the tick. Readers resolve
+    /// through this table (see `scene_slots_for_chunk`) so the frozen copy is
+    /// never the value a generator observes. Shared by `Arc` so the
+    /// copy-on-write single-track publish carries it forward untouched.
+    pub scene_slot_table: Arc<Vec<SceneSlotStore>>,
     pub process_trace: bool,
 }
 
@@ -116,6 +126,7 @@ impl SequencerSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             scene_slots: SceneSlotStore::default(),
+            scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
         }
     }
@@ -160,6 +171,7 @@ impl SequencerSnapshot {
         let tracks = tracks.into_iter().map(Arc::new).collect();
         let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
         let scene_slots = state.current_scene_slots();
+        let scene_slot_table = Arc::new(state.scene_slot_table());
 
         Self {
             transport,
@@ -168,6 +180,7 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             scene_slots,
+            scene_slot_table,
             process_trace: state.process_trace_enabled(),
         }
     }
@@ -267,6 +280,10 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             scene_slots,
+            // Prebuilt row snapshots are frozen at preflight; the table is
+            // rebuilt from live state on every full publish, so readers take
+            // their slots from there rather than from this stale copy.
+            scene_slot_table: Arc::new(state.scene_slot_table()),
             process_trace: state.process_trace_enabled(),
         }
     }

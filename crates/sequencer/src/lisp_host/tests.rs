@@ -1122,6 +1122,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 name: name.clone(),
                 resolution: Timebase::Sixteenth as u8,
                 tick_source: String::new(),
+                requires: Vec::new(),
                 graph: Some(manifest),
             });
             Ok(Value::String(name))
@@ -3567,6 +3568,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest),
         });
 
@@ -3751,6 +3753,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest),
         });
 
@@ -3879,6 +3882,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest.clone()),
         });
 
@@ -4073,6 +4077,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: manifest.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest.clone()),
         });
         state.publish_sequencer(PublishedSequencer {
@@ -4080,6 +4085,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             name: fixed.name.clone(),
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(fixed),
         });
 
@@ -8393,6 +8399,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 source.to_string(),
+                &[],
             )
             .expect("compile initial tick");
         assert_eq!(runtime.sequencer_tick_compile_count, 1);
@@ -8424,6 +8431,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 "(seq-emit :track 0 :at :now :vel 0.75)".to_string(),
+                &[],
             )
             .expect("compile replacement tick");
         assert_eq!(runtime.sequencer_tick_compile_count, 2);
@@ -8436,6 +8444,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 "(seq-emit".to_string(),
+                &[],
             )
             .expect_err("malformed replacement must fail");
         assert!(error.contains("failed to compile sequencer tick 42"), "{error}");
@@ -8450,6 +8459,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "published".to_string(),
                 Timebase::Sixteenth,
                 "(seq-emit".to_string(),
+                &[],
             )
             .is_err());
         assert_eq!(runtime.sequencer_tick_compile_count, 3);
@@ -9368,9 +9378,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        scheduler
-            .eval("(defscene figures 0.25)")
-            .expect("register the declaration default in the scheduler VM");
+        // No manual `(defscene figures …)` here: the scheduler VM resolves the
+        // declaration through the cross-VM published table the authoring
+        // `defscene` wrote (eseq-85a.2).
         for definition in &published {
             scheduler
                 .register_published_sequencer(
@@ -9378,6 +9388,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     definition.name.clone(),
                     Timebase::from_index(definition.resolution as u32),
                     definition.tick_source.clone(),
+                    &definition.requires,
                 )
                 .expect("compile published sequencer");
         }
@@ -9463,15 +9474,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
             0,
         );
-        scheduler
-            .eval("(defscene counter 0.25)")
-            .expect("register the declaration default in the scheduler VM");
+        // The declaration crosses via the published table (eseq-85a.2); the
+        // scheduler VM never evaluates the authoring `defscene` itself.
         scheduler
             .register_published_sequencer(
                 writer.id,
                 writer.name.clone(),
                 Timebase::from_index(writer.resolution as u32),
                 writer.tick_source.clone(),
+                &writer.requires,
             )
             .expect("compile the published writer");
 
@@ -9509,6 +9520,45 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn generator_tick_error_channel_reports_once_per_generator() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.report_generator_tick_error(7, "broken".to_string(), "first".to_string());
+        state.report_generator_tick_error(7, "broken".to_string(), "second".to_string());
+        state.report_generator_tick_error(9, "other".to_string(), "boom".to_string());
+        let drained = state.drain_generator_tick_errors();
+        assert_eq!(drained.len(), 2, "one pending entry per generator id");
+        assert_eq!(drained[0].id, 7);
+        assert_eq!(drained[0].error, "first");
+        assert_eq!(drained[1].id, 9);
+        assert!(state.drain_generator_tick_errors().is_empty(), "drain empties");
+    }
+
+    #[test]
+    fn register_published_sequencer_fails_loudly_on_missing_required_module() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scheduler = ScratchControlRuntime::new_scheduler(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let error = scheduler
+            .register_published_sequencer(
+                1,
+                "needs-missing".to_string(),
+                Timebase::Sixteenth,
+                "(seq-emit :track 0 :vel 0.5)".to_string(),
+                &["alez.no-such-module".to_string()],
+            )
+            .expect_err("a missing :requires module must fail registration");
+        assert!(
+            error.contains("alez.no-such-module"),
+            "the error must name the module: {error}"
+        );
+    }
+
+    #[test]
     fn jaki_surface_regular_authoring_runtime_publishes_to_scheduler() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut authoring = jaki_authoring_runtime(Arc::clone(&state));
@@ -9524,7 +9574,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let published = state.published_sequencers();
         assert_eq!(published.len(), 1, "jak must publish, not register editor-locally");
         assert!(!published[0].tick_source.is_empty());
+        assert_eq!(
+            published[0].requires,
+            vec!["alez.jaki.core".to_string()],
+            "jak must declare the package module its shipped tick calls into"
+        );
 
+        // The scheduler VM starts empty — no manual jaki import. Registration
+        // imports the published `:requires` modules itself (eseq-85a.1); this
+        // is the exact seam a file-backed (UI-runtime) buffer exercises.
         let mut scheduler = ScratchControlRuntime::new_scheduler(
             Arc::clone(&state),
             fallback_effect_descriptors(1),
@@ -9533,14 +9591,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             0,
         );
         scheduler
-            .eval("(import alez.jaki.surface :refer (jak))")
-            .expect("load Jaki on the scheduler VM");
-        scheduler
             .register_published_sequencer(
                 published[0].id,
                 published[0].name.clone(),
                 Timebase::from_index(published[0].resolution as u32),
                 published[0].tick_source.clone(),
+                &published[0].requires,
             )
             .expect("compile the published Jaki tick on the scheduler VM");
         let mut generators = crate::generator::GeneratorRuntime::default();
@@ -9764,6 +9820,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 published[0].name.clone(),
                 Timebase::from_index(published[0].resolution as u32),
                 published[0].tick_source.clone(),
+                &published[0].requires,
             )
             .expect("compile the one published builder tick");
         let invoke_duration = |scheduler: &mut ScratchControlRuntime| {

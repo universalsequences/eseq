@@ -22,11 +22,11 @@ use super::super::*;
 pub const SCENE_SLOT_REACTIVE_NAMESPACE: &str = "__scene-slot";
 
 pub const DEF_SEQUENCER_SIGNATURE: &str =
-    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
+    "(def-sequencer name :resolution timebase :res timebase :tick callback :tick-source source :init callback :requires (module ...) :shape shape :energy-decay amount :reset-every duration :seed-on-reset amount :max-poly count :max-poly-selection mode :duration duration :dur duration :swing amount ...)";
 pub const DEF_SEQUENCER_DOCS: &str =
-    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization.";
+    "Define a self-clocked Lisp generator with :tick, or a graph sequencer with :shape and graph forms. :resolution/:res select the timebase; :tick-source is the internal prebuilt-source path; :init is reserved for generator initialization; :requires lists module names the tick body calls into, imported by the scheduler VM before compiling the shipped tick.";
 pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
-    ":resolution", ":res", ":tick", ":tick-source", ":init", ":shape", ":energy-decay", ":reset-every",
+    ":resolution", ":res", ":tick", ":tick-source", ":init", ":requires", ":shape", ":energy-decay", ":reset-every",
     ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
 ];
 pub const SEQ_EMIT_SIGNATURE: &str =
@@ -77,6 +77,7 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
     >::new()));
 
     let declarations_for_register = Arc::clone(&declarations);
+    let state_for_register = Arc::clone(&state);
     runtime.register_native("__defscene-register", move |args, _ctx| {
         let [EValue::String(name), default] = args.as_slice() else {
             return Err("defscene expects a symbol name and default value".to_string());
@@ -87,7 +88,10 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         declarations_for_register
             .lock()
             .map_err(|_| "failed to lock scene-slot declarations".to_string())?
-            .insert(name.clone(), literal);
+            .insert(name.clone(), literal.clone());
+        // Cross-VM publish: a scheduler runtime compiling a shipped tick
+        // resolves declarations it never evaluated through this table.
+        state_for_register.publish_scene_slot_declaration(name.clone(), literal);
         Ok(default.clone())
     });
 
@@ -153,11 +157,15 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         let [EValue::String(name)] = args.as_slice() else {
             return Err("scene-slot read expects one declaration name".to_string());
         };
-        let default = declarations_for_resolve
+        let local = declarations_for_resolve
             .lock()
             .map_err(|_| "failed to lock scene-slot declarations".to_string())?
             .get(name)
-            .cloned()
+            .cloned();
+        // Fall back to the cross-VM published table: shipped ticks read slots
+        // whose `defscene` only ever ran in an authoring VM.
+        let default = local
+            .or_else(|| state_for_resolve.published_scene_slot_declaration(name))
             .ok_or_else(|| format!("scene slot '{}' is not declared", name))?;
         let (value, _epoch, _overridden) = if let Some(slots) = &scheduler_slots {
             let slots = slots
@@ -179,11 +187,11 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         let [EValue::String(name), value] = args.as_slice() else {
             return Err("set! on a scene slot expects a declaration name and value".to_string());
         };
-        if !declarations_for_set
+        let declared_locally = declarations_for_set
             .lock()
             .map_err(|_| "failed to lock scene-slot declarations".to_string())?
-            .contains_key(name)
-        {
+            .contains_key(name);
+        if !declared_locally && state.published_scene_slot_declaration(name).is_none() {
             return Err(format!("scene slot '{}' is not declared", name));
         }
         let literal = crate::process::ProcessLiteral::from_value(value)
@@ -2805,6 +2813,33 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
 }
 
 
+/// Parse a `def-sequencer` `:requires` value — an auto-quoted list of module
+/// name symbols/strings — into validated module names for the scheduler VM to
+/// import before it compiles the shipped tick.
+fn parse_requires_arg(value: &EValue) -> Result<Vec<String>, String> {
+    let EValue::List(items) = value else {
+        return Err("def-sequencer :requires expects a list of module names".to_string());
+    };
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let name = match &*item.borrow() {
+            EValue::Symbol(s) | EValue::String(s) => s.clone(),
+            other => {
+                return Err(format!(
+                    "def-sequencer :requires expects module name symbols, got {other:?}"
+                ))
+            }
+        };
+        if !eseqlisp::modules::is_valid_module_name(&name) {
+            return Err(format!(
+                "def-sequencer :requires: invalid module name '{name}'"
+            ));
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
 pub(in crate::lisp_host) fn register_sequencer_impl(
     args: &[EValue],
     sequencers: &SharedRegisteredSequencers,
@@ -2838,6 +2873,11 @@ pub(in crate::lisp_host) fn register_sequencer_impl(
                 _ => return Err("def-sequencer :tick-source expects a string".to_string()),
             },
             "init" => { /* reserved for future one-time init */ }
+            // Validated for parity with the published path, but not imported
+            // here: this VM just evaluated the authoring source, so any module
+            // the tick calls into is already loaded (or the tick itself was
+            // unresolvable and never got this far).
+            "requires" => drop(parse_requires_arg(&args[idx])?),
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -2916,6 +2956,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             name,
             resolution: Timebase::Sixteenth as u8,
             tick_source: String::new(),
+            requires: Vec::new(),
             graph: Some(manifest),
         });
     }
@@ -2923,6 +2964,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
     let mut resolution: u8 = Timebase::Sixteenth as u8;
     let mut tick: Option<String> = None;
     let mut prebuilt_tick_source: Option<String> = None;
+    let mut requires: Vec<String> = Vec::new();
     let mut idx = 1;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -2943,6 +2985,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
                 _ => return Err("def-sequencer :tick-source expects a string".to_string()),
             },
             "init" => { /* reserved for future one-time init */ }
+            "requires" => requires = parse_requires_arg(value)?,
             _ => return Err(format!("def-sequencer unknown key :{key}")),
         }
         idx += 1;
@@ -2958,6 +3001,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         name,
         resolution,
         tick_source,
+        requires,
         graph: None,
     })
 }
