@@ -106,7 +106,11 @@ fn system_fonts() -> &'static Database {
 
 fn load_font(query: Query<'_>) -> Option<LoadedFont> {
     let db = system_fonts();
-    let id = db.query(&query)?;
+    load_font_by_id(db.query(&query)?)
+}
+
+fn load_font_by_id(id: fontdb::ID) -> Option<LoadedFont> {
+    let db = system_fonts();
     let face = db.face(id)?;
     let post_script_name = face.post_script_name.clone();
     let font = db.with_face_data(id, |data, face_index| {
@@ -125,43 +129,52 @@ fn load_font(query: Query<'_>) -> Option<LoadedFont> {
     })
 }
 
-fn load_named_font(name: &str) -> Option<LoadedFont> {
-    // The application historically names JetBrains Mono by PostScript name,
-    // while fontdb's family query expects a family name. Resolve the exact
-    // PostScript name first, then accept a normal family name.
+fn load_exact_named_font(name: &str) -> Option<LoadedFont> {
+    // The application historically names fonts by PostScript name, while
+    // fontdb's family query expects a family name. Try both representations.
     let db = system_fonts();
-    let exact = db
+    let id = db
         .faces()
         .find(|face| face.post_script_name.eq_ignore_ascii_case(name))
-        .map(|face| face.id);
-    let id = exact.or_else(|| {
-        db.query(&Query {
-            families: &[Family::Name(name)],
-            ..Query::default()
+        .map(|face| face.id)
+        .or_else(|| {
+            db.query(&Query {
+                families: &[Family::Name(name)],
+                ..Query::default()
+            })
+        })?;
+    load_font_by_id(id)
+}
+
+fn load_named_font(name: &str) -> Option<LoadedFont> {
+    const MONOSPACE_PREFERENCES: &[&str] = &[
+        "JetBrains Mono",
+        "JetBrains Mono Nerd Font",
+        "SF Mono",
+        "Menlo",
+        "Cascadia Mono",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+    ];
+
+    load_exact_named_font(name)
+        .or_else(|| {
+            MONOSPACE_PREFERENCES
+                .iter()
+                .find_map(|name| load_exact_named_font(name))
         })
-    })?;
-    let face = db.face(id)?;
-    let post_script_name = face.post_script_name.clone();
-    let font = db.with_face_data(id, |data, face_index| {
-        Font::from_bytes(
-            data.to_vec(),
-            FontSettings {
-                collection_index: face_index,
-                ..FontSettings::default()
-            },
-        )
-        .ok()
-    })??;
-    Some(LoadedFont {
-        font,
-        post_script_name,
-    })
+        .or_else(|| {
+            load_font(Query {
+                families: &[Family::Monospace],
+                ..Query::default()
+            })
+        })
 }
 
 fn load_system_ui_font() -> Option<LoadedFont> {
     #[cfg(target_os = "macos")]
     for name in ["SFPro-Regular", ".AppleSystemUIFont", "Helvetica"] {
-        if let Some(font) = load_named_font(name) {
+        if let Some(font) = load_exact_named_font(name) {
             return Some(font);
         }
     }
@@ -639,6 +652,14 @@ fn upload_metal_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_monospace_font_name_falls_back_to_an_installed_font() {
+        assert!(
+            GlyphAtlas::new("ThisFontNameDeliberatelyDoesNotExist", 13.0).is_some(),
+            "the monospace atlas should use a system fallback"
+        );
+    }
 
     #[test]
     fn cpu_atlases_measure_and_rasterize_on_every_platform() {
