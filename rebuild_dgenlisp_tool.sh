@@ -2,24 +2,26 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DGEN_REPO="${DGEN_REPO:-$HOME/code/swift/dgen}"
+DGEN_REPO="${DGEN_REPO:-$HOME/code/dgen-audio}"
 PRODUCT_NAME="DGenLisp"
 SOURCE_BIN="$DGEN_REPO/.build/release/$PRODUCT_NAME"
-DEST_BIN="$ROOT_DIR/crates/sequencer/tools/$PRODUCT_NAME"
 TOOLCHAIN_DEST="$ROOT_DIR/crates/sequencer/tools/dgen-toolchain"
 LOCK_FILE="$ROOT_DIR/content/dgen-toolchain.lock"
 ALLOW_UNCHANGED=0
 UPDATE_LOCK=0
+TARGET=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--allow-unchanged] [--update-lock]
+Usage: $(basename "$0") [--target TARGET] [--allow-unchanged] [--update-lock]
 
 Rebuilds the release DGenLisp binary from:
   $DGEN_REPO
 
-Installs it to:
-  $DEST_BIN
+Installs it under crates/sequencer/tools using the selected target suffix.
+The target defaults to the current host. Supported targets are:
+  macos-arm64
+  linux-x86_64
 
 Also stages the hermetic dgen toolchain archive
 (\$DGEN_REPO/.toolchain/dgen-toolchain-*.tar.gz) into:
@@ -28,9 +30,11 @@ and records the vendored archive's identity in the committed lock file:
   $LOCK_FILE
 
 Environment:
-  DGEN_REPO=/path/to/dgen   Override the Swift dgen repo path.
+  DGEN_REPO=/path/to/dgen-audio
+                            Override the Swift dgen repo path.
 
 Options:
+  --target TARGET           Select the host target and destination suffix.
   --allow-unchanged         Copy the release artifact even if its timestamp did
                             not advance during this run.
   --update-lock             Accept a toolchain archive whose sha256 differs
@@ -41,6 +45,14 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --target)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --target requires a value" >&2
+        exit 2
+      fi
+      TARGET="$2"
+      shift 2
+      ;;
     --allow-unchanged)
       ALLOW_UNCHANGED=1
       shift
@@ -61,26 +73,70 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) HOST_TARGET="macos-arm64" ;;
+  Linux-x86_64) HOST_TARGET="linux-x86_64" ;;
+  *)
+    echo "error: unsupported build host: $(uname -s)-$(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+TARGET="${TARGET:-$HOST_TARGET}"
+if [[ "$TARGET" != "$HOST_TARGET" ]]; then
+  echo "error: target $TARGET cannot be built on host $HOST_TARGET" >&2
+  echo "Build each binary on its matching host to avoid mislabeled artifacts." >&2
+  exit 1
+fi
+
+DEST_BIN="$ROOT_DIR/crates/sequencer/tools/$PRODUCT_NAME-$TARGET"
+BUILD_ARGS=(-c release --product "$PRODUCT_NAME")
+case "$TARGET" in
+  macos-arm64)
+    STRIP_ARGS=(-x)
+    ;;
+  linux-x86_64)
+    BUILD_ARGS+=(
+      -Xswiftc -static-stdlib
+      -Xswiftc -Xclang-linker
+      -Xswiftc -static-libgcc
+    )
+    STRIP_ARGS=(--strip-all)
+    ;;
+  *)
+    echo "error: unsupported target: $TARGET" >&2
+    exit 1
+    ;;
+esac
+
 mtime() {
   local path="$1"
-  if [[ -e "$path" ]]; then
+  if [[ ! -e "$path" ]]; then
+    echo 0
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
     stat -f '%m' "$path"
   else
-    echo 0
+    stat -c '%Y' "$path"
   fi
 }
 
 describe_file() {
   local path="$1"
-  if [[ -e "$path" ]]; then
+  if [[ ! -e "$path" ]]; then
+    echo "missing $path"
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
     stat -f '%Sm %z %N' "$path"
   else
-    echo "missing $path"
+    stat -c '%y %s %n' "$path"
   fi
 }
 
 sha256() {
-  shasum -a 256 "$1" | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
 }
 
 if [[ ! -d "$DGEN_REPO" ]]; then
@@ -111,7 +167,7 @@ echo
 echo "Building $PRODUCT_NAME release binary in $DGEN_REPO..."
 (
   cd "$DGEN_REPO"
-  swift build -c release --product "$PRODUCT_NAME"
+  swift build "${BUILD_ARGS[@]}"
 )
 
 if [[ ! -x "$SOURCE_BIN" ]]; then
@@ -143,15 +199,17 @@ if [[ ! -x "$DEST_BIN" ]]; then
   exit 1
 fi
 
-DEST_HASH="$(sha256 "$DEST_BIN")"
-if [[ "$SOURCE_HASH" != "$DEST_HASH" ]]; then
+COPIED_HASH="$(sha256 "$DEST_BIN")"
+if [[ "$SOURCE_HASH" != "$COPIED_HASH" ]]; then
   echo "error: installed binary checksum does not match release artifact" >&2
   echo "source: $SOURCE_HASH $SOURCE_BIN" >&2
-  echo "dest:   $DEST_HASH $DEST_BIN" >&2
+  echo "dest:   $COPIED_HASH $DEST_BIN" >&2
   exit 1
 fi
 
-echo "Installed tool after copy:"
+strip "${STRIP_ARGS[@]}" "$DEST_BIN"
+DEST_HASH="$(sha256 "$DEST_BIN")"
+echo "Installed and stripped tool:"
 echo "  $(describe_file "$DEST_BIN")"
 echo "  sha256 $DEST_HASH"
 
