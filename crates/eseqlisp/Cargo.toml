@@ -7,6 +7,7 @@ autoexamples = false
 
 [features]
 patcher-test-support = []
+wgpu = ["dep:wgpu"]
 
 [dependencies]
 ratatui = "0.29"
@@ -16,12 +17,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 similar = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+etagere = "0.2"
+winit = "0.29"
+wgpu = { version = "24", optional = true }
 
 [dev-dependencies]
 naga = { version = "24", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = { version = "0.3", features = [
@@ -46,8 +50,6 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGContext",
     "CGImage",
 ] }
-winit = "0.29"
-etagere = "0.2"
 
 [[example]]
 name = "embed"

@@ -4040,36 +4040,7 @@ fragment float4 live_spectrogram_frag(
             }
             self.last_window_bg = Some(bg);
 
-            if let Ok(handle) = window.window_handle()
-                && let RawWindowHandle::AppKit(appkit) = handle.as_raw()
-            {
-                unsafe {
-                    use objc2_app_kit::{NSAppearance, NSAppearanceCustomization, NSColor};
-
-                    let ns_view = appkit.ns_view.as_ptr() as *mut NSView;
-                    let ns_view = &*ns_view;
-                    let ns_window = ns_view.window().expect("view must have a window");
-                    let color = NSColor::colorWithRed_green_blue_alpha(
-                        bg.r as f64,
-                        bg.g as f64,
-                        bg.b as f64,
-                        1.0,
-                    );
-                    ns_window.setBackgroundColor(Some(&color));
-                    ns_window.setTitlebarAppearsTransparent(true);
-
-                    let appearance_name = if bg.luma() > 0.55 {
-                        "NSAppearanceNameVibrantLight"
-                    } else {
-                        "NSAppearanceNameVibrantDark"
-                    };
-                    if let Some(appearance) =
-                        NSAppearance::appearanceNamed(&NSString::from_str(appearance_name))
-                    {
-                        ns_window.setAppearance(Some(&appearance));
-                    }
-                }
-            }
+            crate::ui::platform::sync_window_theme(window, bg);
         }
 
         fn ensure_waveform_buffer(

@@ -70,12 +70,6 @@ use crate::layout::{
 use crate::theme;
 use crate::vm::Value;
 
-#[cfg(target_os = "macos")]
-use objc2_app_kit::{
-    NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
-    NSHapticFeedbackPerformer,
-};
-
 // ── Widget state generation counter ─────────────────────────────────────────
 // Bumped whenever a widget's internal state changes (scroll offset, tree
 // expand/collapse, etc.) so that primitive caches can be invalidated.
@@ -189,29 +183,13 @@ pub fn mapped_haptic_value(props: &HashMap<String, Value>, normalized: f32, fall
     }
 }
 
-#[cfg(target_os = "macos")]
 pub fn trigger_level_change_haptic() {
-    let performer = NSHapticFeedbackManager::defaultPerformer();
-    performer.performFeedbackPattern_performanceTime(
-        NSHapticFeedbackPattern::LevelChange,
-        NSHapticFeedbackPerformanceTime::Now,
-    );
+    crate::ui::platform::trigger_level_change_haptic();
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn trigger_level_change_haptic() {}
-
-#[cfg(target_os = "macos")]
 pub fn trigger_alignment_haptic() {
-    let performer = NSHapticFeedbackManager::defaultPerformer();
-    performer.performFeedbackPattern_performanceTime(
-        NSHapticFeedbackPattern::Alignment,
-        NSHapticFeedbackPerformanceTime::Now,
-    );
+    crate::ui::platform::trigger_alignment_haptic();
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn trigger_alignment_haptic() {}
 
 // ── Overlay system ───────────────────────────────────────────────────────────
 // Overlays form a small kind-tagged stack (expected depth ≤ 2: a modal with a
