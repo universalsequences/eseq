@@ -9426,10 +9426,57 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             (invoke_velocity(&mut scheduler, "scene-reader") - 0.8).abs() < 1e-6,
             "a callback must retain its selected boundary snapshot"
         );
-        scheduler.set_scene_slot_snapshot(state.latest_scheduler_snapshot().scene_slots.clone());
+        scheduler.set_scene_slot_snapshot(Arc::new(state.latest_scheduler_snapshot().scene_slots.clone()));
         assert!(
             (invoke_velocity(&mut scheduler, "scene-reader") - 0.4).abs() < 1e-6,
             "the next boundary must observe the newly published snapshot"
+        );
+    }
+
+    #[test]
+    fn shipped_scene_references_lower_inside_quasiquote_holes_only() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        super::register_scene_slot_natives(&mut authoring, Arc::clone(&state));
+        let publish_state = Arc::clone(&state);
+        authoring.register_native("def-sequencer", move |args, _ctx| {
+            let published = super::published_sequencer_from_def_args(&args)?;
+            let name = published.name.clone();
+            publish_state.publish_sequencer(published);
+            Ok(Value::String(name))
+        });
+        authoring
+            .eval_str(
+                r#"(defscene figures 0.25)
+                   (def-sequencer "template-reader" :resolution :16
+                     :tick (seq-emit :track 0 :vel (first (rest `(figures ,figures)))))"#,
+            )
+            .expect("publish a quasiquoting sequencer");
+
+        // Exactly one lowering: the unquoted hole is a free read, while the
+        // bare `figures` in the same template is data. (Shipped source does
+        // not yet carry the quasiquote/unquote markers themselves — that is a
+        // separate gap in `compile_quoted_expression`.)
+        let template_reader = state
+            .published_sequencers()
+            .into_iter()
+            .find(|definition| definition.name == "template-reader")
+            .expect("template reader publication");
+        assert_eq!(
+            template_reader
+                .tick_source
+                .matches("__defscene-resolve")
+                .count(),
+            1,
+            "only the unquoted hole may lower: {}",
+            template_reader.tick_source
+        );
+        assert!(
+            template_reader
+                .tick_source
+                .contains("(figures (__defscene-resolve \"figures\"))"),
+            "the quasiquoted symbol must stay data: {}",
+            template_reader.tick_source
         );
     }
 
@@ -9512,11 +9559,20 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .velocity
         };
 
-        // The write lands in the live slot bank; the read still observes the
-        // boundary snapshot until the next boundary republishes it.
+        // A scheduler callback resolves against the pattern selected for its
+        // chunk, which is not necessarily the UI's current pattern, so the
+        // write is refused (a native error, surfaced as a status) rather than
+        // landing in an unrelated scene. Reads keep working.
         assert!((invoke(&mut scheduler) - 0.25).abs() < 1e-6);
-        scheduler.set_scene_slot_snapshot(state.latest_scheduler_snapshot().scene_slots.clone());
-        assert!((invoke(&mut scheduler) - 0.5).abs() < 1e-6);
+        assert!((invoke(&mut scheduler) - 0.25).abs() < 1e-6);
+        assert!(
+            state
+                .latest_scheduler_snapshot()
+                .scene_slots
+                .get("counter")
+                .is_none(),
+            "a refused scheduler write must not reach the live slot bank"
+        );
     }
 
     #[test]
@@ -9843,9 +9899,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .resolved
                 .duration
         };
-        scheduler.set_scene_slot_snapshot(first_scheduler_slots);
+        scheduler.set_scene_slot_snapshot(Arc::new(first_scheduler_slots));
         let first_duration = invoke_duration(&mut scheduler);
-        scheduler.set_scene_slot_snapshot(second_scheduler_slots);
+        scheduler.set_scene_slot_snapshot(Arc::new(second_scheduler_slots));
         let second_duration = invoke_duration(&mut scheduler);
         assert!((first_duration - 0.0625).abs() < 1e-6, "stac scene: {first_duration}");
         assert!((second_duration - 0.2).abs() < 1e-6, "plain scene: {second_duration}");
@@ -11044,7 +11100,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         state
             .write_current_scene_slot("amount", crate::process::ProcessLiteral::Number(5.0))
             .expect("write scene override");
-        scratch.set_scene_slot_snapshot(state.latest_scheduler_snapshot().scene_slots.clone());
+        scratch.set_scene_slot_snapshot(Arc::new(state.latest_scheduler_snapshot().scene_slots.clone()));
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
                 runtime_id: 92,

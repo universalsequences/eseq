@@ -48,7 +48,6 @@ pub struct SceneTrackReferenceState {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
-    pub scene_slots: SceneSlotStore,
 }
 
 #[derive(Clone, Debug)]

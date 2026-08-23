@@ -98,12 +98,12 @@ pub(super) fn mark_song_row_accum_resets(
 pub(super) fn scene_slots_for_chunk(
     base_snapshot: &SequencerSnapshot,
     chunk: &SequencerSnapshot,
-) -> crate::sequencer::SceneSlotStore {
+) -> Arc<crate::sequencer::SceneSlotStore> {
     base_snapshot
         .scene_slot_table
         .get(chunk.transport.current_pattern)
         .cloned()
-        .unwrap_or_else(|| chunk.scene_slots.clone())
+        .unwrap_or_else(|| Arc::new(chunk.scene_slots.clone()))
 }
 
 pub(super) fn build_scheduler_scratch_runtime(
@@ -1516,11 +1516,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     process_runtime.payload_epoch(),
                     process_runtime.channel_values(),
                 );
-                let generator_names: std::collections::HashMap<u64, String> = scratch
-                    .sequencer_defs()
-                    .iter()
-                    .map(|definition| (definition.id, definition.name.clone()))
-                    .collect();
+                // Naming a generator means locking the definition registry
+                // and cloning every name; failures are rare, so collect ids
+                // here and resolve names once, after the block.
+                let mut tick_failures: Vec<(u64, String)> = Vec::new();
                 generator_runtime.process_block(
                     chunk_start_beats,
                     chunk_end_beats,
@@ -1546,14 +1545,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 // tick must be one loud notice, not silence
                                 // re-erroring every boundary. The park clears
                                 // when definitions re-sync.
-                                let name = generator_names
-                                    .get(&generator_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("generator {generator_id}"));
-                                eprintln!(
-                                    "sequencer tick failed for {name} ({generator_id}): {error}"
-                                );
-                                state.report_generator_tick_error(generator_id, name, error);
+                                tick_failures.push((generator_id, error));
                                 parked_generators.insert(generator_id);
                                 empty
                             }
@@ -1561,6 +1553,21 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     },
                     &mut generator_emissions,
                 );
+                if !tick_failures.is_empty() {
+                    let generator_names: std::collections::HashMap<u64, String> = scratch
+                        .sequencer_defs()
+                        .iter()
+                        .map(|definition| (definition.id, definition.name.clone()))
+                        .collect();
+                    for (generator_id, error) in tick_failures {
+                        let name = generator_names
+                            .get(&generator_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("generator {generator_id}"));
+                        eprintln!("sequencer tick failed for {name} ({generator_id}): {error}");
+                        state.report_generator_tick_error(generator_id, name, error);
+                    }
+                }
             } else if debug_routing_enabled() {
                 eprintln!(
                     "[routing] skip generator-block reason=no-scratch-runtime chunk=({:.6}..{:.6})",

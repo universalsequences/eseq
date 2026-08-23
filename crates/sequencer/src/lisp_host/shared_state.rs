@@ -119,7 +119,7 @@ pub(super) struct GeneratorChannelSnapshot {
 }
 
 pub(super) type SharedGeneratorChannels = Arc<Mutex<GeneratorChannelSnapshot>>;
-pub(super) type SharedSceneSlotSnapshot = Arc<Mutex<crate::sequencer::SceneSlotStore>>;
+pub(super) type SharedSceneSlotSnapshot = Arc<Mutex<Arc<crate::sequencer::SceneSlotStore>>>;
 pub(super) type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -398,9 +398,9 @@ impl ScratchControlRuntime {
         let generator_tick = Arc::new(Mutex::new(None));
         let generator_channels: SharedGeneratorChannels =
             Arc::new(Mutex::new(GeneratorChannelSnapshot::default()));
-        let scene_slots: SharedSceneSlotSnapshot = Arc::new(Mutex::new(
+        let scene_slots: SharedSceneSlotSnapshot = Arc::new(Mutex::new(Arc::new(
             state.latest_scheduler_snapshot().scene_slots.clone(),
-        ));
+        )));
         let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::default()));
         let process_eval = Arc::new(Mutex::new(None));
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
@@ -513,10 +513,15 @@ impl ScratchControlRuntime {
 
     /// Select the immutable pattern snapshot observed by shipped callbacks at
     /// the next scheduler boundary.
-    pub fn set_scene_slot_snapshot(&self, slots: crate::sequencer::SceneSlotStore) {
-        if let Ok(mut guard) = self.scene_slots.lock() {
-            *guard = slots;
-        }
+    pub fn set_scene_slot_snapshot(&self, slots: Arc<crate::sequencer::SceneSlotStore>) {
+        // Recover through poisoning rather than skipping the update: silently
+        // keeping a stale snapshot forever would make every shipped tick read
+        // the previous chunk's slots with no diagnostic.
+        let mut guard = self
+            .scene_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = slots;
     }
 
     pub fn set_position(&mut self, track: usize, cursor_step: usize) {

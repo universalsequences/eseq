@@ -8945,7 +8945,10 @@ fn a_prebuilt_chunk_reads_live_scene_slots_not_its_preflight_copy() {
     };
     let mut base = SequencerSnapshot::empty();
     base.transport.current_pattern = 0;
-    base.scene_slot_table = Arc::new(vec![SceneSlotStore::default(), overridden.clone()]);
+    base.scene_slot_table = Arc::new(vec![
+        Arc::new(SceneSlotStore::default()),
+        Arc::new(overridden.clone()),
+    ]);
 
     // The row was preflighted before the write: it plays scene 1 and carries
     // an empty slot store.

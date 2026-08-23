@@ -151,6 +151,11 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         },
     );
 
+    // A snapshot-backed runtime reads the pattern selected for its scheduler
+    // chunk, which is not necessarily the UI's current pattern. A write there
+    // would land in the wrong scene and stay invisible to its own next read.
+    let snapshot_backed = scheduler_slots.is_some();
+
     let declarations_for_resolve = Arc::clone(&declarations);
     let state_for_resolve = Arc::clone(&state);
     runtime.register_native("__defscene-resolve", move |args, ctx| {
@@ -187,6 +192,13 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
         let [EValue::String(name), value] = args.as_slice() else {
             return Err("set! on a scene slot expects a declaration name and value".to_string());
         };
+        if snapshot_backed {
+            return Err(format!(
+                "scene slot '{}' cannot be written from a scheduler callback; \
+                 set! it from the UI or a panel handler",
+                name
+            ));
+        }
         let declared_locally = declarations_for_set
             .lock()
             .map_err(|_| "failed to lock scene-slot declarations".to_string())?

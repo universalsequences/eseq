@@ -309,14 +309,14 @@ impl SequencerState {
     /// Captured into each published snapshot so scheduler-side readers can
     /// resolve a chunk's scene without locking the bank on the scheduling
     /// thread, and without trusting a prebuilt snapshot's preflight copy.
-    pub fn scene_slot_table(&self) -> Vec<SceneSlotStore> {
+    pub fn scene_slot_table(&self) -> Vec<std::sync::Arc<SceneSlotStore>> {
         self.pattern
             .scenes
             .lock()
             .unwrap()
             .scenes
             .iter()
-            .map(|scene| scene.scene_slots.clone())
+            .map(|scene| std::sync::Arc::new(scene.scene_slots.clone()))
             .collect()
     }
 

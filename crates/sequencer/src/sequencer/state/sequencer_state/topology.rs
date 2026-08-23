@@ -419,7 +419,6 @@ impl SequencerState {
             mod_connections: scene.mod_connections.clone(),
             neural_networks: scene.neural_networks.clone(),
             graph_overrides: scene.graph_overrides.clone(),
-            scene_slots: scene.scene_slots.clone(),
         }).collect();
         let mut sidechains = Vec::new();
         for (owner_track, owner_pool) in scenes.track_pools.iter().enumerate() {
@@ -538,9 +537,10 @@ impl SequencerState {
             scene.mod_connections = references.mod_connections.clone();
             scene.neural_networks = references.neural_networks.clone();
             scene.graph_overrides = references.graph_overrides.clone();
-            // Scene slots are track-agnostic. Restoring a deleted/reordered
-            // lane preserves their values verbatim; there is no index remap.
-            scene.scene_slots = references.scene_slots.clone();
+            // Scene slots are deliberately absent here. They are
+            // track-agnostic, so a lane restore has nothing to remap — and
+            // round-tripping them through this snapshot would revert slot
+            // writes made after the topology edge was captured.
         }
         for saved in &snapshot.sidechains {
             let Some(patch) = scenes.track_pools.get_mut(saved.owner_track)

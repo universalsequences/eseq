@@ -865,6 +865,17 @@ impl<'a> Compiler<'a> {
             {
                 expression.clone()
             }
+            // The list spelling of `` ` ``: its template is data, but its
+            // unquoted holes are still free reads that must lower.
+            Expression::List(items)
+                if items.len() == 2
+                    && matches!(items.first(), Some(Expression::Symbol(name)) if name == "quasiquote") =>
+            {
+                Expression::List(vec![
+                    items[0].clone(),
+                    self.lower_scene_references_inside_quasiquote(&items[1], bound, 1),
+                ])
+            }
             Expression::List(items)
                 if matches!(items.first(), Some(Expression::Symbol(name)) if name == "lambda")
                     && matches!(items.get(1), Some(Expression::List(_))) =>
@@ -964,12 +975,66 @@ impl<'a> Compiler<'a> {
             Expression::List(items) => {
                 Expression::List(items.iter().map(|item| lower(item, bound)).collect())
             }
-            Expression::QuoteList(_)
-            | Expression::QuoteSymbol(_)
-            | Expression::Quasiquote(_) => expression.clone(),
+            Expression::QuoteList(_) | Expression::QuoteSymbol(_) => expression.clone(),
+            Expression::Quasiquote(inner) => Expression::Quasiquote(Box::new(
+                self.lower_scene_references_inside_quasiquote(inner, bound, 1),
+            )),
             Expression::Unquote(inner) => Expression::Unquote(Box::new(lower(inner, bound))),
             Expression::UnquoteSplicing(inner) => {
                 Expression::UnquoteSplicing(Box::new(lower(inner, bound)))
+            }
+            _ => expression.clone(),
+        }
+    }
+
+    /// Descend a quasiquoted template: its symbols are data, so only the
+    /// unquoted holes lower. `depth` tracks quasiquote nesting so an inner
+    /// `` ` `` consumes its own unquote before the outer template's holes are
+    /// reached.
+    fn lower_scene_references_inside_quasiquote(
+        &self,
+        expression: &Expression,
+        bound: &[String],
+        depth: usize,
+    ) -> Expression {
+        let descend = |expression: &Expression, depth: usize| {
+            self.lower_scene_references_inside_quasiquote(expression, bound, depth)
+        };
+        let unquote_hole = |inner: &Expression| {
+            if depth == 1 {
+                self.lower_scene_references_for_shipping(inner, bound)
+            } else {
+                self.lower_scene_references_inside_quasiquote(inner, bound, depth - 1)
+            }
+        };
+        match expression {
+            Expression::Quasiquote(inner) => {
+                Expression::Quasiquote(Box::new(descend(inner, depth + 1)))
+            }
+            Expression::Unquote(inner) => Expression::Unquote(Box::new(unquote_hole(inner))),
+            Expression::UnquoteSplicing(inner) => {
+                Expression::UnquoteSplicing(Box::new(unquote_hole(inner)))
+            }
+            // Macros can emit the list spellings of these forms rather than
+            // the parser's dedicated variants; both reach the shipped tick.
+            Expression::List(items) | Expression::QuoteList(items) => {
+                let head = match items.first() {
+                    Some(Expression::Symbol(name)) if items.len() == 2 => Some(name.as_str()),
+                    _ => None,
+                };
+                let lowered = match head {
+                    Some("quasiquote") => {
+                        vec![items[0].clone(), descend(&items[1], depth + 1)]
+                    }
+                    Some("unquote") | Some("unquote-splicing") => {
+                        vec![items[0].clone(), unquote_hole(&items[1])]
+                    }
+                    _ => items.iter().map(|item| descend(item, depth)).collect(),
+                };
+                match expression {
+                    Expression::QuoteList(_) => Expression::QuoteList(lowered),
+                    _ => Expression::List(lowered),
+                }
             }
             _ => expression.clone(),
         }

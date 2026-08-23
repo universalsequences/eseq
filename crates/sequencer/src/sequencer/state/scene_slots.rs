@@ -112,9 +112,13 @@ impl SceneSlotStore {
                 epoch: self.epoch(name),
                 overridden: true,
             },
+            // The generation is an invalidation token, not an "is overridden"
+            // flag: it must keep reporting the last write even after an undo
+            // removed the override, or a memoizing reader would see every
+            // non-overridden slot in every scene share epoch 0.
             None => ResolvedSceneSlot {
                 value: declaration_default,
-                epoch: 0,
+                epoch: self.epoch(name),
                 overridden: false,
             },
         }

@@ -135,6 +135,31 @@
     }
 
     #[test]
+    fn track_lane_restore_leaves_later_scene_slot_writes_intact() {
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        let captured = state
+            .capture_track_pattern_lane_state(1, &[Vec::new(), Vec::new()])
+            .expect("capture the trailing track lane");
+
+        // A slot written AFTER the topology edge was captured is not part of
+        // that edge: scene slots are track-agnostic, so restoring the lane
+        // must not roll the write back.
+        state
+            .write_current_scene_slot("figures", crate::process::ProcessLiteral::Number(7.0))
+            .expect("write a scene slot");
+
+        state
+            .move_appended_track_pattern_lane_to(0, &captured)
+            .expect("restore the captured lane");
+
+        assert_eq!(
+            state.current_scene_slots().get("figures"),
+            Some(&crate::process::ProcessLiteral::Number(7.0)),
+            "a track-topology restore must not revert scene-slot writes"
+        );
+    }
+
+    #[test]
     fn record_position_uses_the_track_timebase_not_global_sixteenths() {
         let state = SequencerState::new(1, vec![vec![]]);
         state.pattern.track_params[0].set_timebase(Timebase::Eighth);

@@ -106,7 +106,11 @@ pub struct SequencerSnapshot {
     /// through this table (see `scene_slots_for_chunk`) so the frozen copy is
     /// never the value a generator observes. Shared by `Arc` so the
     /// copy-on-write single-track publish carries it forward untouched.
-    pub scene_slot_table: Arc<Vec<SceneSlotStore>>,
+    ///
+    /// Each entry is itself shared: the scheduler selects one per chunk
+    /// boundary, and a refcount bump keeps that off the audio thread's
+    /// allocation path.
+    pub scene_slot_table: Arc<Vec<Arc<SceneSlotStore>>>,
     pub process_trace: bool,
 }
 
