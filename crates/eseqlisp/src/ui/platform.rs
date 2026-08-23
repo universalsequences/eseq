@@ -7,7 +7,7 @@ use winit::window::{Theme as WindowTheme, Window};
 
 use crate::backend::Color;
 
-pub(crate) fn window_theme_for_background(background: Color) -> WindowTheme {
+pub fn window_theme_for_background(background: Color) -> WindowTheme {
     if background.luma() > 0.55 {
         WindowTheme::Light
     } else {
@@ -20,7 +20,7 @@ pub(crate) fn window_theme_for_background(background: Color) -> WindowTheme {
 /// On Linux and other non-macOS targets winit maps this to the platform window
 /// system. macOS additionally needs AppKit calls for its transparent titlebar
 /// and exact background color.
-pub(crate) fn sync_window_theme(window: &Window, background: Color) {
+pub fn sync_window_theme(window: &Window, background: Color) {
     let window_theme = window_theme_for_background(background);
     window.set_theme(Some(window_theme));
 
@@ -69,7 +69,7 @@ fn sync_appkit_window_theme(window: &Window, background: Color, window_theme: Wi
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn trigger_level_change_haptic() {
+pub fn trigger_level_change_haptic() {
     use objc2_app_kit::{
         NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
         NSHapticFeedbackPerformer,
@@ -83,10 +83,10 @@ pub(crate) fn trigger_level_change_haptic() {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn trigger_level_change_haptic() {}
+pub fn trigger_level_change_haptic() {}
 
 #[cfg(target_os = "macos")]
-pub(crate) fn trigger_alignment_haptic() {
+pub fn trigger_alignment_haptic() {
     use objc2_app_kit::{
         NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
         NSHapticFeedbackPerformer,
@@ -100,7 +100,7 @@ pub(crate) fn trigger_alignment_haptic() {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn trigger_alignment_haptic() {}
+pub fn trigger_alignment_haptic() {}
 
 #[cfg(test)]
 mod tests {

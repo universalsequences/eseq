@@ -4,6 +4,6 @@ pub mod glyph_atlas;
 pub mod hit;
 pub mod layout;
 pub mod metal_backend;
-pub(crate) mod platform;
+pub mod platform;
 pub mod theme;
 pub mod tui;

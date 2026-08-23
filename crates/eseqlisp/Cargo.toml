@@ -60,6 +60,10 @@ name = "metal_window"
 path = "examples/metal_window.rs"
 
 [[example]]
+name = "winit_window"
+path = "examples/winit_window.rs"
+
+[[example]]
 name = "piano_roll_embed"
 path = "examples/piano_roll_embed.rs"
 
