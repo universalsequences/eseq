@@ -19,6 +19,8 @@ sha2 = "0.10"
 similar = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 etagere = "0.2"
+fontdb = "0.23"
+fontdue = "0.9"
 bytemuck = { version = "1", features = ["derive"], optional = true }
 winit = "0.29"
 wgpu = { version = "24", optional = true }
@@ -45,7 +47,6 @@ objc2-metal = { version = "0.3", features = [
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSColor", "NSResponder", "NSAppearance", "NSHapticFeedback"] }
 objc2-core-foundation = { version = "0.3", features = ["CFAttributedString", "CFDictionary"] }
-objc2-core-text = { version = "0.3", features = ["CTFont", "CTFontDescriptor", "CTLine", "CTStringAttributes"] }
 objc2-core-graphics = { version = "0.3", features = [
     "CGBitmapContext",
     "CGColorSpace",

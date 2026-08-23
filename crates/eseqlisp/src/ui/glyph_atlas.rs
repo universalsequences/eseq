@@ -1,554 +1,690 @@
-/// Glyph atlas: rasterizes characters via CoreText into a shared R8Unorm Metal
-/// texture. Each cell is `cell_w × cell_h` pixels; the atlas packs them with
-/// etagere. The shader samples coverage (0=transparent, 1=opaque) and blends
-/// the caller's fg/bg colors — so the atlas is colorless.
-///
-/// Coordinate note: CoreText draws Y-up into the CGBitmapContext, but Metal
-/// textures are Y-down. Rather than flipping pixels on the CPU, we flip UV.v
-/// in the vertex shader (v = 1.0 - v).
+//! Cross-platform glyph measurement, rasterization, and atlas packing.
+//!
+//! Font discovery is provided by `fontdb` and outlines are measured and
+//! rasterized by `fontdue` on every platform. Atlas pixels use one explicit
+//! convention: row zero is the top row and increasing V moves down. GPU
+//! backends must preserve that convention when uploading the R8 bitmap.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use etagere::{AtlasAllocator, Size};
+use fontdb::{Database, Family, Query};
+use fontdue::{Font, FontSettings, Metrics};
+
 #[cfg(target_os = "macos")]
-mod inner {
-    use std::collections::HashMap;
-    use std::ffi::CString;
-    use std::ptr::NonNull;
+use std::ptr::NonNull;
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::ProtocolObject;
+#[cfg(target_os = "macos")]
+use objc2_metal::{
+    MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLTexture,
+    MTLTextureDescriptor,
+};
 
-    use etagere::{AtlasAllocator, Size};
-    use objc2::rc::Retained;
-    use objc2::runtime::ProtocolObject;
-    use objc2_core_foundation::{CFRetained, CFString, CGFloat, CGPoint, CGSize};
-    use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph};
-    use objc2_core_text::{CTFont, CTFontOrientation, CTFontUIFontType};
-    use objc2_metal::{
-        MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLTexture, MTLTextureDescriptor,
-    };
+const ATLAS_SIZE: usize = 1024;
+const PROP_ATLAS_SIZE: usize = 2048;
+const GLYPH_PADDING: usize = 2;
 
-    const ATLAS_SIZE: usize = 1024;
-    // kCFStringEncodingUTF8
-    const CF_UTF8: u32 = 0x0800_0100;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontLineMetrics {
+    pub ascent: f32,
+    /// Positive distance below the baseline.
+    pub descent: f32,
+    pub leading: f32,
+}
 
-    /// Per-character entry in the atlas.
-    #[derive(Clone, Copy, Debug)]
-    pub struct GlyphEntry {
-        /// Normalised UV corners (0..1) in the atlas texture.
-        /// v is in CoreText Y-up order; flip in the shader (v = 1.0 - v).
-        pub uv_min: [f32; 2],
-        pub uv_max: [f32; 2],
+impl FontLineMetrics {
+    pub fn line_height(self) -> f32 {
+        (self.ascent + self.descent + self.leading).ceil()
     }
+}
 
-    pub struct GlyphAtlas {
-        /// R8Unorm GPU texture, ATLAS_SIZE × ATLAS_SIZE.
-        pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
-        /// Advance width in pixels (monospace — same for every glyph).
-        pub cell_w: usize,
-        /// Line height in pixels (ascent + descent + leading).
-        pub cell_h: usize,
-        /// Pixels above the baseline (used to position each cell row).
-        pub ascent: f32,
+/// A CPU-owned R8 atlas. Keeping the authoritative bitmap outside a graphics
+/// API makes glyph generation testable on headless Linux and lets each backend
+/// upload exactly the same pixels.
+pub struct AtlasBitmap {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+    revision: u64,
+}
 
-        allocator: AtlasAllocator,
-        glyphs: HashMap<char, GlyphEntry>,
-        font: CFRetained<CTFont>,
-        descent: f32,
-    }
-
-    impl GlyphAtlas {
-        pub fn new(
-            device: &ProtocolObject<dyn MTLDevice>,
-            font_name: &str,
-            font_size: f64,
-        ) -> Option<Self> {
-            // ── CTFont ───────────────────────────────────────────────────────────
-            let cf_name = {
-                let cstr = CString::new(font_name).ok()?;
-                unsafe { CFString::with_c_string(None, cstr.as_ptr(), CF_UTF8) }?
-            };
-            let font = unsafe { CTFont::with_name(&cf_name, font_size, std::ptr::null()) };
-
-            // Warn if CoreText fell back to a different font (e.g. bad PostScript name).
-            let resolved = unsafe { font.post_script_name() };
-            let resolved_str = resolved.to_string();
-            if resolved_str != font_name {
-                eprintln!(
-                    "[glyph_atlas] font fallback: requested {:?}, got {:?}",
-                    font_name, resolved_str
-                );
-            }
-
-            // ── Cell dimensions from font metrics ────────────────────────────────
-            let ascent = unsafe { font.ascent() } as f32;
-            let descent = unsafe { font.descent() } as f32; // positive value
-            let leading = unsafe { font.leading() } as f32;
-            let cell_h = (ascent + descent + leading).ceil() as usize;
-
-            // Advance width: measure 'm' as the monospace cell width.
-            let cell_w = {
-                let chars: [u16; 1] = ['m' as u16];
-                let mut glyph: [CGGlyph; 1] = [0];
-                unsafe {
-                    font.glyphs_for_characters(
-                        NonNull::new(chars.as_ptr() as *mut _).unwrap(),
-                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                        1,
-                    );
-                }
-                let mut adv = CGSize {
-                    width: 0.0,
-                    height: 0.0,
-                };
-                unsafe {
-                    font.advances_for_glyphs(
-                        CTFontOrientation::Default,
-                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                        &mut adv,
-                        1,
-                    );
-                }
-                adv.width.ceil() as usize
-            };
-
-            // ── Atlas GPU texture (R8Unorm) ──────────────────────────────────────
-            let texture = {
-                let desc = MTLTextureDescriptor::new();
-                unsafe {
-                    desc.setPixelFormat(MTLPixelFormat::R8Unorm);
-                    desc.setWidth(ATLAS_SIZE);
-                    desc.setHeight(ATLAS_SIZE);
-                }
-                device.newTextureWithDescriptor(&desc)?
-            };
-
-            Some(Self {
-                texture,
-                cell_w,
-                cell_h,
-                ascent,
-                descent,
-                allocator: AtlasAllocator::new(Size::new(ATLAS_SIZE as i32, ATLAS_SIZE as i32)),
-                glyphs: HashMap::new(),
-                font,
-            })
-        }
-
-        /// Return the atlas entry for `ch`, rasterizing it on first access.
-        pub fn get_or_rasterize(&mut self, ch: char) -> Option<&GlyphEntry> {
-            if !self.glyphs.contains_key(&ch) {
-                self.rasterize(ch)?;
-            }
-            // Single lookup after the contains_key guard; entry API can't be
-            // used here because rasterize() also borrows self mutably.
-            self.glyphs.get(&ch)
-        }
-
-        fn rasterize(&mut self, ch: char) -> Option<()> {
-            let cell_w = self.cell_w;
-            let cell_h = self.cell_h;
-
-            // Surrogate pairs not handled yet.
-            if ch as u32 > 0xFFFF {
-                return None;
-            }
-
-            // ── Glyph ID ─────────────────────────────────────────────────────────
-            let chars: [u16; 1] = [ch as u16];
-            let mut glyph: [CGGlyph; 1] = [0];
-            unsafe {
-                self.font.glyphs_for_characters(
-                    NonNull::new(chars.as_ptr() as *mut _).unwrap(),
-                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                    1,
-                );
-            }
-
-            // ── CPU rasterization into a gray bitmap ─────────────────────────────
-            // The Vec is zero-initialised → black background, no clearing needed.
-            let mut pixels = vec![0u8; cell_w * cell_h];
-            {
-                let gray = CGColorSpace::new_device_gray()?;
-                // kCGImageAlphaNone = 0: 1 byte per pixel, no alpha channel.
-                // CGBitmapContextCreate uses our buffer directly; does not free it.
-                let ctx = unsafe {
-                    CGBitmapContextCreate(
-                        pixels.as_mut_ptr() as *mut _,
-                        cell_w,
-                        cell_h,
-                        8,      // bits per component
-                        cell_w, // bytes per row (no padding)
-                        Some(&gray),
-                        0, // kCGImageAlphaNone | kCGBitmapByteOrderDefault
-                    )
-                }?;
-
-                // White fill: [gray_component, alpha] for a gray colorspace.
-                let white: [CGFloat; 2] = [1.0, 1.0];
-                unsafe { CGContext::set_fill_color(Some(&ctx), white.as_ptr()) };
-
-                // Draw glyph at the baseline.
-                // CoreText Y-up: baseline is `descent` pixels from the bottom.
-                let pos = CGPoint {
-                    x: 0.0,
-                    y: self.descent as f64,
-                };
-                unsafe {
-                    self.font.draw_glyphs(
-                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                        NonNull::new(&pos as *const _ as *mut _).unwrap(),
-                        1,
-                        &ctx,
-                    );
-                }
-                // `ctx` drops here; pixels now hold the rendered bitmap.
-            }
-
-            // ── Pack into atlas ───────────────────────────────────────────────────
-            let alloc = self
-                .allocator
-                .allocate(Size::new(cell_w as i32, cell_h as i32))?;
-            let r = alloc.rectangle;
-            let (ax, ay) = (r.min.x as usize, r.min.y as usize);
-
-            // ── Upload to GPU ─────────────────────────────────────────────────────
-            unsafe {
-                self.texture
-                    .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                        MTLRegion {
-                            origin: MTLOrigin { x: ax, y: ay, z: 0 },
-                            size: MTLSize {
-                                width: cell_w,
-                                height: cell_h,
-                                depth: 1,
-                            },
-                        },
-                        0,
-                        NonNull::new(pixels.as_ptr() as *mut core::ffi::c_void).unwrap(),
-                        cell_w,
-                    );
-            }
-
-            // ── Record UVs ───────────────────────────────────────────────────────
-            let s = ATLAS_SIZE as f32;
-            self.glyphs.insert(
-                ch,
-                GlyphEntry {
-                    uv_min: [ax as f32 / s, ay as f32 / s],
-                    uv_max: [(ax + cell_w) as f32 / s, (ay + cell_h) as f32 / s],
-                },
-            );
-            Some(())
+impl AtlasBitmap {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![0; width * height],
+            revision: 0,
         }
     }
 
-    // ── Shared font cache for proportional text ────────────────────────────
-
-    /// Caches sized CTFont instances and their line metrics.
-    /// Shared between `ProportionalGlyphAtlas` (rasterization) and
-    /// `PropTextMeasurer` (layout-only measurement).
-    pub struct SizedFontCache {
-        base_font: CFRetained<CTFont>,
-        sized_fonts: HashMap<u16, CFRetained<CTFont>>,
-        line_metrics: HashMap<u16, (f32, f32, f32)>,
-        scale: f64,
+    fn write(&mut self, x: usize, y: usize, width: usize, height: usize, pixels: &[u8]) {
+        debug_assert_eq!(pixels.len(), width * height);
+        for row in 0..height {
+            let src = row * width;
+            let dst = (y + row) * self.width + x;
+            self.pixels[dst..dst + width].copy_from_slice(&pixels[src..src + width]);
+        }
+        self.revision = self.revision.wrapping_add(1);
     }
 
-    impl SizedFontCache {
-        pub fn new(base_font_size: f64, scale: f64) -> Option<Self> {
-            let base_font = unsafe {
-                CTFont::new_ui_font_for_language(CTFontUIFontType::System, base_font_size, None)
-            }?;
-
-            let size_tenths = (base_font_size * 10.0).round() as u16;
-            let ascent = unsafe { base_font.ascent() } as f32;
-            let descent = unsafe { base_font.descent() } as f32;
-            let leading = unsafe { base_font.leading() } as f32;
-
-            let mut sized_fonts = HashMap::new();
-            sized_fonts.insert(size_tenths, base_font.clone());
-            let mut line_metrics = HashMap::new();
-            line_metrics.insert(size_tenths, (ascent, descent, leading));
-
-            Some(Self {
-                base_font,
-                sized_fonts,
-                line_metrics,
-                scale,
-            })
-        }
-
-        pub fn sized_font(&mut self, size_tenths: u16) -> &CTFont {
-            if !self.sized_fonts.contains_key(&size_tenths) {
-                let size = (size_tenths as f64 / 10.0) * self.scale;
-                let font = unsafe {
-                    self.base_font
-                        .copy_with_attributes(size, std::ptr::null(), None)
-                };
-                let ascent = unsafe { font.ascent() } as f32;
-                let descent = unsafe { font.descent() } as f32;
-                let leading = unsafe { font.leading() } as f32;
-                self.line_metrics
-                    .insert(size_tenths, (ascent, descent, leading));
-                self.sized_fonts.insert(size_tenths, font);
-            }
-            &self.sized_fonts[&size_tenths]
-        }
-
-        pub fn line_height(&mut self, size_tenths: u16) -> f32 {
-            self.sized_font(size_tenths);
-            let (a, d, l) = self.line_metrics[&size_tenths];
-            (a + d + l).ceil()
-        }
-
-        pub fn ascent(&mut self, size_tenths: u16) -> f32 {
-            self.sized_font(size_tenths);
-            self.line_metrics[&size_tenths].0
-        }
-
-        pub fn descent(&mut self, size_tenths: u16) -> f32 {
-            self.sized_font(size_tenths);
-            self.line_metrics[&size_tenths].1
-        }
-
-        /// Measure the advance width of a single character at the given size.
-        pub fn char_advance(&mut self, ch: char, size_tenths: u16) -> f32 {
-            if ch as u32 > 0xFFFF {
-                return 0.0;
-            }
-            let font = self.sized_font(size_tenths);
-            let chars: [u16; 1] = [ch as u16];
-            let mut glyph: [CGGlyph; 1] = [0];
-            unsafe {
-                font.glyphs_for_characters(
-                    NonNull::new(chars.as_ptr() as *mut _).unwrap(),
-                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                    1,
-                );
-            }
-            let mut adv = CGSize {
-                width: 0.0,
-                height: 0.0,
-            };
-            unsafe {
-                font.advances_for_glyphs(
-                    CTFontOrientation::Default,
-                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                    &mut adv,
-                    1,
-                );
-            }
-            adv.width as f32
-        }
-
-        /// Measure the total advance width of a string.
-        pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
-            let mut total = 0.0_f32;
-            for ch in text.chars() {
-                total += self.char_advance(ch, size_tenths);
-            }
-            total
-        }
+    pub fn width(&self) -> usize {
+        self.width
     }
 
-    // ── Proportional glyph atlas ────────────────────────────────────────────
-
-    const PROP_ATLAS_SIZE: usize = 2048;
-
-    /// Per-character entry with individual glyph metrics for proportional fonts.
-    #[derive(Clone, Copy, Debug)]
-    pub struct ProportionalGlyphEntry {
-        pub uv_min: [f32; 2],
-        pub uv_max: [f32; 2],
-        /// Horizontal advance in pixels.
-        pub advance: f32,
-        /// Rasterized bitmap width in pixels.
-        pub raster_w: usize,
-        /// Rasterized bitmap height in pixels.
-        pub raster_h: usize,
+    pub fn height(&self) -> usize {
+        self.height
     }
 
-    pub struct ProportionalGlyphAtlas {
-        pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
-        allocator: AtlasAllocator,
-        glyphs: HashMap<(char, u16), ProportionalGlyphEntry>,
-        pub fonts: SizedFontCache,
+    /// Top-down, tightly packed R8 coverage pixels.
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
     }
 
-    impl ProportionalGlyphAtlas {
-        pub fn new(
-            device: &ProtocolObject<dyn MTLDevice>,
-            base_font_size: f64,
-            scale: f64,
-        ) -> Option<Self> {
-            let fonts = SizedFontCache::new(base_font_size, scale)?;
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+}
 
-            let texture = {
-                let desc = MTLTextureDescriptor::new();
-                unsafe {
-                    desc.setPixelFormat(MTLPixelFormat::R8Unorm);
-                    desc.setWidth(PROP_ATLAS_SIZE);
-                    desc.setHeight(PROP_ATLAS_SIZE);
-                }
-                device.newTextureWithDescriptor(&desc)?
-            };
+struct LoadedFont {
+    font: Font,
+    post_script_name: String,
+}
 
-            Some(Self {
-                texture,
-                allocator: AtlasAllocator::new(Size::new(
-                    PROP_ATLAS_SIZE as i32,
-                    PROP_ATLAS_SIZE as i32,
-                )),
-                glyphs: HashMap::new(),
-                fonts,
-            })
+fn system_fonts() -> &'static Database {
+    static SYSTEM_FONTS: OnceLock<Database> = OnceLock::new();
+    SYSTEM_FONTS.get_or_init(|| {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
+fn load_font(query: Query<'_>) -> Option<LoadedFont> {
+    let db = system_fonts();
+    let id = db.query(&query)?;
+    let face = db.face(id)?;
+    let post_script_name = face.post_script_name.clone();
+    let font = db.with_face_data(id, |data, face_index| {
+        Font::from_bytes(
+            data.to_vec(),
+            FontSettings {
+                collection_index: face_index,
+                ..FontSettings::default()
+            },
+        )
+        .ok()
+    })??;
+    Some(LoadedFont {
+        font,
+        post_script_name,
+    })
+}
+
+fn load_named_font(name: &str) -> Option<LoadedFont> {
+    // The application historically names JetBrains Mono by PostScript name,
+    // while fontdb's family query expects a family name. Resolve the exact
+    // PostScript name first, then accept a normal family name.
+    let db = system_fonts();
+    let exact = db
+        .faces()
+        .find(|face| face.post_script_name.eq_ignore_ascii_case(name))
+        .map(|face| face.id);
+    let id = exact.or_else(|| {
+        db.query(&Query {
+            families: &[Family::Name(name)],
+            ..Query::default()
+        })
+    })?;
+    let face = db.face(id)?;
+    let post_script_name = face.post_script_name.clone();
+    let font = db.with_face_data(id, |data, face_index| {
+        Font::from_bytes(
+            data.to_vec(),
+            FontSettings {
+                collection_index: face_index,
+                ..FontSettings::default()
+            },
+        )
+        .ok()
+    })??;
+    Some(LoadedFont {
+        font,
+        post_script_name,
+    })
+}
+
+fn load_system_ui_font() -> Option<LoadedFont> {
+    #[cfg(target_os = "macos")]
+    for name in ["SFPro-Regular", ".AppleSystemUIFont", "Helvetica"] {
+        if let Some(font) = load_named_font(name) {
+            return Some(font);
         }
+    }
+    load_font(Query {
+        families: &[Family::SansSerif],
+        ..Query::default()
+    })
+}
 
-        pub fn line_height(&mut self, size_tenths: u16) -> f32 {
-            self.fonts.line_height(size_tenths)
+fn line_metrics(font: &Font, px: f32) -> Option<FontLineMetrics> {
+    let metrics = font.horizontal_line_metrics(px)?;
+    Some(FontLineMetrics {
+        ascent: metrics.ascent,
+        descent: -metrics.descent,
+        leading: metrics.line_gap,
+    })
+}
+
+fn copy_glyph_into_line(
+    glyph_pixels: &[u8],
+    glyph: Metrics,
+    destination: &mut [u8],
+    destination_w: usize,
+    destination_h: usize,
+    baseline: f32,
+    origin_x: i32,
+) {
+    if glyph.width == 0 || glyph.height == 0 {
+        return;
+    }
+    // fontdue returns top-down glyph pixels. `ymin` locates the bottom of the
+    // glyph relative to the baseline, so this converts to our top-down atlas.
+    let dst_x = glyph.xmin - origin_x;
+    let dst_y = (baseline - (glyph.ymin + glyph.height as i32) as f32).round() as i32;
+    for src_y in 0..glyph.height as i32 {
+        let y = dst_y + src_y;
+        if !(0..destination_h as i32).contains(&y) {
+            continue;
         }
-
-        pub fn ascent(&mut self, size_tenths: u16) -> f32 {
-            self.fonts.ascent(size_tenths)
-        }
-
-        pub fn descent(&mut self, size_tenths: u16) -> f32 {
-            self.fonts.descent(size_tenths)
-        }
-
-        pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
-            let mut width = 0.0_f32;
-            for ch in text.chars() {
-                if let Some(entry) = self.get_or_rasterize(ch, size_tenths) {
-                    width += entry.advance;
-                }
+        for src_x in 0..glyph.width as i32 {
+            let x = dst_x + src_x;
+            if (0..destination_w as i32).contains(&x) {
+                destination[y as usize * destination_w + x as usize] =
+                    glyph_pixels[src_y as usize * glyph.width + src_x as usize];
             }
-            width
-        }
-
-        pub fn get_or_rasterize(
-            &mut self,
-            ch: char,
-            size_tenths: u16,
-        ) -> Option<&ProportionalGlyphEntry> {
-            let key = (ch, size_tenths);
-            if !self.glyphs.contains_key(&key) {
-                self.rasterize(ch, size_tenths)?;
-            }
-            self.glyphs.get(&key)
-        }
-
-        fn rasterize(&mut self, ch: char, size_tenths: u16) -> Option<()> {
-            if ch as u32 > 0xFFFF {
-                return None;
-            }
-
-            let line_h = self.fonts.line_height(size_tenths);
-            let descent = self.fonts.descent(size_tenths);
-            let advance = self.fonts.char_advance(ch, size_tenths);
-            let font = self.fonts.sized_font(size_tenths);
-
-            // ── Glyph ID ────────────────────────────────────────────────────
-            let chars: [u16; 1] = [ch as u16];
-            let mut glyph: [CGGlyph; 1] = [0];
-            unsafe {
-                font.glyphs_for_characters(
-                    NonNull::new(chars.as_ptr() as *mut _).unwrap(),
-                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                    1,
-                );
-            }
-
-            if advance <= 0.0 {
-                self.glyphs.insert(
-                    (ch, size_tenths),
-                    ProportionalGlyphEntry {
-                        uv_min: [0.0, 0.0],
-                        uv_max: [0.0, 0.0],
-                        advance,
-                        raster_w: 0,
-                        raster_h: 0,
-                    },
-                );
-                return Some(());
-            }
-
-            // Full line-height bitmap with shared baseline (like monospace).
-            let raster_h = line_h as usize;
-            let raster_w = (advance.ceil() as usize) + 4; // padding for smoothing
-
-            let mut pixels = vec![0u8; raster_w * raster_h];
-            {
-                let gray = CGColorSpace::new_device_gray()?;
-                let ctx = unsafe {
-                    CGBitmapContextCreate(
-                        pixels.as_mut_ptr() as *mut _,
-                        raster_w,
-                        raster_h,
-                        8,
-                        raster_w,
-                        Some(&gray),
-                        0,
-                    )
-                }?;
-
-                // Enable font smoothing for crisp, professional text.
-                CGContext::set_allows_font_smoothing(Some(&ctx), true);
-                CGContext::set_should_smooth_fonts(Some(&ctx), true);
-                CGContext::set_should_antialias(Some(&ctx), true);
-
-                let white: [CGFloat; 2] = [1.0, 1.0];
-                unsafe { CGContext::set_fill_color(Some(&ctx), white.as_ptr()) };
-
-                // Draw at shared baseline (CoreText Y-up: y=descent from bottom).
-                let pos = CGPoint {
-                    x: 2.0, // center in padding
-                    y: descent as f64,
-                };
-                unsafe {
-                    font.draw_glyphs(
-                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                        NonNull::new(&pos as *const _ as *mut _).unwrap(),
-                        1,
-                        &ctx,
-                    );
-                }
-            }
-
-            // ── Pack into atlas ─────────────────────────────────────────────
-            let alloc = self
-                .allocator
-                .allocate(Size::new(raster_w as i32, raster_h as i32))?;
-            let r = alloc.rectangle;
-            let (ax, ay) = (r.min.x as usize, r.min.y as usize);
-
-            unsafe {
-                self.texture
-                    .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                        MTLRegion {
-                            origin: MTLOrigin { x: ax, y: ay, z: 0 },
-                            size: MTLSize {
-                                width: raster_w,
-                                height: raster_h,
-                                depth: 1,
-                            },
-                        },
-                        0,
-                        NonNull::new(pixels.as_ptr() as *mut core::ffi::c_void).unwrap(),
-                        raster_w,
-                    );
-            }
-
-            let s = PROP_ATLAS_SIZE as f32;
-            self.glyphs.insert(
-                (ch, size_tenths),
-                ProportionalGlyphEntry {
-                    uv_min: [ax as f32 / s, ay as f32 / s],
-                    uv_max: [(ax + raster_w) as f32 / s, (ay + raster_h) as f32 / s],
-                    advance,
-                    raster_w,
-                    raster_h,
-                },
-            );
-            Some(())
         }
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphEntry {
+    /// Normalized UVs in top-left, Y-down order.
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+}
+
+pub struct GlyphAtlas {
+    pub cell_w: usize,
+    pub cell_h: usize,
+    pub ascent: f32,
+    pub bitmap: AtlasBitmap,
+    allocator: AtlasAllocator,
+    glyphs: HashMap<char, GlyphEntry>,
+    font: Font,
+    font_size: f32,
+    descent: f32,
+}
+
+impl GlyphAtlas {
+    /// Build a headless CPU atlas. GPU backends can upload `bitmap` and track
+    /// its revision, while tests can exercise the complete font path on Linux.
+    pub fn new(font_name: &str, font_size: f64) -> Option<Self> {
+        if !font_size.is_finite() || font_size <= 0.0 {
+            return None;
+        }
+        let loaded = load_named_font(font_name)?;
+        if loaded.post_script_name != font_name {
+            eprintln!(
+                "[glyph_atlas] font family resolution: requested {:?}, got {:?}",
+                font_name, loaded.post_script_name
+            );
+        }
+        let font_size = font_size as f32;
+        let metrics = line_metrics(&loaded.font, font_size)?;
+        let (m_metrics, _) = loaded.font.rasterize('m', font_size);
+        let cell_w = m_metrics.advance_width.ceil().max(1.0) as usize;
+        let cell_h = metrics.line_height().max(1.0) as usize;
+        Some(Self {
+            cell_w,
+            cell_h,
+            ascent: metrics.ascent,
+            descent: metrics.descent,
+            bitmap: AtlasBitmap::new(ATLAS_SIZE, ATLAS_SIZE),
+            allocator: AtlasAllocator::new(Size::new(ATLAS_SIZE as i32, ATLAS_SIZE as i32)),
+            glyphs: HashMap::new(),
+            font: loaded.font,
+            font_size,
+        })
+    }
+
+    pub fn get_or_rasterize(&mut self, ch: char) -> Option<&GlyphEntry> {
+        if !self.glyphs.contains_key(&ch) {
+            self.rasterize(ch)?;
+        }
+        self.glyphs.get(&ch)
+    }
+
+    fn rasterize(&mut self, ch: char) -> Option<()> {
+        let (glyph_metrics, glyph_pixels) = self.font.rasterize(ch, self.font_size);
+        let mut pixels = vec![0; self.cell_w * self.cell_h];
+        copy_glyph_into_line(
+            &glyph_pixels,
+            glyph_metrics,
+            &mut pixels,
+            self.cell_w,
+            self.cell_h,
+            self.cell_h as f32 - self.descent,
+            0,
+        );
+        let allocation = self
+            .allocator
+            .allocate(Size::new(self.cell_w as i32, self.cell_h as i32))?;
+        let x = allocation.rectangle.min.x as usize;
+        let y = allocation.rectangle.min.y as usize;
+        self.bitmap
+            .write(x, y, self.cell_w, self.cell_h, &pixels);
+        let size = ATLAS_SIZE as f32;
+        self.glyphs.insert(
+            ch,
+            GlyphEntry {
+                uv_min: [x as f32 / size, y as f32 / size],
+                uv_max: [
+                    (x + self.cell_w) as f32 / size,
+                    (y + self.cell_h) as f32 / size,
+                ],
+            },
+        );
+        Some(())
+    }
+
+    pub fn descent(&self) -> f32 {
+        self.descent
+    }
+}
+
+/// Shared scalable system font and cached line metrics for proportional text.
+pub struct SizedFontCache {
+    font: Font,
+    line_metrics: HashMap<u16, FontLineMetrics>,
+    scale: f32,
+    pub post_script_name: String,
+}
+
+impl SizedFontCache {
+    pub fn new(scale: f64) -> Option<Self> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let loaded = load_system_ui_font()?;
+        Some(Self {
+            font: loaded.font,
+            line_metrics: HashMap::new(),
+            scale: scale as f32,
+            post_script_name: loaded.post_script_name,
+        })
+    }
+
+    pub fn metrics(&mut self, size_tenths: u16) -> Option<FontLineMetrics> {
+        if !self.line_metrics.contains_key(&size_tenths) {
+            let px = size_tenths as f32 / 10.0 * self.scale;
+            let metrics = line_metrics(&self.font, px)?;
+            self.line_metrics.insert(size_tenths, metrics);
+        }
+        self.line_metrics.get(&size_tenths).copied()
+    }
+
+    pub fn line_height(&mut self, size_tenths: u16) -> f32 {
+        self.metrics(size_tenths)
+            .map(FontLineMetrics::line_height)
+            .unwrap_or(0.0)
+    }
+
+    pub fn ascent(&mut self, size_tenths: u16) -> f32 {
+        self.metrics(size_tenths).map(|m| m.ascent).unwrap_or(0.0)
+    }
+
+    pub fn descent(&mut self, size_tenths: u16) -> f32 {
+        self.metrics(size_tenths).map(|m| m.descent).unwrap_or(0.0)
+    }
+
+    pub fn char_advance(&mut self, ch: char, size_tenths: u16) -> f32 {
+        let px = size_tenths as f32 / 10.0 * self.scale;
+        self.font.metrics(ch, px).advance_width
+    }
+
+    pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
+        text.chars()
+            .map(|ch| self.char_advance(ch, size_tenths))
+            .sum()
+    }
+
+    fn rasterize(&self, ch: char, size_tenths: u16) -> (Metrics, Vec<u8>) {
+        let px = size_tenths as f32 / 10.0 * self.scale;
+        self.font.rasterize(ch, px)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ProportionalGlyphEntry {
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    pub advance: f32,
+    pub raster_w: usize,
+    pub raster_h: usize,
+    /// Horizontal offset from the pen to the bitmap's left edge.
+    pub offset_x: f32,
+}
+
+pub struct ProportionalGlyphAtlas {
+    pub bitmap: AtlasBitmap,
+    allocator: AtlasAllocator,
+    glyphs: HashMap<(char, u16), ProportionalGlyphEntry>,
+    pub fonts: SizedFontCache,
+}
+
+impl ProportionalGlyphAtlas {
+    pub fn new(scale: f64) -> Option<Self> {
+        Some(Self {
+            bitmap: AtlasBitmap::new(PROP_ATLAS_SIZE, PROP_ATLAS_SIZE),
+            allocator: AtlasAllocator::new(Size::new(
+                PROP_ATLAS_SIZE as i32,
+                PROP_ATLAS_SIZE as i32,
+            )),
+            glyphs: HashMap::new(),
+            fonts: SizedFontCache::new(scale)?,
+        })
+    }
+
+    pub fn line_height(&mut self, size_tenths: u16) -> f32 {
+        self.fonts.line_height(size_tenths)
+    }
+
+    pub fn ascent(&mut self, size_tenths: u16) -> f32 {
+        self.fonts.ascent(size_tenths)
+    }
+
+    pub fn descent(&mut self, size_tenths: u16) -> f32 {
+        self.fonts.descent(size_tenths)
+    }
+
+    pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
+        self.fonts.measure_text(text, size_tenths)
+    }
+
+    pub fn get_or_rasterize(
+        &mut self,
+        ch: char,
+        size_tenths: u16,
+    ) -> Option<&ProportionalGlyphEntry> {
+        let key = (ch, size_tenths);
+        if !self.glyphs.contains_key(&key) {
+            self.rasterize(ch, size_tenths)?;
+        }
+        self.glyphs.get(&key)
+    }
+
+    fn rasterize(&mut self, ch: char, size_tenths: u16) -> Option<()> {
+        let line_metrics = self.fonts.metrics(size_tenths)?;
+        let (glyph, glyph_pixels) = self.fonts.rasterize(ch, size_tenths);
+        let advance = glyph.advance_width;
+        let raster_h = line_metrics.line_height().max(1.0) as usize;
+        let left = glyph.xmin.min(0) - GLYPH_PADDING as i32;
+        let right = (glyph.xmin + glyph.width as i32)
+            .max(advance.ceil() as i32)
+            + GLYPH_PADDING as i32;
+        let raster_w = (right - left).max(1) as usize;
+        let mut pixels = vec![0; raster_w * raster_h];
+        copy_glyph_into_line(
+            &glyph_pixels,
+            glyph,
+            &mut pixels,
+            raster_w,
+            raster_h,
+            raster_h as f32 - line_metrics.descent,
+            left,
+        );
+        let allocation = self
+            .allocator
+            .allocate(Size::new(raster_w as i32, raster_h as i32))?;
+        let x = allocation.rectangle.min.x as usize;
+        let y = allocation.rectangle.min.y as usize;
+        self.bitmap.write(x, y, raster_w, raster_h, &pixels);
+        let size = PROP_ATLAS_SIZE as f32;
+        self.glyphs.insert(
+            (ch, size_tenths),
+            ProportionalGlyphEntry {
+                uv_min: [x as f32 / size, y as f32 / size],
+                uv_max: [
+                    (x + raster_w) as f32 / size,
+                    (y + raster_h) as f32 / size,
+                ],
+                advance,
+                raster_w,
+                raster_h,
+                offset_x: left as f32,
+            },
+        );
+        Some(())
+    }
+}
+
 #[cfg(target_os = "macos")]
-pub use inner::*;
+pub struct MetalGlyphAtlas {
+    pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    atlas: GlyphAtlas,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalGlyphAtlas {
+    pub fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+        font_name: &str,
+        font_size: f64,
+    ) -> Option<Self> {
+        Some(Self {
+            texture: make_metal_texture(device, ATLAS_SIZE)?,
+            atlas: GlyphAtlas::new(font_name, font_size)?,
+        })
+    }
+
+    pub fn get_or_rasterize(&mut self, ch: char) -> Option<&GlyphEntry> {
+        let previous_revision = self.atlas.bitmap.revision();
+        let entry = *self.atlas.get_or_rasterize(ch)?;
+        if self.atlas.bitmap.revision() != previous_revision {
+            upload_entry(
+                &self.texture,
+                &self.atlas.bitmap,
+                entry.uv_min,
+                self.atlas.cell_w,
+                self.atlas.cell_h,
+            );
+        }
+        self.atlas.glyphs.get(&ch)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::ops::Deref for MetalGlyphAtlas {
+    type Target = GlyphAtlas;
+
+    fn deref(&self) -> &Self::Target {
+        &self.atlas
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::ops::DerefMut for MetalGlyphAtlas {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.atlas
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub struct MetalProportionalGlyphAtlas {
+    pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    atlas: ProportionalGlyphAtlas,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalProportionalGlyphAtlas {
+    pub fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+        scale: f64,
+    ) -> Option<Self> {
+        Some(Self {
+            texture: make_metal_texture(device, PROP_ATLAS_SIZE)?,
+            atlas: ProportionalGlyphAtlas::new(scale)?,
+        })
+    }
+
+    pub fn get_or_rasterize(
+        &mut self,
+        ch: char,
+        size_tenths: u16,
+    ) -> Option<&ProportionalGlyphEntry> {
+        let previous_revision = self.atlas.bitmap.revision();
+        let entry = *self.atlas.get_or_rasterize(ch, size_tenths)?;
+        if self.atlas.bitmap.revision() != previous_revision {
+            upload_entry(
+                &self.texture,
+                &self.atlas.bitmap,
+                entry.uv_min,
+                entry.raster_w,
+                entry.raster_h,
+            );
+        }
+        self.atlas.glyphs.get(&(ch, size_tenths))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::ops::Deref for MetalProportionalGlyphAtlas {
+    type Target = ProportionalGlyphAtlas;
+
+    fn deref(&self) -> &Self::Target {
+        &self.atlas
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::ops::DerefMut for MetalProportionalGlyphAtlas {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.atlas
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn upload_entry(
+    texture: &ProtocolObject<dyn MTLTexture>,
+    bitmap: &AtlasBitmap,
+    uv_min: [f32; 2],
+    width: usize,
+    height: usize,
+) {
+    let x = (uv_min[0] * bitmap.width as f32).round() as usize;
+    let y = (uv_min[1] * bitmap.height as f32).round() as usize;
+    let mut packed = Vec::with_capacity(width * height);
+    for row in 0..height {
+        let start = (y + row) * bitmap.width + x;
+        packed.extend_from_slice(&bitmap.pixels[start..start + width]);
+    }
+    upload_metal_region(texture, x, y, width, height, &packed);
+}
+
+#[cfg(target_os = "macos")]
+fn make_metal_texture(
+    device: &ProtocolObject<dyn MTLDevice>,
+    size: usize,
+) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
+    let descriptor = MTLTextureDescriptor::new();
+    unsafe {
+        descriptor.setPixelFormat(MTLPixelFormat::R8Unorm);
+        descriptor.setWidth(size);
+        descriptor.setHeight(size);
+    }
+    device.newTextureWithDescriptor(&descriptor)
+}
+
+#[cfg(target_os = "macos")]
+fn upload_metal_region(
+    texture: &ProtocolObject<dyn MTLTexture>,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    pixels: &[u8],
+) {
+    unsafe {
+        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+            MTLRegion {
+                origin: MTLOrigin { x, y, z: 0 },
+                size: MTLSize {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            },
+            0,
+            NonNull::new(pixels.as_ptr() as *mut core::ffi::c_void).unwrap(),
+            width,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_atlases_measure_and_rasterize_on_every_platform() {
+        let mut mono = load_font(Query {
+            families: &[Family::Monospace],
+            ..Query::default()
+        })
+            .map(|loaded| loaded.post_script_name)
+            .and_then(|name| GlyphAtlas::new(&name, 13.0))
+            .expect("an installed monospace font");
+        let entry = *mono.get_or_rasterize('M').expect("M glyph");
+        assert!(mono.cell_w > 0 && mono.cell_h > 0);
+        assert!(mono.ascent > 0.0 && mono.descent() >= 0.0);
+        assert!(entry.uv_max[0] > entry.uv_min[0]);
+        assert!(mono.bitmap.pixels().iter().any(|coverage| *coverage > 0));
+
+        let mut proportional = ProportionalGlyphAtlas::new(1.0)
+            .expect("an installed system sans font");
+        let narrow = proportional.fonts.char_advance('i', 140);
+        let wide = proportional.fonts.char_advance('W', 140);
+        assert!(wide > narrow, "system sans font should be proportional");
+        let glyph = proportional
+            .get_or_rasterize('g', 140)
+            .expect("g glyph");
+        assert!(glyph.raster_w > 0 && glyph.raster_h > 0);
+        assert!(proportional.bitmap.revision() > 0);
+    }
+
+    #[test]
+    fn atlas_uvs_follow_top_down_bitmap_rows() {
+        let loaded = load_font(Query {
+            families: &[Family::Monospace],
+            ..Query::default()
+        })
+        .expect("an installed monospace font");
+        let mut atlas = GlyphAtlas::new(&loaded.post_script_name, 24.0).unwrap();
+        let entry = *atlas.get_or_rasterize('T').unwrap();
+        let x0 = (entry.uv_min[0] * ATLAS_SIZE as f32).round() as usize;
+        let y0 = (entry.uv_min[1] * ATLAS_SIZE as f32).round() as usize;
+        let top_half_coverage: usize = (0..atlas.cell_h / 2)
+            .flat_map(|row| {
+                &atlas.bitmap.pixels()
+                    [(y0 + row) * ATLAS_SIZE + x0..(y0 + row) * ATLAS_SIZE + x0 + atlas.cell_w]
+            })
+            .map(|v| *v as usize)
+            .sum();
+        assert!(top_half_coverage > 0, "T must occupy the top half of its cell");
+    }
+}

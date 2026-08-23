@@ -20595,11 +20595,11 @@ fn default_layout_keeps_named_inputs_clear_of_the_param_stack() {
     );
 }
 
-/// True rendered width of `text` in layout cells, measured the way the macOS
-/// backend does: CoreText advances of the system font at `font_size * scale`
-/// device pixels, over a monospace cell of `MONO_CELL_POINTS * scale` device
-/// pixels. Both sides carry the scale factor, so the ratio cancels it - which
-/// is exactly what a cells-per-character estimate has to reproduce.
+/// True rendered width of `text` in layout cells, measured by the portable
+/// system-font cache at `font_size * scale` device pixels, over a monospace
+/// cell of `MONO_CELL_POINTS * scale` device pixels. Both sides carry the scale
+/// factor, so the ratio cancels it - exactly what a cells-per-character
+/// estimate has to reproduce.
 #[cfg(target_os = "macos")]
 fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
     use crate::glyph_atlas::SizedFontCache;
@@ -20609,7 +20609,7 @@ fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
     const MONO_CELL_POINTS: f64 = 13.0;
     const MONO_ADVANCE_EM: f64 = 0.6;
     let cell_w = (MONO_CELL_POINTS * MONO_ADVANCE_EM * scale) as f32;
-    let mut fonts = SizedFontCache::new(14.0 * scale, scale).expect("system font");
+    let mut fonts = SizedFontCache::new(scale).expect("system font");
     fonts.measure_text(text, (font_size * 10.0).round() as u16) / cell_w
 }
 

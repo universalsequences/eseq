@@ -49,7 +49,11 @@ mod inner {
         AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
         TiledRenderFrame, completion_panel_columns,
     };
-    use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
+    use crate::glyph_atlas::{
+        MetalGlyphAtlas as GlyphAtlas,
+        MetalProportionalGlyphAtlas as ProportionalGlyphAtlas,
+        SizedFontCache,
+    };
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::live_audio;
     use crate::theme;
@@ -66,8 +70,8 @@ mod inner {
     }
 
     impl PropTextMeasurer {
-        pub(crate) fn new(base_font_size: f64, scale: f64) -> Option<Self> {
-            let fonts = SizedFontCache::new(base_font_size, scale)?;
+        pub(crate) fn new(scale: f64) -> Option<Self> {
+            let fonts = SizedFontCache::new(scale)?;
             Some(Self {
                 fonts: std::cell::RefCell::new(fonts),
             })
@@ -98,8 +102,8 @@ mod inner {
     // ── Shader source ─────────────────────────────────────────────────────────
     //
     // Buffer-based vertex input: no vertex descriptor needed.
-    // UV.v is flipped in the fragment shader because CoreText rasterizes Y-up
-    // but Metal textures are Y-down.
+    // Glyph atlas pixels and UVs use the same explicit top-left, Y-down
+    // convention as Metal textures; no backend-specific flip is required.
     const SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -1581,6 +1585,7 @@ fragment float4 live_spectrogram_frag(
     struct CachedGlyphPlacement {
         pen_x: f32,
         advance: f32,
+        offset_x: f32,
         raster_w: usize,
         raster_h: usize,
         uv_min: [f32; 2],
@@ -1705,6 +1710,7 @@ fragment float4 live_spectrogram_frag(
                     glyphs.push(CachedGlyphPlacement {
                         pen_x,
                         advance: entry.advance,
+                        offset_x: entry.offset_x,
                         raster_w: entry.raster_w,
                         raster_h: entry.raster_h,
                         uv_min: entry.uv_min,
@@ -3738,7 +3744,7 @@ fragment float4 live_spectrogram_frag(
                 .as_ref()
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
-            let measurer = PropTextMeasurer::new(14.0 * scale, scale)?;
+            let measurer = PropTextMeasurer::new(scale)?;
             Some(Box::new(measurer))
         }
 
@@ -6126,11 +6132,7 @@ fragment float4 live_spectrogram_frag(
                 self.monospace_font_size_pt * text_zoom as f64 * scale,
             );
             self.text_atlas_zoom = text_zoom;
-            self.prop_atlas = ProportionalGlyphAtlas::new(
-                &self.device,
-                DEFAULT_MONOSPACE_FONT_SIZE_PT * scale,
-                scale,
-            );
+            self.prop_atlas = ProportionalGlyphAtlas::new(&self.device, scale);
             self.mono_atlas_generation = self.mono_atlas_generation.wrapping_add(1);
             self.prop_atlas_generation = self.prop_atlas_generation.wrapping_add(1);
             self.compiled_widget_runs.clear();
@@ -7508,8 +7510,9 @@ fragment float4 live_spectrogram_frag(
                 let [u0, v0] = glyph.uv_min;
                 let [u1, v1] = glyph.uv_max;
 
-                // Glyph bitmap starts 2px before pen (padding), spans full line height.
-                let gx0 = base_x_px + glyph.pen_x * scale - 2.0 * scale;
+                // The atlas records the actual outline overhang and padding relative
+                // to the pen, so italic and otherwise overhanging glyphs are not clipped.
+                let gx0 = base_x_px + (glyph.pen_x + glyph.offset_x) * scale;
                 let gy0 = base_y_px + y_offset;
                 let gx1 = gx0 + glyph.raster_w as f32 * scale;
                 let gy1 = gy0 + glyph.raster_h as f32 * scale;
