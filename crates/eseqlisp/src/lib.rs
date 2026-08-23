@@ -62,6 +62,8 @@ pub use ui::layout;
 pub use ui::metal_backend;
 pub use ui::theme;
 pub use ui::tui;
+#[cfg(feature = "wgpu")]
+pub use ui::wgpu_backend;
 
 // ── Root-level modules ───────────────────────────────────────────────────
 pub mod audio;

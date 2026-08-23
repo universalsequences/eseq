@@ -53,6 +53,9 @@ mod inner {
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::live_audio;
     use crate::theme;
+    use crate::ui::gpu_geometry::{
+        Vertex, push_solid_quad_vertices, push_solid_rect_vertices,
+    };
     use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
@@ -1437,20 +1440,6 @@ fragment float4 live_spectrogram_frag(
 "#;
 
     // ── Vertex type ───────────────────────────────────────────────────────────
-
-    /// One vertex of a cell quad.  Two triangles (6 vertices) form each cell.
-    #[repr(C)]
-    #[derive(Clone)]
-    pub struct Vertex {
-        /// NDC position: X in [-1, +1], Y in [-1, +1] (Y+ = up).
-        pub position: [f32; 2],
-        /// Atlas UV: (0,0) = top-left of atlas texture.
-        pub uv: [f32; 2],
-        /// Foreground colour (RGBA linear 0..1).
-        pub fg: [f32; 4],
-        /// Background colour (RGBA linear 0..1).
-        pub bg: [f32; 4],
-    }
 
     struct UploadedBufferSlice {
         buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -8781,38 +8770,6 @@ fragment float4 live_spectrogram_frag(
         ]
     }
 
-    fn push_solid_rect_vertices(
-        rect: Rect,
-        color: Color,
-        cell_w: f32,
-        cell_h: f32,
-        vp_w: f32,
-        vp_h: f32,
-        verts: &mut Vec<Vertex>,
-    ) {
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        let x0 = ndc_x(rect.col * cell_w);
-        let x1 = ndc_x((rect.col + rect.width) * cell_w);
-        let y0 = ndc_y(rect.row * cell_h);
-        let y1 = ndc_y((rect.row + rect.height) * cell_h);
-        let rgba = color.to_rgba();
-        let v = |px, py| Vertex {
-            position: [px, py],
-            uv: [0.0, 0.0],
-            fg: rgba,
-            bg: rgba,
-        };
-        verts.extend_from_slice(&[
-            v(x0, y0),
-            v(x0, y1),
-            v(x1, y0),
-            v(x1, y0),
-            v(x0, y1),
-            v(x1, y1),
-        ]);
-    }
-
     fn push_horizontal_rule(
         verts: &mut Vec<Vertex>,
         x: f32,
@@ -8830,37 +8787,6 @@ fragment float4 live_spectrogram_frag(
         let x1 = ndc_x(x + width);
         let y0 = ndc_y(y);
         let y1 = ndc_y(y + height);
-        let v = |px, py| Vertex {
-            position: [px, py],
-            uv: [0.0, 0.0],
-            fg: rgba,
-            bg: rgba,
-        };
-        verts.extend_from_slice(&[
-            v(x0, y0),
-            v(x0, y1),
-            v(x1, y0),
-            v(x1, y0),
-            v(x0, y1),
-            v(x1, y1),
-        ]);
-    }
-
-    fn push_solid_quad_vertices(
-        quad: widget_render::GpuQuadPrimitive,
-        cell_w: f32,
-        cell_h: f32,
-        vp_w: f32,
-        vp_h: f32,
-        verts: &mut Vec<Vertex>,
-    ) {
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        let x0 = ndc_x(quad.x * cell_w);
-        let x1 = ndc_x((quad.x + quad.width) * cell_w);
-        let y0 = ndc_y(quad.y * cell_h);
-        let y1 = ndc_y((quad.y + quad.height) * cell_h);
-        let rgba = quad.color.to_rgba();
         let v = |px, py| Vertex {
             position: [px, py],
             uv: [0.0, 0.0],
