@@ -91,7 +91,7 @@ pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut C
     }
 }
 
-pub(super) fn build_metal_primitives_for_patcher(
+pub(super) fn build_primitives_for_patcher(
     node: &LayoutNode,
     viewport: WidgetViewport,
 ) -> Vec<GpuPrimitive> {

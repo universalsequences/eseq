@@ -635,11 +635,15 @@ impl WidgetDefinition for BoxWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(super::ROUNDED_RECT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        super::ROUNDED_RECT_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,

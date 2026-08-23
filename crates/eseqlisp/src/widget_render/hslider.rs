@@ -79,7 +79,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-const HSLIDER_FRAGMENT_SHADER: &str = r#"
+const HSLIDER_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -120,7 +120,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (alpha < 0.001) discard_fragment();
     return float4(rgb, alpha);
 }
-"#;
+"#);
 
 impl WidgetDefinition for HorizontalSliderWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -217,11 +217,15 @@ impl WidgetDefinition for HorizontalSliderWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(HSLIDER_FRAGMENT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        HSLIDER_FRAGMENT_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,

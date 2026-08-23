@@ -88,11 +88,15 @@ impl WidgetDefinition for ModulatorCurveWidget {
         }
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(MODULATOR_CURVE_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        MODULATOR_CURVE_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -151,7 +155,7 @@ impl WidgetDefinition for ModulatorCurveWidget {
     }
 }
 
-const MODULATOR_CURVE_SHADER: &str = r#"
+const MODULATOR_CURVE_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float mc_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -238,7 +242,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
     return col;
 }
-"#;
+"#);
 
 #[cfg(test)]
 mod tests {

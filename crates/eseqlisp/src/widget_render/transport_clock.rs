@@ -75,7 +75,7 @@ impl WidgetDefinition for TransportClockWidget {
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,

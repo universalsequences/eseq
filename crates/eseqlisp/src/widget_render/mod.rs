@@ -855,6 +855,40 @@ impl CellBuffer {
     }
 }
 
+/// Shader language requested by a graphics backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderBackend {
+    Msl,
+    Wgsl,
+}
+
+/// Backend-tagged source bodies for one shader stage.
+///
+/// A stage may support either backend independently while shader ports are in
+/// progress, or carry both bodies once the port is complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShaderSources {
+    msl: Option<&'static str>,
+    wgsl: Option<&'static str>,
+}
+
+impl ShaderSources {
+    pub const fn new(msl: Option<&'static str>, wgsl: Option<&'static str>) -> Self {
+        Self { msl, wgsl }
+    }
+
+    pub const fn msl(source: &'static str) -> Self {
+        Self::new(Some(source), None)
+    }
+
+    pub const fn source(self, backend: ShaderBackend) -> Option<&'static str> {
+        match backend {
+            ShaderBackend::Msl => self.msl,
+            ShaderBackend::Wgsl => self.wgsl,
+        }
+    }
+}
+
 pub trait WidgetDefinition: Sync {
     fn names(&self) -> &'static [&'static str];
     fn is_container(&self) -> bool {
@@ -996,10 +1030,18 @@ pub trait WidgetDefinition: Sync {
     fn metal_shader_uses_time(&self) -> bool {
         false
     }
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        _backend: ShaderBackend,
+    ) -> Option<&'static str> {
         None
     }
-    fn metal_vertex_shader(&self, _widget_type: &str) -> Option<&'static str> {
+    fn vertex_shader(
+        &self,
+        _widget_type: &str,
+        _backend: ShaderBackend,
+    ) -> Option<&'static str> {
         None
     }
     /// Optional framework-rendered focus decoration. The decoration is added
@@ -1007,7 +1049,7 @@ pub trait WidgetDefinition: Sync {
     fn metal_focus_decoration(&self, _node: &LayoutNode) -> FocusDecoration {
         FocusDecoration::None
     }
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         _node: &LayoutNode,
@@ -1390,25 +1432,33 @@ fn is_internal_source_prop(key: &str) -> bool {
     )
 }
 
-pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
+pub fn widget_shader_sources(
+    backend: ShaderBackend,
+) -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
-    shaders.push(("tile-chrome", None, TILE_CHROME_SHADER));
-    shaders.push(("tile-tab", None, TILE_TAB_SHADER));
-    shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
-    shaders.push(("patcher-panel", None, PATCHER_PANEL_SHADER));
-    shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
-    shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
+    for (name, sources) in [
+        ("tile-chrome", TILE_CHROME_SHADER),
+        ("tile-tab", TILE_TAB_SHADER),
+        ("patcher-node", PATCHER_NODE_SHADER),
+        ("patcher-panel", PATCHER_PANEL_SHADER),
+        ("patcher-port", PATCHER_PORT_SHADER),
+        ("patcher-back-chevron", PATCHER_BACK_CHEVRON_SHADER),
+    ] {
+        if let Some(fragment_shader) = sources.source(backend) {
+            shaders.push((name, None, fragment_shader));
+        }
+    }
     for definition in WIDGET_DEFINITIONS {
         for &name in definition.names() {
-            if let Some(fragment_shader) = definition.metal_fragment_shader(name) {
-                shaders.push((name, definition.metal_vertex_shader(name), fragment_shader));
+            if let Some(fragment_shader) = definition.fragment_shader(name, backend) {
+                shaders.push((name, definition.vertex_shader(name, backend), fragment_shader));
             }
         }
     }
     shaders
 }
 
-pub const TILE_CHROME_SHADER: &str = r#"
+pub const TILE_CHROME_SHADER: ShaderSources = ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float aspect = max(in.aspect, 0.0001);
@@ -1443,9 +1493,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#;
+"#);
 
-pub const TILE_TAB_SHADER: &str = r#"
+pub const TILE_TAB_SHADER: ShaderSources = ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 p = float2((in.uv.x - 0.5) * 2.0 * in.aspect, (in.uv.y - 0.5) * 2.0);
@@ -1481,7 +1531,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#;
+"#);
 
 pub fn widget_primitives_for_node(
     node: &LayoutNode,
@@ -1496,7 +1546,7 @@ pub fn widget_primitives_for_node(
     }
 
     if let Some(definition) = widget_definition(&node.widget_type) {
-        let mut primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        let mut primitives = definition.build_primitives(&node.widget_type, node, viewport);
         if node.focusable && viewport.focused_widget_id == Some(node.widget_id) {
             primitives.extend(
                 definition
@@ -2944,6 +2994,14 @@ mod tests {
     }
 
     #[test]
+    fn shader_sources_select_the_requested_backend() {
+        let sources = ShaderSources::new(Some("msl source"), Some("wgsl source"));
+
+        assert_eq!(sources.source(ShaderBackend::Msl), Some("msl source"));
+        assert_eq!(sources.source(ShaderBackend::Wgsl), Some("wgsl source"));
+    }
+
+    #[test]
     fn integer_haptic_only_fires_once_for_stale_previous_bucket() {
         clear_haptic_buckets();
         assert!(should_trigger_integer_haptic(10, 1.0, 2.1, 0.0, 10.0));
@@ -3995,7 +4053,7 @@ mod tests {
 /// Shared rounded-rect SDF shader used by tree-row, text-input, number-picker, dropdown.
 /// When `corner_radius > 0`, uses that as the radius (in normalized space).
 /// Otherwise defaults to 0.75 (pill-like for small widgets).
-pub const ROUNDED_RECT_SHADER: &str = r#"
+pub const ROUNDED_RECT_SHADER: ShaderSources = ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -4016,7 +4074,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#);
 
 /// Flat panel chrome: solid fill, crisp uniform border, rounded corners.
 ///
@@ -4024,7 +4082,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 /// width in device pixels, `corner_radius` = normalized radius (see
 /// `normalized_corner_radius`). Deliberately unlit — no gradient, no specular —
 /// so completion menus and tooltips read as flat surfaces instead of nodes.
-pub const PATCHER_PANEL_SHADER: &str = r#"
+pub const PATCHER_PANEL_SHADER: ShaderSources = ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float aspect = max(in.aspect, 0.001);
@@ -4050,9 +4108,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float alpha = mix(in.color_b.a, in.color_a.a, borderMask);
     return float4(color, alpha * outerAlpha);
 }
-"#;
+"#);
 
-pub const PATCHER_PORT_SHADER: &str = r#"
+pub const PATCHER_PORT_SHADER: ShaderSources = ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 p = (in.uv - float2(0.5)) * 2.0;
@@ -4073,9 +4131,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float4 col = mix(in.color_a, in.color_b, innerMask);
     return float4(col.rgb, col.a * outerMask);
 }
-"#;
+"#);
 
-pub const PATCHER_BACK_CHEVRON_SHADER: &str = r#"
+pub const PATCHER_BACK_CHEVRON_SHADER: ShaderSources = ShaderSources::msl(r#"
 float patcher_chevron_segment_distance(float2 p, float2 a, float2 b)
 {
     float2 pa = p - a;
@@ -4106,9 +4164,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(in.color_a.rgb, in.color_a.a * mask);
 }
-"#;
+"#);
 
-pub const PATCHER_NODE_SHADER: &str = r#"
+pub const PATCHER_NODE_SHADER: ShaderSources = ShaderSources::msl(r#"
 float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)
 {
     return smoothstep(smin, smax, sdf_rounded_rect(pos, size, radius));
@@ -4185,7 +4243,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 color = mix(litBg, litBorder, borderMask);
     return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));
 }
-"#;
+"#);
 
 pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
     let ndc_x = |px: f32| px / viewport.vp_w * 2.0 - 1.0;

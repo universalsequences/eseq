@@ -691,7 +691,7 @@ impl WidgetDefinition for Eq8EditorWidget {
         })
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -1083,7 +1083,7 @@ mod tests {
             inherited_hover: false,
         };
         let primitives =
-            EQ8_EDITOR_WIDGET.build_metal_primitives("eq8-editor", &layout_node(), viewport);
+            EQ8_EDITOR_WIDGET.build_primitives("eq8-editor", &layout_node(), viewport);
         let spectrogram = primitives.iter().find_map(|primitive| match primitive {
             GpuPrimitive::LiveSpectrogram(spectrogram) => Some(spectrogram),
             _ => None,

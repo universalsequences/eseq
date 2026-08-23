@@ -671,7 +671,7 @@ impl WidgetDefinition for EventViewWidget {
         super::AnimationFramePolicy::LayoutStatic
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -1000,7 +1000,7 @@ mod tests {
             Value::Keyword("heatmap".to_string()),
         );
         let prims =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &layout_node(props), viewport());
         assert!(
             prims
                 .iter()
@@ -1042,7 +1042,7 @@ mod tests {
         );
 
         let prims =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &layout_node(props), viewport());
         let event_rect = prims.iter().skip(1).find_map(|prim| match prim {
             GpuPrimitive::Rect(rect) => Some(rect),
             _ => None,
@@ -1060,7 +1060,7 @@ mod tests {
             Value::Keyword("isometric".to_string()),
         );
         let prims =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &layout_node(props), viewport());
         assert!(
             prims
                 .iter()
@@ -1124,7 +1124,7 @@ mod tests {
             Value::Keyword("isometric".to_string()),
         );
         let node = layout_node(props);
-        let before = EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport());
+        let before = EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport());
 
         let gesture = EVENT_VIEW_WIDGET
             .begin_gesture(&node, 4.0, 4.0, KeyModifiers::empty())
@@ -1144,7 +1144,7 @@ mod tests {
             MouseEventOutcome::Consume
         ));
 
-        let after = EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport());
+        let after = EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport());
         let first_cable_start = |prims: &[GpuPrimitive]| {
             prims.iter().find_map(|prim| match prim {
                 GpuPrimitive::PatchCable(cable) => Some(cable.start),
@@ -1167,9 +1167,9 @@ mod tests {
 
         assert!(EVENT_VIEW_WIDGET.wants_animation_frames(&node));
         let at_zero =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport_at(0.0));
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport_at(0.0));
         let at_one =
-            EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &node, viewport_at(1.0));
+            EVENT_VIEW_WIDGET.build_primitives("event-view", &node, viewport_at(1.0));
         let first_cable_start = |prims: &[GpuPrimitive]| {
             prims.iter().find_map(|prim| match prim {
                 GpuPrimitive::PatchCable(cable) => Some(cable.start),

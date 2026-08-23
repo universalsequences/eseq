@@ -440,7 +440,7 @@ impl WidgetDefinition for LineGraphWidget {
         tui_render(props, rect, buf);
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -725,7 +725,7 @@ mod tests {
             focusable: false,
             animation: Default::default(),
         };
-        let primitives = LINEGRAPH_WIDGET.build_metal_primitives(
+        let primitives = LINEGRAPH_WIDGET.build_primitives(
             "linegraph",
             &node,
             WidgetViewport {

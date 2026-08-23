@@ -25,7 +25,7 @@ pub(super) struct TimelineCursorMarkerWidget;
 pub(super) static TIMELINE_CURSOR_MARKER_WIDGET: TimelineCursorMarkerWidget =
     TimelineCursorMarkerWidget;
 
-const TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER: &str = r#"
+const TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 instance_size_px = in.uniform_a.xy;
@@ -53,7 +53,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
     return float4(in.color_a.rgb, in.color_a.a * alpha);
 }
-"#;
+"#);
 
 #[derive(Clone)]
 struct TimelineLane {
@@ -452,8 +452,12 @@ impl WidgetDefinition for TimelineCursorMarkerWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER.source(backend)
     }
 }
 
@@ -822,13 +826,13 @@ impl WidgetDefinition for TimelineWidget {
         !vertical_scroll_passthrough(&node.props)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
     ) -> Vec<GpuPrimitive> {
-        build_metal_primitives(node, viewport)
+        build_primitives(node, viewport)
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
@@ -863,7 +867,7 @@ pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
     )
 }
 
-fn build_metal_primitives(
+fn build_primitives(
     node: &LayoutNode,
     viewport: super::WidgetViewport,
 ) -> Vec<GpuPrimitive> {
@@ -5382,7 +5386,7 @@ mod tests {
                 focusable: false,
                 animation: Default::default(),
             };
-            build_metal_primitives(&node, viewport)
+            build_primitives(&node, viewport)
         };
         // Last quad of a given colour covering a point — i.e. what the eye
         // actually sees there once everything has been painted.
@@ -5554,7 +5558,7 @@ mod tests {
             "a non-wrapping item has no repeat play-throughs to cue"
         );
 
-        let primitives = build_metal_primitives(&node, viewport);
+        let primitives = build_primitives(&node, viewport);
         let dot_quads: Vec<_> = primitives
             .iter()
             .filter_map(|primitive| match primitive {
@@ -5653,7 +5657,7 @@ mod tests {
             animation: Default::default(),
         };
 
-        let primitives = build_metal_primitives(&node, viewport);
+        let primitives = build_primitives(&node, viewport);
         let clip_grid_lines: Vec<_> = primitives
             .iter()
             .filter_map(|primitive| match primitive {
@@ -5796,7 +5800,7 @@ mod tests {
             animation: Default::default(),
         };
 
-        let primitives = build_metal_primitives(&node, viewport);
+        let primitives = build_primitives(&node, viewport);
         let label_run = primitives
             .windows(3)
             .find_map(|window| match window {
@@ -5895,7 +5899,7 @@ mod tests {
             inherited_hover: false,
         };
 
-        let primitives = build_metal_primitives(&node, viewport);
+        let primitives = build_primitives(&node, viewport);
         assert!(primitives.iter().any(|primitive| {
             matches!(primitive, GpuPrimitive::Quad(quad)
                 if quad.x == rect.col
@@ -5988,7 +5992,7 @@ mod tests {
             inherited_hover: false,
         };
 
-        let primitives = build_metal_primitives(&node, viewport);
+        let primitives = build_primitives(&node, viewport);
         let dot_color = crate::backend::Color {
             r: 0.02,
             g: 0.025,
@@ -6055,7 +6059,7 @@ mod tests {
             animation: Default::default(),
         };
 
-        let primitives = build_metal_primitives(&node, viewport);
+        let primitives = build_primitives(&node, viewport);
         let marker = cursor_marker_instance(&primitives).expect("cursor marker");
         assert_eq!(marker.color_a, theme::CURSOR().to_rgba());
         assert_eq!(marker.uniform_a[2], 8.0, "pixel-aligned marker width");
@@ -6129,7 +6133,7 @@ mod tests {
             animation: Default::default(),
         };
 
-        let marker_only = build_metal_primitives(&node, viewport);
+        let marker_only = build_primitives(&node, viewport);
         let marker = cursor_marker_instance(&marker_only).expect("scaled cursor marker");
         assert_eq!(marker.uniform_a[2], 19.0, "80%-scaled, pixel-aligned width");
         assert_eq!(
@@ -6155,7 +6159,7 @@ mod tests {
             .insert("cursor-marker-visible".to_string(), bool_value(false));
         node.props
             .insert("cursor-line-visible".to_string(), bool_value(true));
-        let line_only = build_metal_primitives(&node, viewport);
+        let line_only = build_primitives(&node, viewport);
         assert!(
             cursor_marker_instance(&line_only).is_none(),
             "line-only mode must not draw a cursor marker"

@@ -811,15 +811,19 @@ impl WidgetDefinition for DropdownWidget {
         }
     }
 
-    fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
         match widget_type {
-            "dropdown" | "menu-button" => Some(super::ROUNDED_RECT_SHADER),
-            "dropdown-chevron" => Some(DROPDOWN_CHEVRON_SHADER),
+            "dropdown" | "menu-button" => super::ROUNDED_RECT_SHADER.source(backend),
+            "dropdown-chevron" => DROPDOWN_CHEVRON_SHADER.source(backend),
             _ => None,
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -1225,7 +1229,7 @@ fn emit_rounded_rect(
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const DROPDOWN_CHEVRON_SHADER: &str = r#"
+const DROPDOWN_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -1271,7 +1275,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#);
 
 #[cfg(test)]
 mod tests {

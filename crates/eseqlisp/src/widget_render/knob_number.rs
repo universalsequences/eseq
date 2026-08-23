@@ -604,7 +604,7 @@ mod tests {
         ]));
 
         let primitives =
-            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let base_instances = primitives
             .iter()
             .filter_map(|primitive| match primitive {
@@ -657,7 +657,7 @@ mod tests {
             ("origin".to_string(), Value::Number(0.0)),
         ]));
         let primitives =
-            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let instance = primitives
             .iter()
             .find_map(|primitive| match primitive {
@@ -692,7 +692,7 @@ mod tests {
         ]));
 
         let primitives =
-            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let range = primitives
             .iter()
             .find_map(|primitive| match primitive {
@@ -730,7 +730,7 @@ mod tests {
         ]));
 
         let primitives =
-            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+            KNOB_NUMBER_WIDGET.build_primitives("knob-number", &node, test_viewport());
         let base = primitives
             .iter()
             .find_map(|primitive| match primitive {
@@ -1653,10 +1653,14 @@ impl WidgetDefinition for KnobNumberWidget {
         true
     }
 
-    fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
         match widget_type {
-            "knob-number" => Some(KNOB_NUMBER_SHADER),
-            "knob-number-mod-range" => Some(KNOB_NUMBER_MOD_RANGE_SHADER),
+            "knob-number" => KNOB_NUMBER_SHADER.source(backend),
+            "knob-number-mod-range" => KNOB_NUMBER_MOD_RANGE_SHADER.source(backend),
             _ => None,
         }
     }
@@ -1669,7 +1673,7 @@ impl WidgetDefinition for KnobNumberWidget {
         )))
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -1978,7 +1982,7 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 }
 
-const KNOB_NUMBER_SHADER: &str = r#"
+const KNOB_NUMBER_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2033,9 +2037,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#;
+"#);
 
-const KNOB_NUMBER_MOD_RANGE_SHADER: &str = r#"
+const KNOB_NUMBER_MOD_RANGE_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2064,4 +2068,4 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#;
+"#);

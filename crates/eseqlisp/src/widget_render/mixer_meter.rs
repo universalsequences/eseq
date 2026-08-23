@@ -86,7 +86,7 @@ impl WidgetDefinition for MixerMeterWidget {
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -212,7 +212,7 @@ mod tests {
             inherited_hover: false,
         };
 
-        let prims = MIXER_METER_WIDGET.build_metal_primitives("mixer-meter", &node, viewport);
+        let prims = MIXER_METER_WIDGET.build_primitives("mixer-meter", &node, viewport);
         let first_bar_row = prims
             .iter()
             .find_map(|prim| match prim {
@@ -294,7 +294,7 @@ mod tests {
         };
 
         assert_eq!(
-            near_top_left_color(MIXER_METER_WIDGET.build_metal_primitives(
+            near_top_left_color(MIXER_METER_WIDGET.build_primitives(
                 "mixer-meter",
                 &node,
                 viewport
@@ -305,7 +305,7 @@ mod tests {
         registry.set("APP", "peak", Value::Number(1.0), false);
 
         assert_eq!(
-            near_top_left_color(MIXER_METER_WIDGET.build_metal_primitives(
+            near_top_left_color(MIXER_METER_WIDGET.build_primitives(
                 "mixer-meter",
                 &node,
                 viewport

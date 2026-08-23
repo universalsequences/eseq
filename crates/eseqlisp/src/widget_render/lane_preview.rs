@@ -96,7 +96,7 @@ impl WidgetDefinition for LanePreviewWidget {
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,

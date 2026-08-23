@@ -163,7 +163,7 @@ mod tests {
         ]));
 
         let prims =
-            NumberPickerWidget.build_metal_primitives("number-picker", &node, test_viewport());
+            NumberPickerWidget.build_primitives("number-picker", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
@@ -736,10 +736,14 @@ impl WidgetDefinition for NumberPickerWidget {
         true
     }
 
-    fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
         match widget_type {
-            "number-picker" => Some(super::button::BUTTON_SURFACE_SHADER),
-            "number-picker-tri" => Some(NUMBER_PICKER_TRI_SHADER),
+            "number-picker" => super::button::BUTTON_SURFACE_SHADER.source(backend),
+            "number-picker-tri" => NUMBER_PICKER_TRI_SHADER.source(backend),
             _ => None,
         }
     }
@@ -755,7 +759,7 @@ impl WidgetDefinition for NumberPickerWidget {
         )))
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -1013,7 +1017,7 @@ impl WidgetDefinition for NumberPickerWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const NUMBER_PICKER_TRI_SHADER: &str = r#"
+const NUMBER_PICKER_TRI_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float number_picker_segment_distance(float2 p, float2 a, float2 b)
 {
     float2 pa = p - a;
@@ -1055,4 +1059,4 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#);

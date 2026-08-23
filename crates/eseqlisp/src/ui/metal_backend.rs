@@ -717,7 +717,9 @@ vertex WidgetVaryings widget_vert(
 
         #[test]
         fn registered_widget_shaders_compile_in_metal() {
-            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources() {
+            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources(
+                widget_render::ShaderBackend::Msl,
+            ) {
                 compile_widget_shader_source_with_metal(vertex_src, fragment_src)
                     .unwrap_or_else(|err| panic!("{widget_type} widget shader failed: {err}"));
             }
@@ -6312,7 +6314,9 @@ fragment float4 live_spectrogram_frag(
             // ── Widget render pipelines (one per widget type) ────────────────
             // Each widget gets its own fragment shader but shares the vertex
             // shader and SDF utilities from the preamble.
-            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources() {
+            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources(
+                widget_render::ShaderBackend::Msl,
+            ) {
                 let pipeline_state =
                     self.compile_widget_pipeline_source(widget_type, vertex_src, fragment_src)?;
                 self.widget_pipelines

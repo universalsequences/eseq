@@ -14,7 +14,7 @@ pub struct KnobWidget;
 
 pub static KNOB_WIDGET: KnobWidget = KnobWidget;
 
-const KNOB_FRAGMENT_SHADER: &str = r#"
+const KNOB_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -59,7 +59,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#;
+"#);
 
 fn normalized_value(props: &HashMap<String, Value>) -> f32 {
     let value = get_f32_prop(props, "value", 0.0);
@@ -239,11 +239,15 @@ impl WidgetDefinition for KnobWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(KNOB_FRAGMENT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        KNOB_FRAGMENT_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,

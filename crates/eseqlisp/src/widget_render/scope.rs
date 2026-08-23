@@ -130,7 +130,7 @@ impl WidgetDefinition for ScopeWidget {
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,

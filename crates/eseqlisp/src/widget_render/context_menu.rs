@@ -376,7 +376,7 @@ impl WidgetDefinition for MenuItemWidget {
         })
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -467,7 +467,7 @@ impl WidgetDefinition for MenuSeparatorWidget {
         })
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,

@@ -174,7 +174,7 @@ Changes:
   `CursorIcon::Move` in `metal_backend.rs:3609-3619`. `cursor()`
   (`timeline.rs:499-507`) returns it for `ItemTitleBar`, `EwResize` for both
   edges.
-- Rendering (`build_metal_primitives`, item loop `:905-964`): draw the bar
+- Rendering (`build_primitives`, item loop `:905-964`): draw the bar
   as a solid band of the item color at full saturation with a 1px hairline
   under it; the body below renders at the existing (slightly dimmed) body
   fill. Labels move into the bar. Selected border/edge-hover highlights

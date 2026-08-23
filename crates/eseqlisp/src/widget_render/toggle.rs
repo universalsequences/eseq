@@ -62,7 +62,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-const TOGGLE_FRAGMENT_SHADER: &str = r#"
+const TOGGLE_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -93,7 +93,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(rgb, outerMask);
 }
-"#;
+"#);
 
 impl WidgetDefinition for ToggleWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -154,11 +154,15 @@ impl WidgetDefinition for ToggleWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(TOGGLE_FRAGMENT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        TOGGLE_FRAGMENT_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,

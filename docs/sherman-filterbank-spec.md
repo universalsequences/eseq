@@ -331,7 +331,7 @@ Reuse the OTT node-state → widget path: `filterbank.rs` writes gate/env/
 effective-cutoffs into its state tail (5/250 ms ballistics where they're
 levels), `live_audio_analyzer.rs` publishes a frame keyed
 `filterbank-meter:<source-fragment>` on movement, widgets read the frame
-store in `build_metal_primitives`. Gate LED + display sweep only — no
+store in `build_primitives`. Gate LED + display sweep only — no
 multi-band meter walls.
 
 ## 10. Implementation order

@@ -205,7 +205,7 @@ fn button_icon_text_inset(rect: Rect) -> f32 {
     (icon_rect.col - rect.col) + icon_rect.width + 0.42
 }
 
-const BUTTON_ICON_SHADER: &str = r#"
+const BUTTON_ICON_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float button_icon_box(float2 p, float2 b)
 {
     float2 q = abs(p) - b;
@@ -332,9 +332,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#);
 
-pub(crate) const BUTTON_SURFACE_SHADER: &str = r#"
+pub(crate) const BUTTON_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float button_surface_rounded_rect(float2 p, float2 size, float radius)
 {
     float2 q = abs(p) - (size - float2(radius));
@@ -431,7 +431,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#;
+"#);
 
 impl WidgetDefinition for ButtonWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -602,15 +602,19 @@ impl WidgetDefinition for ButtonWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
+    fn fragment_shader(
+        &self,
+        widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
         if widget_type == "button-icon" {
-            Some(BUTTON_ICON_SHADER)
+            BUTTON_ICON_SHADER.source(backend)
         } else {
-            Some(BUTTON_SURFACE_SHADER)
+            BUTTON_SURFACE_SHADER.source(backend)
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -854,7 +858,7 @@ mod tests {
         let node = test_button_node(props);
         let viewport = test_viewport();
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, viewport);
+        let prims = ButtonWidget.build_primitives("button", &node, viewport);
         let background_is_marked_background = prims.iter().any(|prim| {
             matches!(
                 prim,
@@ -899,7 +903,7 @@ mod tests {
             ("shadow-color".to_string(), color_value(0.0, 0.0, 0.0, 0.3)),
         ]);
         let node = test_button_node(props);
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
@@ -957,7 +961,7 @@ mod tests {
             ("active".to_string(), Value::Bool(true)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
@@ -981,7 +985,7 @@ mod tests {
             ("active".to_string(), Value::Bool(false)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let instance = prims
             .iter()
             .find_map(|prim| match prim {
@@ -1006,7 +1010,7 @@ mod tests {
             ("font-size".to_string(), Value::Number(11.0)),
         ]));
 
-        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let text = prims
             .iter()
             .find_map(|prim| match prim {
@@ -1052,7 +1056,7 @@ mod tests {
 
         let corner_radius = |node: &LayoutNode| {
             ButtonWidget
-                .build_metal_primitives("button", node, test_viewport())
+                .build_primitives("button", node, test_viewport())
                 .into_iter()
                 .find_map(|prim| match prim {
                     GpuPrimitive::WidgetInstance {
@@ -1102,7 +1106,7 @@ mod tests {
         ]));
         let render_radius = || {
             ButtonWidget
-                .build_metal_primitives("button", &node, test_viewport())
+                .build_primitives("button", &node, test_viewport())
                 .into_iter()
                 .find_map(|prim| match prim {
                     GpuPrimitive::WidgetInstance {
@@ -1152,7 +1156,7 @@ mod tests {
             ),
         ]));
 
-        let inactive_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let inactive_prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let inactive_bg = inactive_prims
             .iter()
             .find_map(|prim| match prim {
@@ -1167,7 +1171,7 @@ mod tests {
         assert_eq!(inactive_bg, [0.1, 0.2, 0.3, 1.0]);
 
         slots.write_float("BUTTON_TEST", "active", 1.0);
-        let active_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let active_prims = ButtonWidget.build_primitives("button", &node, test_viewport());
         let active_bg = active_prims
             .iter()
             .find_map(|prim| match prim {

@@ -325,11 +325,15 @@ impl WidgetDefinition for ScrollWidget {
         Some(WidgetEvent::Custom(Value::Nil))
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(SCROLL_FRAGMENT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        SCROLL_FRAGMENT_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -390,7 +394,7 @@ impl WidgetDefinition for ScrollWidget {
 
 // ── Metal shader ─────────────────────────────────────────────────────────────
 
-const SCROLL_FRAGMENT_SHADER: &str = r#"
+const SCROLL_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -439,4 +443,4 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return result;
 }
-"#;
+"#);

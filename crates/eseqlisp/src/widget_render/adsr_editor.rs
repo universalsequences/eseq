@@ -411,11 +411,15 @@ impl WidgetDefinition for AdsrEditorWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(ADSR_EDITOR_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        ADSR_EDITOR_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -486,7 +490,7 @@ impl WidgetDefinition for AdsrEditorWidget {
     }
 }
 
-const ADSR_EDITOR_SHADER: &str = r#"
+const ADSR_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float adsr_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -644,7 +648,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return col;
 }
-"#;
+"#);
 
 #[cfg(test)]
 mod tests {
@@ -814,14 +818,13 @@ mod tests {
 
     #[test]
     fn shader_draws_only_the_four_live_handles() {
-        assert!(ADSR_EDITOR_SHADER.contains("for (int i = 1; i < 5; ++i)"));
-        assert!(!ADSR_EDITOR_SHADER.contains("for (int i = 0; i < 5; ++i)"));
-        assert!(
-            ADSR_EDITOR_SHADER.contains(
-                "return clamp((x - attackOrigin) / max(x1 - attackOrigin, 1e-5), 0.0, 1.0)"
-            )
-        );
-        assert!(ADSR_EDITOR_SHADER.contains("? segmentT"));
-        assert!(!ADSR_EDITOR_SHADER.contains("adsr_expRise"));
+        let shader = ADSR_EDITOR_SHADER.source(crate::widget_render::ShaderBackend::Msl).unwrap();
+        assert!(shader.contains("for (int i = 1; i < 5; ++i)"));
+        assert!(!shader.contains("for (int i = 0; i < 5; ++i)"));
+        assert!(shader.contains(
+            "return clamp((x - attackOrigin) / max(x1 - attackOrigin, 1e-5), 0.0, 1.0)"
+        ));
+        assert!(shader.contains("? segmentT"));
+        assert!(!shader.contains("adsr_expRise"));
     }
 }

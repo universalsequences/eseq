@@ -1924,7 +1924,7 @@ fn metal_patcher_primitives_are_clipped_to_the_widget_rect() {
     let path = temp_patcher_source_path("primitive-clip");
     fs::write(&path, "(def signal (sin 440))\n(out signal)").expect("write patch");
     let node = patcher_test_node(&path);
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -3164,7 +3164,7 @@ fn clicking_the_agentic_send_chevron_submits_the_prompt() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let _ = build_metal_primitives_for_patcher(&node, viewport);
+    let _ = build_primitives_for_patcher(&node, viewport);
 
     let button = super::state::agentic_buttons_for_test()
         .into_iter()
@@ -3274,7 +3274,7 @@ fn clicking_the_agentic_model_chip_asks_the_host_for_the_picker() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let _ = build_metal_primitives_for_patcher(&node, viewport);
+    let _ = build_primitives_for_patcher(&node, viewport);
 
     let chip = super::state::agentic_buttons_for_test()
         .into_iter()
@@ -3672,7 +3672,7 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -3732,7 +3732,7 @@ fn agentic_bubble_answer_renders_a_follow_up_composer_below_its_body() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -18329,7 +18329,7 @@ fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
     };
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,
@@ -18407,7 +18407,7 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let prims = build_metal_primitives_for_patcher(&node, viewport);
+    let prims = build_primitives_for_patcher(&node, viewport);
 
     assert_eq!(
         agentic_bubble_body_sizes(&prims, viewport).len(),
@@ -18498,7 +18498,7 @@ fn agentic_answer_eases_the_bubble_from_the_pending_box_to_the_answer_box() {
         cache_agentic_bubble_text_widths(bubble, &ctx);
         settle_agentic_bubbles(&mut state);
         set_patcher_interaction_state(key, state);
-        let prims = build_metal_primitives_for_patcher(&node, viewport);
+        let prims = build_primitives_for_patcher(&node, viewport);
         agentic_bubble_body_sizes(&prims, viewport)
             .into_iter()
             .next()
@@ -18571,7 +18571,7 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
         scroll_left: 0.0,
         inherited_hover: false,
     };
-    let prims = build_metal_primitives_for_patcher(&node, viewport);
+    let prims = build_primitives_for_patcher(&node, viewport);
 
     let (body_width, _) = agentic_bubble_body_sizes(&prims, viewport)
         .into_iter()
@@ -23000,7 +23000,7 @@ fn connect_bubble_renders_its_placeholder_and_subject_badge() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    let prims = build_metal_primitives_for_patcher(
+    let prims = build_primitives_for_patcher(
         &node,
         WidgetViewport {
             cell_w: 10.0,

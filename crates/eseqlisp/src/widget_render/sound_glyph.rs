@@ -130,11 +130,15 @@ impl WidgetDefinition for SoundGlyphWidget {
     ) {
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(DELTA_GLYPH_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        DELTA_GLYPH_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -269,7 +273,7 @@ impl WidgetDefinition for SoundGlyphWidget {
     }
 }
 
-const DELTA_GLYPH_SHADER: &str = r#"
+const DELTA_GLYPH_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 // Geometry constants mirror sequencer::delta_glyph (spec §6). Radius and k are
 // FIXED: magnitude rides occupancy (which cells a piece claims) and luminance.
 // Two equal discs weld iff their surface gap is within 0.6452*k, and all three
@@ -633,7 +637,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     if (color.a <= 0.002) discard_fragment();
     return color;
 }
-"#;
+"#);
 
 #[cfg(test)]
 mod tests {
@@ -730,7 +734,7 @@ mod tests {
         };
 
         let playing =
-            instance(SOUND_GLYPH_WIDGET.build_metal_primitives("sound-glyph", &node, viewport));
+            instance(SOUND_GLYPH_WIDGET.build_primitives("sound-glyph", &node, viewport));
         assert!((playing.orientation - 0.14).abs() < 0.0001);
         assert!((playing.itime - 0.14).abs() < 0.0001);
         assert!((playing.pixel_aspect - 0.4).abs() < 0.0001);
@@ -745,7 +749,7 @@ mod tests {
         slots.write_float("SOUND_GLYPH_TEST", "padding", 0.25);
         slots.write_float("SOUND_GLYPH_TEST", "opacity", 0.7);
         let stopped =
-            instance(SOUND_GLYPH_WIDGET.build_metal_primitives("sound-glyph", &node, viewport));
+            instance(SOUND_GLYPH_WIDGET.build_primitives("sound-glyph", &node, viewport));
         assert_eq!(stopped.color_a[3], 0.0);
         assert!((stopped.orientation - 0.25).abs() < 0.0001);
         assert!((stopped.pixel_aspect - 0.7).abs() < 0.0001);

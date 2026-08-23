@@ -289,11 +289,15 @@ impl WidgetDefinition for PhaserNotchWidget {
         true
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(PHASER_NOTCH_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        PHASER_NOTCH_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -381,7 +385,7 @@ impl WidgetDefinition for PhaserNotchWidget {
     }
 }
 
-const PHASER_NOTCH_SHADER: &str = r#"
+const PHASER_NOTCH_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float phaserFlangerLfo(int shape, float phase)
 {
     phase = fract(phase);
@@ -507,7 +511,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
     return col;
 }
-"#;
+"#);
 
 #[cfg(test)]
 mod tests {

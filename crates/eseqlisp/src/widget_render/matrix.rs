@@ -525,7 +525,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-const MATRIX_FRAGMENT_SHADER: &str = r#"
+const MATRIX_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -653,7 +653,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     color = mix(color, in.color_a.rgb, innerMask);
     return float4(color, in.color_b.a * inCell);
 }
-"#;
+"#);
 
 impl WidgetDefinition for MatrixWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -826,11 +826,15 @@ impl WidgetDefinition for MatrixWidget {
         super::AnimationFramePolicy::RuntimeState
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(MATRIX_FRAGMENT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        MATRIX_FRAGMENT_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -1422,7 +1426,7 @@ mod tests {
             inherited_hover: false,
         };
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, viewport);
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, viewport);
         assert_eq!(prims.len(), 4);
         assert!(prims.iter().all(|prim| {
             matches!(
@@ -1463,7 +1467,7 @@ mod tests {
         );
         let node = matrix_node(props);
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, test_viewport());
         let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
@@ -1495,7 +1499,7 @@ mod tests {
         );
         let node = matrix_node(props);
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, test_viewport());
         let instances: Vec<_> = prims
             .iter()
             .map(|prim| match prim {
@@ -1525,7 +1529,7 @@ mod tests {
         );
         let node = matrix_node(props);
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, test_viewport());
         let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
@@ -1556,7 +1560,7 @@ mod tests {
         );
         let node = matrix_node(props);
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, test_viewport());
         let instances: Vec<_> = prims
             .iter()
             .map(|prim| match prim {
@@ -1610,7 +1614,7 @@ mod tests {
         );
         let node = matrix_node(props);
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, test_viewport());
         let instances: Vec<_> = prims
             .iter()
             .filter_map(|prim| match prim {
@@ -1647,7 +1651,7 @@ mod tests {
         );
         let node = matrix_node(props);
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, test_viewport());
         let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };
@@ -1685,7 +1689,7 @@ mod tests {
             inherited_hover: false,
         };
 
-        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, viewport);
+        let prims = MATRIX_WIDGET.build_primitives("matrix", &node, viewport);
         let [GpuPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
             panic!("expected one widget instance");
         };

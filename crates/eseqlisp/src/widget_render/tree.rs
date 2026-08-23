@@ -685,8 +685,12 @@ impl WidgetDefinition for TreeWidget {
         &["tree"]
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(TREE_CHEVRON_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        TREE_CHEVRON_SHADER.source(backend)
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -1130,7 +1134,7 @@ impl WidgetDefinition for TreeWidget {
         })
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -1436,14 +1440,18 @@ impl WidgetDefinition for TreeRowBgWidget {
         None
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(super::ROUNDED_RECT_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        super::ROUNDED_RECT_SHADER.source(backend)
     }
 }
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const TREE_CHEVRON_SHADER: &str = r#"
+const TREE_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -1492,7 +1500,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(col.rgb, col.a * mask);
 }
-"#;
+"#);
 
 /// Find the scroll offset from the nearest parent scroll container.
 fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {

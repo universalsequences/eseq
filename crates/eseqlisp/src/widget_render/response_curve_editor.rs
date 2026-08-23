@@ -507,11 +507,15 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         })
     }
 
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(RESPONSE_CURVE_EDITOR_SHADER)
+    fn fragment_shader(
+        &self,
+        _widget_type: &str,
+        backend: super::ShaderBackend,
+    ) -> Option<&'static str> {
+        RESPONSE_CURVE_EDITOR_SHADER.source(backend)
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         widget_type: &str,
         node: &LayoutNode,
@@ -630,7 +634,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
     }
 }
 
-const RESPONSE_CURVE_EDITOR_SHADER: &str = r#"
+const RESPONSE_CURVE_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
 float rce_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -788,7 +792,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.a = max(col.a * clipMask, handleOuter);
     return col;
 }
-"#;
+"#);
 
 #[cfg(test)]
 mod tests {

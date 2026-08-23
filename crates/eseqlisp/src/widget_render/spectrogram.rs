@@ -135,7 +135,7 @@ impl WidgetDefinition for SpectrogramWidget {
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -590,7 +590,7 @@ mod tests {
             scroll_left: 0.0,
             inherited_hover: false,
         };
-        let primitives = SPECTROGRAM_WIDGET.build_metal_primitives("spectrogram", &node, viewport);
+        let primitives = SPECTROGRAM_WIDGET.build_primitives("spectrogram", &node, viewport);
         assert!(matches!(
             primitives.get(1),
             Some(GpuPrimitive::LiveSpectrogram(_))

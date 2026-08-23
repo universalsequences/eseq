@@ -499,7 +499,7 @@ impl WidgetDefinition for PianoKeyboardWidget {
         }
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
@@ -877,7 +877,7 @@ mod tests {
             inherited_hover: false,
         };
         let primitives =
-            PIANO_KEYBOARD_WIDGET.build_metal_primitives("piano-keyboard", &node, viewport);
+            PIANO_KEYBOARD_WIDGET.build_primitives("piano-keyboard", &node, viewport);
         let mut activity_alphas: Vec<f32> = primitives
             .iter()
             .filter_map(|primitive| match primitive {

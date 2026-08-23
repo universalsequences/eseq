@@ -491,17 +491,17 @@ impl WidgetDefinition for WaveformWidget {
         })
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         _viewport: super::WidgetViewport,
     ) -> Vec<GpuPrimitive> {
-        build_metal_primitives(node)
+        build_primitives(node)
     }
 }
 
-fn build_metal_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
+fn build_primitives(node: &LayoutNode) -> Vec<GpuPrimitive> {
     if node.widget_type != "waveform" {
         return Vec::new();
     }

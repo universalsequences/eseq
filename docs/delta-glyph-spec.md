@@ -832,7 +832,7 @@ anything.
 | geometry lib | `crates/sequencer/src/sound_glyph/` (`extract.rs`, `geometry.rs`, `stock.rs`) |
 | host / cache / publish | `crates/sequencer/src/ui/state_values/sound_palette.rs` (`GlyphFrames`, `:43-171`) |
 | transport | `crates/eseqlisp/src/sound_glyph_data.rs` — `SoundGlyphFrame { revision, strokes, marks }`, global `OnceLock<Mutex<HashMap<String, Arc<Frame>>>>` |
-| widget | `crates/eseqlisp/src/widget_render/sound_glyph.rs` — `"sound-glyph"`, `build_metal_primitives` `:80` |
+| widget | `crates/eseqlisp/src/widget_render/sound_glyph.rs` — `"sound-glyph"`, `build_primitives` `:80` |
 | draw site | `content/ui/sound-palette.lisp:148-152` |
 | cohort source | `App::sound_palette_entries` — `crates/sequencer/src/app/sound_palette.rs:302` |
 

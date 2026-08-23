@@ -1556,13 +1556,13 @@ impl WidgetDefinition for PatcherWidget {
         true
     }
 
-    fn build_metal_primitives(
+    fn build_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<GpuPrimitive> {
-        render::build_metal_primitives_for_patcher(node, viewport)
+        render::build_primitives_for_patcher(node, viewport)
     }
 }
 
