@@ -146,6 +146,76 @@ fn load_exact_named_font(name: &str) -> Option<LoadedFont> {
     load_font_by_id(id)
 }
 
+/// Case- and punctuation-insensitive key for comparing font names, so
+/// "JetBrainsMono", "JetBrains Mono", and "jetbrains-mono" all compare equal.
+fn normalized_font_key(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+/// The family part of a PostScript name, which is conventionally
+/// `Family-Style`: "JetBrainsMono-Regular" has the stem "jetbrainsmono".
+fn font_family_stem(name: &str) -> String {
+    normalized_font_key(name.split('-').next().unwrap_or(name))
+}
+
+/// Find an installed family whose name starts with `stem`. Distribution builds
+/// routinely suffix the family the caller asked for -- a machine carrying
+/// "JetBrainsMono Nerd Font" has no plain "JetBrains Mono" -- and that variant
+/// is a far better answer than the next entry in a hardcoded preference list.
+fn find_family_by_stem(stem: &str) -> Option<&'static str> {
+    if stem.is_empty() {
+        return None;
+    }
+    let db = system_fonts();
+    let mut exact: Option<&'static str> = None;
+    let mut prefixed: Option<&'static str> = None;
+    for face in db.faces() {
+        for (family, _) in &face.families {
+            let key = normalized_font_key(family);
+            if key == stem {
+                exact.get_or_insert(family.as_str());
+            } else if key.starts_with(stem)
+                && prefixed.is_none_or(|current| family.as_str() < current)
+            {
+                prefixed = Some(family.as_str());
+            }
+        }
+    }
+    exact.or(prefixed)
+}
+
+fn load_font_by_family_stem(name: &str) -> Option<LoadedFont> {
+    // Query by family so fontdb still picks the upright regular weight within
+    // whichever variant family matched.
+    let family = find_family_by_stem(&font_family_stem(name))?;
+    load_font(Query {
+        families: &[Family::Name(family)],
+        ..Query::default()
+    })
+}
+
+/// Last resort: any face at all that fontdue can parse, preferring upright
+/// regular weights and, when asked, faces flagged monospaced.
+fn load_any_font(monospaced_only: bool) -> Option<LoadedFont> {
+    let db = system_fonts();
+    let candidates = |upright: bool| {
+        db.faces()
+            .filter(move |face| !monospaced_only || face.monospaced)
+            .filter(move |face| {
+                !upright
+                    || (face.style == fontdb::Style::Normal
+                        && face.weight == fontdb::Weight::NORMAL)
+            })
+            .map(|face| face.id)
+    };
+    candidates(true)
+        .find_map(load_font_by_id)
+        .or_else(|| candidates(false).find_map(load_font_by_id))
+}
+
 fn load_named_font(name: &str) -> Option<LoadedFont> {
     const MONOSPACE_PREFERENCES: &[&str] = &[
         "JetBrains Mono",
@@ -158,17 +228,23 @@ fn load_named_font(name: &str) -> Option<LoadedFont> {
     ];
 
     load_exact_named_font(name)
+        .or_else(|| load_font_by_family_stem(name))
         .or_else(|| {
             MONOSPACE_PREFERENCES
                 .iter()
                 .find_map(|name| load_exact_named_font(name))
         })
         .or_else(|| {
+            // fontdb only maps the generic families to real names when
+            // fontconfig supplies aliases; elsewhere they stay at the Windows
+            // defaults ("Courier New") and can miss on a machine full of fonts.
             load_font(Query {
                 families: &[Family::Monospace],
                 ..Query::default()
             })
         })
+        .or_else(|| load_any_font(true))
+        .or_else(|| load_any_font(false))
 }
 
 fn load_system_ui_font() -> Option<LoadedFont> {
@@ -182,6 +258,7 @@ fn load_system_ui_font() -> Option<LoadedFont> {
         families: &[Family::SansSerif],
         ..Query::default()
     })
+    .or_else(|| load_any_font(false))
 }
 
 fn line_metrics(font: &Font, px: f32) -> Option<FontLineMetrics> {
@@ -659,6 +736,61 @@ mod tests {
             GlyphAtlas::new("ThisFontNameDeliberatelyDoesNotExist", 13.0).is_some(),
             "the monospace atlas should use a system fallback"
         );
+    }
+
+    #[test]
+    fn the_last_resort_fallback_ignores_every_configured_family_name() {
+        // The tail of the chain must not depend on fontconfig aliases or on the
+        // preference list, so text still renders on a machine whose fonts are
+        // all named something we have never heard of.
+        assert!(
+            load_any_font(false).is_some(),
+            "a machine with fonts must always yield some face"
+        );
+    }
+
+    #[test]
+    fn font_name_matching_ignores_case_punctuation_and_style_suffixes() {
+        assert_eq!(normalized_font_key("JetBrains Mono"), "jetbrainsmono");
+        assert_eq!(normalized_font_key("jetbrains-mono"), "jetbrainsmono");
+        assert_eq!(font_family_stem("JetBrainsMono-Regular"), "jetbrainsmono");
+        assert_eq!(font_family_stem("SFPro-Regular"), "sfpro");
+        assert_eq!(font_family_stem(""), "");
+    }
+
+    #[test]
+    fn a_postscript_name_resolves_to_a_suffixed_family_variant() {
+        // Machine-independent: derive a PostScript-style request from a family
+        // that is actually installed here, then require the stem lookup to find
+        // that family (or a variant of it) rather than falling through to an
+        // unrelated preference-list font.
+        let family = system_fonts()
+            .faces()
+            .find_map(|face| face.families.first().map(|(name, _)| name.clone()))
+            .expect("the test machine must have at least one font installed");
+        let request = format!("{}-Regular", family.replace(' ', ""));
+        let stem = font_family_stem(&request);
+        let matched = find_family_by_stem(&stem)
+            .unwrap_or_else(|| panic!("no family matched the stem of {request:?}"));
+        assert!(
+            normalized_font_key(matched).starts_with(&stem),
+            "{matched:?} does not start with the requested stem {stem:?}"
+        );
+        assert!(
+            load_font_by_family_stem(&request).is_some(),
+            "the stem match must produce a loadable face"
+        );
+    }
+
+    #[test]
+    fn an_exact_name_still_wins_over_every_fallback() {
+        let expected = system_fonts()
+            .faces()
+            .find(|face| face.style == fontdb::Style::Normal)
+            .map(|face| face.post_script_name.clone())
+            .expect("the test machine must have at least one font installed");
+        let loaded = load_named_font(&expected).expect("an installed font must load by name");
+        assert_eq!(loaded.post_script_name, expected);
     }
 
     #[test]
