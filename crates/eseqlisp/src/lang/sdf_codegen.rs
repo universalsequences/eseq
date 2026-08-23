@@ -21,7 +21,14 @@ impl std::fmt::Display for CodegenError {
     }
 }
 
-struct MetalEmitter {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShaderLanguage {
+    Metal,
+    Wgsl,
+}
+
+struct ShaderEmitter {
+    language: ShaderLanguage,
     next_var: usize,
     statements: Vec<String>,
     scopes: Vec<HashMap<String, String>>,
@@ -54,13 +61,26 @@ struct LightingSpec<'a> {
     bump_expr: Option<&'a Expression>,
 }
 
-impl MetalEmitter {
-    fn new(uniform_symbols: HashMap<String, String>) -> Self {
-        Self::with_theme(uniform_symbols, theme::current())
+impl ShaderEmitter {
+    fn metal(uniform_symbols: HashMap<String, String>) -> Self {
+        Self::metal_with_theme(uniform_symbols, theme::current())
     }
 
-    fn with_theme(uniform_symbols: HashMap<String, String>, theme: theme::Theme) -> Self {
+    fn metal_with_theme(uniform_symbols: HashMap<String, String>, theme: theme::Theme) -> Self {
+        Self::new(ShaderLanguage::Metal, uniform_symbols, theme)
+    }
+
+    fn wgsl(uniform_symbols: HashMap<String, String>) -> Self {
+        Self::new(ShaderLanguage::Wgsl, uniform_symbols, theme::current())
+    }
+
+    fn new(
+        language: ShaderLanguage,
+        uniform_symbols: HashMap<String, String>,
+        theme: theme::Theme,
+    ) -> Self {
         Self {
+            language,
             next_var: 0,
             statements: Vec::new(),
             scopes: Vec::new(),
@@ -78,22 +98,71 @@ impl MetalEmitter {
         name
     }
 
+    fn input_name(&self) -> &'static str {
+        match self.language {
+            ShaderLanguage::Metal => "in",
+            ShaderLanguage::Wgsl => "input",
+        }
+    }
+
+    fn type_name(&self, metal_name: &'static str) -> &'static str {
+        match (self.language, metal_name) {
+            (ShaderLanguage::Wgsl, "float") => "f32",
+            (ShaderLanguage::Wgsl, "float2") => "vec2<f32>",
+            (ShaderLanguage::Wgsl, "float3") => "vec3<f32>",
+            (ShaderLanguage::Wgsl, "float4") => "vec4<f32>",
+            _ => metal_name,
+        }
+    }
+
+    fn declaration(&self, type_name: &'static str, name: &str, value: &str) -> String {
+        match self.language {
+            ShaderLanguage::Metal => format!("{} {} = {};", type_name, name, value),
+            ShaderLanguage::Wgsl => {
+                format!("let {}: {} = {};", name, self.type_name(type_name), value)
+            }
+        }
+    }
+
+    fn mutable_declaration(&self, type_name: &'static str, name: &str, value: &str) -> String {
+        match self.language {
+            ShaderLanguage::Metal => format!("{} {} = {};", type_name, name, value),
+            ShaderLanguage::Wgsl => {
+                format!("var {}: {} = {};", name, self.type_name(type_name), value)
+            }
+        }
+    }
+
+    fn constructor(&self, type_name: &'static str) -> &'static str {
+        self.type_name(type_name)
+    }
+
     fn resolve_symbol(&self, name: &str) -> String {
         // Hit contextual variables
         match name {
             "itime" => return "itime".to_string(),
             "aspect" => return "aspect".to_string(),
-            "input-color" => return "in.color_a".to_string(),
+            "input-color" => return format!("{}.color_a", self.input_name()),
             "hit/hover" => {
                 return if let Some(rid) = self.current_region_id {
-                    format!("(hit_region == {})", rid)
+                    match self.language {
+                        ShaderLanguage::Metal => format!("(hit_region == {})", rid),
+                        ShaderLanguage::Wgsl => format!("(hit_region == {rid}.0)"),
+                    }
                 } else {
                     "false".to_string()
                 };
             }
             "hit/active" => {
                 return if let Some(rid) = self.current_region_id {
-                    format!("((hit_region == {}) && (hit_pressed != 0))", rid)
+                    match self.language {
+                        ShaderLanguage::Metal => {
+                            format!("((hit_region == {}) && (hit_pressed != 0))", rid)
+                        }
+                        ShaderLanguage::Wgsl => {
+                            format!("((hit_region == {rid}.0) && hit_pressed)")
+                        }
+                    }
                 } else {
                     "false".to_string()
                 };
@@ -121,6 +190,23 @@ impl MetalEmitter {
             }
         }
         None
+    }
+
+    fn expr_is_bool(&self, expr: &Expression) -> bool {
+        match expr {
+            Expression::Symbol(name) => {
+                matches!(
+                    name.as_str(),
+                    "true" | "false" | "hit/hover" | "hit/active"
+                ) || self.resolve_symbol_type(name) == Some("bool")
+            }
+            Expression::List(items) => matches!(
+                items.first(),
+                Some(Expression::Symbol(head))
+                    if matches!(head.as_str(), "=" | "<" | ">" | "<=" | ">=")
+            ),
+            _ => false,
+        }
     }
 
     fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
@@ -169,7 +255,8 @@ impl MetalEmitter {
                 let color = theme::named_color_in(&self.theme, name)
                     .ok_or_else(|| CodegenError::UnknownThemeColor(name.clone()))?;
                 Ok(format!(
-                    "float4({}, {}, {}, {})",
+                    "{}({}, {}, {}, {})",
+                    self.constructor("float4"),
                     format_float(color.r as f64),
                     format_float(color.g as f64),
                     format_float(color.b as f64),
@@ -203,20 +290,21 @@ impl MetalEmitter {
                     "min" | "max" => self.emit_variadic_func(head, args),
 
                     // Vector constructors
-                    "vec2" => self.emit_func_call("float2", args),
-                    "vec3" => self.emit_func_call("float3", args),
-                    "vec4" => self.emit_func_call("float4", args),
-                    "rgba" => self.emit_func_call("float4", args),
+                    "vec2" => self.emit_func_call(self.constructor("float2"), args),
+                    "vec3" => self.emit_func_call(self.constructor("float3"), args),
+                    "vec4" => self.emit_func_call(self.constructor("float4"), args),
+                    "rgba" => self.emit_func_call(self.constructor("float4"), args),
 
                     // 1-arg math intrinsics (same name in Metal)
                     "abs" | "sin" | "cos" | "sqrt" | "fract" | "floor" | "ceil" | "round"
                     | "length" | "normalize" | "fwidth" => self.emit_func_call(head, args),
 
                     // 2-arg math intrinsics
-                    "pow" | "atan2" | "dot" | "mod" => {
-                        let metal_name = if head == "mod" { "fmod" } else { head };
-                        self.emit_func_call(metal_name, args)
+                    "pow" | "atan2" | "dot" => self.emit_func_call(head, args),
+                    "mod" if self.language == ShaderLanguage::Metal => {
+                        self.emit_func_call("fmod", args)
                     }
+                    "mod" => self.emit_binary_op("%", args),
 
                     // 3-arg math intrinsics
                     "clamp" | "smoothstep" => self.emit_func_call(head, args),
@@ -259,16 +347,15 @@ impl MetalEmitter {
 
     fn emit_sdf_layer(&mut self, children: &[Expression]) -> Result<String, CodegenError> {
         let layer_var = self.fresh_var();
-        self.statements.push(format!(
-            "float4 {} = float4(0.0, 0.0, 0.0, 0.0);",
-            layer_var
-        ));
+        let zero = format!("{}(0.0, 0.0, 0.0, 0.0)", self.constructor("float4"));
+        self.statements
+            .push(self.mutable_declaration("float4", &layer_var, &zero));
 
         for child in children {
             let child_color = self.emit_expr(child)?;
             let c = self.fresh_var();
             self.statements
-                .push(format!("float4 {} = {};", c, child_color));
+                .push(self.declaration("float4", &c, &child_color));
             self.statements
                 .push(format!("{0} = {1} + {0} * (1.0 - {1}.a);", layer_var, c));
         }
@@ -296,17 +383,18 @@ impl MetalEmitter {
         // Evaluate the SDF distance
         let dist = self.emit_expr(sdf_expr)?;
         let d = self.fresh_var();
-        self.statements.push(format!("float {} = {};", d, dist));
+        self.statements
+            .push(self.declaration("float", &d, &dist));
 
         // AA mask
         let aa = self.fresh_var();
+        let aa_expr = format!("max(fwidth({}), 0.001)", d);
         self.statements
-            .push(format!("float {} = max(fwidth({}), 0.001);", aa, d));
+            .push(self.declaration("float", &aa, &aa_expr));
         let mask = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = smoothstep({}, -({}), {});",
-            mask, aa, aa, d
-        ));
+        let mask_expr = format!("smoothstep({}, -({}), {})", aa, aa, d);
+        self.statements
+            .push(self.declaration("float", &mask, &mask_expr));
 
         let material = self.parse_material(material_expr)?;
         let mut scope_bindings = HashMap::from([("d".to_string(), d.clone())]);
@@ -334,23 +422,25 @@ impl MetalEmitter {
         self.type_scopes.pop();
         self.scopes.pop();
         let clr = self.fresh_var();
-        self.statements.push(format!("float4 {} = {};", clr, color));
+        self.statements
+            .push(self.declaration("float4", &clr, &color));
 
         let fill_result = self.fresh_var();
-        self.statements.push(format!(
-            "float4 {} = float4({}.rgb * {}.a * {}, {}.a * {});",
-            fill_result, clr, clr, mask, clr, mask
-        ));
+        let fill_expr = format!(
+            "{}({}.rgb * {}.a * {}, {}.a * {})",
+            self.constructor("float4"), clr, clr, mask, clr, mask
+        );
+        self.statements
+            .push(self.declaration("float4", &fill_result, &fill_expr));
 
         let result = self.fresh_var();
         if let Some(shadow) = shadow {
-            self.statements.push(format!(
-                "float4 {} = {} + {} * (1.0 - {}.a);",
-                result, fill_result, shadow, fill_result
-            ));
+            let result_expr = format!("{} + {} * (1.0 - {}.a)", fill_result, shadow, fill_result);
+            self.statements
+                .push(self.declaration("float4", &result, &result_expr));
         } else {
             self.statements
-                .push(format!("float4 {} = {};", result, fill_result));
+                .push(self.declaration("float4", &result, &fill_result));
         }
 
         // Keep region context active for subsequent sdf/paint siblings
@@ -553,8 +643,9 @@ impl MetalEmitter {
 
         // Right: x + eps
         let right_x = self.fresh_var();
+        let right_x_expr = format!("x + {}", eps);
         self.statements
-            .push(format!("float {} = x + {};", right_x, eps));
+            .push(self.declaration("float", &right_x, &right_x_expr));
         self.scopes
             .push(HashMap::from([("x".to_string(), right_x.clone())]));
         let right_sdf = self.emit_expr(sdf_expr)?;
@@ -565,22 +656,19 @@ impl MetalEmitter {
         };
         self.scopes.pop();
         let right = self.fresh_var();
-        if let Some(ref rb) = right_bump {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {}) + {};",
-                right, edge_min, edge_max, right_sdf, rb
-            ));
+        let right_expr = if let Some(ref rb) = right_bump {
+            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, right_sdf, rb)
         } else {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {});",
-                right, edge_min, edge_max, right_sdf
-            ));
-        }
+            format!("smoothstep({}, {}, {})", edge_min, edge_max, right_sdf)
+        };
+        self.statements
+            .push(self.declaration("float", &right, &right_expr));
 
         // Left: x - eps
         let left_x = self.fresh_var();
+        let left_x_expr = format!("x - {}", eps);
         self.statements
-            .push(format!("float {} = x - {};", left_x, eps));
+            .push(self.declaration("float", &left_x, &left_x_expr));
         self.scopes
             .push(HashMap::from([("x".to_string(), left_x.clone())]));
         let left_sdf = self.emit_expr(sdf_expr)?;
@@ -591,22 +679,19 @@ impl MetalEmitter {
         };
         self.scopes.pop();
         let left = self.fresh_var();
-        if let Some(ref lb) = left_bump {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {}) + {};",
-                left, edge_min, edge_max, left_sdf, lb
-            ));
+        let left_expr = if let Some(ref lb) = left_bump {
+            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, left_sdf, lb)
         } else {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {});",
-                left, edge_min, edge_max, left_sdf
-            ));
-        }
+            format!("smoothstep({}, {}, {})", edge_min, edge_max, left_sdf)
+        };
+        self.statements
+            .push(self.declaration("float", &left, &left_expr));
 
         // Up: y + eps
         let up_y = self.fresh_var();
+        let up_y_expr = format!("y + {}", eps);
         self.statements
-            .push(format!("float {} = y + {};", up_y, eps));
+            .push(self.declaration("float", &up_y, &up_y_expr));
         self.scopes
             .push(HashMap::from([("y".to_string(), up_y.clone())]));
         let up_sdf = self.emit_expr(sdf_expr)?;
@@ -617,22 +702,19 @@ impl MetalEmitter {
         };
         self.scopes.pop();
         let up = self.fresh_var();
-        if let Some(ref ub) = up_bump {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {}) + {};",
-                up, edge_min, edge_max, up_sdf, ub
-            ));
+        let up_expr = if let Some(ref ub) = up_bump {
+            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, up_sdf, ub)
         } else {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {});",
-                up, edge_min, edge_max, up_sdf
-            ));
-        }
+            format!("smoothstep({}, {}, {})", edge_min, edge_max, up_sdf)
+        };
+        self.statements
+            .push(self.declaration("float", &up, &up_expr));
 
         // Down: y - eps
         let down_y = self.fresh_var();
+        let down_y_expr = format!("y - {}", eps);
         self.statements
-            .push(format!("float {} = y - {};", down_y, eps));
+            .push(self.declaration("float", &down_y, &down_y_expr));
         self.scopes
             .push(HashMap::from([("y".to_string(), down_y.clone())]));
         let down_sdf = self.emit_expr(sdf_expr)?;
@@ -643,34 +725,30 @@ impl MetalEmitter {
         };
         self.scopes.pop();
         let down = self.fresh_var();
-        if let Some(ref db) = down_bump {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {}) + {};",
-                down, edge_min, edge_max, down_sdf, db
-            ));
+        let down_expr = if let Some(ref db) = down_bump {
+            format!("smoothstep({}, {}, {}) + {}", edge_min, edge_max, down_sdf, db)
         } else {
-            self.statements.push(format!(
-                "float {} = smoothstep({}, {}, {});",
-                down, edge_min, edge_max, down_sdf
-            ));
-        }
+            format!("smoothstep({}, {}, {})", edge_min, edge_max, down_sdf)
+        };
+        self.statements
+            .push(self.declaration("float", &down, &down_expr));
 
         // Central differences → normal
         let dx = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = ({} - {}) / (2.0 * {});",
-            dx, right, left, eps
-        ));
+        let dx_expr = format!("({} - {}) / (2.0 * {})", right, left, eps);
+        self.statements
+            .push(self.declaration("float", &dx, &dx_expr));
         let dy = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = ({} - {}) / (2.0 * {});",
-            dy, up, down, eps
-        ));
+        let dy_expr = format!("({} - {}) / (2.0 * {})", up, down, eps);
+        self.statements
+            .push(self.declaration("float", &dy, &dy_expr));
         let normal = self.fresh_var();
-        self.statements.push(format!(
-            "float3 {} = normalize(float3({}, {}, 1.0));",
-            normal, dx, dy
-        ));
+        let normal_expr = format!(
+            "normalize({}({}, {}, 1.0))",
+            self.constructor("float3"), dx, dy
+        );
+        self.statements
+            .push(self.declaration("float3", &normal, &normal_expr));
         self.type_scopes
             .last_mut()
             .map(|s| s.insert("normal".to_string(), "float3"));
@@ -680,15 +758,15 @@ impl MetalEmitter {
         if let Some(light_expr) = lighting.light_expr {
             let light = self.emit_expr(light_expr)?;
             let light_var = self.fresh_var();
+            let light_expr = format!("normalize({})", light);
             self.statements
-                .push(format!("float3 {} = normalize({});", light_var, light));
+                .push(self.declaration("float3", &light_var, &light_expr));
 
             // Diffuse: max(0, dot(normal, light))
             let diffuse = self.fresh_var();
-            self.statements.push(format!(
-                "float {} = max(0.0, dot({}, {}));",
-                diffuse, normal, light_var
-            ));
+            let diffuse_expr = format!("max(0.0, dot({}, {}))", normal, light_var);
+            self.statements
+                .push(self.declaration("float", &diffuse, &diffuse_expr));
             bindings.insert("diffuse".to_string(), diffuse);
 
             // Specular: Blinn-Phong
@@ -697,15 +775,20 @@ impl MetalEmitter {
                 None => "48.0".to_string(),
             };
             let half_vec = self.fresh_var();
-            self.statements.push(format!(
-                "float3 {} = normalize({} + float3(0.0, 0.0, 1.0));",
-                half_vec, light_var
-            ));
+            let half_expr = format!(
+                "normalize({} + {}(0.0, 0.0, 1.0))",
+                light_var,
+                self.constructor("float3")
+            );
+            self.statements
+                .push(self.declaration("float3", &half_vec, &half_expr));
             let specular = self.fresh_var();
-            self.statements.push(format!(
-                "float {} = pow(max(0.0, dot({}, {})), {});",
-                specular, normal, half_vec, shininess
-            ));
+            let specular_expr = format!(
+                "pow(max(0.0, dot({}, {})), {})",
+                normal, half_vec, shininess
+            );
+            self.statements
+                .push(self.declaration("float", &specular, &specular_expr));
             bindings.insert("specular".to_string(), specular);
         }
 
@@ -733,14 +816,16 @@ impl MetalEmitter {
         };
         let offset_var = self.fresh_var();
         self.statements
-            .push(format!("float2 {} = {};", offset_var, offset));
+            .push(self.declaration("float2", &offset_var, &offset));
 
         let shadow_x = self.fresh_var();
+        let shadow_x_expr = format!("x - {}.x", offset_var);
         self.statements
-            .push(format!("float {} = x - {}.x;", shadow_x, offset_var));
+            .push(self.declaration("float", &shadow_x, &shadow_x_expr));
         let shadow_y = self.fresh_var();
+        let shadow_y_expr = format!("y - {}.y", offset_var);
         self.statements
-            .push(format!("float {} = y - {}.y;", shadow_y, offset_var));
+            .push(self.declaration("float", &shadow_y, &shadow_y_expr));
 
         self.scopes.push(HashMap::from([
             ("x".to_string(), shadow_x.clone()),
@@ -757,28 +842,27 @@ impl MetalEmitter {
         self.scopes.pop();
 
         let shadow_d = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = ({} - {});",
-            shadow_d, shadow_dist_expr, spread_expr
-        ));
+        let shadow_d_expr = format!("({} - {})", shadow_dist_expr, spread_expr);
+        self.statements
+            .push(self.declaration("float", &shadow_d, &shadow_d_expr));
         let shadow_soft = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = max(max({}, fwidth({})), 0.001);",
-            shadow_soft, blur_expr, shadow_d
-        ));
+        let shadow_soft_expr = format!("max(max({}, fwidth({})), 0.001)", blur_expr, shadow_d);
+        self.statements
+            .push(self.declaration("float", &shadow_soft, &shadow_soft_expr));
         let shadow_mask = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = smoothstep({}, -({}), {});",
-            shadow_mask, shadow_soft, shadow_soft, shadow_d
-        ));
+        let shadow_mask_expr = format!("smoothstep({}, -({}), {})", shadow_soft, shadow_soft, shadow_d);
+        self.statements
+            .push(self.declaration("float", &shadow_mask, &shadow_mask_expr));
         let shadow_color = self.fresh_var();
         self.statements
-            .push(format!("float4 {} = {};", shadow_color, shadow_color_expr));
+            .push(self.declaration("float4", &shadow_color, &shadow_color_expr));
         let shadow_result = self.fresh_var();
-        self.statements.push(format!(
-            "float4 {} = float4({}.rgb * {}.a * {}, {}.a * {});",
-            shadow_result, shadow_color, shadow_color, shadow_mask, shadow_color, shadow_mask
-        ));
+        let shadow_result_expr = format!(
+            "{}({}.rgb * {}.a * {}, {}.a * {})",
+            self.constructor("float4"), shadow_color, shadow_color, shadow_mask, shadow_color, shadow_mask
+        );
+        self.statements
+            .push(self.declaration("float4", &shadow_result, &shadow_result_expr));
         Ok(Some(shadow_result))
     }
 
@@ -810,35 +894,40 @@ impl MetalEmitter {
         // Evaluate the SDF distance
         let dist = self.emit_expr(&args[0])?;
         let d = self.fresh_var();
-        self.statements.push(format!("float {} = {};", d, dist));
+        self.statements
+            .push(self.declaration("float", &d, &dist));
 
         // Convert to stroke: abs(d) - width
         let width = self.emit_expr(&args[1])?;
         let stroke_d = self.fresh_var();
+        let stroke_expr = format!("abs({}) - {}", d, width);
         self.statements
-            .push(format!("float {} = abs({}) - {};", stroke_d, d, width));
+            .push(self.declaration("float", &stroke_d, &stroke_expr));
 
         // AA mask
         let aa = self.fresh_var();
+        let aa_expr = format!("max(fwidth({}), 0.001)", stroke_d);
         self.statements
-            .push(format!("float {} = max(fwidth({}), 0.001);", aa, stroke_d));
+            .push(self.declaration("float", &aa, &aa_expr));
         let mask = self.fresh_var();
-        self.statements.push(format!(
-            "float {} = smoothstep({}, -({}), {});",
-            mask, aa, aa, stroke_d
-        ));
+        let mask_expr = format!("smoothstep({}, -({}), {})", aa, aa, stroke_d);
+        self.statements
+            .push(self.declaration("float", &mask, &mask_expr));
 
         // Evaluate color
         let color = self.emit_expr(&args[2])?;
         let clr = self.fresh_var();
-        self.statements.push(format!("float4 {} = {};", clr, color));
+        self.statements
+            .push(self.declaration("float4", &clr, &color));
 
         // Premultiplied alpha output
         let result = self.fresh_var();
-        self.statements.push(format!(
-            "float4 {} = float4({}.rgb * {}.a * {}, {}.a * {});",
-            result, clr, clr, mask, clr, mask
-        ));
+        let result_expr = format!(
+            "{}({}.rgb * {}.a * {}, {}.a * {})",
+            self.constructor("float4"), clr, clr, mask, clr, mask
+        );
+        self.statements
+            .push(self.declaration("float4", &result, &result_expr));
 
         Ok(result)
     }
@@ -877,9 +966,15 @@ impl MetalEmitter {
             // Emit value before inserting binding (sequential let: sees prior bindings only)
             let val = self.emit_expr(&pair[1])?;
             let var = self.fresh_var();
-            let type_name = self.expr_type(&pair[1]).unwrap_or("float");
+            let type_name = if self.language == ShaderLanguage::Wgsl
+                && self.expr_is_bool(&pair[1])
+            {
+                "bool"
+            } else {
+                self.expr_type(&pair[1]).unwrap_or("float")
+            };
             self.statements
-                .push(format!("{} {} = {};", type_name, var, val));
+                .push(self.declaration(type_name, &var, &val));
             self.scopes.last_mut().unwrap().insert(name.clone(), var);
             if type_name != "float" {
                 self.type_scopes
@@ -904,7 +999,17 @@ impl MetalEmitter {
         let cond = self.emit_expr(&args[0])?;
         let then = self.emit_expr(&args[1])?;
         let else_ = self.emit_expr(&args[2])?;
-        Ok(format!("(({}) ? ({}) : ({}))", cond, then, else_))
+        match self.language {
+            ShaderLanguage::Metal => Ok(format!("(({}) ? ({}) : ({}))", cond, then, else_)),
+            ShaderLanguage::Wgsl => {
+                let condition = if self.expr_is_bool(&args[0]) {
+                    cond
+                } else {
+                    format!("({cond} != 0.0)")
+                };
+                Ok(format!("select(({}), ({}), ({}))", else_, then, condition))
+            }
+        }
     }
 
     fn emit_do(&mut self, args: &[Expression]) -> Result<String, CodegenError> {
@@ -1087,7 +1192,7 @@ fn uniform_layout(state_symbols: &[String]) -> HashMap<String, String> {
         .collect()
 }
 
-fn emit_uniform_declarations(shader: &mut String, state_symbols: &[String]) {
+fn emit_metal_uniform_declarations(shader: &mut String, state_symbols: &[String]) {
     for (idx, name) in state_symbols.iter().enumerate() {
         let register = match idx / 4 {
             0 => "uniform_a",
@@ -1195,7 +1300,7 @@ pub fn compile_sdf_to_metal_with_state(
 ) -> Result<SdfShaderOutput, CodegenError> {
     let returns_color = expr_returns_float4(expr);
 
-    let mut emitter = MetalEmitter::new(uniform_layout(state_symbols));
+    let mut emitter = ShaderEmitter::metal(uniform_layout(state_symbols));
     let result_expr = emitter.emit_expr(expr)?;
     let region_count = emitter.next_region_id;
 
@@ -1238,7 +1343,7 @@ pub fn compile_sdf_to_metal_with_state(
         writeln!(shader, "    int hit_region = int(in.color_b.x);").unwrap();
         writeln!(shader, "    int hit_pressed = int(in.color_b.y);").unwrap();
     }
-    emit_uniform_declarations(&mut shader, state_symbols);
+    emit_metal_uniform_declarations(&mut shader, state_symbols);
 
     for stmt in &emitter.statements {
         writeln!(shader, "    {}", stmt).unwrap();
@@ -1280,17 +1385,154 @@ pub fn compile_sdf_to_metal_with_state(
     })
 }
 
-/// Compile only the SDF expression (no shader wrapper). Useful for testing
-/// and for Milestone 2 where sdf/layer composes multiple SDF expressions.
+/// Compile a macro-expanded SDF expression into a complete WGSL fragment shader.
+pub fn compile_sdf_to_wgsl(expr: &Expression) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_wgsl_with_state(expr, &[])
+}
+
+pub fn compile_sdf_to_wgsl_with_state(
+    expr: &Expression,
+    state_symbols: &[String],
+) -> Result<SdfShaderOutput, CodegenError> {
+    let returns_color = expr_returns_float4(expr);
+    let mut emitter = ShaderEmitter::wgsl(uniform_layout(state_symbols));
+    let result_expr = emitter.emit_expr(expr)?;
+    let region_count = emitter.next_region_id;
+
+    let mut shader = String::with_capacity(3072);
+    shader.push_str(
+        r#"struct WidgetVaryings {
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) value_t: f32,
+    @location(2) @interpolate(flat) itime: f32,
+    @location(3) @interpolate(flat) uniform_a: vec4<f32>,
+    @location(4) @interpolate(flat) uniform_b: vec4<f32>,
+    @location(5) @interpolate(flat) uniform_c: vec4<f32>,
+    @location(6) @interpolate(flat) uniform_d: vec4<f32>,
+    @location(7) @interpolate(flat) color_a: vec4<f32>,
+    @location(8) @interpolate(flat) color_b: vec4<f32>,
+    @location(9) @interpolate(flat) color_c: vec4<f32>,
+    @location(10) @interpolate(flat) color_d: vec4<f32>,
+    @location(11) @interpolate(flat) aspect: f32,
+    @location(12) @interpolate(flat) corner_radius: f32,
+};
+
+"#,
+    );
+    writeln!(
+        shader,
+        "@fragment\nfn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32> {{"
+    )
+    .unwrap();
+    writeln!(shader, "    let aspect: f32 = input.aspect;").unwrap();
+    writeln!(
+        shader,
+        "    let logical_uv: vec2<f32> = (input.uv - input.color_c.xy) / max(input.color_c.zw - input.color_c.xy, vec2<f32>(0.0001));"
+    )
+    .unwrap();
+    writeln!(
+        shader,
+        "    let x: f32 = (logical_uv.x * 2.0 - 1.0) * max(aspect, 1.0);"
+    )
+    .unwrap();
+    writeln!(
+        shader,
+        "    let y: f32 = (logical_uv.y * 2.0 - 1.0) * max(1.0 / max(aspect, 0.0001), 1.0);"
+    )
+    .unwrap();
+    writeln!(shader, "    let width: f32 = max(aspect, 1.0);").unwrap();
+    writeln!(
+        shader,
+        "    let height: f32 = max(1.0 / max(aspect, 0.0001), 1.0);"
+    )
+    .unwrap();
+    writeln!(shader, "    let value_t: f32 = input.value_t;").unwrap();
+    writeln!(shader, "    let itime: f32 = input.itime;").unwrap();
+
+    if region_count > 0 {
+        writeln!(shader, "    let hit_region: f32 = input.color_b.x;").unwrap();
+        writeln!(shader, "    let hit_pressed: bool = input.color_b.y != 0.0;").unwrap();
+    }
+    for (idx, name) in state_symbols.iter().enumerate() {
+        let register = match idx / 4 {
+            0 => "uniform_a",
+            1 => "uniform_b",
+            2 => "uniform_c",
+            _ => "uniform_d",
+        };
+        let component = ["x", "y", "z", "w"][idx % 4];
+        writeln!(
+            shader,
+            "    let sdf_state_{}: f32 = input.{}.{};",
+            metal_safe_symbol(name),
+            register,
+            component
+        )
+        .unwrap();
+    }
+
+    for stmt in &emitter.statements {
+        writeln!(shader, "    {}", stmt).unwrap();
+    }
+
+    if returns_color {
+        writeln!(shader, "    var result: vec4<f32> = {};", result_expr).unwrap();
+        writeln!(
+            shader,
+            "    let style_brightness: f32 = select(input.color_b.w, 1.0, input.color_b.w <= 0.0);"
+        )
+        .unwrap();
+        writeln!(
+            shader,
+            "    result = vec4<f32>(result.rgb * style_brightness, result.a);"
+        )
+        .unwrap();
+        writeln!(shader, "    if (result.a < 0.001) {{ discard; }}").unwrap();
+        writeln!(shader, "    return result;").unwrap();
+    } else {
+        writeln!(shader, "    let d: f32 = {};", result_expr).unwrap();
+        writeln!(shader, "    let aa: f32 = max(fwidth(d), 0.001);").unwrap();
+        writeln!(shader, "    let mask: f32 = smoothstep(aa, -aa, d);").unwrap();
+        writeln!(shader, "    if (mask < 0.001) {{ discard; }}").unwrap();
+        writeln!(shader, "    let fill_color: vec4<f32> = input.color_a;").unwrap();
+        writeln!(
+            shader,
+            "    let style_brightness: f32 = select(input.color_b.w, 1.0, input.color_b.w <= 0.0);"
+        )
+        .unwrap();
+        writeln!(
+            shader,
+            "    return vec4<f32>(fill_color.rgb * style_brightness, fill_color.a * mask);"
+        )
+        .unwrap();
+    }
+    writeln!(shader, "}}").unwrap();
+
+    Ok(SdfShaderOutput {
+        shader_source: shader,
+        region_count,
+    })
+}
+
+/// Compile only the Metal SDF expression (no shader wrapper).
 pub fn compile_sdf_expr(expr: &Expression) -> Result<(Vec<String>, String), CodegenError> {
     compile_sdf_expr_with_theme(expr, theme::current())
+}
+
+/// Compile only the WGSL SDF expression (no shader wrapper).
+pub fn compile_sdf_expr_to_wgsl(
+    expr: &Expression,
+) -> Result<(Vec<String>, String), CodegenError> {
+    let mut emitter = ShaderEmitter::wgsl(HashMap::new());
+    let result = emitter.emit_expr(expr)?;
+    Ok((emitter.statements, result))
 }
 
 fn compile_sdf_expr_with_theme(
     expr: &Expression,
     theme: theme::Theme,
 ) -> Result<(Vec<String>, String), CodegenError> {
-    let mut emitter = MetalEmitter::with_theme(HashMap::new(), theme);
+    let mut emitter = ShaderEmitter::metal_with_theme(HashMap::new(), theme);
     let result = emitter.emit_expr(expr)?;
     Ok((emitter.statements, result))
 }
@@ -1308,6 +1550,98 @@ mod tests {
 
     fn codegen_expr(src: &str) -> (Vec<String>, String) {
         compile_sdf_expr(&parse_one_expr(src)).unwrap()
+    }
+
+    fn assert_valid_wgsl(source: &str) {
+        let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
+            panic!(
+                "WGSL parse failed:\n{}\n\n{}",
+                error.emit_to_string(source),
+                source
+            )
+        });
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("WGSL validation failed: {error:#?}\n\n{source}"));
+    }
+
+    fn expression_source(expr: &Expression) -> String {
+        match expr {
+            Expression::Symbol(value) => value.clone(),
+            Expression::Keyword(value) => format!(":{value}"),
+            Expression::String(value) => format!("{value:?}"),
+            Expression::Number(value) => format_float(*value),
+            Expression::List(items) => format!(
+                "({})",
+                items
+                    .iter()
+                    .map(expression_source)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            Expression::QuoteSymbol(value) => format!("'{value}"),
+            Expression::QuoteList(items) => format!(
+                "'({})",
+                items
+                    .iter()
+                    .map(expression_source)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            Expression::Quasiquote(value) => format!("`{}", expression_source(value)),
+            Expression::Unquote(value) => format!(",{}", expression_source(value)),
+            Expression::UnquoteSplicing(value) => format!(",@{}", expression_source(value)),
+        }
+    }
+
+    fn shader_from_defwidget(expr: &Expression) -> Option<(&Expression, Vec<String>)> {
+        let Expression::List(items) = expr else {
+            return None;
+        };
+        if !matches!(items.first(), Some(Expression::Symbol(head)) if head == "defwidget") {
+            return None;
+        }
+
+        let mut shader = None;
+        let mut state = Vec::new();
+        let mut index = 2;
+        while index + 1 < items.len() {
+            if let Expression::Keyword(key) = &items[index] {
+                match key.as_str() {
+                    "shader" => shader = Some(&items[index + 1]),
+                    "state" => {
+                        if let Expression::List(symbols) = &items[index + 1] {
+                            state.extend(symbols.iter().filter_map(|symbol| match symbol {
+                                Expression::Symbol(name) => Some(name.clone()),
+                                _ => None,
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+                index += 2;
+            } else {
+                index += 1;
+            }
+        }
+        shader.map(|shader| (shader, state))
+    }
+
+    fn content_lisp_files(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                content_lisp_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "lisp")
+                && std::fs::read_to_string(&path)
+                    .is_ok_and(|source| source.contains(":shader"))
+            {
+                out.push(path);
+            }
+        }
     }
 
     #[test]
@@ -1436,6 +1770,136 @@ mod tests {
         assert!(shader.contains("smoothstep"));
         assert!(shader.contains("discard_fragment"));
         assert_eq!(output.region_count, 0);
+    }
+
+    #[test]
+    fn content_shader_corpus_emits_valid_wgsl() {
+        use crate::runtime::Runtime;
+
+        let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let mut files = Vec::new();
+        content_lisp_files(&content, &mut files);
+        files.sort_by_key(|path| {
+            let is_materials = path.ends_with("ui/materials.lisp");
+            (!is_materials, path.clone())
+        });
+
+        use sha2::{Digest, Sha256};
+
+        let mut runtime = Runtime::new();
+        let mut metal_snapshot = Sha256::new();
+        let mut wgsl_snapshot = Sha256::new();
+        let mut shader_count = 0;
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            let tokens = crate::parser::Parser::new(source).parse().unwrap();
+            let expressions = crate::parser::ASTParser::new(tokens).parse().unwrap();
+            let mut module_name = None;
+            for expression in expressions {
+                if let Expression::List(items) = &expression
+                    && matches!(items.first(), Some(Expression::Symbol(head)) if head == "module")
+                    && let Some(Expression::Symbol(name)) = items.get(1)
+                {
+                    module_name = Some(name.clone());
+                    continue;
+                }
+                if let Expression::List(items) = &expression
+                    && matches!(items.first(), Some(Expression::Symbol(head)) if head == "defmacro")
+                {
+                    let mut qualified = items.clone();
+                    if let (Some(module), Some(Expression::Symbol(name))) =
+                        (module_name.as_ref(), qualified.get_mut(1))
+                    {
+                        *name = format!("{module}/{name}");
+                    }
+                    let qualified = Expression::List(qualified);
+                    runtime.eval_str(&expression_source(&qualified)).unwrap_or_else(|error| {
+                        panic!("failed to register corpus macro from {}: {error:?}", path.display())
+                    });
+                    continue;
+                }
+
+                let Some((shader, state_symbols)) = shader_from_defwidget(&expression) else {
+                    continue;
+                };
+                let expanded = runtime.expand_macros_expression(shader).unwrap_or_else(|error| {
+                    panic!("failed to expand shader from {}: {error}", path.display())
+                });
+                let state_bindings = state_symbols.into_iter().collect::<HashSet<_>>();
+                let mut state_symbols = collect_state_symbols(&expanded, &state_bindings);
+                state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
+                let metal = compile_sdf_to_metal_with_state(&expanded, &state_symbols)
+                    .unwrap_or_else(|error| panic!("MSL codegen failed for {}: {error}", path.display()));
+                let wgsl = compile_sdf_to_wgsl_with_state(&expanded, &state_symbols)
+                    .unwrap_or_else(|error| panic!("WGSL codegen failed for {}: {error}", path.display()));
+                assert_eq!(metal.region_count, wgsl.region_count, "{}", path.display());
+                metal_snapshot.update(metal.shader_source.as_bytes());
+                metal_snapshot.update([0]);
+                wgsl_snapshot.update(wgsl.shader_source.as_bytes());
+                wgsl_snapshot.update([0]);
+                assert_valid_wgsl(&wgsl.shader_source);
+                shader_count += 1;
+            }
+        }
+        assert!(shader_count >= 60, "expected the full content shader corpus");
+        let metal_snapshot = metal_snapshot
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        // Golden hash captured from the pre-WGSL emitter over the same 63 shaders.
+        assert_eq!(
+            metal_snapshot,
+            "471118d63261518e58894e068bd39596f058034a376e2952c84dfe84307c6d52"
+        );
+        let wgsl_snapshot = wgsl_snapshot
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            wgsl_snapshot,
+            "762c24ab58a81c00a296c4cb55e4d45ae7ac70105d6764c854173d26877a6f6c"
+        );
+    }
+
+    #[test]
+    fn wgsl_distance_shader_is_valid() {
+        let output = compile_sdf_to_wgsl(&parse_one_expr(
+            "(let ((wrapped (mod (+ value_t 1) 1))
+                   (positive (> x 0)))
+               (- (length (vec2 x y)) (if positive wrapped 0.5)))",
+        ))
+        .unwrap();
+        assert_valid_wgsl(&output.shader_source);
+        assert!(output.shader_source.contains("@fragment"));
+        assert!(output.shader_source.contains("vec2<f32>(x, y)"));
+        assert!(output.shader_source.contains("%"));
+        assert!(output.shader_source.contains(": bool ="));
+    }
+
+    #[test]
+    fn wgsl_color_shader_with_material_features_and_state_is_valid() {
+        let expr = parse_one_expr(
+            "(sdf/layer
+               (sdf/fill (- (length (vec2 x y)) radius)
+                 (material
+                   :color (if hit/hover :accent (rgba diffuse specular 0.25 1))
+                   :shadow (shadow :color (rgba 0 0 0 0.2)
+                                   :blur 0.18
+                                   :offset (vec2 0 0.05))
+                   :lighting (lighting :edge-min -0.2
+                                       :edge-max 0.2
+                                       :light (vec3 0.2 -0.4 1)
+                                       :shininess 32))))",
+        );
+        let output = compile_sdf_to_wgsl_with_state(&expr, &[String::from("radius")]).unwrap();
+        assert_eq!(output.region_count, 1);
+        assert_valid_wgsl(&output.shader_source);
+        assert!(output
+            .shader_source
+            .contains("let sdf_state_radius: f32 = input.uniform_a.x;"));
+        assert!(output.shader_source.contains("select("));
     }
 
     #[test]
@@ -1695,7 +2159,7 @@ mod tests {
 
     #[test]
     fn sdf_fill_assigns_region() {
-        let mut emitter = MetalEmitter::new(HashMap::new());
+        let mut emitter = ShaderEmitter::metal(HashMap::new());
         let expr = parse_one_expr("(sdf/fill (- (length (vec2 x y)) 0.5) :accent)");
         let _ = emitter.emit_expr(&expr).unwrap();
         assert_eq!(emitter.next_region_id, 1);
@@ -1703,7 +2167,7 @@ mod tests {
 
     #[test]
     fn sdf_paint_no_region() {
-        let mut emitter = MetalEmitter::new(HashMap::new());
+        let mut emitter = ShaderEmitter::metal(HashMap::new());
         let expr = parse_one_expr("(sdf/paint (- (length (vec2 x y)) 0.5) :accent)");
         let _ = emitter.emit_expr(&expr).unwrap();
         assert_eq!(emitter.next_region_id, 0);
@@ -1731,7 +2195,7 @@ mod tests {
 
     #[test]
     fn sdf_layer_two_fills_get_different_regions() {
-        let mut emitter = MetalEmitter::new(HashMap::new());
+        let mut emitter = ShaderEmitter::metal(HashMap::new());
         let expr = parse_one_expr(
             "(sdf/layer
                (sdf/fill (- (length (vec2 x y)) 0.5) :accent)
