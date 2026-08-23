@@ -60,17 +60,32 @@ pub(crate) fn build_primitive_geometry(
     viewport_h: f32,
 ) -> PrimitiveRunGeometry {
     let mut geometry = PrimitiveRunGeometry::default();
-    let mut draw_start = 0;
+    // Instances of one clip segment, tagged with the z index they were authored
+    // at. Metal buckets a segment's primitives into a `BTreeMap<i32, Vec<_>>`
+    // and draws the buckets in ascending key order
+    // (`metal_backend::z_ordered_primitive_layers`); a stable sort by z index
+    // reproduces that ordering, including the "untagged primitives sit at z 0"
+    // rule that `effective_z_index` encodes.
+    let mut segment: Vec<(i32, SolidQuadInstance)> = Vec::new();
 
-    let flush_draw = |geometry: &mut PrimitiveRunGeometry, draw_start: &mut u32| {
-        let end = geometry.instances.len() as u32;
-        if end > *draw_start {
-            geometry.ops.push(PrimitiveRunOp::Draw(*draw_start..end));
-            *draw_start = end;
+    fn flush_segment(
+        geometry: &mut PrimitiveRunGeometry,
+        segment: &mut Vec<(i32, SolidQuadInstance)>,
+    ) {
+        if segment.is_empty() {
+            return;
         }
-    };
+        segment.sort_by_key(|(z_index, _)| *z_index);
+        let start = geometry.instances.len() as u32;
+        geometry
+            .instances
+            .extend(segment.drain(..).map(|(_, instance)| instance));
+        let end = geometry.instances.len() as u32;
+        geometry.ops.push(PrimitiveRunOp::Draw(start..end));
+    }
 
     for primitive in primitives {
+        let z_index = widget_render::effective_z_index(primitive);
         match widget_render::innermost_primitive(primitive) {
             GpuPrimitive::Rect(rect) | GpuPrimitive::ForegroundRect(rect) => {
                 if let Some(instance) = solid_rect_instance(
@@ -81,7 +96,7 @@ pub(crate) fn build_primitive_geometry(
                     viewport_w,
                     viewport_h,
                 ) {
-                    geometry.instances.push(instance);
+                    segment.push((z_index, instance));
                 }
             }
             GpuPrimitive::Quad(quad) => {
@@ -99,21 +114,21 @@ pub(crate) fn build_primitive_geometry(
                     viewport_w,
                     viewport_h,
                 ) {
-                    geometry.instances.push(instance);
+                    segment.push((z_index, instance));
                 }
             }
             GpuPrimitive::PushClipRect(rect) => {
-                flush_draw(&mut geometry, &mut draw_start);
+                flush_segment(&mut geometry, &mut segment);
                 geometry.ops.push(PrimitiveRunOp::PushClip(*rect));
             }
             GpuPrimitive::PopClipRect => {
-                flush_draw(&mut geometry, &mut draw_start);
+                flush_segment(&mut geometry, &mut segment);
                 geometry.ops.push(PrimitiveRunOp::PopClip);
             }
             _ => {}
         }
     }
-    flush_draw(&mut geometry, &mut draw_start);
+    flush_segment(&mut geometry, &mut segment);
     geometry
 }
 
@@ -342,6 +357,61 @@ mod tests {
                     height: 1.0,
                 }),
                 PrimitiveRunOp::Draw(1..2),
+                PrimitiveRunOp::PopClip,
+            ]
+        );
+    }
+
+    #[test]
+    fn z_layers_sort_within_a_clip_segment_but_never_across_one() {
+        let rect = |row: f32| {
+            GpuPrimitive::Rect(GpuRectPrimitive {
+                rect: Rect {
+                    row,
+                    col: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                color: Color::rgb(row / 10.0, 0.0, 0.0),
+            })
+        };
+        let clip = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 4.0,
+            height: 4.0,
+        };
+        // Authored out of z order, and straddling a clip segment boundary.
+        let geometry = build_primitive_geometry(
+            &[
+                widget_render::z_layer(5, rect(1.0)),
+                rect(2.0),
+                widget_render::z_layer(-1, rect(3.0)),
+                GpuPrimitive::PushClipRect(clip),
+                widget_render::z_layer(5, rect(4.0)),
+                widget_render::z_layer(1, rect(5.0)),
+                GpuPrimitive::PopClipRect,
+            ],
+            10.0,
+            10.0,
+            100.0,
+            100.0,
+        );
+
+        // Metal buckets each clip segment by z index and draws the buckets in
+        // ascending order; untagged primitives sit at z 0.
+        let rows: Vec<i32> = geometry
+            .instances
+            .iter()
+            .map(|instance| (((1.0 - instance.ndc_bounds[1]) * 50.0 / 10.0).round()) as i32)
+            .collect();
+        assert_eq!(rows, vec![3, 2, 1, 5, 4]);
+        assert_eq!(
+            geometry.ops,
+            vec![
+                PrimitiveRunOp::Draw(0..3),
+                PrimitiveRunOp::PushClip(clip),
+                PrimitiveRunOp::Draw(3..5),
                 PrimitiveRunOp::PopClip,
             ]
         );

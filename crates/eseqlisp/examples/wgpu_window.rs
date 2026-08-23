@@ -1,6 +1,14 @@
 //! Render a real eseqlisp widget tree through the retained primitive-run wgpu path.
 //!
 //! Run with: `cargo run -p eseqlisp --example wgpu_window --features wgpu`
+//! Set `ESEQ_WGPU_FRAMES=<n>` to present `n` frames and exit (0 = run until the
+//! window is closed), so the spike doubles as a non-interactive smoke check.
+//!
+//! Note on what shows up: a `box` with a `background` prop compiles to an SDF
+//! `WidgetInstance`, not a solid `Rect`, so the panel chrome stays unpainted
+//! until the SDF pipelines are ported (eseq-linux.7). What this renderer draws
+//! is the solid `Rect`/`Quad` geometry the leaf widgets emit — and the boxes'
+//! `PushClipRect`/`PopClipRect` pairs still clip it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,8 +18,8 @@ use eseqlisp::layout::{LayoutNode, Rect};
 use eseqlisp::vm::Value;
 use eseqlisp::wgpu_backend::WgpuBackend;
 use eseqlisp::widget_render::{
-    GpuPrimitiveRun, WidgetViewport, collect_gpu_primitive_runs,
-    collect_gpu_primitive_runs_retained,
+    GpuPrimitive, GpuPrimitiveRun, WidgetViewport, collect_gpu_primitive_runs,
+    collect_gpu_primitive_runs_retained, innermost_primitive,
 };
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -21,62 +29,71 @@ use winit::window::WindowBuilder;
 const CELL_W: f32 = 12.0;
 const CELL_H: f32 = 24.0;
 
-fn box_node(id: u64, rect: Rect, color: &str, children: Vec<LayoutNode>) -> LayoutNode {
+fn node(id: u64, widget_type: &str, rect: Rect, props: Vec<(&str, &str)>) -> LayoutNode {
     LayoutNode {
         widget_id: id,
         stable_widget_id: None,
         subtree_root_id: None,
         parent_subtree_root_id: None,
         stable_key: None,
-        widget_type: "box".into(),
+        widget_type: widget_type.into(),
         rect,
-        props: HashMap::from([
-            ("background".into(), Value::String("panel".into())),
-            ("background-color".into(), Value::String(color.into())),
-        ]),
-        children,
+        props: props
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), Value::String(value.to_string())))
+            .collect::<HashMap<_, _>>(),
+        children: vec![],
         focusable: false,
         animation: Default::default(),
     }
 }
 
 fn widget_tree() -> LayoutNode {
-    box_node(
+    // The panel box emits PushClipRect/PopClipRect around its children.
+    let mut panel = node(
         1,
+        "box",
         Rect {
             row: 1.0,
             col: 2.0,
             width: 42.0,
             height: 20.0,
         },
-        "#202631",
-        vec![
-            box_node(
-                2,
-                Rect {
-                    row: 3.0,
-                    col: 5.0,
-                    width: 18.0,
-                    height: 6.0,
-                },
-                "#36c5a3",
-                vec![],
-            ),
-            // This deliberately crosses the parent edge. The parent box's
-            // production PushClipRect/PopClipRect pair must clip it.
-            box_node(
-                3,
-                Rect {
-                    row: 12.0,
-                    col: 28.0,
-                    width: 24.0,
-                    height: 6.0,
-                },
-                "#e46f61",
-                vec![],
-            ),
-        ],
-    )
+        vec![("background", "panel")],
+    );
+    panel.children = vec![
+        node(
+            2,
+            "scope",
+            Rect {
+                row: 3.0,
+                col: 5.0,
+                width: 18.0,
+                height: 6.0,
+            },
+            vec![
+                ("background-color", "#12303a"),
+                ("waveform-color", "#36c5a3"),
+            ],
+        ),
+        // This deliberately overhangs the panel on the right. The panel's
+        // production clip rect must cut it off at column 44.
+        node(
+            3,
+            "scope",
+            Rect {
+                row: 12.0,
+                col: 28.0,
+                width: 24.0,
+                height: 6.0,
+            },
+            vec![
+                ("background-color", "#3a1d1a"),
+                ("waveform-color", "#e46f61"),
+            ],
+        ),
+    ];
+    panel
 }
 
 fn viewport(size: PhysicalSize<u32>) -> WidgetViewport {
@@ -105,6 +122,20 @@ fn collect(tree: &LayoutNode, size: PhysicalSize<u32>) -> Vec<GpuPrimitiveRun> {
     .0
 }
 
+/// Count what this renderer can actually paint, so an empty window is
+/// immediately distinguishable from a broken one.
+fn drawable_primitive_count(runs: &[GpuPrimitiveRun]) -> usize {
+    runs.iter()
+        .flat_map(|run| run.primitives.iter())
+        .filter(|primitive| {
+            matches!(
+                innermost_primitive(primitive),
+                GpuPrimitive::Rect(_) | GpuPrimitive::ForegroundRect(_) | GpuPrimitive::Quad(_)
+            )
+        })
+        .count()
+}
+
 fn main() {
     let frame_limit = std::env::var("ESEQ_WGPU_FRAMES")
         .ok()
@@ -123,6 +154,16 @@ fn main() {
     let tree = widget_tree();
     let mut runs = collect(&tree, window.inner_size());
     let mut presented_frames = 0;
+
+    let drawable = drawable_primitive_count(&runs);
+    println!(
+        "{} primitive runs, {drawable} solid rect/quad primitives to draw",
+        runs.len()
+    );
+    assert!(
+        drawable > 0,
+        "the spike tree produced no rect/quad geometry — the window would only show the clear color"
+    );
 
     event_loop
         .run(move |event, elwt| {
@@ -148,6 +189,7 @@ fn main() {
                             if status == eseqlisp::wgpu_backend::WgpuRenderStatus::Presented {
                                 presented_frames += 1;
                                 if frame_limit != 0 && presented_frames >= frame_limit {
+                                    println!("presented {presented_frames} frames — exiting");
                                     elwt.exit();
                                 }
                             }
