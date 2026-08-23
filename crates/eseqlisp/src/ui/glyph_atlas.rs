@@ -318,6 +318,8 @@ pub struct GlyphAtlas {
     font: Font,
     font_size: f32,
     descent: f32,
+    leading: f32,
+    pub post_script_name: String,
 }
 
 impl GlyphAtlas {
@@ -349,6 +351,8 @@ impl GlyphAtlas {
             glyphs: HashMap::new(),
             font: loaded.font,
             font_size,
+            leading: metrics.leading,
+            post_script_name: loaded.post_script_name,
         })
     }
 
@@ -394,6 +398,18 @@ impl GlyphAtlas {
 
     pub fn descent(&self) -> f32 {
         self.descent
+    }
+
+    pub fn line_metrics(&self) -> FontLineMetrics {
+        FontLineMetrics {
+            ascent: self.ascent,
+            descent: self.descent,
+            leading: self.leading,
+        }
+    }
+
+    pub fn char_advance(&self, ch: char) -> f32 {
+        self.font.metrics(ch, self.font_size).advance_width
     }
 }
 

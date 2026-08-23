@@ -82,6 +82,7 @@ pub mod reactive;
 pub mod runtime;
 pub mod sound_glyph_data;
 pub mod text;
+pub mod text_capture;
 pub mod tile;
 pub mod widget_render;
 pub mod widgets;
