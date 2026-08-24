@@ -79,26 +79,38 @@ overrides it with a locally built compiler.
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test
-fails at HEAD. Reuse an isolated worktree and a dedicated target directory. This
-recipe is for the narrowest exact test that answers the question; a cold
-workspace run takes several minutes and consumes multiple GB in the dedicated
-target directory.
+fails at HEAD. Reuse an isolated worktree and a dedicated target directory.
+Resolve HEAD once in the working checkout and pin both worktree commands to that
+commit: a bare `HEAD` passed to `git -C "$wt"` resolves against the worktree's
+own detached HEAD, so a reused worktree would silently stay on whatever commit
+it was left at and answer for the wrong tree.
 
 ```bash
 wt=/tmp/eseq-head-test; target="$HOME/.cache/eseq-head-test-target"
-[ -e "$wt/.git" ] || git worktree add --detach "$wt" HEAD
-git -C "$wt" checkout --detach HEAD
+head=$(git rev-parse HEAD)
+[ -e "$wt/.git" ] || git worktree add --detach "$wt" "$head"
+git -C "$wt" checkout --detach "$head"
 (cd "$wt" && \
   CARGO_TARGET_DIR="$target" \
   cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)')
 ```
 
 The dedicated target directory keeps Cargo artifacts from the clean checkout
-separate from working-checkout artifacts and off `/tmp`, which may be a small
-tmpfs. Sharing a target directory between worktrees can make Cargo run a binary
-built from the wrong source tree. The worktree is disposable and isolated, so
-resetting it never touches the working checkout. Clean up both directories when
-they are no longer useful:
+separate from working-checkout artifacts and off `/tmp`, which is a 3.9 GB tmpfs
+on the Linux workstation and cannot hold a Cargo target directory. Sharing a
+target directory between worktrees can make Cargo run a binary built from the
+wrong source tree. The worktree is disposable and isolated, so resetting it
+never touches the working checkout.
+
+Budget for the cold build before starting. `-E` filters which tests *run*, not
+what gets *built*, so even the narrowest exact test pays for its package's whole
+dependency graph: measured 2026-08-24, one `-p sequencer` test took 5m51s and
+left 8.1 GB in the dedicated target directory. Still prefer the narrowest exact
+test — it saves run time and keeps the output readable — but do not expect it to
+save disk. A `--workspace` run costs more of both.
+
+Clean up both directories when they are no longer useful; each is several GB and
+easy to forget:
 
 ```bash
 git worktree remove /tmp/eseq-head-test
