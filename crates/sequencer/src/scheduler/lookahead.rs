@@ -35,6 +35,9 @@ pub(super) struct SchedulerLookaheadState {
     /// Cleared when the worker re-syncs generator definitions, so an edited
     /// body gets a fresh attempt.
     pub(super) parked_generators: std::collections::HashSet<u64>,
+    /// Last line emitted by the ESEQ_DEBUG_SCENE_SLOTS trace, so the seam
+    /// reports changes rather than one line per chunk boundary.
+    pub(super) last_scene_slot_debug: Option<(usize, usize, usize, String)>,
 }
 
 impl SchedulerLookaheadState {
@@ -57,6 +60,7 @@ impl SchedulerLookaheadState {
             song: None,
             roll: RollState::new(),
             parked_generators: std::collections::HashSet::new(),
+            last_scene_slot_debug: None,
         }
     }
 }
@@ -95,6 +99,11 @@ pub(super) fn mark_song_row_accum_resets(
 /// is an identity — its table entry for its own scene is `scene_slots` — so
 /// one rule covers all three sources. The frozen copy is the fallback for a
 /// scene index the live table no longer has (a scene deleted mid-song).
+pub(super) fn scene_slot_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQ_DEBUG_SCENE_SLOTS").is_some())
+}
+
 pub(super) fn scene_slots_for_chunk(
     base_snapshot: &SequencerSnapshot,
     chunk: &SequencerSnapshot,
@@ -479,7 +488,25 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
         if let Some(scratch) = scratch_runtime.as_ref() {
-            scratch.set_scene_slot_snapshot(scene_slots_for_chunk(base_snapshot, snapshot));
+            let chunk_slots = scene_slots_for_chunk(base_snapshot, snapshot);
+            // ESEQ_DEBUG_SCENE_SLOTS: one line per change at the seam where a
+            // chunk selects the scene its shipped ticks read.
+            if scene_slot_debug_enabled() {
+                let fingerprint = (
+                    snapshot.transport.current_pattern,
+                    base_snapshot.transport.current_pattern,
+                    base_snapshot.scene_slot_table.len(),
+                    format!("{:?}", chunk_slots.values()),
+                );
+                if scheduler.last_scene_slot_debug.as_ref() != Some(&fingerprint) {
+                    eprintln!(
+                        "[scene-slots] chunk_scene={} base_scene={} table_len={} values={}",
+                        fingerprint.0, fingerprint.1, fingerprint.2, fingerprint.3
+                    );
+                    scheduler.last_scene_slot_debug = Some(fingerprint);
+                }
+            }
+            scratch.set_scene_slot_snapshot(chunk_slots);
         }
         let chunk_start_beats = clock.total_beats;
         // Control-thread channel writes land on the chunk boundary, in order,
