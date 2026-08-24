@@ -58,6 +58,11 @@ void engine_set_rt_priority(int priority);     // Linux SCHED_FIFO priority
 void engine_set_os_workgroup(void *oswg);      // OS Workgroup (macOS 10.16+)
 ```
 
+On Linux, `SCHED_FIFO` requires either a nonzero `RLIMIT_RTPRIO` (configured
+through `limits.conf` or systemd `LimitRTPRIO`) or `CAP_SYS_NICE`. If promotion
+is denied, each worker remains at normal priority and the engine emits one clear
+warning per initialization rather than failing audio startup.
+
 ### Graph Lifecycle
 
 ```c

@@ -34,7 +34,8 @@ void engine_clear_os_workgroup(void);
 // Optional: enable minimal logging from RT workers (join success/failure)
 void engine_enable_rt_logging(int enable);
 
-// Enable/disable Mach time-constraint scheduling for workers (Apple only)
+// Enable/disable platform realtime scheduling for workers. Apple uses Mach
+// time constraints; Linux uses SCHED_FIFO. The priority applies to Linux only.
 void engine_enable_rt_scheduling(int enable);
 void engine_set_rt_priority(int priority);
 

@@ -576,8 +576,8 @@ static void promote_linux_worker_to_realtime(void) {
               memory_order_acq_rel, memory_order_relaxed)) {
         fprintf(stderr,
                 "[audiograph] WARN: SCHED_FIFO priority %d denied: %s; grant "
-                "realtime priority with limits.conf/systemd LimitRTPRIO or "
-                "RTKit (workers remain normal priority)\n",
+                "RLIMIT_RTPRIO with limits.conf/systemd LimitRTPRIO or grant "
+                "CAP_SYS_NICE (workers remain normal priority)\n",
                 priority, strerror(rc));
       }
     } else {
