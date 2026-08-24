@@ -525,7 +525,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
-const MATRIX_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const MATRIX_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -653,7 +653,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     color = mix(color, in.color_a.rgb, innerMask);
     return float4(color, in.color_b.a * inCell);
 }
-"#);
+"#, super::wgsl::MATRIX_FRAGMENT_SHADER);
 
 impl WidgetDefinition for MatrixWidget {
     fn names(&self) -> &'static [&'static str] {

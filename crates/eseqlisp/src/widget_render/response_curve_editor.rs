@@ -634,7 +634,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
     }
 }
 
-const RESPONSE_CURVE_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const RESPONSE_CURVE_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float rce_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -792,7 +792,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.a = max(col.a * clipMask, handleOuter);
     return col;
 }
-"#);
+"#, super::wgsl::RESPONSE_CURVE_EDITOR_SHADER);
 
 #[cfg(test)]
 mod tests {

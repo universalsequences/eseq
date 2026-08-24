@@ -1982,7 +1982,7 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 }
 
-const KNOB_NUMBER_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const KNOB_NUMBER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2037,9 +2037,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#);
+"#, super::wgsl::KNOB_NUMBER_SHADER);
 
-const KNOB_NUMBER_MOD_RANGE_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const KNOB_NUMBER_MOD_RANGE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -2068,4 +2068,4 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#);
+"#, super::wgsl::KNOB_NUMBER_MOD_RANGE_SHADER);

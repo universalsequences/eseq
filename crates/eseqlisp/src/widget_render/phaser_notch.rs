@@ -385,7 +385,7 @@ impl WidgetDefinition for PhaserNotchWidget {
     }
 }
 
-const PHASER_NOTCH_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const PHASER_NOTCH_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float phaserFlangerLfo(int shape, float phase)
 {
     phase = fract(phase);
@@ -511,7 +511,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
     return col;
 }
-"#);
+"#, super::wgsl::PHASER_NOTCH_SHADER);
 
 #[cfg(test)]
 mod tests {

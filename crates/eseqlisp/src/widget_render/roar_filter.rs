@@ -223,7 +223,7 @@ impl WidgetDefinition for RoarFilterWidget {
 }
 
 // Dual-maintained with `filter_magnitude` above.
-const ROAR_FILTER_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const ROAR_FILTER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float roarFilterMagnitude(int filterType, float cutoff, float res, float freq)
 {
     float omega = freq / max(cutoff, 20.0);
@@ -286,7 +286,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.rgb = mix(col.rgb, in.color_a.rgb, fill);
     return col;
 }
-"#);
+"#, super::wgsl::ROAR_FILTER_SHADER);
 
 #[cfg(test)]
 mod tests {

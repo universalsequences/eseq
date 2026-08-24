@@ -14,7 +14,7 @@ pub struct KnobWidget;
 
 pub static KNOB_WIDGET: KnobWidget = KnobWidget;
 
-const KNOB_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const KNOB_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -59,7 +59,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }
-"#);
+"#, super::wgsl::KNOB_FRAGMENT_SHADER);
 
 fn normalized_value(props: &HashMap<String, Value>) -> f32 {
     let value = get_f32_prop(props, "value", 0.0);

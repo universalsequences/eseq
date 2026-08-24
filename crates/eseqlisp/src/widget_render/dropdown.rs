@@ -1229,7 +1229,7 @@ fn emit_rounded_rect(
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const DROPDOWN_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const DROPDOWN_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -1275,7 +1275,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#);
+"#, super::wgsl::DROPDOWN_CHEVRON_SHADER);
 
 #[cfg(test)]
 mod tests {

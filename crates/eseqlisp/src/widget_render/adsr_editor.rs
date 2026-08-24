@@ -490,7 +490,7 @@ impl WidgetDefinition for AdsrEditorWidget {
     }
 }
 
-const ADSR_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const ADSR_EDITOR_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float adsr_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -648,7 +648,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return col;
 }
-"#);
+"#, super::wgsl::ADSR_EDITOR_SHADER);
 
 #[cfg(test)]
 mod tests {

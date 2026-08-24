@@ -273,7 +273,7 @@ impl WidgetDefinition for SoundGlyphWidget {
     }
 }
 
-const DELTA_GLYPH_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const DELTA_GLYPH_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 // Geometry constants mirror sequencer::delta_glyph (spec §6). Radius and k are
 // FIXED: magnitude rides occupancy (which cells a piece claims) and luminance.
 // Two equal discs weld iff their surface gap is within 0.6452*k, and all three
@@ -637,7 +637,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     if (color.a <= 0.002) discard_fragment();
     return color;
 }
-"#);
+"#, super::wgsl::DELTA_GLYPH_SHADER);
 
 #[cfg(test)]
 mod tests {

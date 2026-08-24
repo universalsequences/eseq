@@ -1451,7 +1451,7 @@ impl WidgetDefinition for TreeRowBgWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const TREE_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const TREE_CHEVRON_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -1500,7 +1500,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(col.rgb, col.a * mask);
 }
-"#);
+"#, super::wgsl::TREE_CHEVRON_SHADER);
 
 /// Find the scroll offset from the nearest parent scroll container.
 fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {

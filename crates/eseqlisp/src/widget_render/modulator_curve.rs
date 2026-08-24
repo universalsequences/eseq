@@ -155,7 +155,7 @@ impl WidgetDefinition for ModulatorCurveWidget {
     }
 }
 
-const MODULATOR_CURVE_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const MODULATOR_CURVE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float mc_sdSegment(float2 p, float2 a, float2 b) {
     float2 pa = p - a;
     float2 ba = b - a;
@@ -242,7 +242,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
     return col;
 }
-"#);
+"#, super::wgsl::MODULATOR_CURVE_SHADER);
 
 #[cfg(test)]
 mod tests {

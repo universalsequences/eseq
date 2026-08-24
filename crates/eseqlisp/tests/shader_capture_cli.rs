@@ -40,7 +40,10 @@ fn shader_capture_artifacts_are_stable_and_cover_every_scene() {
     assert_eq!(first_manifest, second_manifest);
 
     let manifest: serde_json::Value = serde_json::from_slice(&first_manifest).unwrap();
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(
+        manifest["schema_version"],
+        eseqlisp::shader_capture::SCHEMA_VERSION
+    );
     assert_eq!(manifest["backend"], "wgsl");
     let scenes = manifest["scenes"].as_array().unwrap();
     assert_eq!(scenes.len(), eseqlisp::shader_capture::SCENES.len());

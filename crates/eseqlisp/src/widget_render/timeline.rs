@@ -25,7 +25,7 @@ pub(super) struct TimelineCursorMarkerWidget;
 pub(super) static TIMELINE_CURSOR_MARKER_WIDGET: TimelineCursorMarkerWidget =
     TimelineCursorMarkerWidget;
 
-const TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 instance_size_px = in.uniform_a.xy;
@@ -53,7 +53,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
     return float4(in.color_a.rgb, in.color_a.a * alpha);
 }
-"#);
+"#, super::wgsl::TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER);
 
 #[derive(Clone)]
 struct TimelineLane {

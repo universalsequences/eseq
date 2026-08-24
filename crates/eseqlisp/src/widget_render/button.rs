@@ -205,7 +205,7 @@ fn button_icon_text_inset(rect: Rect) -> f32 {
     (icon_rect.col - rect.col) + icon_rect.width + 0.42
 }
 
-const BUTTON_ICON_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const BUTTON_ICON_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float button_icon_box(float2 p, float2 b)
 {
     float2 q = abs(p) - b;
@@ -332,9 +332,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#);
+"#, super::wgsl::BUTTON_ICON_SHADER);
 
-pub(crate) const BUTTON_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+pub(crate) const BUTTON_SURFACE_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float button_surface_rounded_rect(float2 p, float2 size, float radius)
 {
     float2 q = abs(p) - (size - float2(radius));
@@ -431,7 +431,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#);
+"#, super::wgsl::BUTTON_SURFACE_SHADER);
 
 impl WidgetDefinition for ButtonWidget {
     fn names(&self) -> &'static [&'static str] {

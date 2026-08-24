@@ -284,7 +284,7 @@ impl WidgetDefinition for MultibandMeterWidget {
     }
 }
 
-const MULTIBAND_METER_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const MULTIBAND_METER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -348,7 +348,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return col;
 }
-"#);
+"#, super::wgsl::MULTIBAND_METER_SHADER);
 
 #[cfg(test)]
 mod tests {

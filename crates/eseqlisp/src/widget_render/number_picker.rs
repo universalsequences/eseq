@@ -1017,7 +1017,7 @@ impl WidgetDefinition for NumberPickerWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-const NUMBER_PICKER_TRI_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const NUMBER_PICKER_TRI_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float number_picker_segment_distance(float2 p, float2 a, float2 b)
 {
     float2 pa = p - a;
@@ -1059,4 +1059,4 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#);
+"#, super::wgsl::NUMBER_PICKER_TRI_SHADER);

@@ -394,7 +394,7 @@ impl WidgetDefinition for ScrollWidget {
 
 // ── Metal shader ─────────────────────────────────────────────────────────────
 
-const SCROLL_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const SCROLL_FRAGMENT_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -443,4 +443,4 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return result;
 }
-"#);
+"#, super::wgsl::SCROLL_FRAGMENT_SHADER);

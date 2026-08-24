@@ -305,7 +305,7 @@ impl WidgetDefinition for RoarShaperWidget {
 
 // Dual-maintained with `sequencer::effects::roar::shaper_transfer` and the Rust
 // mirror above.
-const ROAR_SHAPER_SHADER: super::ShaderSources = super::ShaderSources::msl(r#"
+const ROAR_SHAPER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
 float roarShaperCurve(int shaper, float a, float x)
 {
     if (shaper == 1) { return clamp(x, -1.0, 1.0); }
@@ -385,7 +385,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.rgb = mix(col.rgb, in.color_a.rgb, line * 0.95);
     return col;
 }
-"#);
+"#, super::wgsl::ROAR_SHAPER_SHADER);
 
 #[cfg(test)]
 mod tests {

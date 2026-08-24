@@ -50,6 +50,7 @@ pub mod vslider;
 pub mod vstack;
 pub mod waveform;
 pub mod wavetable_viewer;
+pub(crate) mod wgsl;
 pub mod wrap;
 
 pub use focus_decoration::{FocusCornerStyle, FocusDecoration};
@@ -860,6 +861,10 @@ impl ShaderSources {
         Self::new(Some(source), None)
     }
 
+    pub const fn both(msl: &'static str, wgsl: &'static str) -> Self {
+        Self::new(Some(msl), Some(wgsl))
+    }
+
     pub const fn source(self, backend: ShaderBackend) -> Option<&'static str> {
         match backend {
             ShaderBackend::Msl => self.msl,
@@ -1437,7 +1442,7 @@ pub fn widget_shader_sources(
     shaders
 }
 
-pub const TILE_CHROME_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const TILE_CHROME_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float aspect = max(in.aspect, 0.0001);
@@ -1472,9 +1477,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#);
+"#, wgsl::TILE_CHROME_SHADER);
 
-pub const TILE_TAB_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const TILE_TAB_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 p = float2((in.uv.x - 0.5) * 2.0 * in.aspect, (in.uv.y - 0.5) * 2.0);
@@ -1510,7 +1515,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
     return float4(out_rgb, out_alpha);
 }
-"#);
+"#, wgsl::TILE_TAB_SHADER);
 
 pub fn widget_primitives_for_node(
     node: &LayoutNode,
@@ -2981,9 +2986,9 @@ mod tests {
     }
 
     /// Every widget can be asked for either backend's source without panicking
-    /// or falling back to the other language. MSL is fully populated today;
-    /// WGSL bodies land in the shader-port bead, so a widget answers WGSL only
-    /// once it actually has a WGSL body.
+    /// or falling back to the other language. Definitions without a custom
+    /// shader legitimately answer `None`; the validation below proves that
+    /// every MSL body has a corresponding WGSL body.
     #[test]
     fn every_widget_answers_both_backends() {
         for definition in WIDGET_DEFINITIONS {
@@ -3003,6 +3008,29 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Every hand-written widget shader has a validated source body for both
+    /// graphics backends. Parsing the fully assembled module catches accidental
+    /// dependencies on MSL syntax as well as WGSL interface mismatches.
+    #[test]
+    fn every_widget_wgsl_shader_is_valid() {
+        let msl = widget_shader_sources(ShaderBackend::Msl);
+        let wgsl = widget_shader_sources(ShaderBackend::Wgsl);
+        assert_eq!(wgsl.len(), msl.len(), "some MSL widget shaders lack WGSL ports");
+
+        for (name, vertex, fragment) in wgsl {
+            let source = crate::ui::wgsl_shaders::widget_shader_module(vertex, fragment);
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{name} WGSL parse failed: {error}\n\n{source}"));
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            );
+            validator
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("{name} WGSL validation failed: {error:#?}\n\n{source}"));
         }
     }
 
@@ -4087,7 +4115,7 @@ mod tests {
 /// Shared rounded-rect SDF shader used by tree-row, text-input, number-picker, dropdown.
 /// When `corner_radius > 0`, uses that as the radius (in normalized space).
 /// Otherwise defaults to 0.75 (pill-like for small widgets).
-pub const ROUNDED_RECT_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const ROUNDED_RECT_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -4108,7 +4136,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
-"#);
+"#, wgsl::ROUNDED_RECT_SHADER);
 
 /// Flat panel chrome: solid fill, crisp uniform border, rounded corners.
 ///
@@ -4116,7 +4144,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 /// width in device pixels, `corner_radius` = normalized radius (see
 /// `normalized_corner_radius`). Deliberately unlit — no gradient, no specular —
 /// so completion menus and tooltips read as flat surfaces instead of nodes.
-pub const PATCHER_PANEL_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const PATCHER_PANEL_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float aspect = max(in.aspect, 0.001);
@@ -4142,9 +4170,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float alpha = mix(in.color_b.a, in.color_a.a, borderMask);
     return float4(color, alpha * outerAlpha);
 }
-"#);
+"#, wgsl::PATCHER_PANEL_SHADER);
 
-pub const PATCHER_PORT_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const PATCHER_PORT_SHADER: ShaderSources = ShaderSources::both(r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 p = (in.uv - float2(0.5)) * 2.0;
@@ -4165,9 +4193,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float4 col = mix(in.color_a, in.color_b, innerMask);
     return float4(col.rgb, col.a * outerMask);
 }
-"#);
+"#, wgsl::PATCHER_PORT_SHADER);
 
-pub const PATCHER_BACK_CHEVRON_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const PATCHER_BACK_CHEVRON_SHADER: ShaderSources = ShaderSources::both(r#"
 float patcher_chevron_segment_distance(float2 p, float2 a, float2 b)
 {
     float2 pa = p - a;
@@ -4198,9 +4226,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     return float4(in.color_a.rgb, in.color_a.a * mask);
 }
-"#);
+"#, wgsl::PATCHER_BACK_CHEVRON_SHADER);
 
-pub const PATCHER_NODE_SHADER: ShaderSources = ShaderSources::msl(r#"
+pub const PATCHER_NODE_SHADER: ShaderSources = ShaderSources::both(r#"
 float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)
 {
     return smoothstep(smin, smax, sdf_rounded_rect(pos, size, radius));
@@ -4277,7 +4305,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float3 color = mix(litBg, litBorder, borderMask);
     return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));
 }
-"#);
+"#, wgsl::PATCHER_NODE_SHADER);
 
 pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
     let ndc_x = |px: f32| px / viewport.vp_w * 2.0 - 1.0;

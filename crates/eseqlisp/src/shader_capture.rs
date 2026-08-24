@@ -19,17 +19,18 @@ use crate::ui::gpu_geometry::{
 };
 use crate::ui::wgpu_pipelines as pipelines;
 use crate::ui::wgsl_shaders;
-use crate::widget_render::WidgetInstance;
+use crate::widget_render::{self, ShaderBackend, WidgetInstance};
 
 /// Schema of the emitted `manifest.json`. Bump when the scene set or the file
 /// layout changes so an old capture cannot be mistaken for a current one.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub const WIDTH: u32 = 512;
 pub const HEIGHT: u32 = 256;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// One capture per ported pipeline, in the order the bead lists them.
+/// One capture per core pipeline followed by one per distinct retained-mode
+/// widget fragment. Widget aliases that share a body are intentionally omitted.
 pub const SCENES: &[&str] = &[
     "text",
     "proportional-text",
@@ -39,7 +40,45 @@ pub const SCENES: &[&str] = &[
     "wavetable",
     "waveform",
     "live-spectrogram",
+    "widget-adsr-editor",
+    "widget-box",
+    "widget-button",
+    "widget-button-icon",
+    "widget-dropdown-chevron",
+    "widget-slider",
+    "widget-knob",
+    "widget-matrix",
+    "widget-modulator-curve",
+    "widget-multiband-meter",
+    "widget-response-curve-editor",
+    "widget-scroll",
+    "widget-sound-glyph",
+    "widget-timeline-cursor-marker",
+    "widget-toggle",
+    "widget-tree",
+    "widget-vslider",
+    "widget-phaser-notch",
+    "widget-roar-shaper",
+    "widget-knob-number",
+    "widget-knob-number-mod-range",
+    "widget-roar-filter",
+    "widget-number-picker-tri",
+    "widget-tile-chrome",
+    "widget-tile-tab",
+    "widget-patcher-panel",
+    "widget-patcher-port",
+    "widget-patcher-back-chevron",
+    "widget-patcher-node",
 ];
+
+fn widget_scene_shader(scene: &str) -> Option<(Option<&'static str>, &'static str)> {
+    let name = scene.strip_prefix("widget-")?;
+    widget_render::widget_shader_sources(ShaderBackend::Wgsl)
+        .into_iter()
+        .find_map(|(shader_name, vertex, fragment)| {
+            (shader_name == name).then_some((vertex, fragment))
+        })
+}
 
 /// A dark, non-neutral clear so a pipeline that writes nothing is obvious and
 /// so alpha blending has something to blend against.
@@ -614,11 +653,14 @@ impl CaptureRenderer {
             pipelines::text_pipelines(&self.device, &atlas_layout, FORMAT);
         let image_pipeline = pipelines::image_pipeline(&self.device, &atlas_layout, FORMAT);
         let patch_cable_pipeline = pipelines::patch_cable_pipeline(&self.device, FORMAT);
+        let widget_shader = widget_scene_shader(scene);
+        let (widget_vertex, widget_fragment) = widget_shader
+            .unwrap_or((None, wgsl_shaders::BUTTON_SURFACE_WGSL));
         let widget_pipeline = pipelines::widget_pipeline(
             &self.device,
-            "eseqlisp capture button surface",
-            None,
-            wgsl_shaders::BUTTON_SURFACE_WGSL,
+            "eseqlisp capture widget shader",
+            widget_vertex,
+            widget_fragment,
             FORMAT,
         );
         let wavetable_pipeline = pipelines::wavetable_pipeline(&self.device, &storage1, FORMAT);
@@ -632,7 +674,12 @@ impl CaptureRenderer {
         let image_buffer = self.instance_buffer(&image_verts);
         let cables = patch_cable_instances();
         let cable_buffer = self.instance_buffer(&cables);
-        let widgets = widget_instances();
+        let mut widgets = widget_instances();
+        if scene == "widget-knob-number-mod-range" {
+            for widget in &mut widgets {
+                widget.uniform_b = [0.82, 0.15, 0.75, 1.0];
+            }
+        }
         let widget_buffer = self.instance_buffer(&widgets);
         let wavetable = [wavetable_instance()];
         let wavetable_buffer = self.instance_buffer(&wavetable);
@@ -716,6 +763,11 @@ impl CaptureRenderer {
                     pass.draw(0..6, 0..cables.len() as u32);
                 }
                 "widget-surface" => {
+                    pass.set_pipeline(&widget_pipeline);
+                    pass.set_vertex_buffer(0, widget_buffer.slice(..));
+                    pass.draw(0..6, 0..widgets.len() as u32);
+                }
+                widget_scene if widget_scene_shader(widget_scene).is_some() => {
                     pass.set_pipeline(&widget_pipeline);
                     pass.set_vertex_buffer(0, widget_buffer.slice(..));
                     pass.draw(0..6, 0..widgets.len() as u32);
