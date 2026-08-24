@@ -1,8 +1,8 @@
-//! Native Mach-O audit of compiled DGen dylibs (impl spec, decision 4 /
-//! slice E5).
+//! Native Mach-O/ELF audit of compiled DGen shared libraries (impl spec,
+//! decision 4 / slice E5).
 //!
-//! Reimplements `scripts/audit-dgen-dylib.sh` from the dgen repo without
-//! subprocesses: that script shells out to `nm`/`otool`/`file`/`strings`
+//! Reimplements the DGen Mach-O and ELF audit scripts without subprocesses:
+//! those scripts shell out to `nm`/`otool`/`readelf`/`file`/`strings`
 //! (Command Line Tools), which the production compile path must not require.
 //! ESeq passes `--skip-inline-audit` to the DGenLisp subprocess and runs this
 //! audit on the exact bytes it is about to publish/load instead.
@@ -15,6 +15,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+use object::read::elf::Dyn;
+#[cfg(target_os = "macos")]
 use object::read::macho::{LoadCommandVariant, MachHeader};
 use object::{Endianness, Object, ObjectSymbol};
 
@@ -22,22 +25,42 @@ use object::{Endianness, Object, ObjectSymbol};
 pub const MAX_DYLIB_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Required `LC_BUILD_VERSION` minos, encoded X.Y.Z as nibbles (11.0.0).
+#[cfg(target_os = "macos")]
 const MINIMUM_MACOS: u32 = 11 << 16;
 
+#[cfg(target_os = "macos")]
 const EXPORTS_ALLOWLIST_FILE: &str = "exports-v1.txt";
+#[cfg(target_os = "linux")]
+const EXPORTS_ALLOWLIST_FILE: &str = "exports-v1-elf.txt";
+#[cfg(target_os = "macos")]
 const UNDEFINED_ALLOWLIST_FILE: &str = "libsystem-symbols-v1.txt";
+#[cfg(target_os = "linux")]
+const UNDEFINED_ALLOWLIST_FILE: &str = "libsystem-symbols-v1-elf.txt";
+#[cfg(target_os = "macos")]
 const REQUIRED_DEPENDENCY: &str = "/usr/lib/libSystem.B.dylib";
 
 /// Same forbidden-path set as the shell audit's `strings` check: developer
 /// tool installs, user home dirs, and temp dirs must not be baked into a
 /// published artifact.
-const FORBIDDEN_PATH_STRINGS: [&str; 6] = [
+#[cfg(target_os = "macos")]
+const FORBIDDEN_PATH_STRINGS: &[&str] = &[
     "/Applications/Xcode",
     "/Library/Developer/CommandLineTools",
     "/usr/bin/clang",
     "/Users/",
     "/private/var/",
     "/tmp/",
+];
+#[cfg(target_os = "linux")]
+const FORBIDDEN_PATH_STRINGS: &[&str] = &[
+    "/home/",
+    "/root/",
+    "/tmp/",
+    "/var/tmp/",
+    "/nix/store/",
+    "/usr/bin/clang",
+    "/usr/lib/llvm",
+    "/usr/lib/gcc",
 ];
 
 /// Audit `dylib` against the allowlists staged with the app's toolchain.
@@ -66,6 +89,7 @@ fn check_error(check: &str, detail: String) -> String {
 
 /// `Err` is an environment problem (unreadable file/allowlist); `Ok(vec)`
 /// holds the audit verdict.
+#[cfg(target_os = "macos")]
 fn collect_audit_failures(dylib: &Path, abi_dir: &Path) -> Result<Vec<String>, String> {
     let expected_exports = read_allowlist(&abi_dir.join(EXPORTS_ALLOWLIST_FILE))?;
     let allowed_undefined = read_allowlist(&abi_dir.join(UNDEFINED_ALLOWLIST_FILE))?;
@@ -300,6 +324,200 @@ fn collect_audit_failures(dylib: &Path, abi_dir: &Path) -> Result<Vec<String>, S
     Ok(failures)
 }
 
+#[cfg(target_os = "linux")]
+fn collect_audit_failures(shared_object: &Path, abi_dir: &Path) -> Result<Vec<String>, String> {
+    use object::read::elf::ElfFile64;
+    use object::{Architecture, ObjectKind, SymbolScope};
+
+    const ALLOWED_DEPENDENCIES: [&str; 2] = ["libc.so.6", "libm.so.6"];
+    const LINKER_EXPORTS: [&str; 7] = [
+        "_init", "_fini", "__bss_start", "_edata", "_end", "_edata_end", "__dso_handle",
+    ];
+
+    let expected_exports = read_allowlist(&abi_dir.join(EXPORTS_ALLOWLIST_FILE))?;
+    let allowed_undefined = read_allowlist(&abi_dir.join(UNDEFINED_ALLOWLIST_FILE))?;
+    let data = std::fs::read(shared_object)
+        .map_err(|e| format!("dgen audit: read {}: {e}", shared_object.display()))?;
+    let mut failures = Vec::new();
+
+    if data.len() as u64 > MAX_DYLIB_BYTES {
+        failures.push(check_error(
+            "file-size",
+            format!(
+                "shared object is {} bytes; limit is {} bytes",
+                data.len(), MAX_DYLIB_BYTES
+            ),
+        ));
+    }
+
+    let file = match ElfFile64::<Endianness>::parse(&*data) {
+        Ok(file) => file,
+        Err(error) => {
+            failures.push(check_error(
+                "elf",
+                format!("not a 64-bit ELF file: {error}"),
+            ));
+            return Ok(failures);
+        }
+    };
+    if !file.is_little_endian() {
+        failures.push(check_error("endianness", "expected little-endian ELF".to_string()));
+    }
+    let expected_arch = if cfg!(target_arch = "x86_64") {
+        Architecture::X86_64
+    } else {
+        Architecture::Aarch64
+    };
+    if file.architecture() != expected_arch {
+        failures.push(check_error(
+            "arch",
+            format!("expected {expected_arch:?}, got {:?}", file.architecture()),
+        ));
+    }
+    if file.kind() != ObjectKind::Dynamic {
+        failures.push(check_error(
+            "filetype",
+            format!("expected ET_DYN, got {:?}", file.kind()),
+        ));
+    }
+
+    let endian = file.endian();
+    let sections = file.elf_section_table();
+    let dynamic = match sections.dynamic(endian, &*data) {
+        Ok(Some((dynamic, strings_index))) => match sections.strings(endian, &*data, strings_index) {
+            Ok(strings) => Some((dynamic, strings)),
+            Err(error) => {
+                failures.push(check_error(
+                    "dynamic-section",
+                    format!("unreadable dynamic string table: {error}"),
+                ));
+                None
+            }
+        },
+        Ok(None) => {
+            failures.push(check_error(
+                "dynamic-section",
+                "shared object has no dynamic section".to_string(),
+            ));
+            None
+        }
+        Err(error) => {
+            failures.push(check_error(
+                "dynamic-section",
+                format!("unreadable dynamic section: {error}"),
+            ));
+            None
+        }
+    };
+
+    if let Some((dynamic, strings)) = dynamic {
+        let mut dependencies = Vec::new();
+        let mut soname = None;
+        let mut has_rpath = false;
+        for entry in dynamic {
+            match entry.tag32(endian) {
+                Some(object::elf::DT_NEEDED) => match entry.string(endian, strings) {
+                    Ok(name) => dependencies.push(String::from_utf8_lossy(name).into_owned()),
+                    Err(error) => failures.push(check_error(
+                        "dependencies",
+                        format!("unreadable DT_NEEDED name: {error}"),
+                    )),
+                },
+                Some(object::elf::DT_SONAME) => match entry.string(endian, strings) {
+                    Ok(name) => soname = Some(String::from_utf8_lossy(name).into_owned()),
+                    Err(error) => failures.push(check_error(
+                        "soname",
+                        format!("unreadable DT_SONAME: {error}"),
+                    )),
+                },
+                Some(object::elf::DT_RPATH | object::elf::DT_RUNPATH) => has_rpath = true,
+                _ => {}
+            }
+        }
+        match soname.as_deref() {
+            Some(name) if !name.is_empty() && !name.contains('/') => {}
+            Some(name) => failures.push(check_error(
+                "soname",
+                format!("DT_SONAME must be a bare filename; found: {name}"),
+            )),
+            None => failures.push(check_error(
+                "soname",
+                "shared object has no DT_SONAME".to_string(),
+            )),
+        }
+        let unexpected: Vec<_> = dependencies
+            .iter()
+            .filter(|name| !ALLOWED_DEPENDENCIES.contains(&name.as_str()))
+            .cloned()
+            .collect();
+        if !unexpected.is_empty() {
+            failures.push(check_error(
+                "dependencies",
+                format!(
+                    "DT_NEEDED dependencies fall outside libc/libm: [{}]",
+                    unexpected.join(", ")
+                ),
+            ));
+        }
+        if has_rpath {
+            failures.push(check_error(
+                "rpath",
+                "DT_RPATH/DT_RUNPATH is forbidden in DGen artifacts".to_string(),
+            ));
+        }
+    }
+
+    let mut exports = BTreeSet::new();
+    let mut undefined = BTreeSet::new();
+    for symbol in file.dynamic_symbols() {
+        let Ok(name) = symbol.name() else { continue };
+        if name.is_empty() {
+            continue;
+        }
+        let name = name.split('@').next().unwrap_or(name);
+        if symbol.is_undefined() {
+            undefined.insert(name.to_string());
+        } else if symbol.is_definition() && symbol.scope() == SymbolScope::Dynamic {
+            exports.insert(name.to_string());
+        }
+    }
+    for name in LINKER_EXPORTS {
+        exports.remove(name);
+    }
+    if exports != expected_exports {
+        let extra: Vec<_> = exports.difference(&expected_exports).cloned().collect();
+        let missing: Vec<_> = expected_exports.difference(&exports).cloned().collect();
+        failures.push(check_error(
+            "exports",
+            format!(
+                "exported symbols do not exactly match DGen ABI v1 \
+                 (unexpected: [{}], missing: [{}])",
+                extra.join(", "), missing.join(", ")
+            ),
+        ));
+    }
+    let unexpected: Vec<_> = undefined.difference(&allowed_undefined).cloned().collect();
+    if !unexpected.is_empty() {
+        failures.push(check_error(
+            "undefined-symbols",
+            format!(
+                "undefined symbols fall outside the DGen ABI v1 allowlist: [{}]",
+                unexpected.join(", ")
+            ),
+        ));
+    }
+
+    for pattern in FORBIDDEN_PATH_STRINGS {
+        if find_subslice(&data, pattern.as_bytes()) {
+            failures.push(check_error(
+                "forbidden-paths",
+                format!("forbidden path string embedded in shared object: {pattern}"),
+            ));
+        }
+    }
+    Ok(failures)
+}
+
 fn read_allowlist(path: &Path) -> Result<BTreeSet<String>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         format!(
@@ -316,6 +534,7 @@ fn read_allowlist(path: &Path) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
+#[cfg(target_os = "macos")]
 fn format_version(encoded: u32) -> String {
     format!(
         "{}.{}.{}",
@@ -331,7 +550,183 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const GOOD_SOURCE: &str = r#"
+__attribute__((visibility("default"))) void dgen_process_v1(void) {}
+__attribute__((visibility("default"))) void dgen_set_param_value_v1(void) {}
+"#;
+
+    fn fixture_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dgen-elf-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    fn abi_dir() -> PathBuf {
+        let dir = fixture_dir().join("abi");
+        std::fs::create_dir_all(&dir).expect("create ABI dir");
+        std::fs::write(
+            dir.join(EXPORTS_ALLOWLIST_FILE),
+            "dgen_process_v1\ndgen_set_param_value_v1\n",
+        )
+        .expect("write export allowlist");
+        std::fs::write(
+            dir.join(UNDEFINED_ALLOWLIST_FILE),
+            "__cxa_finalize\n_ITM_registerTMCloneTable\n_ITM_deregisterTMCloneTable\n__gmon_start__\n",
+        )
+        .expect("write undefined allowlist");
+        dir
+    }
+
+    fn build_fixture(name: &str, source: &str, extra_args: &[&str]) -> PathBuf {
+        let dir = fixture_dir();
+        let c_path = dir.join(format!("{name}.c"));
+        let so_path = dir.join(format!("{name}.so"));
+        std::fs::write(&c_path, source).expect("write fixture source");
+        let output = Command::new("cc")
+            .args(["-shared", "-fPIC", "-fvisibility=hidden", "-g0"])
+            .arg(format!("-Wl,-soname,{name}.so"))
+            .args(extra_args)
+            .args(["-o"])
+            .arg(&so_path)
+            .arg(&c_path)
+            .output()
+            .expect("run system C compiler for fixture");
+        assert!(
+            output.status.success(),
+            "fixture compiler failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        so_path
+    }
+
+    #[test]
+    fn good_elf_fixture_passes() {
+        let shared_object = build_fixture("good", GOOD_SOURCE, &[]);
+        audit_dylib_with_abi_dir(&shared_object, &abi_dir())
+            .expect("good ELF fixture must pass the audit");
+    }
+
+    #[test]
+    fn extra_export_fixture_fails_exports() {
+        let source = format!(
+            "{GOOD_SOURCE}\n__attribute__((visibility(\"default\"))) void dgen_evil_extra(void) {{}}\n"
+        );
+        let shared_object = build_fixture("extra-export", &source, &[]);
+        let error = audit_dylib_with_abi_dir(&shared_object, &abi_dir()).unwrap_err();
+        assert!(error.contains("dgen-audit[exports]"), "{error}");
+        assert!(error.contains("dgen_evil_extra"), "{error}");
+    }
+
+    #[test]
+    fn unexpected_undefined_fixture_fails() {
+        let source = format!(
+            "{GOOD_SOURCE}\nextern void forbidden_import(void);\n\
+             __attribute__((visibility(\"default\"))) void call_forbidden(void) {{ forbidden_import(); }}\n"
+        );
+        let shared_object = build_fixture("undefined", &source, &[]);
+        let error = audit_dylib_with_abi_dir(&shared_object, &abi_dir()).unwrap_err();
+        assert!(error.contains("dgen-audit[undefined-symbols]"), "{error}");
+        assert!(error.contains("forbidden_import"), "{error}");
+    }
+
+    #[test]
+    fn runpath_fixture_fails() {
+        let shared_object = build_fixture("runpath", GOOD_SOURCE, &["-Wl,-rpath,/opt/dgen"]);
+        let error = audit_dylib_with_abi_dir(&shared_object, &abi_dir()).unwrap_err();
+        assert!(error.contains("dgen-audit[rpath]"), "{error}");
+    }
+
+    #[test]
+    fn absolute_soname_fixture_fails() {
+        let shared_object = build_fixture(
+            "absolute-soname",
+            GOOD_SOURCE,
+            &["-Wl,-soname,/opt/absolute-soname.so"],
+        );
+        let error = audit_dylib_with_abi_dir(&shared_object, &abi_dir()).unwrap_err();
+        assert!(error.contains("dgen-audit[soname]"), "{error}");
+    }
+
+    #[test]
+    fn wrong_arch_fixture_fails() {
+        let shared_object = build_fixture("wrong-arch", GOOD_SOURCE, &[]);
+        let mut data = std::fs::read(&shared_object).expect("read fixture");
+        data[18..20].copy_from_slice(&object::elf::EM_AARCH64.to_le_bytes());
+        std::fs::write(&shared_object, data).expect("patch ELF machine");
+        let error = audit_dylib_with_abi_dir(&shared_object, &abi_dir()).unwrap_err();
+        assert!(error.contains("dgen-audit[arch]"), "{error}");
+    }
+
+    #[test]
+    fn non_elf_file_fails() {
+        let path = fixture_dir().join("not-a-shared-object.so");
+        std::fs::write(&path, b"definitely not ELF").expect("write invalid fixture");
+        let error = audit_dylib_with_abi_dir(&path, &abi_dir()).unwrap_err();
+        assert!(error.contains("dgen-audit[elf]"), "{error}");
+    }
+
+    #[test]
+    fn real_compiled_effect_audits_loads_and_renders_across_reload() {
+        use crate::lisp_host::dgen::dgen_ffi::{
+            dgen_host_services_v1, dgen_process_context_v1, DGEN_STATE_REDZONE_SLOTS,
+        };
+        use crate::lisp_host::dgen::dgen_manifest::{load_dylib, parse_manifest};
+
+        let compile_and_render = || {
+            let manifest_json = crate::lisp_host::dgen::effect_compile::compile_lisp(
+                "(out 0.25 1)",
+                48_000,
+            )
+            .expect("compile Linux DGen effect");
+            let manifest = parse_manifest(&manifest_json).expect("parse generated manifest");
+            assert_eq!(
+                manifest.dylib_path.extension().and_then(|ext| ext.to_str()),
+                Some("so")
+            );
+            audit_dylib_with_abi_dir(
+                &manifest.dylib_path,
+                &crate::app_paths::app_paths().dgen_abi_dir(),
+            )
+            .expect("generated ELF shared object passes native audit");
+            let lib = load_dylib(&manifest.dylib_path).expect("dlopen generated shared object");
+
+            const FRAMES: usize = 64;
+            let inputs = vec![vec![0.0f32; FRAMES]; manifest.n_inputs.max(1)];
+            let mut outputs = vec![vec![0.0f32; FRAMES]; manifest.n_outputs.max(1)];
+            let input_ptrs: Vec<_> = inputs.iter().map(|buffer| buffer.as_ptr()).collect();
+            let output_ptrs: Vec<_> = outputs
+                .iter_mut()
+                .map(|buffer| buffer.as_mut_ptr())
+                .collect();
+            let mut state = vec![0.0f32; manifest.total_memory_slots + DGEN_STATE_REDZONE_SLOTS];
+            let context = dgen_process_context_v1(48_000.0);
+            unsafe {
+                (lib.process_fn)(
+                    input_ptrs.as_ptr(),
+                    output_ptrs.as_ptr(),
+                    FRAMES as u32,
+                    state.as_mut_ptr().cast(),
+                    &context,
+                    dgen_host_services_v1(),
+                );
+            }
+            outputs[0].clone()
+        };
+
+        let first = compile_and_render();
+        let reloaded = compile_and_render();
+        assert!(first.iter().all(|sample| (*sample - 0.25).abs() < 1e-6));
+        assert_eq!(reloaded, first, "reloaded shared object changed output");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

@@ -13,6 +13,11 @@ modulation param appenders) and loads the dylib itself (`load_dylib` ->
 
 use super::super::*;
 
+#[cfg(target_os = "macos")]
+pub(crate) const DGEN_SHARED_LIBRARY_EXTENSION: &str = "dylib";
+#[cfg(target_os = "linux")]
+pub(crate) const DGEN_SHARED_LIBRARY_EXTENSION: &str = "so";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectGraphNodeIds {
     pub effect_node_id: i32,
@@ -189,7 +194,10 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Failed to parse manifest: {e}"))?;
 
-    let dylib_name = v["dylib"].as_str().unwrap_or("effect.dylib");
+    let default_library_name = format!("effect.{DGEN_SHARED_LIBRARY_EXTENSION}");
+    let dylib_name = v["dylib"]
+        .as_str()
+        .unwrap_or(default_library_name.as_str());
     let dylib_path = base_dir.join(dylib_name);
     let version = v["version"].as_u64().unwrap_or(0) as u32;
     let process_abi = v["processAbi"].as_str().unwrap_or("").to_string();

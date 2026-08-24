@@ -244,10 +244,24 @@ impl AppPaths {
         Ok(root)
     }
 
-    /// ABI allowlist dir (`exports-v1.txt`, `libsystem-symbols-v1.txt`) read
-    /// by the Rust binary audit (slice E5).
+    /// Platform ABI allowlists read by the Rust binary audit (slice E5).
     pub fn dgen_abi_dir(&self) -> PathBuf {
-        self.dgen_toolchain_root().join("abi")
+        #[cfg(target_os = "macos")]
+        {
+            self.dgen_toolchain_root().join("abi")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Linux distributions carry their compile policy and allowlists
+            // beside the real compiler binary. Resolve the fetch script's
+            // stable symlink so this works in both dev and packaged layouts.
+            let tool = self.dgenlisp_tool();
+            let real_tool = std::fs::canonicalize(&tool).unwrap_or(tool);
+            real_tool
+                .parent()
+                .expect("DGenLisp compiler path must have a parent")
+                .join("toolchain/abi")
+        }
     }
 
     /// Checked-in project fixtures used by the end-to-end performance probes.
@@ -675,9 +689,15 @@ mod tests {
             paths.dgen_toolchain_root(),
             PathBuf::from("/ws/crates/sequencer/tools/dgen-toolchain")
         );
+        #[cfg(target_os = "macos")]
         assert_eq!(
             paths.dgen_abi_dir(),
             PathBuf::from("/ws/crates/sequencer/tools/dgen-toolchain/abi")
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            paths.dgen_abi_dir(),
+            PathBuf::from("/ws/crates/sequencer/tools/toolchain/abi")
         );
         assert_eq!(
             paths.perf_probe_projects_dir(),

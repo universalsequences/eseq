@@ -461,10 +461,10 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     std::fs::write(&src_path, effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
-    // Hermetic toolchain hand-off (impl spec, decision 1 / slice E2): the
-    // staged root is passed unconditionally and preflight-checked here; a
-    // missing/incomplete stage is a hard compile error, never a fallback to
-    // the system compiler.
+    // macOS uses the staged hermetic clang/lld toolchain. Linux DGenLisp owns
+    // its native -shared/-fPIC policy and deliberately selects the host C
+    // compiler when no Mach-O-only toolchain root is supplied.
+    #[cfg(target_os = "macos")]
     let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
     // Same hard-error contract for the compiler itself: it is fetched by lock
     // (scripts/fetch_dgenlisp.sh), never tracked, so its absence must name
@@ -475,9 +475,10 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", dylib_name])
-        .args(["--sample-rate", &sample_rate.to_string()])
-        .arg("--toolchain-root")
-        .arg(&toolchain_root)
+        .args(["--sample-rate", &sample_rate.to_string()]);
+    #[cfg(target_os = "macos")]
+    command.arg("--toolchain-root").arg(&toolchain_root);
+    command
         // The host audits the artifact itself (dgen_audit.rs); DGenLisp's
         // inline shell audit would reintroduce the nm/otool (Command Line
         // Tools) dependency this path must not have.

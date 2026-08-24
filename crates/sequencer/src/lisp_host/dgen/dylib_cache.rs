@@ -4,10 +4,10 @@ Content-addressed cache of compiled DGenLisp dylibs.
 Compiling through the external dgenlisp tool is slow, so `DylibCacheManager`
 (see `global_cache_manager()`) keys each artifact by a fingerprint of the
 effective source, referenced assets, compile kind (`DGenCompileKind`), sample
-rate, the dgenlisp tool binary itself, and the staged toolchain identity
-(`VERSION.json` hash, vendored ABI header hash, target triple, minimum
-macOS). A cache hit hands out a `DylibLease`; a miss compiles into a fresh
-artifact directory and records `CacheMetadata`. Concurrent misses on the same
+rate, the dgenlisp tool binary itself, and the platform compile-policy
+identity (policy hash, vendored ABI header hash, target triple, and optional
+deployment target). A cache hit hands out a `DylibLease`; a miss compiles into
+a fresh artifact directory and records `CacheMetadata`. Concurrent misses on the same
 key are serialized by a per-key in-flight latch so exactly one compilation
 runs; different keys still compile concurrently. Includes a small lisp
 tokenizer used to discover `(asset ...)` references that must participate in
@@ -58,18 +58,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::dgen_manifest::DGEN_SHARED_LIBRARY_EXTENSION;
 use super::super::{
     compile_effective_dgen_source_to_dir, dgenlisp_tool_path, effective_dgen_source,
     load_dylib_prewarmed, parse_manifest_with_base, CompileResult,
 };
 
-const CACHE_SCHEMA_VERSION: u32 = 2;
-/// The only lowering the toolchain performs today (impl spec, decision 7).
-/// Part of the on-disk path tier and the cache key.
+const CACHE_SCHEMA_VERSION: u32 = 3;
+/// The native lowering selected by the bundled compiler. Part of the on-disk
+/// path tier and cache key so artifacts can never cross target boundaries.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const CACHE_TARGET_TRIPLE: &str = "arm64-apple-macos";
-/// Deployment floor the staged toolchain links against; key material so a
-/// floor bump invalidates artifacts.
-const CACHE_MINIMUM_MACOS: &str = "11.0";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const CACHE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+#[cfg(target_os = "macos")]
+const CACHE_DEPLOYMENT_TARGET: Option<&str> = Some("11.0");
+#[cfg(target_os = "linux")]
+const CACHE_DEPLOYMENT_TARGET: Option<&str> = None;
 const INSTRUMENT_VOICES: u32 = 12;
 
 /// The vendored ABI header is a build input: `dgen_ffi.rs` mirrors it as
@@ -214,18 +219,16 @@ struct ToolFingerprint {
     sha256: Option<String>,
 }
 
-/// Identity of the staged toolchain + vendored ABI (impl spec, slice E6).
-/// `version_json_sha256` covers the staged distribution/policy/llvm identity
-/// (`VERSION.json`'s `dgen_compiler_version` is the stable, intentionally
-/// bumped `"abi-v1.1"` string, so this hash only churns on real toolchain
-/// changes); `abi_header_sha256` is the compiled-in vendored header (see
-/// [`ABI_HEADER_BYTES`]).
+/// Identity of the platform compile policy + vendored ABI (impl spec, slice
+/// E6). `policy_sha256` covers macOS's staged `VERSION.json`, or Linux's ELF
+/// symbol-policy files; `abi_header_sha256` is the compiled-in vendored header
+/// (see [`ABI_HEADER_BYTES`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ToolchainFingerprint {
-    version_json_sha256: String,
+    policy_sha256: String,
     abi_header_sha256: String,
     target_triple: String,
-    minimum_macos: String,
+    deployment_target: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -505,7 +508,7 @@ impl DylibCacheManager {
         // is the only audit on the production path; failure publishes
         // nothing.
         if let Err(error) = crate::lisp_host::dgen::dgen_audit::audit_dylib(
-            &staging_dir.join(format!("{dylib_name}.dylib")),
+            &staging_dir.join(format!("{dylib_name}.{DGEN_SHARED_LIBRARY_EXTENSION}")),
         ) {
             let _ = std::fs::remove_dir_all(&staging_dir);
             return Err(error);
@@ -758,24 +761,46 @@ fn cache_key(
     ))
 }
 
-/// A missing/unreadable `VERSION.json` is a hard error, never silently
-/// omitted key material — the toolchain preflight
-/// (`dgen_toolchain_root_checked`) should have failed long before this.
+/// Fingerprint every external compile-policy input not already covered by the
+/// DGenLisp executable hash: staged `VERSION.json` on macOS, and the bundled
+/// ELF symbol allowlists on Linux. Missing policy material is a hard error.
 fn fingerprint_toolchain(toolchain_root: &Path) -> Result<ToolchainFingerprint, String> {
-    let version_json_path = toolchain_root.join("VERSION.json");
-    let version_json = std::fs::read(&version_json_path).map_err(|e| {
-        format!(
-            "read staged toolchain VERSION.json for cache fingerprint at {}: {e}. \
-             Run ./rebuild_dgenlisp_tool.sh at the repo root to stage the toolchain \
-             (or fix ESEQ_DGEN_TOOLCHAIN_ROOT if the override is active).",
-            version_json_path.display()
-        )
-    })?;
+    #[cfg(target_os = "macos")]
+    let policy_bytes = {
+        let path = toolchain_root.join("VERSION.json");
+        std::fs::read(&path).map_err(|e| {
+            format!(
+                "read staged toolchain VERSION.json for cache fingerprint at {}: {e}. \
+                 Run ./rebuild_dgenlisp_tool.sh at the repo root to stage the toolchain \
+                 (or fix ESEQ_DGEN_TOOLCHAIN_ROOT if the override is active).",
+                path.display()
+            )
+        })?
+    };
+    #[cfg(target_os = "linux")]
+    let policy_bytes = {
+        let abi_dir = crate::app_paths::app_paths().dgen_abi_dir();
+        let mut bytes = Vec::new();
+        for name in ["exports-v1-elf.txt", "libsystem-symbols-v1-elf.txt"] {
+            let path = abi_dir.join(name);
+            bytes.extend(std::fs::read(&path).map_err(|e| {
+                format!("read Linux DGen ABI policy {}: {e}", path.display())
+            })?);
+            bytes.push(0);
+        }
+        // Test/custom policy roots may carry an explicit version marker. The
+        // published Linux distribution currently identifies its policy via
+        // the two allowlist contents above instead.
+        if let Ok(version) = std::fs::read(toolchain_root.join("VERSION.json")) {
+            bytes.extend(version);
+        }
+        bytes
+    };
     Ok(ToolchainFingerprint {
-        version_json_sha256: sha256_hex(&version_json),
+        policy_sha256: sha256_hex(&policy_bytes),
         abi_header_sha256: abi_header_sha256().to_string(),
         target_triple: CACHE_TARGET_TRIPLE.to_string(),
-        minimum_macos: CACHE_MINIMUM_MACOS.to_string(),
+        deployment_target: CACHE_DEPLOYMENT_TARGET.map(str::to_string),
     })
 }
 
@@ -805,7 +830,7 @@ fn metadata_matches(artifact_dir: &Path, request: &CacheRequest) -> Result<bool,
     Ok(artifact_dir.join("manifest.json").is_file()
         && artifact_dir.join("source.lisp").is_file()
         && artifact_dir
-            .join(format!("{}.dylib", metadata.dylib_name))
+            .join(format!("{}.{}", metadata.dylib_name, DGEN_SHARED_LIBRARY_EXTENSION))
             .is_file())
 }
 
@@ -1540,8 +1565,8 @@ mod tests {
         let toolchain_a = fingerprint_toolchain(&stage_a).expect("fingerprint a");
         let toolchain_b = fingerprint_toolchain(&stage_b).expect("fingerprint b");
         assert_ne!(
-            toolchain_a.version_json_sha256,
-            toolchain_b.version_json_sha256
+            toolchain_a.policy_sha256,
+            toolchain_b.policy_sha256
         );
 
         let tool = ToolFingerprint {
@@ -1565,10 +1590,13 @@ mod tests {
         };
         assert_ne!(key(&toolchain_a), key(&toolchain_b));
 
-        // Missing VERSION.json is a hard error, never omitted key material.
-        let err = fingerprint_toolchain(&root.join("missing-stage"))
-            .expect_err("missing VERSION.json must fail");
-        assert!(err.contains("VERSION.json"), "{err}");
+        #[cfg(target_os = "macos")]
+        {
+            // The staged macOS policy is incomplete without VERSION.json.
+            let err = fingerprint_toolchain(&root.join("missing-stage"))
+                .expect_err("missing VERSION.json must fail");
+            assert!(err.contains("VERSION.json"), "{err}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1584,9 +1612,12 @@ mod tests {
             .expect("write VERSION.json");
         let toolchain = fingerprint_toolchain(&root).expect("fingerprint");
         assert_eq!(toolchain.abi_header_sha256.len(), 64);
-        assert_eq!(toolchain.version_json_sha256.len(), 64);
+        assert_eq!(toolchain.policy_sha256.len(), 64);
         assert_eq!(toolchain.target_triple, CACHE_TARGET_TRIPLE);
-        assert_eq!(toolchain.minimum_macos, CACHE_MINIMUM_MACOS);
+        assert_eq!(
+            toolchain.deployment_target,
+            CACHE_DEPLOYMENT_TARGET.map(str::to_string)
+        );
 
         let tool = ToolFingerprint {
             path: "/tools/DGenLisp-target-a".to_string(),
@@ -1638,12 +1669,12 @@ mod tests {
             serde_json::json!(CACHE_TARGET_TRIPLE)
         );
         assert_eq!(
-            toolchain_value["minimum_macos"],
-            serde_json::json!(CACHE_MINIMUM_MACOS)
+            toolchain_value["deployment_target"],
+            serde_json::json!(CACHE_DEPLOYMENT_TARGET)
         );
         assert_eq!(
-            toolchain_value["version_json_sha256"],
-            serde_json::json!(toolchain.version_json_sha256)
+            toolchain_value["policy_sha256"],
+            serde_json::json!(toolchain.policy_sha256)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1726,10 +1757,10 @@ mod tests {
                 sha256: Some("aa".to_string()),
             },
             toolchain: ToolchainFingerprint {
-                version_json_sha256: "bb".to_string(),
+                policy_sha256: "bb".to_string(),
                 abi_header_sha256: "cc".to_string(),
                 target_triple: CACHE_TARGET_TRIPLE.to_string(),
-                minimum_macos: CACHE_MINIMUM_MACOS.to_string(),
+                deployment_target: CACHE_DEPLOYMENT_TARGET.map(str::to_string),
             },
             assets: Vec::new(),
             dylib_name: "dgen_effect_valid".to_string(),
@@ -1756,12 +1787,29 @@ mod tests {
     }
 
     fn staged_toolchain_present() -> bool {
-        let root = crate::app_paths::app_paths().dgen_toolchain_root();
-        if root.join("VERSION.json").is_file() {
-            return true;
+        #[cfg(target_os = "macos")]
+        {
+            let root = crate::app_paths::app_paths().dgen_toolchain_root();
+            if root.join("VERSION.json").is_file() {
+                return true;
+            }
+            eprintln!("skipping: staged toolchain not found at {root:?}");
+            false
         }
-        eprintln!("skipping: staged toolchain not found at {root:?}");
-        false
+        #[cfg(target_os = "linux")]
+        {
+            let paths = crate::app_paths::app_paths();
+            let present = paths.dgenlisp_tool().is_file()
+                && paths.dgen_abi_dir().join("exports-v1-elf.txt").is_file()
+                && paths
+                    .dgen_abi_dir()
+                    .join("libsystem-symbols-v1-elf.txt")
+                    .is_file();
+            if !present {
+                eprintln!("skipping: fetched Linux DGenLisp distribution is incomplete");
+            }
+            present
+        }
     }
 
     /// Slice E1 exit criterion (embedded-dgen-connector-impl-spec.md): with
