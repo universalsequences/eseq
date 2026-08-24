@@ -34,22 +34,24 @@ matter here).
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test
-fails at HEAD. Reuse one isolated worktree, the current checkout's compiled
-target directory, and its staged (gitignored) DGen toolchain:
+fails at HEAD. Reuse an isolated worktree and a dedicated target directory:
 
 ```sh
-root=$PWD; wt=/tmp/eseq-head-test
+wt=/tmp/eseq-head-test; target=/tmp/eseq-head-test-target
 [ -e "$wt/.git" ] || git worktree add --detach "$wt" HEAD
 git -C "$wt" checkout --detach HEAD
 (cd "$wt" && \
-  CARGO_TARGET_DIR="$root/target" \
-  ESEQ_DGEN_TOOLCHAIN_ROOT="$root/crates/sequencer/tools/dgen-toolchain" \
+  CARGO_TARGET_DIR="$target" \
   cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)')
 ```
 
-The worktree is disposable and isolated, so resetting it never touches the
-working checkout. Remove it with `git worktree remove /tmp/eseq-head-test` when
-it is no longer useful.
+The dedicated target directory keeps Cargo artifacts from the clean checkout
+separate from working-checkout artifacts; sharing a target directory between
+worktrees can make Cargo run a binary built from the wrong source tree. The
+worktree is disposable and isolated, so resetting it never touches the working
+checkout. Remove it with `git worktree remove /tmp/eseq-head-test` when it is no
+longer useful; remove `/tmp/eseq-head-test-target` too if its cached artifacts
+are no longer needed.
 
 ### Test stack budget
 
