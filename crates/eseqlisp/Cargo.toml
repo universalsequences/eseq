@@ -46,13 +46,7 @@ objc2-metal = { version = "0.3", features = [
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSColor", "NSResponder", "NSAppearance", "NSHapticFeedback"] }
-objc2-core-foundation = { version = "0.3", features = ["CFAttributedString", "CFDictionary"] }
-objc2-core-graphics = { version = "0.3", features = [
-    "CGBitmapContext",
-    "CGColorSpace",
-    "CGContext",
-    "CGImage",
-] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 
 # Deterministic WGSL pipeline captures; see crates/eseqlisp/src/shader_capture.rs.
 [[bin]]

@@ -95,6 +95,11 @@ struct LoadedFont {
     post_script_name: String,
 }
 
+struct NamedFontResolution {
+    loaded: LoadedFont,
+    used_fallback: bool,
+}
+
 fn system_fonts() -> &'static Database {
     static SYSTEM_FONTS: OnceLock<Database> = OnceLock::new();
     SYSTEM_FONTS.get_or_init(|| {
@@ -234,7 +239,7 @@ fn load_any_font(monospaced_only: bool) -> Option<LoadedFont> {
         .or_else(|| candidates(false).find_map(load_font_by_id))
 }
 
-fn load_named_font(name: &str) -> Option<LoadedFont> {
+fn load_named_font(name: &str) -> Option<NamedFontResolution> {
     const MONOSPACE_PREFERENCES: &[&str] = &[
         "JetBrains Mono",
         "JetBrains Mono Nerd Font",
@@ -245,13 +250,18 @@ fn load_named_font(name: &str) -> Option<LoadedFont> {
         "Liberation Mono",
     ];
 
-    load_exact_named_font(name)
+    if let Some(loaded) = load_exact_named_font(name)
         .or_else(|| load_font_by_family_stem(name))
-        .or_else(|| {
-            MONOSPACE_PREFERENCES
-                .iter()
-                .find_map(|name| load_exact_named_font(name))
-        })
+    {
+        return Some(NamedFontResolution {
+            loaded,
+            used_fallback: false,
+        });
+    }
+
+    let loaded = MONOSPACE_PREFERENCES
+        .iter()
+        .find_map(|name| load_exact_named_font(name))
         .or_else(|| {
             // fontdb only maps the generic families to real names when
             // fontconfig supplies aliases; elsewhere they stay at the Windows
@@ -262,7 +272,11 @@ fn load_named_font(name: &str) -> Option<LoadedFont> {
             })
         })
         .or_else(|| load_any_font(true))
-        .or_else(|| load_any_font(false))
+        .or_else(|| load_any_font(false))?;
+    Some(NamedFontResolution {
+        loaded,
+        used_fallback: true,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -362,17 +376,22 @@ impl GlyphAtlas {
         if !font_size.is_finite() || font_size <= 0.0 {
             return None;
         }
-        let loaded = load_named_font(font_name)?;
-        if loaded.post_script_name != font_name {
+        let resolution = load_named_font(font_name)?;
+        let loaded = resolution.loaded;
+        if resolution.used_fallback {
             eprintln!(
-                "[glyph_atlas] font family resolution: requested {:?}, got {:?}",
+                "[glyph_atlas] font fallback: requested {:?}, got {:?}",
                 font_name, loaded.post_script_name
             );
         }
         let font_size = font_size as f32;
         let metrics = line_metrics(&loaded.font, font_size)?;
-        let (m_metrics, _) = loaded.font.rasterize('m', font_size);
-        let cell_w = m_metrics.advance_width.ceil().max(1.0) as usize;
+        let cell_w = loaded
+            .font
+            .metrics('m', font_size)
+            .advance_width
+            .ceil()
+            .max(1.0) as usize;
         let cell_h = metrics.line_height().max(1.0) as usize;
         Some(Self {
             cell_w,
@@ -781,8 +800,11 @@ mod tests {
 
     #[test]
     fn unknown_monospace_font_name_falls_back_to_an_installed_font() {
+        let name = "ThisFontNameDeliberatelyDoesNotExist";
+        let resolution = load_named_font(name).expect("the fallback chain must find a font");
+        assert!(resolution.used_fallback);
         assert!(
-            GlyphAtlas::new("ThisFontNameDeliberatelyDoesNotExist", 13.0).is_some(),
+            GlyphAtlas::new(name, 13.0).is_some(),
             "the monospace atlas should use a system fallback"
         );
     }
@@ -829,6 +851,12 @@ mod tests {
             load_font_by_family_stem(&request).is_some(),
             "the stem match must produce a loadable face"
         );
+        let resolution = load_named_font(&request)
+            .expect("the family-name resolution must produce a loadable face");
+        assert!(
+            !resolution.used_fallback,
+            "a requested family variant is a resolution, not a fallback"
+        );
     }
 
     #[test]
@@ -838,8 +866,9 @@ mod tests {
             .find(|face| face.style == fontdb::Style::Normal)
             .map(|face| face.post_script_name.clone())
             .expect("the test machine must have at least one font installed");
-        let loaded = load_named_font(&expected).expect("an installed font must load by name");
-        assert_eq!(loaded.post_script_name, expected);
+        let resolution = load_named_font(&expected).expect("an installed font must load by name");
+        assert!(!resolution.used_fallback);
+        assert_eq!(resolution.loaded.post_script_name, expected);
     }
 
     #[test]
