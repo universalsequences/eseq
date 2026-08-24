@@ -64,6 +64,15 @@ Prefer `cargo nextest run` and select the narrowest exact test that validates a
 change. Full workspace runs are reserved for explicitly exhaustive work such as
 eseq-4tl; see `AGENTS.md` for selection examples and runtime policy.
 
+### DGenLisp compiler (fetched, not tracked)
+
+The DGenLisp compiler binary is not in git. `content/dgenlisp.lock` pins the
+published distribution per target; run `./scripts/fetch_dgenlisp.sh` once per
+fresh checkout (idempotent, sha256-verified) to install it under
+`crates/sequencer/tools/` (gitignored). Anything that needs the compiler and
+cannot find it hard-fails naming that command. `ESEQ_DGENLISP_TOOL=/abs/path`
+overrides it with a locally built compiler.
+
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test

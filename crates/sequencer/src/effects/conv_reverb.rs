@@ -397,6 +397,10 @@ fn ir_prep_dir() -> PathBuf {
     crate::app_paths::app_paths().ir_prep_dir()
 }
 
+/// Unchecked tool location, kept for the tests' skip-if-absent probes; the
+/// compile path itself goes through `dgenlisp_tool_checked` so a missing
+/// compiler names the fetch command.
+#[cfg(test)]
 fn tool_path() -> PathBuf {
     crate::app_paths::app_paths().dgenlisp_tool()
 }
@@ -428,7 +432,9 @@ fn partition_channel(samples: &[f32], host_sr: u32) -> Result<ChannelIr, String>
     // no system-compiler fallback.
     let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
     let out_name = format!("ir_{seq}");
-    let output = std::process::Command::new(tool_path())
+    let output = std::process::Command::new(
+        crate::app_paths::app_paths().dgenlisp_tool_checked()?,
+    )
         .args(["compile", lisp_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", &out_name])

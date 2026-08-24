@@ -466,7 +466,10 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     // missing/incomplete stage is a hard compile error, never a fallback to
     // the system compiler.
     let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
-    let tool_path = dgenlisp_tool_path();
+    // Same hard-error contract for the compiler itself: it is fetched by lock
+    // (scripts/fetch_dgenlisp.sh), never tracked, so its absence must name
+    // the fetch command instead of surfacing as a spawn failure.
+    let tool_path = crate::app_paths::app_paths().dgenlisp_tool_checked()?;
     let mut command = std::process::Command::new(&tool_path);
     command
         .args(["compile", src_path.to_str().unwrap()])

@@ -1,6 +1,8 @@
 # Published DGenLisp distributions. Each target stanza is independent so a
-# platform may remain pinned while another advances. Fetching is explicit;
-# consumers must verify sha256 before installing executable_path.
+# platform may remain pinned while another advances. Fetching is explicit:
+# scripts/fetch_dgenlisp.sh downloads the pinned url, hard-fails unless the
+# download's sha256 matches the pin, and installs the compiler under
+# crates/sequencer/tools/ (gitignored) at DGenLisp-<target>.
 
 target linux-x86_64
 version dgenlisp-v0.1.1

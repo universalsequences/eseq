@@ -1830,9 +1830,23 @@ fn patcher_test_dgenlisp_tool(repo_root: &std::path::Path) -> Result<std::path::
         all(target_os = "linux", target_arch = "x86_64")
     ))]
     {
-        Ok(repo_root
+        // The compiler is not tracked in git; content/dgenlisp.lock pins the
+        // published distribution and scripts/fetch_dgenlisp.sh installs it at
+        // this path. Same contract as AppPaths::dgenlisp_tool_checked: a
+        // missing binary is a hard error naming the exact fetch command.
+        let tool = repo_root
             .join("crates/sequencer/tools")
-            .join(DGENLISP_TOOL_FILENAME))
+            .join(DGENLISP_TOOL_FILENAME);
+        if tool.is_file() {
+            Ok(tool)
+        } else {
+            Err(format!(
+                "DGenLisp compiler not found at {}. Run ./scripts/fetch_dgenlisp.sh at the \
+                 repo root to install the distribution pinned in content/dgenlisp.lock, or \
+                 set ESEQ_DGENLISP_TOOL to a locally built compiler.",
+                tool.display()
+            ))
+        }
     }
     #[cfg(not(any(
         all(target_os = "macos", target_arch = "aarch64"),
@@ -1840,18 +1854,12 @@ fn patcher_test_dgenlisp_tool(repo_root: &std::path::Path) -> Result<std::path::
     )))]
     {
         Err(format!(
-            "no DGenLisp test compiler is available for {}-{}; set ESEQ_DGENLISP_TOOL",
+            "no DGenLisp distribution is published for {}-{}; set ESEQ_DGENLISP_TOOL to a \
+             locally built compiler",
             std::env::consts::OS,
             std::env::consts::ARCH
         ))
     }
-}
-
-fn patcher_test_dgen_toolchain_root(repo_root: &std::path::Path) -> std::path::PathBuf {
-    std::env::var_os("ESEQ_DGEN_TOOLCHAIN_ROOT")
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("crates/sequencer/tools/dgen-toolchain"))
 }
 
 fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
@@ -1865,18 +1873,19 @@ fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
         .and_then(|path| path.parent())
         .expect("eseqlisp crate should live below the repository root");
     let tool_path = patcher_test_dgenlisp_tool(repo_root)?;
-    let runtime_include = patcher_test_dgen_toolchain_root(repo_root).join("include");
     let output = std::process::Command::new(tool_path)
         .args(["compile", source_path.to_str().unwrap()])
         .args(["-o", out_dir.to_str().unwrap()])
         .args(["--name", "patcher_dgen_compile_test"])
         .args(["--sample-rate", "44100"])
         .args(["--voices", "12"])
-        // Published DGenLisp binaries must not fall back to a checkout path
-        // captured on their build machine. Patcher tests intentionally use
-        // the system compiler, so provide the runtime headers explicitly;
-        // production compiles instead pass the complete staged toolchain root.
-        .env("DGEN_RUNTIME_INCLUDE", runtime_include)
+        // No DGEN_RUNTIME_INCLUDE / toolchain hint: the pinned distribution
+        // carries its own headers and resolves them relative to the
+        // executable. Exporting a hint overrides that resolution, and an
+        // absent stage silently turns into `dgen_runtime.h not found`.
+        // eseq audits the produced dylib itself (see
+        // crates/sequencer/src/lisp_host/dgen/dgen_audit.rs), so the
+        // compiler's inline audit is redundant here.
         .arg("--skip-inline-audit")
         .output()
         .map_err(|error| error.to_string())?;

@@ -24,6 +24,9 @@
 # recorded by the committed content/dgen-toolchain.lock — never committed itself.
 /tools/dgen-toolchain/
 /tools/dgen-toolchain.staging.*/
+# DGenLisp compiler distributions: not tracked; scripts/fetch_dgenlisp.sh at the
+# repo root installs the release pinned in the committed content/dgenlisp.lock.
+/tools/DGenLisp-*
 
 # Diagnostics and accidental temporary output
 /sequencer-crash.log

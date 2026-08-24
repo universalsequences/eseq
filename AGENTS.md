@@ -31,6 +31,15 @@ nextest notes: use `--no-capture` where a `cargo test` command would use
 doctests (this repo's tests are all unit/integration tests, so that does not
 matter here).
 
+### DGenLisp compiler (fetched, not tracked)
+
+The DGenLisp compiler binary is not in git. `content/dgenlisp.lock` pins the
+published distribution per target; run `./scripts/fetch_dgenlisp.sh` once per
+fresh checkout (idempotent, sha256-verified) to install it under
+`crates/sequencer/tools/` (gitignored). Anything that needs the compiler and
+cannot find it hard-fails naming that command. `ESEQ_DGENLISP_TOOL=/abs/path`
+overrides it with a locally built compiler.
+
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test

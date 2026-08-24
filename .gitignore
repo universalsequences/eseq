@@ -23,7 +23,6 @@ crates/eseqlisp/profiles/
 *.trace/
 sequencer-profile
 sequencer-crash.log
-rebuild_dgenlisp_tool.sh
 spring_reverb_impulse.wav
 
 # Beads / Dolt files (added by bd init)

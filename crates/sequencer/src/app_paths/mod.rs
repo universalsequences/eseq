@@ -20,7 +20,10 @@ Dev-only override: `ESEQ_DGENLISP_TOOL=/abs/path` selects a custom DGenLisp
 compiler. Like all dev path overrides, it is captured at construction and
 logged when active. The default compiler filename is selected from the build
 target, so a checkout containing tools for multiple targets never executes a
-host-incompatible binary.
+host-incompatible binary. The default compiler itself is not tracked in git:
+`content/dgenlisp.lock` pins the published distribution per target and
+`scripts/fetch_dgenlisp.sh` installs it at the resolved path (see
+[`AppPaths::dgenlisp_tool_checked`]).
 
 Dev-only override: `ESEQ_DGEN_TOOLCHAIN_ROOT=/abs/path` redirects
 [`AppPaths::dgen_toolchain_root`] away from the per-checkout
@@ -149,6 +152,40 @@ impl AppPaths {
                 executable_dir.join(DGENLISP_TOOL_FILENAME)
             }
         }
+    }
+
+    /// [`Self::dgenlisp_tool`], preflight-checked for existence. The compiler
+    /// is not tracked in git — `content/dgenlisp.lock` pins the published
+    /// distribution and `scripts/fetch_dgenlisp.sh` installs it — so a fresh
+    /// checkout starts without one and the absence must be a hard, actionable
+    /// error naming the exact fetch command, never a bare spawn failure.
+    pub fn dgenlisp_tool_checked(&self) -> Result<PathBuf, String> {
+        let tool = self.dgenlisp_tool();
+        if tool.is_file() {
+            return Ok(tool);
+        }
+        let hint = match self {
+            AppPaths::Dev {
+                dgenlisp_tool_override: Some(_),
+                ..
+            } => {
+                "The path comes from the ESEQ_DGENLISP_TOOL override; point it at a real \
+                 compiler, or unset it and run ./scripts/fetch_dgenlisp.sh at the repo root \
+                 to install the distribution pinned in content/dgenlisp.lock."
+            }
+            AppPaths::Dev { .. } => {
+                "Run ./scripts/fetch_dgenlisp.sh at the repo root to install the \
+                 distribution pinned in content/dgenlisp.lock (the compiler is gitignored, \
+                 so fresh checkouts and worktrees start without one)."
+            }
+            AppPaths::Release { .. } => {
+                "The packaged application is missing its bundled compiler; reinstall it."
+            }
+        };
+        Err(format!(
+            "DGenLisp compiler not found at {}. {hint}",
+            tool.display()
+        ))
     }
 
     /// Root of the staged hermetic clang/lld toolchain handed to DGenLisp via
@@ -915,6 +952,39 @@ mod tests {
             .expect_err("missing stage must be a hard error");
         assert!(err.contains("rebuild_dgenlisp_tool.sh"), "{err}");
         assert!(err.contains("tools/dgen-toolchain"), "{err}");
+    }
+
+    #[test]
+    fn missing_dgenlisp_tool_error_mentions_fetch_script() {
+        let paths = AppPaths::dev(
+            PathBuf::from("/nonexistent/crates/sequencer"),
+            PathBuf::from("/nonexistent"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        let err = paths
+            .dgenlisp_tool_checked()
+            .expect_err("missing compiler must be a hard error");
+        assert!(err.contains("scripts/fetch_dgenlisp.sh"), "{err}");
+        assert!(err.contains(DGENLISP_TOOL_FILENAME), "{err}");
+
+        let mut overridden = AppPaths::dev(
+            PathBuf::from("/nonexistent/crates/sequencer"),
+            PathBuf::from("/nonexistent"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        let AppPaths::Dev {
+            dgenlisp_tool_override,
+            ..
+        } = &mut overridden
+        else {
+            unreachable!()
+        };
+        *dgenlisp_tool_override = Some(PathBuf::from("/custom/DGenLisp"));
+        let err = overridden
+            .dgenlisp_tool_checked()
+            .expect_err("missing override compiler must be a hard error");
+        assert!(err.contains("/custom/DGenLisp"), "{err}");
+        assert!(err.contains("ESEQ_DGENLISP_TOOL"), "{err}");
     }
 
     #[test]
