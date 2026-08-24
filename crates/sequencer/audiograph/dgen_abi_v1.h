@@ -11,7 +11,7 @@
  * math/intrinsics section is vendored here.
  *
  * Source: tools/dgen-toolchain/include/dgen_runtime.h
- * Source-sha256: 73baeab623bb7f2aa1f4971e1117ea3757769731f49e7d2f8967bd0a6f3a0e50
+ * Source-sha256: 5c3333cb92db268a82a8e0e618ed17566e05b112824023a5b75a2f93a29d5b38
  * A Rust test (lisp_host/tests.rs, vendored_dgen_abi_header_matches_staged_
  * toolchain_header) recomputes the staged header's sha256 and fails with a
  * "re-vendor dgen_abi_v1.h" message when it drifts.

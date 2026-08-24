@@ -5,12 +5,12 @@
 # crates/sequencer/tools/ (gitignored) at DGenLisp-<target>.
 
 target linux-x86_64
-version dgenlisp-v0.1.1
-url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.1/DGenLisp-linux-x86_64.tar.gz
-sha256 717b5cb629928459d8b366d5b75afabe46800c70639a0de3fb0fb29246c2ff61
+version dgenlisp-v0.1.2
+url https://github.com/universalsequences/dgen-audio/releases/download/dgenlisp-v0.1.2/DGenLisp-linux-x86_64.tar.gz
+sha256 8279d4e4c461a628dd943741670cbd78faddb825cf17d4902b3916b06798b372
 format tar.gz
 executable_path dgenlisp-linux-x86_64/DGenLisp
-upstream_commit ae25e9d9913ac745c653b6c7df4236b1a42b32f8
+upstream_commit ab969edfcdb31b94307bb92755e1778413a4c500
 glibc_floor 2.35
 container_image swift:6.3.3-jammy
 
