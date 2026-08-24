@@ -44,10 +44,13 @@ overrides it with a locally built compiler.
 ### Cheap clean-HEAD check
 
 Do not stash and do not cold-clone the repository to determine whether one test
-fails at HEAD. Reuse an isolated worktree and a dedicated target directory:
+fails at HEAD. Reuse an isolated worktree and a dedicated target directory. This
+recipe is for the narrowest exact test that answers the question; a cold
+workspace run takes several minutes and consumes multiple GB in the dedicated
+target directory.
 
 ```sh
-wt=/tmp/eseq-head-test; target=/tmp/eseq-head-test-target
+wt=/tmp/eseq-head-test; target="$HOME/.cache/eseq-head-test-target"
 [ -e "$wt/.git" ] || git worktree add --detach "$wt" HEAD
 git -C "$wt" checkout --detach HEAD
 (cd "$wt" && \
@@ -56,12 +59,16 @@ git -C "$wt" checkout --detach HEAD
 ```
 
 The dedicated target directory keeps Cargo artifacts from the clean checkout
-separate from working-checkout artifacts; sharing a target directory between
-worktrees can make Cargo run a binary built from the wrong source tree. The
-worktree is disposable and isolated, so resetting it never touches the working
-checkout. Remove it with `git worktree remove /tmp/eseq-head-test` when it is no
-longer useful; remove `/tmp/eseq-head-test-target` too if its cached artifacts
-are no longer needed.
+separate from working-checkout artifacts and off `/tmp`, which may be a small
+tmpfs. Sharing a target directory between worktrees can make Cargo run a binary
+built from the wrong source tree. The worktree is disposable and isolated, so
+resetting it never touches the working checkout. Clean up both directories when
+they are no longer useful:
+
+```sh
+git worktree remove /tmp/eseq-head-test
+rm -rf "$HOME/.cache/eseq-head-test-target"
+```
 
 ### Test stack budget
 
