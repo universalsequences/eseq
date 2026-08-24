@@ -675,10 +675,21 @@ impl CaptureRenderer {
         let cables = patch_cable_instances();
         let cable_buffer = self.instance_buffer(&cables);
         let mut widgets = widget_instances();
-        if scene == "widget-knob-number-mod-range" {
-            for widget in &mut widgets {
-                widget.uniform_b = [0.82, 0.15, 0.75, 1.0];
+        match scene {
+            "widget-slider" => {
+                // Keep the fill endpoint away from the exact half-pixel boundary
+                // produced by the generic 0.5 value. Mesa can round that one
+                // antialiased pixel differently across fresh device processes.
+                for widget in &mut widgets {
+                    widget.value_t = 0.47;
+                }
             }
+            "widget-knob-number-mod-range" => {
+                for widget in &mut widgets {
+                    widget.uniform_b = [0.82, 0.15, 0.75, 1.0];
+                }
+            }
+            _ => {}
         }
         let widget_buffer = self.instance_buffer(&widgets);
         let wavetable = [wavetable_instance()];
@@ -915,6 +926,25 @@ mod tests {
 
     fn luminance(pixel: [u8; 4]) -> u32 {
         pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32
+    }
+
+    /// The fixed scene list must retain one capture for every distinct widget
+    /// fragment. Aliases can share a scene, but adding a shader body without a
+    /// capture would leave the Linux port visually unreviewed.
+    #[test]
+    fn widget_scenes_cover_every_distinct_fragment() {
+        use std::collections::BTreeSet;
+
+        let captured = SCENES
+            .iter()
+            .filter_map(|scene| widget_scene_shader(scene))
+            .map(|(_, fragment)| fragment)
+            .collect::<BTreeSet<_>>();
+        let missing = widget_render::widget_shader_sources(ShaderBackend::Wgsl)
+            .into_iter()
+            .filter_map(|(name, _, fragment)| (!captured.contains(fragment)).then_some(name))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "widget shaders missing captures: {missing:?}");
     }
 
     /// Every scene must paint something, and two renders of one scene must be
