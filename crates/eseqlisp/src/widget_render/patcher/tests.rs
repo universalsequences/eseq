@@ -14418,7 +14418,6 @@ fn patcher_alignment_hysteresis_keeps_existing_x_snap_until_escape_threshold() {
 fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
     let mut patch = parse("(def a (in 1 @name a))\n(def b (phasor a))");
     set_patch_node_position(&mut patch, "a", (0.0, 10.0));
-    set_patch_node_position(&mut patch, "b", (12.77, 20.0));
     {
         let source = patch.nodes.iter_mut().find(|node| node.id == "a").unwrap();
         source.width = Some(12.0);
@@ -14431,9 +14430,42 @@ fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
         .unwrap()
         .width = Some(20.0);
     prime_patcher_text_metrics(&patch);
+
+    // Explicit node widths are minimums: the rendered label can make a node
+    // wider, and its measured width differs between text backends. Position
+    // the target from the same geometry that rendering and snapping use so
+    // this test isolates output-to-input alignment rather than font metrics.
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let source = patch.nodes.iter().find(|node| node.id == "a").unwrap();
+    let target = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let source_size = node_size_for_ports(
+        source,
+        input_slot_counts.get("a").copied().unwrap_or(0),
+        output_counts.get("a").copied().unwrap_or(0),
+    );
+    let target_size = node_size_for_ports(
+        target,
+        input_slot_counts.get("b").copied().unwrap_or(0),
+        output_counts.get("b").copied().unwrap_or(0),
+    );
+    let source_output_offset = port_x_offset(1, output_counts["a"], source_size.0);
+    let target_input = input_indices["b"][0];
+    let target_input_offset =
+        port_x_offset(target_input, input_slot_counts["b"], target_size.0);
+    let expected_aligned_x = 0.5;
+    set_patch_node_position(
+        &mut patch,
+        "b",
+        (
+            expected_aligned_x + source_output_offset - target_input_offset,
+            20.0,
+        ),
+    );
+
     let mut snap = AlignmentSnapState::default();
     let selected = HashSet::from(["a".to_string()]);
-
     let aligned = align_dragged_primary_position(
         &patch,
         "a",
@@ -14445,7 +14477,10 @@ fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
         20.0,
     );
 
-    assert!((aligned.0 - 0.5).abs() < 0.001, "{aligned:?}");
+    assert!(
+        (aligned.0 - expected_aligned_x).abs() < 0.001,
+        "{aligned:?}"
+    );
     assert!(snap.snapped_x);
 }
 
