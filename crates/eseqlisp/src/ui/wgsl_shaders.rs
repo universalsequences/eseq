@@ -1200,18 +1200,10 @@ fn heat_color(value: f32, low: vec3<f32>, mid: vec3<f32>, high: vec3<f32>) -> ve
 }
 
 @fragment
-fn live_spectrogram_frag(input: LiveSpectrogramVaryings) -> @location(0) vec4<f32> {
+fn live_spectrogram_waterfall_frag(input: LiveSpectrogramVaryings) -> @location(0) vec4<f32> {
     let bins = input.counts.x;
     let time_slices = input.counts.y;
     let write_head = input.counts.z;
-    let mode = input.counts.w;
-    let freq_scale = input.freq_scale;
-    let sample_rate = input.rates.x;
-    let min_hz = input.rates.y;
-    let max_hz = input.rates.z;
-    let widget_px_w = input.widget_px.x;
-    let widget_px_h = input.widget_px.y;
-
     if (bins < 2u || time_slices < 1u) {
         discard;
     }
@@ -1219,43 +1211,14 @@ fn live_spectrogram_frag(input: LiveSpectrogramVaryings) -> @location(0) vec4<f3
     let uv = clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0));
     let bin = spectrogram_bin_for_uv(
         uv.y,
-        freq_scale,
+        input.freq_scale,
         bins,
-        sample_rate,
-        min_hz,
-        max_hz);
+        input.rates.x,
+        input.rates.y,
+        input.rates.z);
     let border = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
     let border_mask = 1.0 - smoothstep(0.0, max(fwidth(border) * 1.5, 0.002), border);
-
-    // Both modes' derivative inputs are computed here, in uniform control flow.
-    // WGSL cannot take fwidth inside the `mode` branch, and the EQ curve has to
-    // exist before its own derivative can be taken, so the curve is evaluated
-    // for both modes and only the compositing below is branched.
-    let eq_value = sample_eq_spectrum_curve(
-        bins,
-        uv.x,
-        freq_scale,
-        sample_rate,
-        min_hz,
-        max_hz,
-        widget_px_w);
-    let eq_y = clamp(eq_value, 0.0, 1.0);
-    let eq_deriv = fwidth(uv.y - eq_y);
     let bin_width = max(fwidth(bin), 1.0);
-
-    if (mode == 1u) {
-        let fill = smoothstep(-0.004, 0.010, eq_y - uv.y);
-        let line_width = max(1.35 / max(widget_px_h, 1.0), 0.003);
-        let aa = max(eq_deriv, line_width * 0.65);
-        let line = 1.0 - smoothstep(line_width, line_width + aa, abs(uv.y - eq_y));
-        var rgb = input.background_color.rgb;
-        rgb = mix(rgb, input.eq_fill_color.rgb, fill * input.eq_fill_color.a);
-        rgb = mix(rgb, input.eq_line_color.rgb, line * input.eq_line_color.a);
-        rgb = mix(rgb, input.eq_line_color.rgb, border_mask * 0.45);
-        let alpha = max(max(fill * input.eq_fill_color.a, line * input.eq_line_color.a), border_mask * 0.35);
-        return vec4<f32>(rgb, alpha);
-    }
-
     let x = clamp(uv.x, 0.0, 0.999999);
     let time_offset = u32(floor(x * f32(time_slices)));
     let row = (write_head + time_offset) % time_slices;
@@ -1264,6 +1227,39 @@ fn live_spectrogram_frag(input: LiveSpectrogramVaryings) -> @location(0) vec4<f3
     var rgb = mix(input.background_color.rgb, heat, smoothstep(0.02, 0.95, value));
     rgb = mix(rgb, input.max_color.rgb, border_mask * 0.28);
     let alpha = max(smoothstep(0.005, 0.12, value), border_mask * 0.30);
+    return vec4<f32>(rgb, alpha);
+}
+
+@fragment
+fn live_spectrogram_eq_frag(input: LiveSpectrogramVaryings) -> @location(0) vec4<f32> {
+    let bins = input.counts.x;
+    let time_slices = input.counts.y;
+    if (bins < 2u || time_slices < 1u) {
+        discard;
+    }
+
+    let uv = clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let border = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    let border_mask = 1.0 - smoothstep(0.0, max(fwidth(border) * 1.5, 0.002), border);
+    let eq_value = sample_eq_spectrum_curve(
+        bins,
+        uv.x,
+        input.freq_scale,
+        input.rates.x,
+        input.rates.y,
+        input.rates.z,
+        input.widget_px.x);
+    let eq_y = clamp(eq_value, 0.0, 1.0);
+    let eq_deriv = fwidth(uv.y - eq_y);
+    let fill = smoothstep(-0.004, 0.010, eq_y - uv.y);
+    let line_width = max(1.35 / max(input.widget_px.y, 1.0), 0.003);
+    let aa = max(eq_deriv, line_width * 0.65);
+    let line = 1.0 - smoothstep(line_width, line_width + aa, abs(uv.y - eq_y));
+    var rgb = input.background_color.rgb;
+    rgb = mix(rgb, input.eq_fill_color.rgb, fill * input.eq_fill_color.a);
+    rgb = mix(rgb, input.eq_line_color.rgb, line * input.eq_line_color.a);
+    rgb = mix(rgb, input.eq_line_color.rgb, border_mask * 0.45);
+    let alpha = max(max(fill * input.eq_fill_color.a, line * input.eq_line_color.a), border_mask * 0.35);
     return vec4<f32>(rgb, alpha);
 }
 "#;
@@ -1322,6 +1318,78 @@ mod tests {
         for (label, source) in STANDALONE_SHADER_MODULES {
             validate_wgsl(label, source);
         }
+    }
+
+    fn collect_called_functions(
+        block: &naga::Block,
+        calls: &mut Vec<naga::Handle<naga::Function>>,
+    ) {
+        for statement in block.iter() {
+            match statement {
+                naga::Statement::Block(block) => collect_called_functions(block, calls),
+                naga::Statement::If { accept, reject, .. } => {
+                    collect_called_functions(accept, calls);
+                    collect_called_functions(reject, calls);
+                }
+                naga::Statement::Switch { cases, .. } => {
+                    for case in cases {
+                        collect_called_functions(&case.body, calls);
+                    }
+                }
+                naga::Statement::Loop {
+                    body, continuing, ..
+                } => {
+                    collect_called_functions(body, calls);
+                    collect_called_functions(continuing, calls);
+                }
+                naga::Statement::Call { function, .. } => calls.push(*function),
+                _ => {}
+            }
+        }
+    }
+
+    fn entry_point_reaches_function(module: &naga::Module, entry: &str, target: &str) -> bool {
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|candidate| candidate.name == entry)
+            .unwrap_or_else(|| panic!("missing WGSL entry point {entry}"));
+        let target = module
+            .functions
+            .iter()
+            .find_map(|(handle, function)| {
+                (function.name.as_deref() == Some(target)).then_some(handle)
+            })
+            .unwrap_or_else(|| panic!("missing WGSL function {target}"));
+
+        let mut pending = Vec::new();
+        collect_called_functions(&entry.function.body, &mut pending);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(handle) = pending.pop() {
+            if handle == target {
+                return true;
+            }
+            if visited.insert(handle) {
+                collect_called_functions(&module.functions[handle].body, &mut pending);
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn live_spectrogram_waterfall_does_not_reach_eq_curve_sampling() {
+        let module = naga::front::wgsl::parse_str(LIVE_SPECTROGRAM_SHADER_WGSL)
+            .expect("live spectrogram WGSL parses");
+        assert!(entry_point_reaches_function(
+            &module,
+            "live_spectrogram_eq_frag",
+            "sample_eq_spectrum_curve",
+        ));
+        assert!(!entry_point_reaches_function(
+            &module,
+            "live_spectrogram_waterfall_frag",
+            "sample_eq_spectrum_curve",
+        ));
     }
 
     #[test]

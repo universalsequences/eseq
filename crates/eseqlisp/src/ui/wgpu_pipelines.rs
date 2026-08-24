@@ -423,30 +423,47 @@ pub fn waveform_pipeline(
     )
 }
 
-pub fn live_spectrogram_pipeline(
+pub struct LiveSpectrogramPipelines {
+    pub waterfall: wgpu::RenderPipeline,
+    pub eq: wgpu::RenderPipeline,
+}
+
+pub fn live_spectrogram_pipelines(
     device: &wgpu::Device,
     data_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
+) -> LiveSpectrogramPipelines {
     let shader = module(
         device,
         "eseqlisp live spectrogram shader",
         wgsl_shaders::LIVE_SPECTROGRAM_SHADER_WGSL,
     );
-    build(
-        device,
-        "eseqlisp live spectrogram pipeline",
-        &shader,
-        "live_spectrogram_vert",
-        &shader,
-        "live_spectrogram_frag",
-        &[buffer_layout::<LiveSpectrogramInstance>(
-            wgpu::VertexStepMode::Instance,
-            &LIVE_SPECTROGRAM_ATTRIBUTES,
-        )],
-        &[data_layout],
-        format,
-    )
+    let build_mode = |label, fragment_entry| {
+        build(
+            device,
+            label,
+            &shader,
+            "live_spectrogram_vert",
+            &shader,
+            fragment_entry,
+            &[buffer_layout::<LiveSpectrogramInstance>(
+                wgpu::VertexStepMode::Instance,
+                &LIVE_SPECTROGRAM_ATTRIBUTES,
+            )],
+            &[data_layout],
+            format,
+        )
+    };
+    LiveSpectrogramPipelines {
+        waterfall: build_mode(
+            "eseqlisp live spectrogram waterfall pipeline",
+            "live_spectrogram_waterfall_frag",
+        ),
+        eq: build_mode(
+            "eseqlisp live spectrogram EQ pipeline",
+            "live_spectrogram_eq_frag",
+        ),
+    }
 }
 
 #[cfg(test)]

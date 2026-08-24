@@ -26,7 +26,7 @@ through the Metal pipelines on macOS and diff the two.
 | `widget-surface` | widget preamble + `widget_vert` + `button_surface.wgsl` | Four button surfaces: three corner radii and the splayed tab shape |
 | `wavetable` | `wavetable_vert` + `wavetable_frag` | Sine/saw/square/triangle stacked bottom to top, with the morphed selected wave at `wave_pos` 1.6 |
 | `waveform` | `waveform_vert` + `waveform_frag` | A decaying burst with a selection, both boundary flags, an active start marker and the playhead |
-| `live-spectrogram` | `live_spectrogram_vert` + `live_spectrogram_frag` | Waterfall mode (left) beside EQ-curve mode (right) |
+| `live-spectrogram` | `live_spectrogram_vert` + `live_spectrogram_waterfall_frag` / `live_spectrogram_eq_frag` | Waterfall mode (left) beside EQ-curve mode (right) |
 | `widget-<name>` | widget preamble + the named retained-mode widget fragment | Four fixed aspect/color/uniform combinations; one scene for every distinct hand-written widget fragment |
 
 The widget scenes cover all 29 distinct fragment bodies ported by

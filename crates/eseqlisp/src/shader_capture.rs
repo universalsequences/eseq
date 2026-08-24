@@ -746,8 +746,8 @@ impl CaptureRenderer {
         );
         let wavetable_pipeline = pipelines::wavetable_pipeline(&self.device, &storage1, FORMAT);
         let waveform_pipeline = pipelines::waveform_pipeline(&self.device, &storage1, FORMAT);
-        let spectrogram_pipeline =
-            pipelines::live_spectrogram_pipeline(&self.device, &storage2, FORMAT);
+        let spectrogram_pipelines =
+            pipelines::live_spectrogram_pipelines(&self.device, &storage2, FORMAT);
 
         let text_vertices = text_vertices();
         let text_buffer = self.instance_buffer(&text_vertices);
@@ -778,7 +778,13 @@ impl CaptureRenderer {
         let waveform = [waveform_instance()];
         let waveform_buffer = self.instance_buffer(&waveform);
         let spectrograms = live_spectrogram_instances();
-        let spectrogram_buffer = self.instance_buffer(&spectrograms);
+        // The fragment entry point is selected by pipeline, so instances must
+        // be grouped by mode before issuing their draw calls. As in the Metal
+        // shader, mode 1 is EQ and every other value is waterfall.
+        let (eq_spectrograms, waterfall_spectrograms): (Vec<_>, Vec<_>) =
+            spectrograms.into_iter().partition(|instance| instance.mode == 1);
+        let waterfall_spectrogram_buffer = self.instance_buffer(&waterfall_spectrograms);
+        let eq_spectrogram_buffer = self.instance_buffer(&eq_spectrograms);
 
         let bank = self.storage_buffer(&wavetable_bank());
         let buckets = self.storage_buffer(&waveform_buckets());
@@ -877,10 +883,13 @@ impl CaptureRenderer {
                     pass.draw(0..6, 0..1);
                 }
                 "live-spectrogram" => {
-                    pass.set_pipeline(&spectrogram_pipeline);
                     pass.set_bind_group(0, &spectrogram_group, &[]);
-                    pass.set_vertex_buffer(0, spectrogram_buffer.slice(..));
-                    pass.draw(0..6, 0..spectrograms.len() as u32);
+                    pass.set_pipeline(&spectrogram_pipelines.waterfall);
+                    pass.set_vertex_buffer(0, waterfall_spectrogram_buffer.slice(..));
+                    pass.draw(0..6, 0..waterfall_spectrograms.len() as u32);
+                    pass.set_pipeline(&spectrogram_pipelines.eq);
+                    pass.set_vertex_buffer(0, eq_spectrogram_buffer.slice(..));
+                    pass.draw(0..6, 0..eq_spectrograms.len() as u32);
                 }
                 other => panic!("unknown capture scene {other:?}"),
             }
