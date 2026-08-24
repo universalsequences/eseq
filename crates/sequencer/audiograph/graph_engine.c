@@ -685,17 +685,19 @@ void engine_promote_current_thread_rt(void) {
       1, "audio callback thread", &requested_priority);
   if (rtkit_needed) {
     pid_t tid = (pid_t)syscall(SYS_gettid);
-    if (g_rtkit_callback_hook &&
-        g_rtkit_callback_hook(tid, requested_priority)) {
-      // The helper records the achieved policy after its D-Bus call. Marking
-      // this pending prevents an early SCHED_OTHER snapshot being mistaken
-      // for the final fallback result.
+    if (g_rtkit_callback_hook) {
+      // Mark the result pending BEFORE handing the TID to the helper. This
+      // thread is still SCHED_OTHER here, so it can be preempted between the
+      // hook call and any later store for longer than the helper's poll plus
+      // D-Bus round trip; a store after the hook could then clobber the
+      // helper's recorded result into a permanently-pending status.
       atomic_store_explicit(&g_engine.callbackReported, 0,
                             memory_order_release);
-      return;
-    }
-    if (!g_rtkit_callback_hook)
+      if (g_rtkit_callback_hook(tid, requested_priority))
+        return;
+    } else {
       warn_realtime_unavailable_without_host();
+    }
   }
   int policy = ENGINE_SCHED_POLICY_UNKNOWN;
   int priority = 0;

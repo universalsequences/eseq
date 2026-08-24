@@ -109,24 +109,37 @@ fn promote(
     if client.is_none() {
         *client = Some(RtKitClient::connect());
     }
-    let result: WorkerResult = (|| {
+    // The bool marks errors worth caching: a connection, property, or
+    // transport failure will not improve for the next thread a few
+    // microseconds later, so caching it means a missing or wedged service
+    // adds at most one bounded timeout to startup rather than one per
+    // worker. A method error REPLY is different — the service is alive and
+    // refused this one request (e.g. an rtkit per-user thread quota), so
+    // later threads, above all the audio callback which asks last, must
+    // still get their own attempt.
+    let result: Result<i32, (bool, String)> = (|| {
         let connected = client.as_ref().expect("rtkit state initialized");
-        let connected = connected.as_ref().map_err(Clone::clone)?;
-        let priority = clamp_priority(requested_priority, connected.max_priority, callback)?;
-        let proxy = connected.proxy()?;
+        let connected = connected.as_ref().map_err(|error| (true, error.clone()))?;
+        let priority = clamp_priority(requested_priority, connected.max_priority, callback)
+            .map_err(|error| (true, error))?;
+        let proxy = connected.proxy().map_err(|error| (true, error))?;
         proxy
             .call::<_, _, ()>("MakeThreadRealtime", &(tid, priority as u32))
-            .map_err(|error| format!("MakeThreadRealtime failed: {error}"))?;
+            .map_err(|error| {
+                let transport_failure = !matches!(error, zbus::Error::MethodError(..));
+                (transport_failure, format!("MakeThreadRealtime failed: {error}"))
+            })?;
         Ok(priority)
     })();
-    if let Err(error) = &result {
-        // A process-wide service, property, policy, or transport failure will
-        // not improve for the next worker a few microseconds later. Cache it
-        // so a missing or wedged service adds at most one bounded timeout to
-        // startup rather than one timeout per worker.
-        *client = Some(Err(error.clone()));
+    match result {
+        Ok(priority) => Ok(priority),
+        Err((cache_failure, error)) => {
+            if cache_failure {
+                *client = Some(Err(error.clone()));
+            }
+            Err(error)
+        }
     }
-    result
 }
 
 fn report_result(coordinator: &Coordinator, tid: u64, callback: bool, result: &WorkerResult) {
