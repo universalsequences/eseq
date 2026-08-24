@@ -247,9 +247,24 @@ fn load_named_font(name: &str) -> Option<LoadedFont> {
         .or_else(|| load_any_font(false))
 }
 
+#[cfg(target_os = "linux")]
+const LINUX_SYSTEM_UI_FONT_PREFERENCES: &[&str] = &[
+    "DejaVu Sans",
+    "Noto Sans",
+    "Liberation Sans",
+    "Cantarell",
+    "Inter",
+];
+
 fn load_system_ui_font() -> Option<LoadedFont> {
     #[cfg(target_os = "macos")]
     for name in ["SFPro-Regular", ".AppleSystemUIFont", "Helvetica"] {
+        if let Some(font) = load_exact_named_font(name) {
+            return Some(font);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    for name in LINUX_SYSTEM_UI_FONT_PREFERENCES {
         if let Some(font) = load_exact_named_font(name) {
             return Some(font);
         }
@@ -807,6 +822,34 @@ mod tests {
             .expect("the test machine must have at least one font installed");
         let loaded = load_named_font(&expected).expect("an installed font must load by name");
         assert_eq!(loaded.post_script_name, expected);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn system_ui_font_is_not_a_condensed_face_on_linux() {
+        let loaded = load_system_ui_font().expect("an installed system UI font");
+        let face = system_fonts()
+            .faces()
+            .find(|face| face.post_script_name == loaded.post_script_name)
+            .expect("the loaded font must remain in the system font database");
+        let names = face
+            .families
+            .iter()
+            .fold(face.post_script_name.clone(), |mut names, (family, _)| {
+                names.push_str(family);
+                names
+            });
+        let normalized_names = normalized_font_key(&names);
+
+        assert!(
+            face.stretch >= fontdb::Stretch::Normal
+                && !normalized_names.contains("condensed")
+                && !normalized_names.contains("narrow"),
+            "Linux system UI font must not be condensed: name={:?} families={:?} stretch={:?}",
+            face.post_script_name,
+            face.families,
+            face.stretch
+        );
     }
 
     #[test]
