@@ -24,12 +24,60 @@ use super::{
     ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
     BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
     FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
-    HostTransportClockRuntime, MetronomeState, OutputDeviceConfig, OutputFormatRange,
-    RackSlotNoteOff, SliceTriggerVerdict, FALLBACK_SAMPLE_RATE,
+    HostTransportClockRuntime, MetronomeState, OutputBlockSizeObservation,
+    OutputBlockSizeVerifier, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
+    SliceTriggerVerdict, FALLBACK_SAMPLE_RATE,
 };
 use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
 use crate::sequencer::MAX_TRACKS;
 use crate::analysis::{pack_ptr, OnsetTableShared};
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires a default Linux audio output device"]
+fn linux_cpal_output_stream_starts_and_renders_callbacks() {
+    let engine = super::engine::init_engine().expect("Linux output stream should start");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let super::engine::Engine { _stream, lg_ptr, .. } = engine;
+    drop(_stream);
+    unsafe {
+        crate::audiograph::clear_os_workgroup();
+        crate::audiograph::engine_stop_workers();
+        crate::audiograph::destroy_live_graph(lg_ptr.0);
+    }
+}
+
+#[test]
+fn output_block_size_verifier_confirms_match_and_reports_first_later_mismatch() {
+    let mut verifier = OutputBlockSizeVerifier::new(512);
+    assert_eq!(
+        verifier.observe(512),
+        Some(OutputBlockSizeObservation::Matched { frames: 512 })
+    );
+    assert_eq!(verifier.observe(512), None);
+    assert_eq!(
+        verifier.observe(256),
+        Some(OutputBlockSizeObservation::Mismatched {
+            requested: 512,
+            actual: 256,
+        })
+    );
+    assert_eq!(verifier.observe(1024), None);
+}
+
+#[test]
+fn output_block_size_verifier_reports_first_callback_mismatch_once() {
+    let mut verifier = OutputBlockSizeVerifier::new(512);
+    assert_eq!(
+        verifier.observe(1024),
+        Some(OutputBlockSizeObservation::Mismatched {
+            requested: 512,
+            actual: 1024,
+        })
+    );
+    assert_eq!(verifier.observe(512), None);
+    assert_eq!(verifier.observe(256), None);
+}
 
 #[test]
 fn host_transport_clock_anchor_changes_only_on_transport_edges() {

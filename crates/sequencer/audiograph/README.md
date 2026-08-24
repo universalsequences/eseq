@@ -2,7 +2,7 @@
 
 A real-time audio graph engine in C11 with lock-free multi-threaded scheduling, live graph editing, and zero-allocation audio processing.
 
-- **Multi-threaded DAG scheduling** with Mach RT time-constraint promotion and OS Workgroup coordination
+- **Multi-threaded DAG scheduling** with Mach time constraints on macOS, SCHED_FIFO on Linux, and OS Workgroup coordination
 - **Live editing** — add, remove, and reconnect nodes while audio is playing
 - **Lock-free throughout** — MPMC work queue, SPSC parameter ring, batched edit queue
 - **Auto-summing** — multiple sources to one input transparently create hidden SUM nodes
@@ -24,7 +24,7 @@ int main() {
     initialize_engine(512, 48000);
     LiveGraph *lg = create_live_graph(16, 512, "demo", 2); // stereo
 
-    engine_enable_rt_time_constraint(1);
+    engine_enable_rt_scheduling(1);
     engine_start_workers(4);
 
     // Build a signal chain
@@ -53,8 +53,9 @@ All graph operations (`graph_connect`, `add_node`, `delete_node`, etc.) are queu
 void initialize_engine(int block_size, int sample_rate);
 void engine_start_workers(int n);
 void engine_stop_workers(void);
-void engine_enable_rt_time_constraint(int enable); // Mach RT scheduling (macOS)
-void engine_set_os_workgroup(void *oswg);           // OS Workgroup (macOS 10.16+)
+void engine_enable_rt_scheduling(int enable); // Mach RT (macOS), SCHED_FIFO (Linux)
+void engine_set_rt_priority(int priority);     // Linux SCHED_FIFO priority
+void engine_set_os_workgroup(void *oswg);      // OS Workgroup (macOS 10.16+)
 ```
 
 ### Graph Lifecycle

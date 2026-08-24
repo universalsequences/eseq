@@ -35,7 +35,8 @@ void engine_clear_os_workgroup(void);
 void engine_enable_rt_logging(int enable);
 
 // Enable/disable Mach time-constraint scheduling for workers (Apple only)
-void engine_enable_rt_time_constraint(int enable);
+void engine_enable_rt_scheduling(int enable);
+void engine_set_rt_priority(int priority);
 
 // ===================== Live Graph Management =====================
 

@@ -389,22 +389,34 @@ fn init_engine_parts(
     let workers = env_i32("TINYSEQ_AUDIOGRAPH_WORKERS")
         .unwrap_or(worker_count)
         .max(0);
-    let mach_rt_default = cfg!(target_os = "macos") && workers > 0;
-    let mach_rt = env_flag("TINYSEQ_AUDIOGRAPH_MACH_RT", mach_rt_default);
+    let rt_default = cfg!(any(target_os = "macos", target_os = "linux")) && workers > 0;
+    // Keep the old macOS-specific flag as a fallback while exposing one
+    // platform-neutral switch for both Mach and SCHED_FIFO scheduling.
+    let legacy_rt = env_flag("TINYSEQ_AUDIOGRAPH_MACH_RT", rt_default);
+    let rt_enabled = env_flag("TINYSEQ_AUDIOGRAPH_RT", legacy_rt);
+    let rt_priority = env_i32("TINYSEQ_AUDIOGRAPH_RT_PRIORITY").unwrap_or(20);
     let rt_log = env_flag("TINYSEQ_AUDIOGRAPH_RT_LOG", false);
     let graph_log = env_flag("TINYSEQ_AUDIOGRAPH_TRACE", false);
 
     unsafe {
         audiograph::enable_rt_logging(rt_log);
         audiograph::enable_graph_logging(graph_log);
-        audiograph::enable_rt_time_constraint(mach_rt);
-        audiograph::engine_start_workers(workers);
+        audiograph::set_rt_priority(rt_priority);
+        audiograph::enable_rt_scheduling(rt_enabled);
     }
     eprintln!(
-        "audiograph: started {workers} worker(s), Mach RT {}, graph trace {}",
-        if mach_rt { "enabled" } else { "disabled" },
+        "audiograph: starting {workers} worker(s), realtime scheduling {}{}, graph trace {}",
+        if rt_enabled { "enabled" } else { "disabled" },
+        if cfg!(target_os = "linux") && rt_enabled {
+            format!(" (SCHED_FIFO priority {rt_priority})")
+        } else {
+            String::new()
+        },
         if graph_log { "enabled" } else { "disabled" }
     );
+    unsafe {
+        audiograph::engine_start_workers(workers);
+    }
 
     // Create shared sequencer state (start with 0 tracks)
     let state = Arc::new(SequencerState::new(0, vec![]));

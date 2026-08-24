@@ -14,6 +14,18 @@ use super::*;
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;
+    if let Some(observation) = data.output_block_size.observe(nframes) {
+        match observation {
+            OutputBlockSizeObservation::Matched { frames } => {
+                eprintln!("audio: output callback block size verified at {frames} frames");
+            }
+            OutputBlockSizeObservation::Mismatched { requested, actual } => {
+                eprintln!(
+                    "audio: WARN: output callback uses {actual} frames after requesting {requested}; audiograph variable-block slicing is active"
+                );
+            }
+        }
+    }
     data.current_callback_nframes = nframes;
     data.trace_callback_counter = data.trace_callback_counter.wrapping_add(1);
     // The immutable scheduler snapshot is the commit point for topology.

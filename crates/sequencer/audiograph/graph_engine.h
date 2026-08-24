@@ -170,7 +170,8 @@ typedef struct Engine {
   _Atomic int oswg_version;      // incremented on each workgroup change for re-join detection
   _Atomic int rt_log; // enable lightweight debug prints from workers
   _Atomic int graph_log; // enable per-block audiograph scheduler/output trace
-  _Atomic int rt_time_constraint; // apply Mach RT time-constraint policy
+  _Atomic int rt_scheduling; // apply the platform realtime worker policy
+  _Atomic int rt_priority; // SCHED_FIFO priority on Linux
 } Engine;
 
 void engine_start_workers(int workers);
@@ -187,8 +188,10 @@ void engine_clear_os_workgroup(void);
 void engine_enable_rt_logging(int enable);
 void engine_enable_graph_logging(int enable);
 
-// Enable/disable Mach time-constraint scheduling for workers (Apple only).
-void engine_enable_rt_time_constraint(int enable);
+// Enable/disable platform realtime scheduling for workers. macOS uses Mach
+// time constraints; Linux uses SCHED_FIFO.
+void engine_enable_rt_scheduling(int enable);
+void engine_set_rt_priority(int priority);
 bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 
 // ===================== Live Graph Operations =====================

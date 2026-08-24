@@ -118,6 +118,47 @@ impl HostTransportClockRuntime {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputBlockSizeObservation {
+    Matched { frames: usize },
+    Mismatched { requested: usize, actual: usize },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OutputBlockSizeVerifier {
+    requested_frames: usize,
+    first_callback_seen: bool,
+    mismatch_reported: bool,
+}
+
+impl OutputBlockSizeVerifier {
+    pub(super) fn new(requested_frames: usize) -> Self {
+        Self {
+            requested_frames,
+            first_callback_seen: false,
+            mismatch_reported: false,
+        }
+    }
+
+    pub(super) fn observe(&mut self, actual_frames: usize) -> Option<OutputBlockSizeObservation> {
+        let first_callback = !self.first_callback_seen;
+        self.first_callback_seen = true;
+        if actual_frames != self.requested_frames {
+            if self.mismatch_reported {
+                return None;
+            }
+            self.mismatch_reported = true;
+            return Some(OutputBlockSizeObservation::Mismatched {
+                requested: self.requested_frames,
+                actual: actual_frames,
+            });
+        }
+        first_callback.then_some(OutputBlockSizeObservation::Matched {
+            frames: actual_frames,
+        })
+    }
+}
+
 pub(super) struct AudioCallbackData {
     pub(super) lg: LiveGraphPtr,
     pub(super) state: Arc<SequencerState>,
@@ -129,7 +170,7 @@ pub(super) struct AudioCallbackData {
     pub(super) custom_engine_pools: Vec<CustomEnginePool>,
     pub(super) scheduler_snapshot: Arc<SequencerSnapshot>,
     pub(super) scheduler_snapshot_version: u64,
-    pub(super) active_keyboard_notes: [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    pub(super) active_keyboard_notes: Vec<[Option<ActiveKeyboardNote>; MAX_VOICES]>,
     pub(super) keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
     pub(super) master_recorder: Arc<MasterRecorder>,
     pub(super) accumulator_states: [crate::accumulator::AccumulatorRuntimeState; MAX_TRACKS],
@@ -156,6 +197,7 @@ pub(super) struct AudioCallbackData {
     pub(super) block_events: Vec<BlockEvent>,
     pub(super) block_events_need_sort: bool,
     pub(super) current_callback_nframes: usize,
+    pub(super) output_block_size: OutputBlockSizeVerifier,
     pub(super) rendered_samples: Arc<AtomicU64>,
     /// Bus effect slots, published by the UI thread so the callback can reach
     /// each bus effect's modulator node for the transport clock/phase
@@ -225,7 +267,7 @@ pub(super) struct FreePatchTransportRouteTarget {
 }
 
 pub(super) fn clear_active_keyboard_note_by_lid(
-    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     logical_id: u64,
 ) {
     if logical_id == 0 {
@@ -244,7 +286,7 @@ pub(super) fn clear_active_keyboard_note_by_lid(
 }
 
 pub(super) fn store_active_keyboard_note(
-    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     source_transpose: f32,
     midi_note: Option<u8>,
@@ -272,7 +314,7 @@ pub(super) fn store_active_keyboard_note(
 }
 
 pub(super) fn take_active_keyboard_note(
-    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
+    active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]],
     track_idx: usize,
     source_transpose: f32,
 ) -> Option<ActiveKeyboardNote> {

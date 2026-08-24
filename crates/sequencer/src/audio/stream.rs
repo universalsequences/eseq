@@ -89,7 +89,10 @@ pub fn build_output_stream(
         eprintln!("audio-trace: enabled");
     }
 
-    let mut cb_data = AudioCallbackData {
+    // Keep the large callback state behind one pointer before handing the
+    // closure through CPAL's generic stream builders. Passing it by value makes
+    // debug builds reserve a copy-sized stack slot at every generic layer.
+    let cb_data = Box::new(AudioCallbackData {
         lg: LiveGraphPtr(lg),
         state,
         num_channels,
@@ -100,7 +103,7 @@ pub fn build_output_stream(
         custom_engine_pools,
         scheduler_snapshot: initial_scheduler_snapshot,
         scheduler_snapshot_version: initial_scheduler_snapshot_version,
-        active_keyboard_notes: [[None; MAX_VOICES]; MAX_TRACKS],
+        active_keyboard_notes: (0..MAX_TRACKS).map(|_| [None; MAX_VOICES]).collect(),
         keyboard_rx: audio_keyboard_rx,
         master_recorder,
         accumulator_states: [crate::accumulator::AccumulatorRuntimeState::default(); MAX_TRACKS],
@@ -119,6 +122,7 @@ pub fn build_output_stream(
         block_events: Vec::with_capacity(SCHEDULED_BLOCK_SCRATCH_CAPACITY),
         block_events_need_sort: false,
         current_callback_nframes: block_size,
+        output_block_size: OutputBlockSizeVerifier::new(block_size),
         rendered_samples: Arc::clone(&rendered_samples),
         bus_effect_runtime,
         dropped_scheduled_events: 0,
@@ -132,7 +136,7 @@ pub fn build_output_stream(
         transport_was_playing: false,
         metronome: MetronomeState::default(),
         preview: preview::PreviewVoice::default(),
-    };
+    });
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),
         sample_rate,
@@ -153,9 +157,17 @@ pub fn build_output_stream(
         buffer_size: cpal::BufferSize::Fixed(block_size as u32),
     };
 
+    start_cpal_output_stream(&device, &config, cb_data)
+}
+
+fn start_cpal_output_stream(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    mut cb_data: Box<AudioCallbackData>,
+) -> Result<Stream, String> {
     let stream = device
         .build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 audio_callback(&mut cb_data, data);
             },

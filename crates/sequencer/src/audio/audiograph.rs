@@ -137,7 +137,8 @@ extern "C" {
     pub fn engine_clear_os_workgroup();
     pub fn engine_enable_rt_logging(enable: c_int);
     pub fn engine_enable_graph_logging(enable: c_int);
-    pub fn engine_enable_rt_time_constraint(enable: c_int);
+    pub fn engine_enable_rt_scheduling(enable: c_int);
+    pub fn engine_set_rt_priority(priority: c_int);
     pub fn debug_dump_graph(lg: *mut LiveGraph);
 
     // Graph lifecycle
@@ -280,6 +281,10 @@ pub unsafe fn enable_graph_logging(enable: bool) {
     engine_enable_graph_logging(if enable { 1 } else { 0 });
 }
 
-pub unsafe fn enable_rt_time_constraint(enable: bool) {
-    engine_enable_rt_time_constraint(if enable { 1 } else { 0 });
+pub unsafe fn enable_rt_scheduling(enable: bool) {
+    engine_enable_rt_scheduling(if enable { 1 } else { 0 });
+}
+
+pub unsafe fn set_rt_priority(priority: i32) {
+    engine_set_rt_priority(priority);
 }

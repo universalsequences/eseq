@@ -2,6 +2,7 @@
 #include "graph_edit.h"
 #include "graph_nodes.h"
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <sched.h>
 #include <stdio.h>
@@ -80,6 +81,7 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 #endif
 
 static _Atomic int g_active_job_count = 0;
+static _Atomic int g_rt_permission_warning_logged = 0;
 static _Atomic uint64_t g_stall_recovery_count = 0;
 static _Atomic uint64_t g_graph_trace_block_counter = 0;
 static _Atomic uint32_t g_graph_trace_silent_streak = 0;
@@ -203,10 +205,12 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.oswg_join_pending, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.oswg_join_remaining, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.oswg_version, 0, memory_order_relaxed);
-  atomic_store_explicit(&g_engine.rt_time_constraint, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.rt_scheduling, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.rt_priority, 20, memory_order_relaxed);
   atomic_store_explicit(&g_engine.graph_log, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.activeWorkerLimit, 0, memory_order_relaxed);
   atomic_store_explicit(&g_active_job_count, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_rt_permission_warning_logged, 0, memory_order_relaxed);
   atomic_store_explicit(&g_stall_recovery_count, 0, memory_order_relaxed);
   atomic_store_explicit(&g_graph_trace_block_counter, 0, memory_order_relaxed);
   atomic_store_explicit(&g_graph_trace_silent_streak, 0, memory_order_relaxed);
@@ -537,13 +541,73 @@ static void wait_for_block_start_or_shutdown(void) {
   pthread_mutex_unlock(&g_engine.sess_mtx);
 }
 
+#ifdef __linux__
+static void promote_linux_worker_to_realtime(void) {
+  if (!atomic_load_explicit(&g_engine.rt_scheduling, memory_order_acquire)) {
+    return;
+  }
+
+  int min_priority = sched_get_priority_min(SCHED_FIFO);
+  int max_priority = sched_get_priority_max(SCHED_FIFO);
+  if (min_priority < 0 || max_priority < 0) {
+    int err = errno;
+    fprintf(stderr,
+            "[audiograph] WARN: cannot query SCHED_FIFO priority range: %s "
+            "(workers remain normal priority)\n",
+            strerror(err));
+    return;
+  }
+
+  int requested =
+      atomic_load_explicit(&g_engine.rt_priority, memory_order_acquire);
+  int priority = requested;
+  if (priority < min_priority)
+    priority = min_priority;
+  if (priority > max_priority)
+    priority = max_priority;
+
+  struct sched_param policy = {.sched_priority = priority};
+  int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &policy);
+  if (rc != 0) {
+    if (rc == EPERM || rc == EACCES) {
+      int expected = 0;
+      if (atomic_compare_exchange_strong_explicit(
+              &g_rt_permission_warning_logged, &expected, 1,
+              memory_order_acq_rel, memory_order_relaxed)) {
+        fprintf(stderr,
+                "[audiograph] WARN: SCHED_FIFO priority %d denied: %s; grant "
+                "realtime priority with limits.conf/systemd LimitRTPRIO or "
+                "RTKit (workers remain normal priority)\n",
+                priority, strerror(rc));
+      }
+    } else {
+      fprintf(stderr,
+              "[audiograph] WARN: pthread_setschedparam(SCHED_FIFO, %d) "
+              "failed: %s (worker remains normal priority)\n",
+              priority, strerror(rc));
+    }
+    return;
+  }
+
+  if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed)) {
+    fprintf(stderr,
+            "[audiograph] worker %p set SCHED_FIFO priority %d%s\n",
+            (void *)pthread_self(), priority,
+            priority == requested ? "" : " (clamped to platform range)");
+  }
+}
+#endif
+
 static void *worker_main(void *arg) {
   intptr_t worker_slot = (intptr_t)arg;
   int worker_index = (int)worker_slot - 1;
 #if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   g_current_execution_slot = (int)worker_slot;
 #endif
-  // Elevate worker thread QoS on Apple platforms for better scheduling.
+  // Elevate worker scheduling before it begins participating in graph work.
+#ifdef __linux__
+  promote_linux_worker_to_realtime();
+#endif
 #ifdef __APPLE__
 #ifdef QOS_CLASS_USER_INTERACTIVE
   (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
@@ -552,8 +616,7 @@ static void *worker_main(void *arg) {
 
 #ifdef HAVE_MACH_RT
   // Optionally promote to Mach time-constraint scheduling
-  if (atomic_load_explicit(&g_engine.rt_time_constraint,
-                           memory_order_acquire)) {
+  if (atomic_load_explicit(&g_engine.rt_scheduling, memory_order_acquire)) {
     // Compute period from engine config
     double sr =
         (g_engine.sampleRate > 0) ? (double)g_engine.sampleRate : 48000.0;
@@ -833,9 +896,13 @@ void engine_enable_graph_logging(int enable) {
   atomic_store_explicit(&g_engine.graph_log, enable ? 1 : 0, memory_order_release);
 }
 
-void engine_enable_rt_time_constraint(int enable) {
-  atomic_store_explicit(&g_engine.rt_time_constraint, enable ? 1 : 0,
+void engine_enable_rt_scheduling(int enable) {
+  atomic_store_explicit(&g_engine.rt_scheduling, enable ? 1 : 0,
                         memory_order_release);
+}
+
+void engine_set_rt_priority(int priority) {
+  atomic_store_explicit(&g_engine.rt_priority, priority, memory_order_release);
 }
 
 void engine_stop_workers(void) {
