@@ -43,8 +43,12 @@ On-disk layout (impl spec, slice E6 / decision 7):
 Schema-1 leftovers (`dylibs/`, `staging/` directly under the cache root) are
 ignored and deleted opportunistically by the construction-time sweep, which
 also clears orphaned staging dirs and artifact dirs whose metadata fails to
-parse. Sibling dirs under the cache root (e.g. `ir-prep/`, owned by the
-convolution reverb) are never touched.
+parse. Because the cache root is shared between *processes* (each nextest
+test is its own process; a second app instance is possible too), in-flight
+staging dirs are protected by an advisory `flock` on a sibling
+`<artifact-id>.tmp.lock` file (see [`StagingLock`], eseq-linux.51): a sweep
+only deletes staging it can prove ownerless. Sibling dirs under the cache
+root (e.g. `ir-prep/`, owned by the convolution reverb) are never touched.
 
 Everything here runs on control threads only (edit sessions, agent tasks,
 effect setup); nothing is reachable from the audio process callback.
@@ -55,6 +59,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -418,8 +423,14 @@ impl DylibCacheManager {
 
     /// Allocate a fresh artifact id and create its (empty) staging dir plus
     /// the key dir it will be committed into. Returns
-    /// `(artifact_id, staging_dir, artifact_dir)`.
-    fn allocate_artifact_dirs(&self, key: &str) -> Result<(String, PathBuf, PathBuf), String> {
+    /// `(artifact_id, staging_dir, staging_lock, artifact_dir)`; the caller
+    /// must keep the lock alive until the staging dir has been renamed into
+    /// place or removed, or another process's sweep may delete it mid-write
+    /// (eseq-linux.51).
+    fn allocate_artifact_dirs(
+        &self,
+        key: &str,
+    ) -> Result<(String, PathBuf, StagingLock, PathBuf), String> {
         let (cache_root, artifact_id) = {
             let mut inner = self
                 .inner
@@ -444,13 +455,16 @@ impl DylibCacheManager {
 
         let staging_dir = staging_parent.join(format!("{artifact_id}.tmp"));
         let artifact_dir = key_dir.join(&artifact_id);
+        // Lock before the staging dir exists: a sweeping process that can see
+        // the dir must always find its lock held.
+        let staging_lock = StagingLock::acquire(&staging_dir)?;
         if staging_dir.exists() {
             std::fs::remove_dir_all(&staging_dir)
                 .map_err(|e| format!("remove stale cache staging dir: {e}"))?;
         }
         std::fs::create_dir_all(&staging_dir)
             .map_err(|e| format!("create dylib cache staging artifact: {e}"))?;
-        Ok((artifact_id, staging_dir, artifact_dir))
+        Ok((artifact_id, staging_dir, staging_lock, artifact_dir))
     }
 
     /// eseq-599: materialize an independent copy of a live-leased artifact.
@@ -464,7 +478,7 @@ impl DylibCacheManager {
         request: &CacheRequest,
         template_dir: &Path,
     ) -> Result<CompileResult, String> {
-        let (_artifact_id, staging_dir, artifact_dir) =
+        let (_artifact_id, staging_dir, _staging_lock, artifact_dir) =
             self.allocate_artifact_dirs(&request.key)?;
         if let Err(error) = copy_artifact_files(template_dir, &staging_dir) {
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -480,7 +494,7 @@ impl DylibCacheManager {
         request: &CacheRequest,
         asset_base: Option<&Path>,
     ) -> Result<CompileResult, String> {
-        let (artifact_id, staging_dir, artifact_dir) =
+        let (artifact_id, staging_dir, _staging_lock, artifact_dir) =
             self.allocate_artifact_dirs(&request.key)?;
 
         let dylib_name = format!(
@@ -679,6 +693,101 @@ fn staging_root(cache_root: &Path) -> PathBuf {
     schema_tier_root(cache_root).join("staging")
 }
 
+/// Sibling lock file marking a staging dir as in-flight:
+/// `<staging_dir>.lock` next to `<artifact-id>.tmp`.
+fn staging_lock_path(staging_dir: &Path) -> PathBuf {
+    let mut name = staging_dir
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    staging_dir.with_file_name(name)
+}
+
+/// Cross-process liveness marker for an in-flight staging dir (eseq-linux.51).
+///
+/// The construction-time sweep runs in every process sharing a cache root, so
+/// "is this staging dir orphaned?" needs an answer that survives across
+/// processes. An advisory exclusive `flock` on the sibling `.lock` file is
+/// that answer: the compiling process holds it from *before* the staging dir
+/// exists until *after* the dir is renamed into place (or cleaned up), and the
+/// OS releases it automatically if the holder dies, so a sweeper that can
+/// acquire the lock knows the dir has no live owner. `flock` handles from
+/// separate `open`s conflict even within one process, so this also covers a
+/// second manager instance sharing the root in-process.
+struct StagingLock {
+    lock_path: PathBuf,
+    _file: std::fs::File,
+}
+
+impl StagingLock {
+    /// Create and exclusively lock `<staging_dir>.lock`. Must be called
+    /// before the staging dir itself is created, so a concurrent sweeper can
+    /// never observe the dir without a held lock.
+    ///
+    /// A sweeper deletes an unlocked lock file while briefly holding its
+    /// lock, so create-then-lock can race it: our freshly created file may be
+    /// unlinked before we lock it, leaving us with a lock on an anonymous
+    /// inode no sweeper will ever check. After locking, verify the fd still
+    /// names the path and retry on mismatch (or on momentary contention).
+    fn acquire(staging_dir: &Path) -> Result<Self, String> {
+        let lock_path = staging_lock_path(staging_dir);
+        let contended_os_error = fs2::lock_contended_error().raw_os_error();
+        for _ in 0..64 {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .map_err(|e| format!("create staging lock {}: {e}", lock_path.display()))?;
+            if let Err(error) = file.try_lock_exclusive() {
+                if error.raw_os_error() == contended_os_error {
+                    // A sweeper holds it for the instant it takes to unlink
+                    // an orphan; artifact ids are unique, so no other writer
+                    // can contend. Yield and retry.
+                    std::thread::yield_now();
+                    continue;
+                }
+                return Err(format!(
+                    "lock staging lock {}: {error}",
+                    lock_path.display()
+                ));
+            }
+            let locked_ino = file
+                .metadata()
+                .map_err(|e| format!("stat staging lock {}: {e}", lock_path.display()))?;
+            match std::fs::metadata(&lock_path) {
+                Ok(on_disk) if same_inode(&locked_ino, &on_disk) => {
+                    return Ok(Self {
+                        lock_path,
+                        _file: file,
+                    })
+                }
+                // Unlinked (or replaced) by a sweeper between create and
+                // lock: this lock protects nothing. Retry with a fresh file.
+                _ => continue,
+            }
+        }
+        Err(format!(
+            "staging lock {} kept being swept while being acquired",
+            lock_path.display()
+        ))
+    }
+}
+
+impl Drop for StagingLock {
+    fn drop(&mut self) {
+        // Unlink while still holding the lock, so no sweeper can acquire the
+        // path between release and removal; the fd close releases the lock.
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+fn same_inode(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
 fn build_request(
     kind: DGenCompileKind,
     origin: DGenSourceOrigin,
@@ -831,22 +940,64 @@ fn metadata_matches(artifact_dir: &Path, request: &CacheRequest) -> Result<bool,
             .is_file())
 }
 
+/// Sweep-side view of a staging dir's sibling lock file (eseq-linux.51).
+enum OrphanLock {
+    /// The lock file does not exist: the dir's owner is gone (it unlinks the
+    /// lock only after the staging dir has been renamed away or removed), or
+    /// the dir predates the lock protocol. Safe to sweep; nothing to unlink.
+    NoLockFile,
+    /// The lock was acquired, so its owner died mid-compile. Dropping the
+    /// guard unlinks the lock file while the lock is still held.
+    Acquired(StagingLock),
+}
+
+/// Try to establish that a staging dir has no live owner. Returns `None`
+/// when the lock is held by a live process (or the lock file is unreadable)
+/// — in which case the dir must not be swept.
+fn try_acquire_orphan_lock(lock_path: &Path) -> Option<OrphanLock> {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(OrphanLock::NoLockFile)
+        }
+        // Unreadable for any other reason: assume live (sweeping is best
+        // effort; deleting an in-flight compile is the one unsafe outcome).
+        Err(_) => return None,
+    };
+    if file.try_lock_exclusive().is_err() {
+        return None;
+    }
+    Some(OrphanLock::Acquired(StagingLock {
+        lock_path: lock_path.to_path_buf(),
+        _file: file,
+    }))
+}
+
 /// Construction-time cache hygiene (impl spec, slice E6). Deletes, best
 /// effort:
 ///
 /// - schema-1 leftovers: the old `dylibs/` + `staging/` dirs directly under
 ///   the cache root (only those two names — sibling dirs like `ir-prep/`
 ///   belong to other subsystems and are never touched);
-/// - orphaned staging dirs under the current schema tier. Nothing can be
-///   leased at manager construction, so all staging dirs are orphans —
-///   except ones created by *this* process (another live manager instance
-///   sharing the root may be mid-compile), which are identifiable by the
-///   `<pid>-…` artifact-id prefix and skipped;
+/// - orphaned staging dirs under the current schema tier. "Orphaned" is a
+///   *liveness* question, not a pid-identity one: the cache root is shared by
+///   other processes (nextest runs one process per test; a second manager
+///   instance in this process is possible too), any of which may be
+///   mid-compile right now, and pids say nothing about that (eseq-linux.51).
+///   A live compile holds an exclusive [`StagingLock`] on the dir's sibling
+///   `.lock` file for its whole lifetime, so a staging dir is an orphan
+///   exactly when that lock can be acquired (or its lock file is gone);
+/// - stale `.lock` files whose staging dir no longer exists and whose lock
+///   can be acquired (their holder is gone);
 /// - artifact dirs under the current tier whose `metadata.json` is missing
 ///   or fails to parse (quarantine-by-delete; they recompile from source).
 ///
 /// Live leased artifacts are safe by construction: leasing requires a
-/// parseable, matching `metadata.json`, and this-process staging is skipped.
+/// parseable, matching `metadata.json`, and in-flight staging is lock-held.
 fn sweep_cache_root(cache_root: &Path) {
     let mut swept_old_schema = 0usize;
     let mut swept_staging = 0usize;
@@ -860,20 +1011,32 @@ fn sweep_cache_root(cache_root: &Path) {
         }
     }
 
-    // Orphaned staging dirs in the current tier (skip this process's own).
-    let own_prefix = format!("{}-", process_id());
+    // Orphaned staging dirs and stale lock files in the current tier. A
+    // staging dir whose sibling lock is held belongs to a live compile in
+    // some process sharing this root — never touch it (eseq-linux.51).
     if let Ok(entries) = std::fs::read_dir(staging_root(cache_root)) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with(&own_prefix) {
-                continue;
-            }
-            if std::fs::remove_dir_all(&path).is_ok() {
-                swept_staging += 1;
+            if path.is_dir() {
+                // Missing lock file ⇒ no live owner (a live compile creates
+                // and locks it before the dir exists and unlinks it only
+                // after the dir is gone). Held lock ⇒ live; skip. Acquired
+                // lock ⇒ the owner died; sweep the dir while holding it, so
+                // the owner-side create-then-lock protocol cannot interleave.
+                let Some(_lock) = try_acquire_orphan_lock(&staging_lock_path(&path)) else {
+                    continue;
+                };
+                if std::fs::remove_dir_all(&path).is_ok() {
+                    swept_staging += 1;
+                }
+            } else if path.extension().is_some_and(|ext| ext == "lock")
+                && !path.with_extension("").exists()
+            {
+                // Lock file whose staging dir is gone: its holder died
+                // between creating the lock and the dir. If acquired, the
+                // guard's drop unlinks the file (while the lock is held); if
+                // held, the owner is live (mid-allocation) — leave it.
+                let _lock = try_acquire_orphan_lock(&path);
             }
         }
     }
@@ -1780,6 +1943,66 @@ mod tests {
         assert!(!corrupt.exists(), "corrupt-metadata artifact swept");
         assert!(!missing_meta.exists(), "missing-metadata artifact swept");
         assert!(valid.exists(), "valid artifact kept");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// eseq-linux.51: the sweep must not delete another manager's in-flight
+    /// staging dir. Liveness is an advisory flock on the sibling `.lock`
+    /// file, so a held lock protects the dir even though the sweeping
+    /// "process" (here: this process, via an independent fd — flock treats
+    /// separate opens identically across and within processes) cannot match
+    /// it by pid. Once the lock is released the dir is an orphan and goes.
+    #[test]
+    fn startup_sweep_honors_staging_locks() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-dylib-cache-staging-lock-test-{}-{}",
+            process_id(),
+            now_unix_ms()
+        ));
+        let staging = staging_root(&root);
+        std::fs::create_dir_all(&staging).expect("create staging root");
+
+        // In-flight: lock acquired before the dir exists, as in
+        // allocate_artifact_dirs.
+        let in_flight = staging.join("12345-1-0.tmp");
+        let lock = StagingLock::acquire(&in_flight).expect("acquire staging lock");
+        std::fs::create_dir_all(&in_flight).expect("create in-flight staging");
+
+        // Orphans: a dir whose lock file exists but is unheld (owner died),
+        // a dir with no lock file at all (pre-lock-protocol leftover), and a
+        // stale lock file whose dir is gone.
+        let dead = staging.join("23456-1-0.tmp");
+        std::fs::create_dir_all(&dead).expect("create dead staging");
+        drop(StagingLock::acquire(&dead).expect("create dead lock file, then release"));
+        // Recreate the lock file unheld: acquire's drop unlinks it.
+        std::fs::write(staging_lock_path(&dead), "").expect("recreate unheld lock");
+        let unlocked = staging.join("34567-1-0.tmp");
+        std::fs::create_dir_all(&unlocked).expect("create lockless staging");
+        let stale_lock = staging.join("45678-1-0.tmp.lock");
+        std::fs::write(&stale_lock, "").expect("create stale lock");
+
+        sweep_cache_root(&root);
+
+        assert!(in_flight.exists(), "lock-held staging dir survives sweep");
+        assert!(
+            staging_lock_path(&in_flight).exists(),
+            "held lock file survives sweep"
+        );
+        assert!(!dead.exists(), "unheld-lock staging dir swept");
+        assert!(
+            !staging_lock_path(&dead).exists(),
+            "unheld lock file swept with its dir"
+        );
+        assert!(!unlocked.exists(), "lockless staging dir swept");
+        assert!(!stale_lock.exists(), "stale lock file without a dir swept");
+
+        drop(lock);
+        assert!(
+            !staging_lock_path(&in_flight).exists(),
+            "released lock unlinks its file"
+        );
+        sweep_cache_root(&root);
+        assert!(!in_flight.exists(), "released staging dir is an orphan");
         let _ = std::fs::remove_dir_all(root);
     }
 
