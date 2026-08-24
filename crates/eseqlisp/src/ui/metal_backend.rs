@@ -58,8 +58,8 @@ mod inner {
     use crate::live_audio;
     use crate::theme;
     use crate::ui::gpu_geometry::{
-        ImageVertex, LiveSpectrogramInstance, PatchCableInstance, Vertex, WaveformInstance,
-        WavetableInstance, push_solid_quad_vertices, push_solid_rect_vertices,
+        ClipStack, ImageVertex, LiveSpectrogramInstance, PatchCableInstance, ScissorRect, Vertex,
+        WaveformInstance, WavetableInstance, push_solid_quad_vertices, push_solid_rect_vertices,
     };
     use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
@@ -1789,7 +1789,7 @@ fragment float4 live_spectrogram_frag(
     #[derive(Clone, Copy)]
     struct PatchCableDrawInstance {
         instance: PatchCableInstance,
-        clip: MTLScissorRect,
+        clip: ScissorRect,
     }
 
     struct WaveformGpuResource {
@@ -3183,7 +3183,7 @@ fragment float4 live_spectrogram_frag(
         fn draw_dynamic_segment_all(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-            seg_scissor: MTLScissorRect,
+            seg_scissor: ScissorRect,
             seg_prims: &[widget_render::GpuPrimitive],
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             cell_w: f32,
@@ -3267,7 +3267,7 @@ fragment float4 live_spectrogram_frag(
                         &cable_pipeline,
                         &cables,
                     );
-                    enc.setScissorRect(seg_scissor);
+                    enc.setScissorRect(mtl_scissor(seg_scissor));
                 }
 
                 if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
@@ -3386,7 +3386,7 @@ fragment float4 live_spectrogram_frag(
         fn draw_widget_run_cached_segment(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-            seg_scissor: MTLScissorRect,
+            seg_scissor: ScissorRect,
             segment_range: Range<usize>,
             offset_prims: &[widget_render::GpuPrimitive],
             run_indices: &[usize],
@@ -3549,7 +3549,7 @@ fragment float4 live_spectrogram_frag(
                             &cable_pipeline,
                             &cables,
                         );
-                        enc.setScissorRect(seg_scissor);
+                        enc.setScissorRect(mtl_scissor(seg_scissor));
                     }
 
                     if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
@@ -3834,13 +3834,11 @@ fragment float4 live_spectrogram_frag(
             let enc = cmdbuf
                 .renderCommandEncoderWithDescriptor(&render_desc)
                 .ok_or(BackendError::MetalError)?;
-            let scene_scissor = MTLScissorRect {
-                x: 0,
-                y: 0,
-                width: texture.width(),
-                height: texture.height(),
-            };
-            enc.setScissorRect(scene_scissor);
+            let scene_scissor = ScissorRect::full(
+                texture.width().min(u32::MAX as usize) as u32,
+                texture.height().min(u32::MAX as usize) as u32,
+            );
+            enc.setScissorRect(mtl_scissor(scene_scissor));
 
             // Match the live tiled renderer: editor text first, followed by
             // ordered widget segments with nested clip markers honored.
@@ -3857,7 +3855,7 @@ fragment float4 live_spectrogram_frag(
             let segments =
                 split_prim_segment_ranges(&primitive_scene, scene_scissor, cell_w, cell_h);
             for (seg_scissor, seg_range) in &segments {
-                enc.setScissorRect(*seg_scissor);
+                enc.setScissorRect(mtl_scissor(*seg_scissor));
                 self.draw_dynamic_segment_all(
                     &enc,
                     *seg_scissor,
@@ -3871,23 +3869,18 @@ fragment float4 live_spectrogram_frag(
                     time_seconds,
                 );
             }
-            enc.setScissorRect(scene_scissor);
+            enc.setScissorRect(mtl_scissor(scene_scissor));
 
             // ── Overlay stage (dropdown menus, modal panels, etc.) ─────────
             // Drawn after the main scene with the same ordered, clip-
             // segmented path as the live global overlay pass, so captures
             // include open overlays with their clip rects honored.
             if !overlay_scene.is_empty() {
-                let overlay_scissor = MTLScissorRect {
-                    x: 0,
-                    y: 0,
-                    width: vp_w as usize,
-                    height: vp_h as usize,
-                };
+                let overlay_scissor = full_viewport_scissor(vp_w, vp_h);
                 let segments =
                     split_prim_segment_ranges(&overlay_scene, overlay_scissor, cell_w, cell_h);
                 for (seg_scissor, seg_range) in &segments {
-                    enc.setScissorRect(*seg_scissor);
+                    enc.setScissorRect(mtl_scissor(*seg_scissor));
                     self.draw_dynamic_segment_all(
                         &enc,
                         *seg_scissor,
@@ -3901,7 +3894,7 @@ fragment float4 live_spectrogram_frag(
                         time_seconds,
                     );
                 }
-                enc.setScissorRect(overlay_scissor);
+                enc.setScissorRect(mtl_scissor(overlay_scissor));
             }
 
             enc.endEncoding();
@@ -4619,7 +4612,7 @@ fragment float4 live_spectrogram_frag(
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
             pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
             images: &[widget_render::GpuImagePrimitive],
-            scissor: Option<MTLScissorRect>,
+            scissor: Option<ScissorRect>,
             load_budget: &mut usize,
             cell_w: f32,
             cell_h: f32,
@@ -4805,11 +4798,11 @@ fragment float4 live_spectrogram_frag(
                 let tile_scissor_bottom = (frame_top_px + frame_height_px)
                     .ceil()
                     .max(tile_scissor_top);
-                let tile_scissor = MTLScissorRect {
-                    x: tile_scissor_left as usize,
-                    y: tile_scissor_top as usize,
-                    width: (tile_scissor_right - tile_scissor_left) as usize,
-                    height: (tile_scissor_bottom - tile_scissor_top) as usize,
+                let tile_scissor = ScissorRect {
+                    x: tile_scissor_left.min(u32::MAX as f32) as u32,
+                    y: tile_scissor_top.min(u32::MAX as f32) as u32,
+                    width: (tile_scissor_right - tile_scissor_left).min(u32::MAX as f32) as u32,
+                    height: (tile_scissor_bottom - tile_scissor_top).min(u32::MAX as f32) as u32,
                 };
 
                 // Set scissor rect to clip to tile content area (exclude border and status row)
@@ -4817,11 +4810,11 @@ fragment float4 live_spectrogram_frag(
                 let scissor_top = content_top_px.floor().max(0.0);
                 let scissor_right = content_right_px.ceil().max(scissor_left);
                 let scissor_bottom = content_bottom_px.ceil().max(scissor_top);
-                let content_scissor = MTLScissorRect {
-                    x: scissor_left as usize,
-                    y: scissor_top as usize,
-                    width: (scissor_right - scissor_left) as usize,
-                    height: (scissor_bottom - scissor_top) as usize,
+                let content_scissor = ScissorRect {
+                    x: scissor_left.min(u32::MAX as f32) as u32,
+                    y: scissor_top.min(u32::MAX as f32) as u32,
+                    width: (scissor_right - scissor_left).min(u32::MAX as f32) as u32,
+                    height: (scissor_bottom - scissor_top).min(u32::MAX as f32) as u32,
                 };
 
                 let tile_bg = tile
@@ -4830,7 +4823,7 @@ fragment float4 live_spectrogram_frag(
                     .and_then(theme::named_color)
                     .or(tile.background_color)
                     .unwrap_or(theme::BG());
-                enc.setScissorRect(tile_scissor);
+                enc.setScissorRect(mtl_scissor(tile_scissor));
                 if let (Some(tile_chrome_pipeline), Some(instance)) = (
                     tile_chrome_pipeline.as_ref(),
                     tile_chrome_instance_px(
@@ -4878,7 +4871,7 @@ fragment float4 live_spectrogram_frag(
                     );
                 }
 
-                enc.setScissorRect(content_scissor);
+                enc.setScissorRect(mtl_scissor(content_scissor));
 
                 // ── Text content (shifted by horizontal scroll) ──────────────
                 let hscroll = tile.frame.widget_scroll_left;
@@ -5081,7 +5074,7 @@ fragment float4 live_spectrogram_frag(
                     self.stats.note_widget_segments(segments.len());
 
                     for (seg_scissor, seg_range) in &segments {
-                        enc.setScissorRect(*seg_scissor);
+                        enc.setScissorRect(mtl_scissor(*seg_scissor));
                         metal_prep_time += if use_widget_run_cache {
                             self.draw_widget_run_cached_segment(
                                 &enc,
@@ -5115,7 +5108,7 @@ fragment float4 live_spectrogram_frag(
                         };
                     }
                     // Restore tile scissor after segments
-                    enc.setScissorRect(content_scissor);
+                    enc.setScissorRect(mtl_scissor(content_scissor));
 
                     // ── Overlay collection (dropdown menus, etc.) ───────────
                     // Defer drawing until after global passes such as patch
@@ -5148,7 +5141,7 @@ fragment float4 live_spectrogram_frag(
                 }
 
                 if let Some(overlay) = tile.inspect_overlay {
-                    enc.setScissorRect(content_scissor);
+                    enc.setScissorRect(mtl_scissor(content_scissor));
                     let text_scroll = tile.frame.text_scroll_top as f32;
                     let overlay_x = (content_col + overlay.rect.col
                         - tile.frame.widget_layout_scroll_left)
@@ -5313,7 +5306,7 @@ fragment float4 live_spectrogram_frag(
 
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
                 if has_multiple_tiles && tile.show_border {
-                    enc.setScissorRect(tile_scissor);
+                    enc.setScissorRect(mtl_scissor(tile_scissor));
                     let border_color = if tile.is_active {
                         theme::BORDER_ACTIVE()
                     } else {
@@ -5554,7 +5547,7 @@ fragment float4 live_spectrogram_frag(
                     if let Some((highlight_verts, highlight_clip)) = highlight
                         && !highlight_verts.is_empty()
                     {
-                        enc.setScissorRect(highlight_clip);
+                        enc.setScissorRect(mtl_scissor(highlight_clip));
                         draw_vertices(
                             &enc,
                             &self.device,
@@ -5577,12 +5570,7 @@ fragment float4 live_spectrogram_frag(
                 // overlay subtrees (modal panels, scroll regions inside them)
                 // are honored. Each segment's scissor derives from the full
                 // viewport, which is what lets overlays escape tile bounds.
-                let overlay_scissor = MTLScissorRect {
-                    x: 0,
-                    y: 0,
-                    width: vp_w as usize,
-                    height: vp_h as usize,
-                };
+                let overlay_scissor = full_viewport_scissor(vp_w, vp_h);
                 let segments = split_prim_segment_ranges(
                     &global_overlay_prims,
                     overlay_scissor,
@@ -5590,7 +5578,7 @@ fragment float4 live_spectrogram_frag(
                     cell_h,
                 );
                 for (seg_scissor, seg_range) in &segments {
-                    enc.setScissorRect(*seg_scissor);
+                    enc.setScissorRect(mtl_scissor(*seg_scissor));
                     self.draw_dynamic_segment_all(
                         &enc,
                         *seg_scissor,
@@ -5604,7 +5592,7 @@ fragment float4 live_spectrogram_frag(
                         render_time_seconds,
                     );
                 }
-                enc.setScissorRect(overlay_scissor);
+                enc.setScissorRect(mtl_scissor(overlay_scissor));
             }
 
             // ── Deferred inspect highlight (modal-hosted hover) ─────────────
@@ -6725,12 +6713,10 @@ fragment float4 live_spectrogram_frag(
             );
 
             if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
-                let clip = MTLScissorRect {
-                    x: 0,
-                    y: 0,
-                    width: texture.width(),
-                    height: texture.height(),
-                };
+                let clip = ScissorRect::full(
+                    texture.width().min(u32::MAX as usize) as u32,
+                    texture.height().min(u32::MAX as usize) as u32,
+                );
                 let cables = collect_patch_cable_primitives(
                     &primitive_scene,
                     clip,
@@ -6747,7 +6733,7 @@ fragment float4 live_spectrogram_frag(
                     &cable_pipeline,
                     &cables,
                 );
-                enc.setScissorRect(clip);
+                enc.setScissorRect(mtl_scissor(clip));
             }
 
             if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
@@ -8004,7 +7990,7 @@ fragment float4 live_spectrogram_frag(
 
     fn collect_patch_cable_primitives(
         primitives: &[widget_render::GpuPrimitive],
-        base_clip: MTLScissorRect,
+        base_clip: ScissorRect,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -8014,31 +8000,20 @@ fragment float4 live_spectrogram_frag(
         // splitting it into clip segments. Preserve the clip stack here too,
         // otherwise patcher cables escape their widget and paint over sibling
         // panes in captures and single-frame rendering.
-        let mut clips = vec![base_clip];
+        let mut clips = ClipStack::new(base_clip);
         let mut cables = Vec::new();
         for primitive in primitives {
             match primitive {
                 widget_render::GpuPrimitive::PushClipRect(rect) => {
-                    let current = *clips.last().unwrap();
-                    let nested = MTLScissorRect {
-                        x: (rect.col * cell_w).max(0.0) as usize,
-                        y: (rect.row * cell_h).max(0.0) as usize,
-                        width: (rect.width * cell_w).max(0.0) as usize,
-                        height: (rect.height * cell_h).max(0.0) as usize,
-                    };
-                    clips.push(intersect_scissor_rects(current, nested));
+                    clips.push_cells(*rect, cell_w, cell_h);
                 }
-                widget_render::GpuPrimitive::PopClipRect => {
-                    if clips.len() > 1 {
-                        clips.pop();
-                    }
-                }
+                widget_render::GpuPrimitive::PopClipRect => clips.pop(),
                 _ => {
                     if let widget_render::GpuPrimitive::PatchCable(cable) =
                         widget_render::innermost_primitive(primitive)
                         && let Some(instance) = patch_cable_draw_instance_from_primitive(
                             cable,
-                            *clips.last().unwrap(),
+                            clips.current(),
                             cell_w,
                             cell_h,
                             vp_w,
@@ -8055,7 +8030,7 @@ fragment float4 live_spectrogram_frag(
 
     fn patch_cable_draw_instance_from_primitive(
         cable: &widget_render::GpuPatchCablePrimitive,
-        clip: MTLScissorRect,
+        clip: ScissorRect,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -8137,7 +8112,7 @@ fragment float4 live_spectrogram_frag(
         active: bool,
         pending: bool,
         center_px: (f32, f32),
-        clip: MTLScissorRect,
+        clip: ScissorRect,
         connected_sources: Vec<usize>,
         selected_sources: Vec<usize>,
     }
@@ -8148,7 +8123,7 @@ fragment float4 live_spectrogram_frag(
         row_off: f32,
         cell_w: f32,
         cell_h: f32,
-        visible_scissor: MTLScissorRect,
+        visible_scissor: ScissorRect,
         out: &mut Vec<ModPatchPort>,
     ) {
         if layout_node_bool_prop(node, "patch-port") {
@@ -8375,26 +8350,29 @@ fragment float4 live_spectrogram_frag(
         cables
     }
 
-    fn full_viewport_scissor(vp_w: f32, vp_h: f32) -> MTLScissorRect {
+    fn full_viewport_scissor(vp_w: f32, vp_h: f32) -> ScissorRect {
+        ScissorRect::full(
+            vp_w.ceil().clamp(0.0, u32::MAX as f32) as u32,
+            vp_h.ceil().clamp(0.0, u32::MAX as f32) as u32,
+        )
+    }
+
+    fn mtl_scissor(rect: ScissorRect) -> MTLScissorRect {
         MTLScissorRect {
-            x: 0,
-            y: 0,
-            width: vp_w.ceil().max(0.0) as usize,
-            height: vp_h.ceil().max(0.0) as usize,
+            x: rect.x as usize,
+            y: rect.y as usize,
+            width: rect.width as usize,
+            height: rect.height as usize,
         }
     }
 
-    fn same_scissor(a: MTLScissorRect, b: MTLScissorRect) -> bool {
-        a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height
-    }
-
     fn shared_endpoint_clip(
-        source_clip: MTLScissorRect,
-        dest_clip: MTLScissorRect,
+        source_clip: ScissorRect,
+        dest_clip: ScissorRect,
         vp_w: f32,
         vp_h: f32,
-    ) -> MTLScissorRect {
-        if same_scissor(source_clip, dest_clip) {
+    ) -> ScissorRect {
+        if source_clip == dest_clip {
             source_clip
         } else {
             full_viewport_scissor(vp_w, vp_h)
@@ -8431,7 +8409,7 @@ fragment float4 live_spectrogram_frag(
         cursor_px: (f32, f32),
         vp_w: f32,
         vp_h: f32,
-    ) -> Option<(Vec<Vertex>, MTLScissorRect)> {
+    ) -> Option<(Vec<Vertex>, ScissorRect)> {
         let Some(source_port) = ports.iter().find(|port| {
             port.direction == ModPatchPortDirection::Out && port.active && port.pending
         }) else {
@@ -8475,7 +8453,7 @@ fragment float4 live_spectrogram_frag(
         end: (f32, f32),
         radius_px: f32,
         color: Color,
-        clip: MTLScissorRect,
+        clip: ScissorRect,
         cables: &mut Vec<PatchCableDrawInstance>,
         vp_w: f32,
         vp_h: f32,
@@ -8613,7 +8591,7 @@ fragment float4 live_spectrogram_frag(
 
     fn image_intersects_scissor(
         image: &widget_render::GpuImagePrimitive,
-        scissor: MTLScissorRect,
+        scissor: ScissorRect,
         cell_w: f32,
         cell_h: f32,
     ) -> bool {
@@ -8623,8 +8601,8 @@ fragment float4 live_spectrogram_frag(
         let y1 = ((image.rect.row + image.rect.height) * cell_h).ceil() as isize;
         let sx0 = scissor.x as isize;
         let sy0 = scissor.y as isize;
-        let sx1 = (scissor.x + scissor.width) as isize;
-        let sy1 = (scissor.y + scissor.height) as isize;
+        let sx1 = scissor.x.saturating_add(scissor.width) as isize;
+        let sy1 = scissor.y.saturating_add(scissor.height) as isize;
         x1 > sx0 && x0 < sx1 && y1 > sy0 && y0 < sy1
     }
 
@@ -9257,7 +9235,7 @@ fragment float4 live_spectrogram_frag(
         while run_start < instances.len() {
             let clip = instances[run_start].clip;
             let mut run_end = run_start + 1;
-            while run_end < instances.len() && same_scissor(instances[run_end].clip, clip) {
+            while run_end < instances.len() && instances[run_end].clip == clip {
                 run_end += 1;
             }
 
@@ -9269,7 +9247,7 @@ fragment float4 live_spectrogram_frag(
                 run_start = run_end;
                 continue;
             };
-            enc.setScissorRect(clip);
+            enc.setScissorRect(mtl_scissor(clip));
             unsafe {
                 enc.setVertexBuffer_offset_atIndex(Some(&upload.buffer), upload.offset, 0);
                 enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
@@ -9311,80 +9289,15 @@ fragment float4 live_spectrogram_frag(
         out
     }
 
-    /// Split a flat list of primitives into segments separated by PushClipRect/PopClipRect.
-    /// Each segment gets an associated scissor rect. Clip rects are intersected with the
-    /// current scissor (stacked) so nested scroll containers work correctly.
-    fn split_prim_segments<'a>(
-        primitives: &'a [widget_render::GpuPrimitive],
-        base_scissor: MTLScissorRect,
-        cell_w: f32,
-        cell_h: f32,
-    ) -> Vec<(MTLScissorRect, &'a [widget_render::GpuPrimitive])> {
-        // Fast path: no clip rects at all
-        let has_clips = primitives.iter().any(|p| {
-            matches!(
-                p,
-                widget_render::GpuPrimitive::PushClipRect(_)
-                    | widget_render::GpuPrimitive::PopClipRect
-            )
-        });
-        if !has_clips {
-            return vec![(base_scissor, primitives)];
-        }
-
-        let mut segments = Vec::new();
-        let mut scissor_stack: Vec<MTLScissorRect> = vec![base_scissor];
-        let mut seg_start = 0;
-
-        for (i, prim) in primitives.iter().enumerate() {
-            match prim {
-                widget_render::GpuPrimitive::PushClipRect(rect) => {
-                    // Flush the current segment (excluding this marker)
-                    if i > seg_start {
-                        segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..i]));
-                    }
-                    // Compute new scissor = intersection of current and clip rect
-                    let clip_x = (rect.col * cell_w).max(0.0) as usize;
-                    let clip_y = (rect.row * cell_h).max(0.0) as usize;
-                    let clip_w = (rect.width * cell_w).max(0.0) as usize;
-                    let clip_h = (rect.height * cell_h).max(0.0) as usize;
-                    let current = scissor_stack.last().unwrap();
-                    let new_scissor = intersect_scissor_rects(
-                        *current,
-                        MTLScissorRect {
-                            x: clip_x,
-                            y: clip_y,
-                            width: clip_w,
-                            height: clip_h,
-                        },
-                    );
-                    scissor_stack.push(new_scissor);
-                    seg_start = i + 1;
-                }
-                widget_render::GpuPrimitive::PopClipRect => {
-                    // Flush the current segment
-                    if i > seg_start {
-                        segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..i]));
-                    }
-                    scissor_stack.pop();
-                    seg_start = i + 1;
-                }
-                _ => {}
-            }
-        }
-        // Final segment
-        if seg_start < primitives.len() {
-            segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..]));
-        }
-        segments
-    }
-
+    /// Split a flat list of primitives into ranges separated by clip markers.
+    /// The backend-neutral clip stack owns cell-to-pixel rounding and nested
+    /// intersections; Metal conversion happens only when a range is encoded.
     fn split_prim_segment_ranges(
         primitives: &[widget_render::GpuPrimitive],
-        base_scissor: MTLScissorRect,
+        base_scissor: ScissorRect,
         cell_w: f32,
         cell_h: f32,
-    ) -> Vec<(MTLScissorRect, Range<usize>)> {
+    ) -> Vec<(ScissorRect, Range<usize>)> {
         if !primitives.iter().any(|primitive| {
             matches!(
                 primitive,
@@ -9396,44 +9309,30 @@ fragment float4 live_spectrogram_frag(
         }
 
         let mut segments = Vec::new();
-        let mut scissor_stack: Vec<MTLScissorRect> = vec![base_scissor];
+        let mut clips = ClipStack::new(base_scissor);
         let mut seg_start = 0;
 
         for (i, prim) in primitives.iter().enumerate() {
             match prim {
                 widget_render::GpuPrimitive::PushClipRect(rect) => {
                     if i > seg_start {
-                        segments.push((*scissor_stack.last().unwrap(), seg_start..i));
+                        segments.push((clips.current(), seg_start..i));
                     }
-                    let clip_x = (rect.col * cell_w).max(0.0) as usize;
-                    let clip_y = (rect.row * cell_h).max(0.0) as usize;
-                    let clip_w = (rect.width * cell_w).max(0.0) as usize;
-                    let clip_h = (rect.height * cell_h).max(0.0) as usize;
-                    let current = scissor_stack.last().unwrap();
-                    let new_scissor = intersect_scissor_rects(
-                        *current,
-                        MTLScissorRect {
-                            x: clip_x,
-                            y: clip_y,
-                            width: clip_w,
-                            height: clip_h,
-                        },
-                    );
-                    scissor_stack.push(new_scissor);
+                    clips.push_cells(*rect, cell_w, cell_h);
                     seg_start = i + 1;
                 }
                 widget_render::GpuPrimitive::PopClipRect => {
                     if i > seg_start {
-                        segments.push((*scissor_stack.last().unwrap(), seg_start..i));
+                        segments.push((clips.current(), seg_start..i));
                     }
-                    scissor_stack.pop();
+                    clips.pop();
                     seg_start = i + 1;
                 }
                 _ => {}
             }
         }
         if seg_start < primitives.len() {
-            segments.push((*scissor_stack.last().unwrap(), seg_start..primitives.len()));
+            segments.push((clips.current(), seg_start..primitives.len()));
         }
         segments
     }
@@ -9462,19 +9361,6 @@ fragment float4 live_spectrogram_frag(
             }
         }
         buckets.into_values().collect()
-    }
-
-    fn intersect_scissor_rects(a: MTLScissorRect, b: MTLScissorRect) -> MTLScissorRect {
-        let x1 = a.x.max(b.x);
-        let y1 = a.y.max(b.y);
-        let x2 = (a.x + a.width).min(b.x + b.width);
-        let y2 = (a.y + a.height).min(b.y + b.height);
-        MTLScissorRect {
-            x: x1,
-            y: y1,
-            width: if x2 > x1 { x2 - x1 } else { 0 },
-            height: if y2 > y1 { y2 - y1 } else { 0 },
-        }
     }
 
     /// Partition widget instances into background and foreground runs in a single pass.
