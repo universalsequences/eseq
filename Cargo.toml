@@ -6,6 +6,9 @@ members = [
 ]
 resolver = "3"
 
+[patch.crates-io]
+aubio-sys = { path = "vendor/aubio-sys-0.2.1" }
+
 [profile.release]
 debug = true
 strip = "none"
