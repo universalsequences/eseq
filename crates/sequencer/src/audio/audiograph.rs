@@ -158,7 +158,14 @@ extern "C" {
     pub fn engine_enable_rt_scheduling(enable: c_int);
     pub fn engine_set_rt_priority(priority: c_int);
     pub fn engine_get_rt_status(status: *mut EngineRtStatus);
+    #[cfg(target_os = "linux")]
+    pub fn engine_set_rtkit_hooks(
+        worker_hook: Option<extern "C" fn(libc::pid_t, c_int) -> c_int>,
+        callback_hook: Option<extern "C" fn(libc::pid_t, c_int) -> c_int>,
+    );
     pub fn engine_promote_current_thread_rt();
+    #[cfg(target_os = "linux")]
+    pub fn engine_record_rtkit_callback_result(tid: libc::pid_t);
     pub fn debug_dump_graph(lg: *mut LiveGraph);
 
     // Graph lifecycle
@@ -371,12 +378,11 @@ pub fn format_rt_status(status: EngineRtStatus) -> String {
     format!("{workers}, {callback}")
 }
 
-/// Promote the calling thread to realtime scheduling: Linux SCHED_FIFO at the
-/// configured rt priority + 1 so the audio callback thread outranks the graph
-/// workers it drives. No-op on Apple (CoreAudio already provides an RT
-/// callback thread) and when rt scheduling is disabled; a permission failure
-/// logs the workers' one-shot RLIMIT_RTPRIO warning and leaves the thread at
-/// normal priority.
+/// Promote the calling thread to realtime scheduling. Linux first requests
+/// SCHED_FIFO at the configured priority + 1; permission denial publishes the
+/// TID to a non-realtime RealtimeKit helper for asynchronous SCHED_RR
+/// promotion. No-op on Apple (CoreAudio already provides an RT callback
+/// thread) and when realtime scheduling is disabled.
 pub unsafe fn promote_current_thread_rt() {
     engine_promote_current_thread_rt();
 }

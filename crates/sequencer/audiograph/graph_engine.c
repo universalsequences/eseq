@@ -9,6 +9,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 
 // On Apple platforms, enable QoS hints for worker threads to reduce jitter.
 #ifdef __APPLE__
@@ -81,7 +84,11 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 #endif
 
 static _Atomic int g_active_job_count = 0;
+#ifdef __linux__
+static EngineRtKitWorkerHook g_rtkit_worker_hook = NULL;
+static EngineRtKitCallbackHook g_rtkit_callback_hook = NULL;
 static _Atomic int g_rt_permission_warning_logged = 0;
+#endif
 static _Atomic uint64_t g_stall_recovery_count = 0;
 static _Atomic uint64_t g_graph_trace_block_counter = 0;
 static _Atomic uint32_t g_graph_trace_silent_streak = 0;
@@ -217,7 +224,6 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.graph_log, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.activeWorkerLimit, 0, memory_order_relaxed);
   atomic_store_explicit(&g_active_job_count, 0, memory_order_relaxed);
-  atomic_store_explicit(&g_rt_permission_warning_logged, 0, memory_order_relaxed);
   atomic_store_explicit(&g_stall_recovery_count, 0, memory_order_relaxed);
   atomic_store_explicit(&g_graph_trace_block_counter, 0, memory_order_relaxed);
   atomic_store_explicit(&g_graph_trace_silent_streak, 0, memory_order_relaxed);
@@ -554,10 +560,13 @@ static void wait_for_block_start_or_shutdown(void) {
 // priority before clamping to the platform range: workers use 0, the callback
 // thread uses +1 so the thread that publishes each block (and helps drain the
 // graph in process_next_block) is never preempted by its own helpers.
-static void promote_current_linux_thread_to_fifo(int priority_boost,
-                                                 const char *role) {
+// Returns true only when direct promotion was permission-denied and the
+// caller should ask the Rust RealtimeKit helper for SCHED_RR instead.
+static bool promote_current_linux_thread_to_fifo(int priority_boost,
+                                                 const char *role,
+                                                 int *requested_priority) {
   if (!atomic_load_explicit(&g_engine.rt_scheduling, memory_order_acquire)) {
-    return;
+    return false;
   }
 
   int min_priority = sched_get_priority_min(SCHED_FIFO);
@@ -568,7 +577,7 @@ static void promote_current_linux_thread_to_fifo(int priority_boost,
             "[audiograph] WARN: cannot query SCHED_FIFO priority range: %s "
             "(%s remains normal priority)\n",
             strerror(err), role);
-    return;
+    return false;
   }
 
   int requested =
@@ -581,26 +590,18 @@ static void promote_current_linux_thread_to_fifo(int priority_boost,
     priority = max_priority;
 
   struct sched_param policy = {.sched_priority = priority};
+  *requested_priority = priority;
   int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &policy);
   if (rc != 0) {
     if (rc == EPERM || rc == EACCES) {
-      int expected = 0;
-      if (atomic_compare_exchange_strong_explicit(
-              &g_rt_permission_warning_logged, &expected, 1,
-              memory_order_acq_rel, memory_order_relaxed)) {
-        fprintf(stderr,
-                "[audiograph] WARN: SCHED_FIFO priority %d denied: %s; grant "
-                "RLIMIT_RTPRIO with limits.conf/systemd LimitRTPRIO or grant "
-                "CAP_SYS_NICE (%s remains normal priority)\n",
-                priority, strerror(rc), role);
-      }
+      return true;
     } else {
       fprintf(stderr,
               "[audiograph] WARN: pthread_setschedparam(SCHED_FIFO, %d) "
               "failed: %s (%s remains normal priority)\n",
               priority, strerror(rc), role);
     }
-    return;
+    return false;
   }
 
   if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed)) {
@@ -609,6 +610,7 @@ static void promote_current_linux_thread_to_fifo(int priority_boost,
             role, (void *)pthread_self(), priority,
             priority == requested ? "" : " (clamped to platform range)");
   }
+  return false;
 }
 
 static void read_current_linux_scheduling(int *policy, int *priority,
@@ -628,8 +630,47 @@ static void read_current_linux_scheduling(int *policy, int *priority,
   *priority = param.sched_priority;
 }
 
+void engine_set_rtkit_hooks(EngineRtKitWorkerHook worker_hook,
+                            EngineRtKitCallbackHook callback_hook) {
+  // Registered by the control thread before workers or the callback can run.
+  g_rtkit_worker_hook = worker_hook;
+  g_rtkit_callback_hook = callback_hook;
+}
+
+static void warn_realtime_unavailable_without_host(void) {
+  int expected = 0;
+  if (atomic_compare_exchange_strong_explicit(
+          &g_rt_permission_warning_logged, &expected, 1, memory_order_acq_rel,
+          memory_order_relaxed)) {
+    fprintf(stderr,
+            "[audiograph] WARN: direct SCHED_FIFO promotion was denied and "
+            "no host RealtimeKit fallback is registered; audio continues at "
+            "normal priority\n");
+  }
+}
+
+void engine_record_rtkit_callback_result(pid_t tid) {
+  struct sched_param param = {.sched_priority = 0};
+  int policy = sched_getscheduler(tid);
+  if (policy < 0 || sched_getparam(tid, &param) != 0) {
+    policy = ENGINE_SCHED_POLICY_UNKNOWN;
+    param.sched_priority = 0;
+  }
+  atomic_store_explicit(&g_engine.callbackPolicy, policy, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, param.sched_priority,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 1, memory_order_release);
+}
+
 static void promote_linux_worker_to_realtime(void) {
-  promote_current_linux_thread_to_fifo(0, "worker");
+  int requested_priority = 0;
+  if (promote_current_linux_thread_to_fifo(0, "worker", &requested_priority)) {
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (g_rtkit_worker_hook)
+      (void)g_rtkit_worker_hook(tid, requested_priority);
+    else
+      warn_realtime_unavailable_without_host();
+  }
 }
 #endif
 
@@ -639,7 +680,23 @@ void engine_promote_current_thread_rt(void) {
   // and no thread-spawn hook, so the callback promotes itself on first entry.
   // Without this the workers run SCHED_FIFO while the thread that drives the
   // block stays SCHED_OTHER — priority inversion in the audio path.
-  promote_current_linux_thread_to_fifo(1, "audio callback thread");
+  int requested_priority = 0;
+  bool rtkit_needed = promote_current_linux_thread_to_fifo(
+      1, "audio callback thread", &requested_priority);
+  if (rtkit_needed) {
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (g_rtkit_callback_hook &&
+        g_rtkit_callback_hook(tid, requested_priority)) {
+      // The helper records the achieved policy after its D-Bus call. Marking
+      // this pending prevents an early SCHED_OTHER snapshot being mistaken
+      // for the final fallback result.
+      atomic_store_explicit(&g_engine.callbackReported, 0,
+                            memory_order_release);
+      return;
+    }
+    if (!g_rtkit_callback_hook)
+      warn_realtime_unavailable_without_host();
+  }
   int policy = ENGINE_SCHED_POLICY_UNKNOWN;
   int priority = 0;
   read_current_linux_scheduling(&policy, &priority, "audio callback thread");

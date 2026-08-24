@@ -398,6 +398,9 @@ fn init_engine_parts(
     let rt_log = env_flag("TINYSEQ_AUDIOGRAPH_RT_LOG", false);
     let graph_log = env_flag("TINYSEQ_AUDIOGRAPH_TRACE", false);
 
+    #[cfg(target_os = "linux")]
+    super::rtkit::start(rt_log);
+
     unsafe {
         audiograph::enable_rt_logging(rt_log);
         audiograph::enable_graph_logging(graph_log);

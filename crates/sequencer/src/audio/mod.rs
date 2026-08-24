@@ -45,6 +45,8 @@ mod graph_dispatch;
 mod params;
 mod rack;
 mod render;
+#[cfg(target_os = "linux")]
+mod rtkit;
 mod state;
 mod stream;
 mod voices;

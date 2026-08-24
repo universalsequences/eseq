@@ -50,6 +50,8 @@ fn linux_cpal_output_stream_starts_and_renders_callbacks() {
 #[cfg(target_os = "linux")]
 #[test]
 fn promote_current_thread_rt_promotes_above_workers_or_degrades_gracefully() {
+    super::rtkit::start(false);
+
     fn current_policy_and_priority() -> (i32, i32) {
         let mut param = libc::sched_param { sched_priority: 0 };
         let mut policy: libc::c_int = 0;
@@ -78,12 +80,20 @@ fn promote_current_thread_rt_promotes_above_workers_or_degrades_gracefully() {
             crate::audiograph::promote_current_thread_rt();
             crate::audiograph::enable_rt_scheduling(false);
         }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while unsafe { crate::audiograph::rt_status() }.callback_reported == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let (policy, priority) = current_policy_and_priority();
         if policy == libc::SCHED_FIFO {
             assert_eq!(
                 priority, 21,
                 "callback thread must sit one step above the workers' base priority"
             );
+        } else if policy == libc::SCHED_RR {
+            assert!(priority >= 1 && priority <= 21);
         } else {
             assert_eq!((policy, priority), (libc::SCHED_OTHER, 0));
         }
@@ -99,6 +109,7 @@ fn promote_current_thread_rt_promotes_above_workers_or_degrades_gracefully() {
 #[cfg(target_os = "linux")]
 #[test]
 fn worker_startup_reports_achieved_policy() {
+    super::rtkit::start(false);
     crate::audiograph::initialize_engine_for_test(128, 48_000);
     unsafe {
         crate::audiograph::set_rt_priority(20);
@@ -111,6 +122,8 @@ fn worker_startup_reports_achieved_policy() {
     assert_eq!(status.workers_reported, 2);
     if status.worker_policy == libc::SCHED_FIFO {
         assert_eq!(status.worker_priority, 20);
+    } else if status.worker_policy == libc::SCHED_RR {
+        assert!(status.worker_priority >= 1 && status.worker_priority <= 20);
     } else {
         assert_eq!(status.worker_policy, libc::SCHED_OTHER);
         assert_eq!(status.worker_priority, 0);

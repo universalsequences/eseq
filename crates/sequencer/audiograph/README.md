@@ -58,7 +58,17 @@ void engine_set_rt_priority(int priority);     // Linux SCHED_FIFO priority
 void engine_set_os_workgroup(void *oswg);      // OS Workgroup (macOS 10.16+)
 ```
 
-On Linux, `SCHED_FIFO` requires a nonzero `RLIMIT_RTPRIO`. The repository ships
+On Linux, eseq first requests `SCHED_FIFO`, which requires a nonzero
+`RLIMIT_RTPRIO`. If that request is denied, a non-audio helper asks the system
+RealtimeKit service for capped `SCHED_RR`; this is the zero-configuration path
+on stock PipeWire desktops. Before its first request, the helper deliberately
+sets the process's soft and hard `RLIMIT_RTTIME` to RealtimeKit's
+`RTTimeUSecMax` (or a pre-existing lower hard limit). Linux sends `SIGKILL` if
+an RT thread consumes that entire uninterrupted CPU budget. Audiograph threads
+block on ALSA or the block-start condition every period, which resets the
+accounting; the limit protects the host from a runaway realtime thread.
+
+For uncapped FIFO priorities, the repository ships
 [`packaging/eseq-realtime.conf`](packaging/eseq-realtime.conf), a PAM limits
 drop-in granting realtime-group members `rtprio 95` and unlimited locked memory.
 Provision a development or manually installed host with:
@@ -87,10 +97,13 @@ grant broader scheduling authority than this group-scoped limit.
 
 At startup, eseq reports the policies and priorities actually observed on the
 worker and audio callback threads. With the drop-in, workers use `SCHED_FIFO`
-priority 20 and the callback uses priority 21. Without it, they remain
-`SCHED_OTHER` priority 0 and audio startup continues after a one-shot warning.
-Set `TINYSEQ_AUDIOGRAPH_RT_LOG=1` for per-thread promotion logs; `chrt -p <tid>`
-can independently inspect a thread from another shell.
+priority 20 and the callback uses priority 21. Without it, RealtimeKit normally
+grants `SCHED_RR` at its advertised cap: the helper reserves the top available
+step for the callback and keeps callback priority at least equal to worker
+priority when the cap has no headroom. If RealtimeKit or the system bus is also
+unavailable, threads remain `SCHED_OTHER` priority 0 and audio continues after
+a one-shot warning. Set `TINYSEQ_AUDIOGRAPH_RT_LOG=1` for per-thread promotion
+logs; `chrt -p <tid>` can independently inspect a thread from another shell.
 
 ### Graph Lifecycle
 

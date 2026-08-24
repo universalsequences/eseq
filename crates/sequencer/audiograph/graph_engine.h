@@ -220,15 +220,28 @@ void engine_enable_graph_logging(int enable);
 void engine_enable_rt_scheduling(int enable);
 void engine_set_rt_priority(int priority);
 void engine_get_rt_status(EngineRtStatus *status);
+#ifdef __linux__
+typedef int (*EngineRtKitWorkerHook)(pid_t tid, int requested_priority);
+typedef int (*EngineRtKitCallbackHook)(pid_t tid, int requested_priority);
+// Optional host hooks. Null preserves the standalone C engine's graceful
+// SCHED_OTHER fallback without introducing a D-Bus or Rust link dependency.
+void engine_set_rtkit_hooks(EngineRtKitWorkerHook worker_hook,
+                            EngineRtKitCallbackHook callback_hook);
+#endif
 
 // Promote the calling thread to realtime scheduling. Intended for the audio
 // callback thread, which drives each block and helps drain the graph: on
 // Linux it gets SCHED_FIFO at the configured rt priority + 1 so it outranks
 // the workers it feeds. No-op on Apple (CoreAudio already delivers the
 // callback on a realtime thread) and when rt scheduling is disabled; a
-// permission failure logs the same one-shot RLIMIT_RTPRIO warning as the
-// workers and the thread continues at normal priority.
+// permission failure is published to the non-RT Rust RealtimeKit helper; the
+// thread continues at normal priority if that fallback is unavailable.
 void engine_promote_current_thread_rt(void);
+#ifdef __linux__
+// Called by the RealtimeKit helper after its asynchronous callback-thread
+// request, to publish the native policy observed for that Linux TID.
+void engine_record_rtkit_callback_result(pid_t tid);
+#endif
 bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 
 // ===================== Live Graph Operations =====================
