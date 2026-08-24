@@ -35,7 +35,8 @@ are incremental.
   - `crates/sequencer/audiograph/` — vendored copy of
     [audiograph](https://github.com/universalsequences/audiograph), the C
     live-editable audio graph engine, copied verbatim from its own repo
-  - `crates/sequencer/tools/DGenLisp` — prebuilt binary of
+  - `crates/sequencer/tools/DGenLisp-<target>` — prebuilt, target-specific
+    binaries of
     [dgen-audio](https://github.com/universalsequences/dgen-audio)'s DGenLisp,
     a Lisp-to-dylib DSP compiler; the sequencer shells out to it to compile
     instrument/effect patches to native shared libraries at runtime

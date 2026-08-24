@@ -1816,6 +1816,37 @@ fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
     );
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-macos-arm64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-linux-x86_64";
+
+fn patcher_test_dgenlisp_tool(repo_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("ESEQ_DGENLISP_TOOL").filter(|path| !path.is_empty()) {
+        return Ok(path.into());
+    }
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    {
+        Ok(repo_root
+            .join("crates/sequencer/tools")
+            .join(DGENLISP_TOOL_FILENAME))
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    )))]
+    {
+        Err(format!(
+            "no DGenLisp test compiler is available for {}-{}; set ESEQ_DGENLISP_TOOL",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    }
+}
+
 fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
     let source_path = temp_patcher_source_path("patcher-dgen-compile");
     let out_dir = source_path.with_extension("out");
@@ -1826,7 +1857,7 @@ fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
         .parent()
         .and_then(|path| path.parent())
         .expect("eseqlisp crate should live below the repository root");
-    let tool_path = repo_root.join("crates/sequencer/tools/DGenLisp");
+    let tool_path = patcher_test_dgenlisp_tool(repo_root)?;
     let output = std::process::Command::new(tool_path)
         .args(["compile", source_path.to_str().unwrap()])
         .args(["-o", out_dir.to_str().unwrap()])

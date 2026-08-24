@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import os
 import re
 from collections import defaultdict
 from pathlib import Path
 
 
-DEFAULT_DGENLISP_ROOT = Path("/Users/alecresende/code/swift/dgen/Sources/DGenLisp")
 DEFAULT_OPERATOR_MANIFEST = Path("tools/dgenlisp-operators.json")
 
 
@@ -1059,7 +1057,11 @@ def build_operator_manifest(data):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate structured DGenLisp API data for sequencer.")
-    parser.add_argument("--dgenlisp-root", default=str(DEFAULT_DGENLISP_ROOT))
+    parser.add_argument(
+        "--dgenlisp-root",
+        required=True,
+        help="Path to the dgen-audio Sources/DGenLisp directory.",
+    )
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--output", default=None)
     parser.add_argument(
@@ -1069,7 +1071,7 @@ def main():
     )
     args = parser.parse_args()
 
-    dgen_root = Path(os.path.expanduser(args.dgenlisp_root)).resolve()
+    dgen_root = Path(args.dgenlisp_root).expanduser().resolve()
     repo_root = Path(args.repo_root).resolve()
     output = Path(args.output).resolve() if args.output else repo_root / "docs" / "dgenlisp-api.json"
     operator_output = (

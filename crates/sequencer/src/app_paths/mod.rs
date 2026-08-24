@@ -12,9 +12,15 @@ untouched.
 
 In dev mode every query resolves to exactly what the pre-`AppPaths` code
 resolved to when running from the workspace (post `enter_sequencer_dir()`).
-The release arm carries the `.app` bundle shapes from the parent product spec
-(`embedded-dgen-toolchain-v0.1-spec.md`, "Writable Runtime Layout") but is
+The release arm carries the packaged application shapes from the parent product
+spec (`embedded-dgen-toolchain-v0.1-spec.md`, "Writable Runtime Layout") but is
 unexercised until Phase 5.
+
+Dev-only override: `ESEQ_DGENLISP_TOOL=/abs/path` selects a custom DGenLisp
+compiler. Like all dev path overrides, it is captured at construction and
+logged when active. The default compiler filename is selected from the build
+target, so a checkout containing tools for multiple targets never executes a
+host-incompatible binary.
 
 Dev-only override: `ESEQ_DGEN_TOOLCHAIN_ROOT=/abs/path` redirects
 [`AppPaths::dgen_toolchain_root`] away from the per-checkout
@@ -30,6 +36,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-macos-arm64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-linux-x86_64";
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
+compile_error!("no bundled DGenLisp compiler exists for this target");
+
 #[derive(Clone, Debug)]
 pub enum AppPaths {
     /// Cargo-workspace layout: tools and source roots under the sequencer
@@ -40,19 +56,21 @@ pub enum AppPaths {
         workspace_root: PathBuf,
         temp_dir: PathBuf,
         user_lisp_root: PathBuf,
+        /// `ESEQ_DGENLISP_TOOL` override, captured at construction (see module
+        /// doc). `None` selects the checked-in compiler for the build target.
+        dgenlisp_tool_override: Option<PathBuf>,
         /// `ESEQ_DGEN_TOOLCHAIN_ROOT` override, captured at construction (see
         /// module doc). `None` = the default per-checkout stage.
         dgen_toolchain_override: Option<PathBuf>,
     },
-    /// `.app` bundle layout per the parent spec: helper binaries in
-    /// `Contents/MacOS`, the staged toolchain in `Contents/Resources`,
-    /// sources in `~/Library/Application Support/<bundle-id>/`, generated
-    /// artifacts in `~/Library/Caches/<bundle-id>/`.
+    /// Packaged layout per the parent spec: helper binaries in the platform's
+    /// executable directory, staged resources in `contents_resources`, and
+    /// mutable user/cache roots supplied by the platform launcher.
     ///
     /// Phase 5 (parent spec): nothing constructs this yet; the shapes exist
     /// so the release layout is pinned now.
     Release {
-        contents_macos: PathBuf,
+        executable_dir: PathBuf,
         contents_resources: PathBuf,
         application_support: PathBuf,
         caches: PathBuf,
@@ -71,6 +89,7 @@ impl AppPaths {
             workspace_root,
             temp_dir: std::env::temp_dir(),
             user_lisp_root,
+            dgenlisp_tool_override: None,
             dgen_toolchain_override: None,
         }
     }
@@ -85,30 +104,30 @@ impl AppPaths {
             workspace_root,
             user_lisp_root_from_env()?,
         );
-        if let Some(override_root) = dev_toolchain_override_from_env() {
-            let AppPaths::Dev {
-                dgen_toolchain_override,
-                ..
-            } = &mut paths
-            else {
-                unreachable!("Self::dev constructs the Dev arm");
-            };
-            *dgen_toolchain_override = Some(override_root);
-        }
+        let AppPaths::Dev {
+            dgenlisp_tool_override,
+            dgen_toolchain_override,
+            ..
+        } = &mut paths
+        else {
+            unreachable!("Self::dev constructs the Dev arm");
+        };
+        *dgenlisp_tool_override = dev_dgenlisp_tool_override_from_env();
+        *dgen_toolchain_override = dev_toolchain_override_from_env();
         Ok(paths)
     }
 
     /// Phase 5 only: deriving these roots (bundle location, `<bundle-id>`
     /// dirs) is unimplemented; no production code constructs this arm yet.
     pub fn release(
-        contents_macos: PathBuf,
+        executable_dir: PathBuf,
         contents_resources: PathBuf,
         application_support: PathBuf,
         caches: PathBuf,
         user_lisp_root: PathBuf,
     ) -> Self {
         AppPaths::Release {
-            contents_macos,
+            executable_dir,
             contents_resources,
             application_support,
             caches,
@@ -119,8 +138,16 @@ impl AppPaths {
     /// The DGenLisp helper binary invoked for every compile.
     pub fn dgenlisp_tool(&self) -> PathBuf {
         match self {
-            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("tools/DGenLisp"),
-            AppPaths::Release { contents_macos, .. } => contents_macos.join("DGenLisp"),
+            AppPaths::Dev {
+                sequencer_dir,
+                dgenlisp_tool_override,
+                ..
+            } => dgenlisp_tool_override
+                .clone()
+                .unwrap_or_else(|| sequencer_dir.join("tools").join(DGENLISP_TOOL_FILENAME)),
+            AppPaths::Release { executable_dir, .. } => {
+                executable_dir.join(DGENLISP_TOOL_FILENAME)
+            }
         }
     }
 
@@ -486,6 +513,27 @@ fn resolve_user_lisp_root(
     Ok(PathBuf::from(home).join(".eseq.d"))
 }
 
+fn dev_dgenlisp_tool_override_from_env() -> Option<PathBuf> {
+    let raw = std::env::var_os("ESEQ_DGENLISP_TOOL")?;
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.is_file() {
+        eprintln!(
+            "[app_paths] ESEQ_DGENLISP_TOOL override active: DGenLisp compiler = {}",
+            path.display()
+        );
+    } else {
+        eprintln!(
+            "[app_paths] ESEQ_DGENLISP_TOOL is set but {} is not a file; \
+             DGen compiles will fail until it points at a compiler executable",
+            path.display()
+        );
+    }
+    Some(path)
+}
+
 fn dev_toolchain_override_from_env() -> Option<PathBuf> {
     let raw = std::env::var_os("ESEQ_DGEN_TOOLCHAIN_ROOT")?;
     if raw.is_empty() {
@@ -584,7 +632,7 @@ mod tests {
         );
         assert_eq!(
             paths.dgenlisp_tool(),
-            PathBuf::from("/ws/crates/sequencer/tools/DGenLisp")
+            PathBuf::from("/ws/crates/sequencer/tools").join(DGENLISP_TOOL_FILENAME)
         );
         assert_eq!(
             paths.dgen_toolchain_root(),
@@ -665,6 +713,10 @@ mod tests {
             PathBuf::from("/Support"),
             PathBuf::from("/Caches"),
             PathBuf::from("/home/test/.eseq.d"),
+        );
+        assert_eq!(
+            paths.dgenlisp_tool(),
+            PathBuf::from("/App/Contents/MacOS").join(DGENLISP_TOOL_FILENAME)
         );
         assert_eq!(
             paths.perf_probe_projects_dir(),
@@ -808,6 +860,24 @@ mod tests {
     }
 
     #[test]
+    fn dgenlisp_override_redirects_tool() {
+        let mut paths = AppPaths::dev(
+            PathBuf::from("/ws/crates/sequencer"),
+            PathBuf::from("/ws"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        let AppPaths::Dev {
+            dgenlisp_tool_override,
+            ..
+        } = &mut paths
+        else {
+            unreachable!()
+        };
+        *dgenlisp_tool_override = Some(PathBuf::from("/custom/DGenLisp"));
+        assert_eq!(paths.dgenlisp_tool(), PathBuf::from("/custom/DGenLisp"));
+    }
+
+    #[test]
     fn toolchain_override_redirects_root_and_preflight_reports_it() {
         let mut paths = AppPaths::dev(
             PathBuf::from("/ws/crates/sequencer"),
@@ -851,7 +921,10 @@ mod tests {
     fn global_accessor_matches_workspace_layout() {
         let paths = app_paths();
         let sequencer_dir = crate::paths::sequencer_dir().expect("locate sequencer dir");
-        assert_eq!(paths.dgenlisp_tool(), sequencer_dir.join("tools/DGenLisp"));
+        assert_eq!(
+            paths.dgenlisp_tool(),
+            sequencer_dir.join("tools").join(DGENLISP_TOOL_FILENAME)
+        );
         assert_eq!(
             paths.dgen_cache_root(),
             crate::paths::workspace_root()

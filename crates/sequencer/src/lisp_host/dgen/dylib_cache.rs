@@ -1545,7 +1545,7 @@ mod tests {
         );
 
         let tool = ToolFingerprint {
-            path: "/tools/DGenLisp".to_string(),
+            path: "/tools/DGenLisp-target-a".to_string(),
             exists: true,
             len: Some(1),
             modified_unix_ms: Some(1),
@@ -1589,7 +1589,7 @@ mod tests {
         assert_eq!(toolchain.minimum_macos, CACHE_MINIMUM_MACOS);
 
         let tool = ToolFingerprint {
-            path: "/tools/DGenLisp".to_string(),
+            path: "/tools/DGenLisp-target-a".to_string(),
             exists: true,
             len: Some(1),
             modified_unix_ms: Some(1),
@@ -1603,6 +1603,29 @@ mod tests {
             &tool,
             &toolchain,
             &[],
+        );
+        let mut other_target_tool = tool.clone();
+        other_target_tool.path = "/tools/DGenLisp-target-b".to_string();
+        assert_ne!(
+            cache_key(
+                DGenCompileKind::Effect,
+                44_100,
+                None,
+                "source-sha",
+                &tool,
+                &toolchain,
+                &[],
+            ).unwrap(),
+            cache_key(
+                DGenCompileKind::Effect,
+                44_100,
+                None,
+                "source-sha",
+                &other_target_tool,
+                &toolchain,
+                &[],
+            ).unwrap(),
+            "target-specific compiler paths must not collide in the cache"
         );
         assert_eq!(material["schemaVersion"], CACHE_SCHEMA_VERSION);
         let toolchain_value = &material["toolchain"];
@@ -1696,7 +1719,7 @@ mod tests {
             voices: None,
             effective_source_sha256: "aa".to_string(),
             tool: ToolFingerprint {
-                path: "/tools/DGenLisp".to_string(),
+                path: "/tools/DGenLisp-target-a".to_string(),
                 exists: true,
                 len: Some(1),
                 modified_unix_ms: Some(1),
