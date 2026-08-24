@@ -20,6 +20,10 @@ pub(super) fn handle(
 ) {
     match name {
         "open-learn-patch" => {
+            if let Some(message) = sequencer::learn_job::training_unavailable_reason() {
+                editor.handle_host_event(HostEvent::Status(message.to_string()));
+                return;
+            }
             let Some(session) = ctx.sessions.instrument_edit_session.as_ref() else {
                 editor.handle_host_event(HostEvent::Status(
                     "Open Patch Learn from an instrument patcher buffer".to_string(),
@@ -164,6 +168,10 @@ pub(super) fn handle(
             finish_reactive(editor);
         }
         "start-learn-job" => {
+            if let Some(message) = sequencer::learn_job::training_unavailable_reason() {
+                editor.handle_host_event(HostEvent::Status(message.to_string()));
+                return;
+            }
             clear_learn_param_preview(
                 app,
                 editor.runtime_mut(),

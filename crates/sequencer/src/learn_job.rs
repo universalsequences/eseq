@@ -19,6 +19,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Explains why DGenLisp patch training cannot run on this host, if applicable.
+///
+/// The published Linux compiler can plan a job, but its training renderer uses
+/// Metal and exits when optimization begins. Keep the command discoverable so
+/// the UI can report this platform limitation before opening Patch Learn.
+pub fn training_unavailable_reason() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        Some("Patch Learn is unavailable on Linux because DGenLisp training requires Metal")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrozenParam {
     pub name: String,
@@ -830,6 +846,21 @@ mod tests {
             gate_frames: None,
             plan_only,
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn patch_training_reports_its_linux_platform_requirement() {
+        assert_eq!(
+            training_unavailable_reason(),
+            Some("Patch Learn is unavailable on Linux because DGenLisp training requires Metal")
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn patch_training_remains_available_off_linux() {
+        assert_eq!(training_unavailable_reason(), None);
     }
 
     #[test]
