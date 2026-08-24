@@ -60,6 +60,11 @@ name = "eseqlisp_shader_capture"
 path = "src/bin/eseqlisp_shader_capture.rs"
 required-features = ["wgpu"]
 
+[[bin]]
+name = "eseqlisp_sdf_lighting_probe"
+path = "src/bin/eseqlisp_sdf_lighting_probe.rs"
+required-features = ["wgpu"]
+
 [[example]]
 name = "embed"
 path = "examples/embed.rs"

@@ -528,6 +528,87 @@ impl CaptureRenderer {
         &self.adapter_backend
     }
 
+    /// Measure completed GPU frame wall time for a generated widget fragment.
+    ///
+    /// The target is retained across frames and there is no readback in the
+    /// measured loop. `device.poll(Wait)` makes each sample include the actual
+    /// GPU completion time instead of only CPU command submission.
+    pub fn benchmark_widget_fragment(
+        &self,
+        fragment_source: &str,
+        instances: &[WidgetInstance],
+        width: u32,
+        height: u32,
+        warmup_frames: usize,
+        sample_frames: usize,
+    ) -> Vec<std::time::Duration> {
+        assert!(!instances.is_empty(), "the benchmark needs widget instances");
+        assert!(width > 0 && height > 0, "the benchmark target must be nonzero");
+        assert!(sample_frames > 0, "the benchmark needs at least one sample");
+
+        let pipeline = pipelines::widget_pipeline(
+            &self.device,
+            "eseqlisp generated SDF lighting probe",
+            None,
+            fragment_source,
+            FORMAT,
+        );
+        let instance_buffer = self.instance_buffer(instances);
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("eseqlisp SDF lighting probe target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+
+        let render = || {
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("eseqlisp SDF lighting probe encoder"),
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("eseqlisp SDF lighting probe pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_vertex_buffer(0, instance_buffer.slice(..));
+                pass.draw(0..6, 0..instances.len() as u32);
+            }
+            self.queue.submit(Some(encoder.finish()));
+            self.device.poll(wgpu::Maintain::Wait);
+        };
+
+        for _ in 0..warmup_frames {
+            render();
+        }
+        (0..sample_frames)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                render();
+                started.elapsed()
+            })
+            .collect()
+    }
+
     fn instance_buffer<T: bytemuck::Pod>(&self, data: &[T]) -> wgpu::Buffer {
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {

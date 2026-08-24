@@ -27,8 +27,58 @@ enum ShaderLanguage {
     Wgsl,
 }
 
+/// Cost/quality policy for generated material lighting.
+///
+/// `Flat` keeps the authored color expression but supplies neutral lighting
+/// bindings, avoiding all offset field samples and lighting ALU. It is intended
+/// as a deliberate low-end GPU fallback, not as a different material syntax.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub enum SdfLightingQuality {
+    #[default]
+    Full,
+    Flat,
+}
+
+impl SdfLightingQuality {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "full" => Ok(Self::Full),
+            "flat" => Ok(Self::Flat),
+            _ => Err(format!(
+                "invalid ESEQ_SDF_LIGHTING_QUALITY value {value:?}; expected 'full' or 'flat'"
+            )),
+        }
+    }
+}
+
+/// Options shared by the Metal and WGSL SDF emitters.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub struct SdfShaderOptions {
+    pub lighting_quality: SdfLightingQuality,
+}
+
+impl SdfShaderOptions {
+    pub const fn flat_lighting() -> Self {
+        Self {
+            lighting_quality: SdfLightingQuality::Flat,
+        }
+    }
+
+    /// Read the process-level quality override used by application runtimes.
+    /// An absent variable preserves full authored lighting.
+    pub fn from_env() -> Result<Self, String> {
+        let lighting_quality = match std::env::var("ESEQ_SDF_LIGHTING_QUALITY") {
+            Ok(value) => SdfLightingQuality::parse(&value)?,
+            Err(std::env::VarError::NotPresent) => SdfLightingQuality::Full,
+            Err(error) => return Err(format!("cannot read ESEQ_SDF_LIGHTING_QUALITY: {error}")),
+        };
+        Ok(Self { lighting_quality })
+    }
+}
+
 struct ShaderEmitter {
     language: ShaderLanguage,
+    options: SdfShaderOptions,
     next_var: usize,
     statements: Vec<String>,
     scopes: Vec<HashMap<String, String>>,
@@ -67,7 +117,15 @@ impl ShaderEmitter {
     }
 
     fn metal_with_theme(uniform_symbols: HashMap<String, String>, theme: theme::Theme) -> Self {
-        Self::new(ShaderLanguage::Metal, uniform_symbols, theme)
+        Self::metal_with_theme_and_options(uniform_symbols, theme, SdfShaderOptions::default())
+    }
+
+    fn metal_with_theme_and_options(
+        uniform_symbols: HashMap<String, String>,
+        theme: theme::Theme,
+        options: SdfShaderOptions,
+    ) -> Self {
+        Self::new(ShaderLanguage::Metal, uniform_symbols, theme, options)
     }
 
     fn wgsl(uniform_symbols: HashMap<String, String>) -> Self {
@@ -75,16 +133,26 @@ impl ShaderEmitter {
     }
 
     fn wgsl_with_theme(uniform_symbols: HashMap<String, String>, theme: theme::Theme) -> Self {
-        Self::new(ShaderLanguage::Wgsl, uniform_symbols, theme)
+        Self::wgsl_with_theme_and_options(uniform_symbols, theme, SdfShaderOptions::default())
+    }
+
+    fn wgsl_with_theme_and_options(
+        uniform_symbols: HashMap<String, String>,
+        theme: theme::Theme,
+        options: SdfShaderOptions,
+    ) -> Self {
+        Self::new(ShaderLanguage::Wgsl, uniform_symbols, theme, options)
     }
 
     fn new(
         language: ShaderLanguage,
         uniform_symbols: HashMap<String, String>,
         theme: theme::Theme,
+        options: SdfShaderOptions,
     ) -> Self {
         Self {
             language,
+            options,
             next_var: 0,
             statements: Vec::new(),
             scopes: Vec::new(),
@@ -403,7 +471,10 @@ impl ShaderEmitter {
         // Emit lighting contribution (normal estimation + optional diffuse/specular)
         // before pushing the scope, so lighting bindings are available in color expr
         let lighting_bindings = if let Some(ref lighting) = material.lighting {
-            self.emit_lighting_contribution(sdf_expr, lighting)?
+            match self.options.lighting_quality {
+                SdfLightingQuality::Full => self.emit_lighting_contribution(sdf_expr, lighting)?,
+                SdfLightingQuality::Flat => self.emit_flat_lighting_contribution(lighting),
+            }
         } else {
             HashMap::new()
         };
@@ -625,6 +696,34 @@ impl ShaderEmitter {
             shininess_expr,
             bump_expr,
         })
+    }
+
+    /// Supply neutral bindings for an authored lighting block without evaluating
+    /// its field taps or light model. Keeping these names available means flat
+    /// quality works for color expressions that use `normal`, `diffuse`, or
+    /// `specular`, rather than requiring content-specific alternate materials.
+    fn emit_flat_lighting_contribution(
+        &mut self,
+        lighting: &LightingSpec<'_>,
+    ) -> HashMap<String, String> {
+        let normal = self.fresh_var();
+        let normal_expr = format!("{}(0.0, 0.0, 1.0)", self.constructor("float3"));
+        self.statements
+            .push(self.declaration("float3", &normal, &normal_expr));
+
+        let mut bindings = HashMap::from([("normal".to_string(), normal)]);
+        if lighting.light_expr.is_some() {
+            let diffuse = self.fresh_var();
+            self.statements
+                .push(self.declaration("float", &diffuse, "1.0"));
+            bindings.insert("diffuse".to_string(), diffuse);
+
+            let specular = self.fresh_var();
+            self.statements
+                .push(self.declaration("float", &specular, "0.0"));
+            bindings.insert("specular".to_string(), specular);
+        }
+        bindings
     }
 
     /// Emit normal estimation and optional diffuse/specular.
@@ -1322,14 +1421,34 @@ pub fn collect_state_symbols(expr: &Expression, state_bindings: &HashSet<String>
 /// Supports both single-SDF expressions (returns distance-based rendering)
 /// and `sdf/layer` expressions (returns composited multi-shape rendering with hit regions).
 pub fn compile_sdf_to_metal(expr: &Expression) -> Result<SdfShaderOutput, CodegenError> {
-    compile_sdf_to_metal_with_state(expr, &[])
+    compile_sdf_to_metal_with_options(expr, SdfShaderOptions::default())
+}
+
+pub fn compile_sdf_to_metal_with_options(
+    expr: &Expression,
+    options: SdfShaderOptions,
+) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_metal_with_state_and_options(expr, &[], options)
 }
 
 pub fn compile_sdf_to_metal_with_state(
     expr: &Expression,
     state_symbols: &[String],
 ) -> Result<SdfShaderOutput, CodegenError> {
-    compile_sdf_to_metal_with_state_and_theme(expr, state_symbols, theme::current())
+    compile_sdf_to_metal_with_state_and_options(expr, state_symbols, SdfShaderOptions::default())
+}
+
+pub fn compile_sdf_to_metal_with_state_and_options(
+    expr: &Expression,
+    state_symbols: &[String],
+    options: SdfShaderOptions,
+) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_metal_with_state_theme_and_options(
+        expr,
+        state_symbols,
+        theme::current(),
+        options,
+    )
 }
 
 /// Same as [`compile_sdf_to_metal_with_state`], but against an explicit theme
@@ -1340,9 +1459,27 @@ fn compile_sdf_to_metal_with_state_and_theme(
     state_symbols: &[String],
     theme: theme::Theme,
 ) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_metal_with_state_theme_and_options(
+        expr,
+        state_symbols,
+        theme,
+        SdfShaderOptions::default(),
+    )
+}
+
+fn compile_sdf_to_metal_with_state_theme_and_options(
+    expr: &Expression,
+    state_symbols: &[String],
+    theme: theme::Theme,
+    options: SdfShaderOptions,
+) -> Result<SdfShaderOutput, CodegenError> {
     let returns_color = expr_returns_float4(expr);
 
-    let mut emitter = ShaderEmitter::metal_with_theme(uniform_layout(state_symbols), theme);
+    let mut emitter = ShaderEmitter::metal_with_theme_and_options(
+        uniform_layout(state_symbols),
+        theme,
+        options,
+    );
     let result_expr = emitter.emit_expr(expr)?;
     let region_count = emitter.next_region_id;
 
@@ -1429,14 +1566,34 @@ fn compile_sdf_to_metal_with_state_and_theme(
 
 /// Compile a macro-expanded SDF expression into a complete WGSL fragment shader.
 pub fn compile_sdf_to_wgsl(expr: &Expression) -> Result<SdfShaderOutput, CodegenError> {
-    compile_sdf_to_wgsl_with_state(expr, &[])
+    compile_sdf_to_wgsl_with_options(expr, SdfShaderOptions::default())
+}
+
+pub fn compile_sdf_to_wgsl_with_options(
+    expr: &Expression,
+    options: SdfShaderOptions,
+) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_wgsl_with_state_and_options(expr, &[], options)
 }
 
 pub fn compile_sdf_to_wgsl_with_state(
     expr: &Expression,
     state_symbols: &[String],
 ) -> Result<SdfShaderOutput, CodegenError> {
-    compile_sdf_to_wgsl_with_state_and_theme(expr, state_symbols, theme::current())
+    compile_sdf_to_wgsl_with_state_and_options(expr, state_symbols, SdfShaderOptions::default())
+}
+
+pub fn compile_sdf_to_wgsl_with_state_and_options(
+    expr: &Expression,
+    state_symbols: &[String],
+    options: SdfShaderOptions,
+) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_wgsl_with_state_theme_and_options(
+        expr,
+        state_symbols,
+        theme::current(),
+        options,
+    )
 }
 
 /// Theme-pinned counterpart to [`compile_sdf_to_wgsl_with_state`]. See
@@ -1446,8 +1603,26 @@ fn compile_sdf_to_wgsl_with_state_and_theme(
     state_symbols: &[String],
     theme: theme::Theme,
 ) -> Result<SdfShaderOutput, CodegenError> {
+    compile_sdf_to_wgsl_with_state_theme_and_options(
+        expr,
+        state_symbols,
+        theme,
+        SdfShaderOptions::default(),
+    )
+}
+
+fn compile_sdf_to_wgsl_with_state_theme_and_options(
+    expr: &Expression,
+    state_symbols: &[String],
+    theme: theme::Theme,
+    options: SdfShaderOptions,
+) -> Result<SdfShaderOutput, CodegenError> {
     let returns_color = expr_returns_float4(expr);
-    let mut emitter = ShaderEmitter::wgsl_with_theme(uniform_layout(state_symbols), theme);
+    let mut emitter = ShaderEmitter::wgsl_with_theme_and_options(
+        uniform_layout(state_symbols),
+        theme,
+        options,
+    );
     let result_expr = emitter.emit_expr(expr)?;
     let region_count = emitter.next_region_id;
 
@@ -1947,6 +2122,42 @@ mod tests {
         assert!(output.shader_source.contains("vec2<f32>(x, y)"));
         assert!(output.shader_source.contains("%"));
         assert!(output.shader_source.contains(": bool ="));
+    }
+
+    #[test]
+    fn flat_lighting_quality_eliminates_offset_field_samples_in_both_emitters() {
+        let expr = parse_one_expr(
+            "(sdf/layer
+               (sdf/fill (sin (+ (* x 7) (* y 11)))
+                 (material
+                   :lighting (lighting :edge-min -0.2
+                                       :edge-max 0.2
+                                       :light (vec3 0.2 -0.4 1)
+                                       :shininess 32)
+                   :color (rgba (+ 0.5 (* 0.5 diffuse)) specular
+                                (dot normal (vec3 0 0 1)) 1))))",
+        );
+        let full = compile_sdf_to_wgsl(&expr).unwrap();
+        let flat_options = SdfShaderOptions::flat_lighting();
+        let flat_wgsl = compile_sdf_to_wgsl_with_options(&expr, flat_options).unwrap();
+        let flat_metal = compile_sdf_to_metal_with_options(&expr, flat_options).unwrap();
+
+        assert_eq!(full.shader_source.matches("sin(").count(), 5);
+        assert_eq!(flat_wgsl.shader_source.matches("sin(").count(), 1);
+        assert_eq!(flat_metal.shader_source.matches("sin(").count(), 1);
+        assert!(!flat_wgsl.shader_source.contains("normalize("));
+        assert!(!flat_wgsl.shader_source.contains("pow("));
+        assert!(flat_wgsl.shader_source.contains("vec3<f32>(0.0, 0.0, 1.0)"));
+        assert!(flat_metal.shader_source.contains("float3(0.0, 0.0, 1.0)"));
+        assert_valid_wgsl(&flat_wgsl.shader_source);
+    }
+
+    #[test]
+    fn lighting_quality_parser_rejects_unknown_tiers() {
+        assert_eq!(SdfLightingQuality::parse("full"), Ok(SdfLightingQuality::Full));
+        assert_eq!(SdfLightingQuality::parse("flat"), Ok(SdfLightingQuality::Flat));
+        let error = SdfLightingQuality::parse("fast").unwrap_err();
+        assert!(error.contains("expected 'full' or 'flat'"));
     }
 
     #[test]

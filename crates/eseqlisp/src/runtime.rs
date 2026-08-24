@@ -465,9 +465,13 @@ fn compile_sdf_value(
     let mut state_symbols =
         crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let output =
-        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
-            .map_err(|e| e.to_string())?;
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    let output = crate::lang::sdf_codegen::compile_sdf_to_metal_with_state_and_options(
+        &expanded,
+        &state_symbols,
+        options,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
@@ -628,6 +632,8 @@ fn compile_widget_material(
     let mut binding_keys = bindings.iter().cloned().collect::<Vec<_>>();
     binding_keys.sort();
     binding_keys.hash(&mut hasher);
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    options.hash(&mut hasher);
     let cache_key = hasher.finish();
 
     if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
@@ -636,9 +642,12 @@ fn compile_widget_material(
 
     let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let output =
-        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
-            .map_err(|e| e.to_string())?;
+    let output = crate::lang::sdf_codegen::compile_sdf_to_metal_with_state_and_options(
+        &expanded,
+        &state_symbols,
+        options,
+    )
+    .map_err(|e| e.to_string())?;
 
     let paint_margin =
         crate::widget_render::sdf_widget::estimate_shadow_paint_margin(&expanded, 16.0, 8.0);
