@@ -6,7 +6,7 @@
 //! backends must preserve that convention when uploading the R8 bitmap.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use etagere::{AtlasAllocator, Size};
 use fontdb::{Database, Family, Query};
@@ -91,7 +91,7 @@ impl AtlasBitmap {
 }
 
 struct LoadedFont {
-    font: Font,
+    font: Arc<Font>,
     post_script_name: String,
 }
 
@@ -109,20 +109,38 @@ fn load_font(query: Query<'_>) -> Option<LoadedFont> {
     load_font_by_id(db.query(&query)?)
 }
 
+fn parsed_fonts() -> &'static Mutex<HashMap<fontdb::ID, Option<Arc<Font>>>> {
+    static PARSED_FONTS: OnceLock<Mutex<HashMap<fontdb::ID, Option<Arc<Font>>>>> =
+        OnceLock::new();
+    PARSED_FONTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn load_font_by_id(id: fontdb::ID) -> Option<LoadedFont> {
     let db = system_fonts();
     let face = db.face(id)?;
     let post_script_name = face.post_script_name.clone();
-    let font = db.with_face_data(id, |data, face_index| {
-        Font::from_bytes(
-            data.to_vec(),
-            FontSettings {
-                collection_index: face_index,
-                ..FontSettings::default()
-            },
-        )
-        .ok()
-    })??;
+    let mut cache = parsed_fonts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let font = if let Some(cached) = cache.get(&id) {
+        cached.clone()?
+    } else {
+        // Font is immutable and size-independent. Parse each face only once;
+        // every atlas size and zoom level can share the resulting object.
+        let parsed = db.with_face_data(id, |data, face_index| {
+            Font::from_bytes(
+                data,
+                FontSettings {
+                    collection_index: face_index,
+                    ..FontSettings::default()
+                },
+            )
+            .ok()
+            .map(Arc::new)
+        })?;
+        cache.insert(id, parsed.clone());
+        parsed?
+    };
     Some(LoadedFont {
         font,
         post_script_name,
@@ -330,7 +348,7 @@ pub struct GlyphAtlas {
     pub bitmap: AtlasBitmap,
     allocator: AtlasAllocator,
     glyphs: HashMap<char, GlyphEntry>,
-    font: Font,
+    font: Arc<Font>,
     font_size: f32,
     descent: f32,
     leading: f32,
@@ -430,7 +448,7 @@ impl GlyphAtlas {
 
 /// Shared scalable system font and cached line metrics for proportional text.
 pub struct SizedFontCache {
-    font: Font,
+    font: Arc<Font>,
     line_metrics: HashMap<u16, FontLineMetrics>,
     scale: f32,
     pub post_script_name: String,
@@ -822,6 +840,22 @@ mod tests {
             .expect("the test machine must have at least one font installed");
         let loaded = load_named_font(&expected).expect("an installed font must load by name");
         assert_eq!(loaded.post_script_name, expected);
+    }
+
+    #[test]
+    fn atlas_rebuilds_at_new_sizes_reuse_the_parsed_font() {
+        let expected = system_fonts()
+            .faces()
+            .find(|face| face.monospaced)
+            .map(|face| face.post_script_name.clone())
+            .expect("the test machine must have at least one monospace font installed");
+        let small = GlyphAtlas::new(&expected, 12.0).expect("small atlas");
+        let large = GlyphAtlas::new(&expected, 24.0).expect("large atlas");
+
+        assert!(
+            Arc::ptr_eq(&small.font, &large.font),
+            "atlas size changes must not reparse the selected font"
+        );
     }
 
     #[test]
