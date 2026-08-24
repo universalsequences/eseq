@@ -61,8 +61,11 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 ## Build & Test
 
 Prefer `cargo nextest run` and select the narrowest exact test that validates a
-change. Full workspace runs are reserved for explicitly exhaustive work such as
-eseq-4tl; see `AGENTS.md` for selection examples and runtime policy.
+change. Verify the prerequisite with `cargo nextest --version`; install it with
+`brew install cargo-nextest` on macOS or
+`cargo install cargo-nextest --locked` on Linux. Full workspace runs are
+reserved for explicitly exhaustive work such as eseq-4tl; see `AGENTS.md` for
+selection examples and runtime policy.
 
 ### DGenLisp compiler (fetched, not tracked)
 
@@ -114,9 +117,17 @@ bead is complete. With the configured budget, any remaining overflow is
 isolated by nextest and reported as the named test rather than aborting a shared
 test binary.
 
-As of 2026-08-20 there are no known pre-existing failures: full debug is 4,272
-passed / 32 skipped and full release is 4,270 passed / 32 skipped. Commands and
-timings are recorded in `docs/test-suite-performance.md`.
+There are no known pre-existing failures in the validated platform baselines:
+
+- On Apple Silicon macOS as of 2026-08-20, the full workspace is green: debug is
+  4,272 passed / 32 skipped and release is 4,270 passed / 32 skipped. Commands
+  and timings are recorded in `docs/test-suite-performance.md`.
+- On x86_64 Linux as of 2026-08-24,
+  `cargo nextest run -p eseqlisp --features wgpu` is green with 1,699 passed and
+  3 skipped. Both shared-state tests that failed spuriously under plain
+  `cargo test` pass under nextest process isolation. A full Linux workspace
+  baseline has not yet been established; do not use the macOS workspace counts
+  as a Linux expectation.
 
 ## Architecture Overview
 

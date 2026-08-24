@@ -2,12 +2,13 @@
 
 ## Test selection and runtime policy
 
-Prefer `cargo nextest run` over `cargo test` when nextest is installed (`brew
-install cargo-nextest`; check with `cargo nextest --version`). It runs each
-test in its own process, which isolates tests that touch shared global state
-(e.g. the shared `$TMPDIR/sequencer_dgenlisp` compile output dir), reports
-per-test wall times, and schedules the suite better. Fall back to `cargo test`
-if nextest is unavailable.
+Prefer `cargo nextest run` over `cargo test`. Verify the prerequisite with
+`cargo nextest --version`; install it with `brew install cargo-nextest` on macOS
+or `cargo install cargo-nextest --locked` on Linux. It runs each test in its own
+process, which isolates tests that touch shared global state (e.g. the shared
+`$TMPDIR/sequencer_dgenlisp` compile output dir), reports per-test wall times,
+and schedules the suite better. Fall back to `cargo test` only when installing
+nextest is not possible.
 
 Use the narrowest test target that validates the behavior changed. Do not run a
 full package or workspace test suite as a default validation or finishing step.
@@ -106,15 +107,25 @@ failing test's subject overlaps your diff at all; if it does not, verify the
 failure pre-exists by running that one test in a temporary `git worktree` of
 HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
-Known pre-existing failures: **none**.
+Known pre-existing failures in the validated baselines below: **none**.
 
-As of 2026-08-20 both full workspace profiles are green: debug has 4,272 passed
-and 32 skipped; release has 4,270 passed and 32 skipped (the two-test difference
-is intentional `cfg(debug_assertions)` coverage). Commands and timings are in
-`docs/test-suite-performance.md`. If a broader run fails, treat it as a real
-signal — verify against the reusable clean-HEAD worktree described above, and if
-a failure genuinely pre-exists your change, update this list with the test name
-and evidence rather than leaving it undocumented.
+Platform baselines are not interchangeable:
+
+- On Apple Silicon macOS as of 2026-08-20, both full workspace profiles are
+  green: debug has 4,272 passed and 32 skipped; release has 4,270 passed and 32
+  skipped. The two-test difference is intentional `cfg(debug_assertions)`
+  coverage. Commands and timings are in `docs/test-suite-performance.md`.
+- On x86_64 Linux as of 2026-08-24,
+  `cargo nextest run -p eseqlisp --features wgpu` is green with 1,699 passed and
+  3 skipped. Both shared-state tests that failed spuriously under plain
+  `cargo test` pass under nextest process isolation. A full Linux workspace
+  baseline has not yet been established; do not use the macOS workspace counts
+  as a Linux expectation.
+
+If a broader run fails, treat it as a real signal — verify against the reusable
+clean-HEAD worktree described above, and if a failure genuinely pre-exists your
+change, update this list with the test name and evidence rather than leaving it
+undocumented.
 
 ## Working tree safety
 
