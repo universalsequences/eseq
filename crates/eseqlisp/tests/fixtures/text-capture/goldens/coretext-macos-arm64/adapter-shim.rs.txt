@@ -1,0 +1,292 @@
+//! CoreText capture shim for the pre-fontdue tree (commit 57b76e2a^).
+//!
+//! This file is NOT part of the eseq-linux branch. It exists only so the
+//! eseq-linux.23 harness can produce the `coretext-macos-*` reference set from
+//! the historical tree, and it deliberately drives the production CoreText
+//! atlas rather than reimplementing rasterization:
+//!
+//! * metrics come from the same `CTFont` calls `GlyphAtlas`/`SizedFontCache`
+//!   make (the CoreText atlas keeps `descent`/`leading` private, and monospace
+//!   has no per-character advance accessor),
+//! * glyph coverage is read back out of the atlas' `MTLTexture`, which is the
+//!   only copy of the rasterized pixels at this commit.
+
+use std::ffi::CString;
+use std::ptr::NonNull;
+
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_core_foundation::{CFRetained, CFString, CGSize};
+use objc2_core_text::{CTFont, CTFontOrientation, CTFontUIFontType};
+use objc2_metal::{
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLOrigin, MTLRegion, MTLSize, MTLTexture,
+};
+
+use super::{FontMeasurement, GlyphRaster, MONOSPACE_FONT_NAME, TextCaptureSource};
+use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
+
+const MONO_ATLAS_SIZE: usize = 1024;
+const PROP_ATLAS_SIZE: usize = 2048;
+/// `ProportionalGlyphAtlas::rasterize` draws each glyph two pixels into its
+/// bitmap so antialiasing has room; the pen therefore sits two pixels right of
+/// the bitmap's left edge.
+const PROP_GLYPH_PADDING_X: f32 = 2.0;
+/// A base size whose tenths key (10) cannot collide with any captured
+/// proportional size, so `SizedFontCache` never hands back the unscaled
+/// metrics it caches for its base font.
+const BASE_FONT_SIZE: f64 = 1.0;
+// kCFStringEncodingUTF8
+const CF_UTF8: u32 = 0x0800_0100;
+
+pub struct PlatformTextCaptureSource;
+
+impl PlatformTextCaptureSource {
+    fn device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>, String> {
+        MTLCreateSystemDefaultDevice().ok_or_else(|| "no Metal device".to_string())
+    }
+
+    fn mono_atlas(font_size: f32, scale_factor: f32) -> Result<GlyphAtlas, String> {
+        let device = Self::device()?;
+        GlyphAtlas::new(&device, MONOSPACE_FONT_NAME, f64::from(font_size * scale_factor))
+            .ok_or_else(|| "could not load a monospace font".to_string())
+    }
+
+    fn proportional_atlas(scale_factor: f32) -> Result<ProportionalGlyphAtlas, String> {
+        let device = Self::device()?;
+        ProportionalGlyphAtlas::new(&device, BASE_FONT_SIZE, f64::from(scale_factor))
+            .ok_or_else(|| "could not load the system UI font".to_string())
+    }
+
+    fn mono_font(font_size: f32, scale_factor: f32) -> Result<CFRetained<CTFont>, String> {
+        let name = {
+            let cstr = CString::new(MONOSPACE_FONT_NAME).map_err(|error| error.to_string())?;
+            unsafe { CFString::with_c_string(None, cstr.as_ptr(), CF_UTF8) }
+                .ok_or_else(|| "could not build a CFString font name".to_string())?
+        };
+        Ok(unsafe {
+            CTFont::with_name(
+                &name,
+                f64::from(font_size * scale_factor),
+                std::ptr::null(),
+            )
+        })
+    }
+
+    fn ui_font(font_size: f32, scale_factor: f32) -> Result<CFRetained<CTFont>, String> {
+        unsafe {
+            CTFont::new_ui_font_for_language(
+                CTFontUIFontType::System,
+                f64::from(font_size * scale_factor),
+                None,
+            )
+        }
+        .ok_or_else(|| "could not load the system UI font".to_string())
+    }
+}
+
+impl TextCaptureSource for PlatformTextCaptureSource {
+    fn backend_name(&self) -> &'static str {
+        "coretext"
+    }
+
+    fn mono_font_name(&self) -> Result<String, String> {
+        let font = Self::mono_font(16.0, 1.0)?;
+        Ok(unsafe { font.post_script_name() }.to_string())
+    }
+
+    fn proportional_font_name(&self) -> Result<String, String> {
+        let font = Self::ui_font(BASE_FONT_SIZE as f32, 1.0)?;
+        Ok(unsafe { font.post_script_name() }.to_string())
+    }
+
+    fn measure_mono(
+        &self,
+        font_size: f32,
+        scale_factor: f32,
+        charset: &str,
+    ) -> Result<FontMeasurement, String> {
+        let atlas = Self::mono_atlas(font_size, scale_factor)?;
+        let font = Self::mono_font(font_size, scale_factor)?;
+        Ok(FontMeasurement {
+            cell_w: atlas.cell_w as f32,
+            cell_h: atlas.cell_h as f32,
+            ascent: unsafe { font.ascent() } as f32,
+            descent: unsafe { font.descent() } as f32,
+            leading: unsafe { font.leading() } as f32,
+            advance_widths: charset
+                .chars()
+                .map(|ch| (ch, char_advance(&font, ch)))
+                .collect(),
+        })
+    }
+
+    fn measure_proportional(
+        &self,
+        font_size: f32,
+        scale_factor: f32,
+        charset: &str,
+    ) -> Result<FontMeasurement, String> {
+        let mut fonts = SizedFontCache::new(BASE_FONT_SIZE, f64::from(scale_factor))
+            .ok_or_else(|| "could not load the system UI font".to_string())?;
+        let size_tenths = size_tenths(font_size)?;
+        let font = Self::ui_font(font_size, scale_factor)?;
+        Ok(FontMeasurement {
+            cell_w: fonts.char_advance('m', size_tenths),
+            cell_h: fonts.line_height(size_tenths),
+            ascent: fonts.ascent(size_tenths),
+            descent: fonts.descent(size_tenths),
+            leading: unsafe { font.leading() } as f32,
+            advance_widths: charset
+                .chars()
+                .map(|ch| (ch, fonts.char_advance(ch, size_tenths)))
+                .collect(),
+        })
+    }
+
+    fn rasterize_mono_text(
+        &self,
+        text: &str,
+        font_size: f32,
+        scale_factor: f32,
+    ) -> Result<Vec<GlyphRaster>, String> {
+        let mut atlas = Self::mono_atlas(font_size, scale_factor)?;
+        let mut entries = Vec::with_capacity(text.chars().count());
+        for ch in text.chars() {
+            let entry = *atlas
+                .get_or_rasterize(ch)
+                .ok_or_else(|| format!("could not rasterize {ch:?}"))?;
+            entries.push(entry);
+        }
+        let (cell_w, cell_h) = (atlas.cell_w, atlas.cell_h);
+        entries
+            .into_iter()
+            .map(|entry| {
+                read_back(
+                    &atlas.texture,
+                    MONO_ATLAS_SIZE,
+                    entry.uv_min,
+                    cell_w,
+                    cell_h,
+                    0.0,
+                    cell_w as f32,
+                )
+            })
+            .collect()
+    }
+
+    fn rasterize_proportional_text(
+        &self,
+        text: &str,
+        font_size: f32,
+        scale_factor: f32,
+    ) -> Result<Vec<GlyphRaster>, String> {
+        let mut atlas = Self::proportional_atlas(scale_factor)?;
+        let size_tenths = size_tenths(font_size)?;
+        let mut entries = Vec::with_capacity(text.chars().count());
+        for ch in text.chars() {
+            entries.push(
+                *atlas
+                    .get_or_rasterize(ch, size_tenths)
+                    .ok_or_else(|| format!("could not rasterize {ch:?}"))?,
+            );
+        }
+        entries
+            .into_iter()
+            .map(|entry| {
+                read_back(
+                    &atlas.texture,
+                    PROP_ATLAS_SIZE,
+                    entry.uv_min,
+                    entry.raster_w,
+                    entry.raster_h,
+                    -PROP_GLYPH_PADDING_X,
+                    entry.advance,
+                )
+            })
+            .collect()
+    }
+}
+
+fn size_tenths(font_size: f32) -> Result<u16, String> {
+    if !font_size.is_finite() || font_size <= 0.0 || font_size > u16::MAX as f32 / 10.0 {
+        return Err(format!("invalid font size {font_size}"));
+    }
+    Ok((font_size * 10.0).round() as u16)
+}
+
+fn char_advance(font: &CTFont, ch: char) -> f32 {
+    if ch as u32 > 0xFFFF {
+        return 0.0;
+    }
+    let chars: [u16; 1] = [ch as u16];
+    let mut glyph = [0u16; 1];
+    unsafe {
+        font.glyphs_for_characters(
+            NonNull::new(chars.as_ptr() as *mut _).unwrap(),
+            NonNull::new(glyph.as_mut_ptr()).unwrap(),
+            1,
+        );
+    }
+    let mut advance = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    unsafe {
+        font.advances_for_glyphs(
+            CTFontOrientation::Default,
+            NonNull::new(glyph.as_mut_ptr()).unwrap(),
+            &mut advance,
+            1,
+        );
+    }
+    advance.width as f32
+}
+
+/// Read one glyph's coverage back out of the atlas texture. The bitmap context
+/// CoreText drew into is already stored top-down (the renderer's `v = 1.0 - v`
+/// flip is a Metal UV-origin convention, not a row-order fix), so the readback
+/// matches the schema's row order as-is.
+fn read_back(
+    texture: &ProtocolObject<dyn MTLTexture>,
+    atlas_size: usize,
+    uv_min: [f32; 2],
+    width: usize,
+    height: usize,
+    offset_x: f32,
+    advance: f32,
+) -> Result<GlyphRaster, String> {
+    if width == 0 || height == 0 {
+        return Ok(GlyphRaster {
+            width,
+            height,
+            offset_x,
+            advance,
+            pixels: Vec::new(),
+        });
+    }
+    let x = (uv_min[0] * atlas_size as f32).round() as usize;
+    let y = (uv_min[1] * atlas_size as f32).round() as usize;
+    let mut pixels = vec![0u8; width * height];
+    unsafe {
+        texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+            NonNull::new(pixels.as_mut_ptr() as *mut core::ffi::c_void).unwrap(),
+            width,
+            MTLRegion {
+                origin: MTLOrigin { x, y, z: 0 },
+                size: MTLSize {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            },
+            0,
+        );
+    }
+    Ok(GlyphRaster {
+        width,
+        height,
+        offset_x,
+        advance,
+        pixels,
+    })
+}
