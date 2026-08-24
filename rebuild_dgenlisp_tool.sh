@@ -11,8 +11,8 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--update-lock]
 
-Stages the hermetic dgen toolchain archive
-(\$DGEN_REPO/.toolchain/dgen-toolchain-*.tar.gz) into:
+Stages the host target's hermetic dgen toolchain archive, selected from
+content/dgen-toolchain.lock, into:
   $TOOLCHAIN_DEST        (gitignored, ~147 MB)
 and records the vendored archive's identity in the committed lock file:
   $LOCK_FILE
@@ -74,30 +74,58 @@ sha256() {
   fi
 }
 
-if [[ ! -d "$DGEN_REPO" ]]; then
-  echo "error: dgen repo not found: $DGEN_REPO" >&2
-  exit 1
-fi
+host_target() {
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) echo "arm64-apple-macos" ;;
+    Linux:x86_64) echo "x86_64-unknown-linux-gnu" ;;
+    *)
+      echo "error: no DGen toolchain target is defined for $(uname -s)/$(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+lock_value() {
+  local key="target.$HOST_TARGET.$1"
+  awk -v key="$key" '$1 == key { print $2 }' "$LOCK_FILE"
+}
 
 # ── Stage the hermetic toolchain ──
 # The archive layout contract is $DGEN_REPO/toolchain/LAYOUT.md: untarring
 # yields a single top-level dgen-toolchain/ directory, which is the root
 # passed to `DGenLisp compile --toolchain-root`.
 
-echo "Locating toolchain archive in $DGEN_REPO/.toolchain..."
-ARCHIVES=("$DGEN_REPO"/.toolchain/dgen-toolchain-*.tar.gz)
-if [[ ${#ARCHIVES[@]} -eq 0 || ! -e "${ARCHIVES[0]}" ]]; then
-  echo "error: no toolchain archive found: $DGEN_REPO/.toolchain/dgen-toolchain-*.tar.gz" >&2
-  echo "Build one in the dgen repo first (scripts/build-toolchain.sh)." >&2
+HOST_TARGET="$(host_target)"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: required tool not found: python3" >&2
   exit 1
 fi
-if [[ ${#ARCHIVES[@]} -gt 1 ]]; then
-  echo "error: multiple toolchain archives found; remove all but one:" >&2
-  printf '  %s\n' "${ARCHIVES[@]}" >&2
+if [[ ! -f "$LOCK_FILE" ]]; then
+  echo "error: DGen toolchain lock file not found: $LOCK_FILE" >&2
   exit 1
 fi
-ARCHIVE="${ARCHIVES[0]}"
-ARCHIVE_NAME="$(basename "$ARCHIVE")"
+ARCHIVE_NAME="$(lock_value archive)"
+LOCKED_HASH="$(lock_value archive_sha256)"
+if [[ -z "$ARCHIVE_NAME" || -z "$LOCKED_HASH" ]]; then
+  echo "error: no hermetic DGen toolchain archive is pinned for host target $HOST_TARGET" >&2
+  echo "  lock: $LOCK_FILE" >&2
+  echo "DGen compiles cannot fall back to the system compiler." >&2
+  echo "Publish this target from dgen-audio's scripts/build-toolchain.sh, then add" >&2
+  echo "target.$HOST_TARGET archive and sha256 entries to the lock file." >&2
+  exit 1
+fi
+if [[ ! -d "$DGEN_REPO" ]]; then
+  echo "error: dgen repo not found: $DGEN_REPO" >&2
+  exit 1
+fi
+
+ARCHIVE="$DGEN_REPO/.toolchain/$ARCHIVE_NAME"
+echo "Locating $HOST_TARGET toolchain archive..."
+if [[ ! -f "$ARCHIVE" ]]; then
+  echo "error: pinned $HOST_TARGET toolchain archive not found: $ARCHIVE" >&2
+  echo "Build or fetch the exact archive recorded in $LOCK_FILE." >&2
+  exit 1
+fi
 echo "  $(describe_file "$ARCHIVE")"
 
 ARCHIVE_HASH="$(sha256 "$ARCHIVE")"
@@ -105,20 +133,17 @@ echo "  sha256 $ARCHIVE_HASH"
 
 # The lock file is the committed, reviewable record of which toolchain is
 # vendored. A divergent archive sha requires an explicit --update-lock.
-if [[ -f "$LOCK_FILE" ]]; then
-  LOCKED_HASH="$(awk '$1 == "archive_sha256" {print $2}' "$LOCK_FILE")"
-  if [[ -n "$LOCKED_HASH" && "$LOCKED_HASH" != "$ARCHIVE_HASH" ]]; then
-    if [[ "$UPDATE_LOCK" -eq 0 ]]; then
-      echo "error: toolchain archive sha256 differs from the committed lock file" >&2
-      echo "  locked:  $LOCKED_HASH  ($LOCK_FILE)" >&2
-      echo "  archive: $ARCHIVE_HASH  ($ARCHIVE)" >&2
-      echo "Re-run with --update-lock to vendor the new toolchain (and commit the lock change)." >&2
-      exit 1
-    fi
-    echo "Lock update requested (--update-lock):"
-    echo "  old sha256: $LOCKED_HASH"
-    echo "  new sha256: $ARCHIVE_HASH"
+if [[ "$LOCKED_HASH" != "$ARCHIVE_HASH" ]]; then
+  if [[ "$UPDATE_LOCK" -eq 0 ]]; then
+    echo "error: $HOST_TARGET toolchain archive sha256 differs from the committed lock file" >&2
+    echo "  locked:  $LOCKED_HASH  ($LOCK_FILE)" >&2
+    echo "  archive: $ARCHIVE_HASH  ($ARCHIVE)" >&2
+    echo "Re-run with --update-lock to vendor the new toolchain (and commit the lock change)." >&2
+    exit 1
   fi
+  echo "Lock update requested (--update-lock):"
+  echo "  old sha256: $LOCKED_HASH"
+  echo "  new sha256: $ARCHIVE_HASH"
 fi
 
 echo
@@ -137,16 +162,30 @@ fi
 
 # Required staged files per LAYOUT.md; an incomplete stage is useless (the
 # compiler preflight-checks it and hard-errors), so fail here instead.
-REQUIRED_FILES=(
+COMMON_REQUIRED_FILES=(
   "VERSION.json"
-  "abi/exports-v1.txt"
-  "abi/libsystem-symbols-v1.txt"
   "include/dgen_runtime.h"
   "bin/dgen-clang"
-  "bin/ld64.lld"
-  "lib/clang/20/lib/darwin/libclang_rt.builtins.a"
-  "lib/libSystem.tbd"
 )
+case "$HOST_TARGET" in
+  arm64-apple-macos)
+    REQUIRED_FILES=(
+      "${COMMON_REQUIRED_FILES[@]}"
+      "abi/exports-v1.txt"
+      "abi/libsystem-symbols-v1.txt"
+      "bin/ld64.lld"
+      "lib/clang/20/lib/darwin/libclang_rt.builtins.a"
+      "lib/libSystem.tbd"
+    )
+    ;;
+  x86_64-unknown-linux-gnu)
+    REQUIRED_FILES=(
+      "${COMMON_REQUIRED_FILES[@]}"
+      "abi/exports-v1-elf.txt"
+      "abi/libsystem-symbols-v1-elf.txt"
+    )
+    ;;
+esac
 for rel in "${REQUIRED_FILES[@]}"; do
   if [[ ! -f "$STAGED_ROOT/$rel" ]]; then
     echo "error: staged toolchain is missing required file: $rel" >&2
@@ -157,8 +196,15 @@ done
 
 LLVM_VERSION="$(sed -n 's/.*"llvm_version": *"\([^"]*\)".*/\1/p' "$STAGED_ROOT/VERSION.json")"
 DGEN_ABI_VERSION="$(sed -n 's/.*"dgen_abi_version": *\([0-9][0-9]*\).*/\1/p' "$STAGED_ROOT/VERSION.json")"
-if [[ -z "$LLVM_VERSION" || -z "$DGEN_ABI_VERSION" ]]; then
-  echo "error: could not read llvm_version / dgen_abi_version from staged VERSION.json" >&2
+STAGED_TARGET="$(sed -n 's/.*"target": *"\([^"]*\)".*/\1/p' "$STAGED_ROOT/VERSION.json")"
+if [[ -z "$LLVM_VERSION" || -z "$DGEN_ABI_VERSION" || -z "$STAGED_TARGET" ]]; then
+  echo "error: could not read target / llvm_version / dgen_abi_version from staged VERSION.json" >&2
+  rm -rf "$STAGING_TMP"
+  exit 1
+fi
+if [[ "$STAGED_TARGET" != "$HOST_TARGET" ]]; then
+  echo "error: archive targets $STAGED_TARGET but this host requires $HOST_TARGET" >&2
+  echo "Refusing to stage a wrong-architecture compiler." >&2
   rm -rf "$STAGING_TMP"
   exit 1
 fi
@@ -169,15 +215,33 @@ rm -rf "$TOOLCHAIN_DEST"
 mv "$STAGED_ROOT" "$TOOLCHAIN_DEST"
 rm -rf "$STAGING_TMP"
 
-cat > "$LOCK_FILE" <<EOF
-# Vendored dgen toolchain (staged by rebuild_dgenlisp_tool.sh into
-# tools/dgen-toolchain/, which is gitignored). This lock file is committed
-# and is the reviewable record of which toolchain archive is vendored.
-archive $ARCHIVE_NAME
-archive_sha256 $ARCHIVE_HASH
-llvm_version $LLVM_VERSION
-dgen_abi_version $DGEN_ABI_VERSION
-EOF
+python3 - "$LOCK_FILE" "$HOST_TARGET" "$ARCHIVE_NAME" "$ARCHIVE_HASH" "$LLVM_VERSION" "$DGEN_ABI_VERSION" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+target = sys.argv[2]
+updates = {
+    f"target.{target}.archive": sys.argv[3],
+    f"target.{target}.archive_sha256": sys.argv[4],
+    f"target.{target}.llvm_version": sys.argv[5],
+    f"target.{target}.dgen_abi_version": sys.argv[6],
+}
+lines = path.read_text().splitlines()
+seen = set()
+for index, line in enumerate(lines):
+    fields = line.split(maxsplit=1)
+    if fields and fields[0] in updates:
+        key = fields[0]
+        lines[index] = f"{key} {updates[key]}"
+        seen.add(key)
+if seen != updates.keys():
+    missing = sorted(updates.keys() - seen)
+    raise SystemExit(f"error: lock file is missing the {target} record: {', '.join(missing)}")
+temporary = path.with_name(path.name + ".tmp")
+temporary.write_text("\n".join(lines) + "\n")
+temporary.replace(path)
+PY
 
 echo "Staged toolchain:"
 echo "  root: $TOOLCHAIN_DEST"

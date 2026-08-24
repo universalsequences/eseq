@@ -461,10 +461,9 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     std::fs::write(&src_path, effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
-    // macOS uses the staged hermetic clang/lld toolchain. Linux DGenLisp owns
-    // its native -shared/-fPIC policy and deliberately selects the host C
-    // compiler when no Mach-O-only toolchain root is supplied.
-    #[cfg(target_os = "macos")]
+    // The stage is mandatory on every host. In particular, omitting this on
+    // Linux makes DGenLisp silently select /usr/bin/clang and destroys the
+    // reproducibility guarantee of the generated audio binary.
     let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
     // Same hard-error contract for the compiler itself: it is fetched by lock
     // (scripts/fetch_dgenlisp.sh), never tracked, so its absence must name
@@ -476,7 +475,6 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", dylib_name])
         .args(["--sample-rate", &sample_rate.to_string()]);
-    #[cfg(target_os = "macos")]
     command.arg("--toolchain-root").arg(&toolchain_root);
     command
         // The host audits the artifact itself (dgen_audit.rs); DGenLisp's

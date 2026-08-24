@@ -689,7 +689,11 @@ fn build_request(
     let effective_source = effective_dgen_source(kind, source, sample_rate)?;
     let effective_source_sha256 = sha256_hex(effective_source.as_bytes());
     let tool = fingerprint_tool(&dgenlisp_tool_path())?;
-    let toolchain = fingerprint_toolchain(&crate::app_paths::app_paths().dgen_toolchain_root())?;
+    // Validate before cache lookup as well as before compilation. Otherwise a
+    // cache entry produced by the old Linux system-compiler fallback could be
+    // loaded even though no hermetic stage exists on this machine.
+    let toolchain_root = crate::app_paths::app_paths().dgen_toolchain_root_checked()?;
+    let toolchain = fingerprint_toolchain(&toolchain_root)?;
     let assets = fingerprint_source_assets(&effective_source, asset_base)?;
     let voices = kind.voices();
     let key = cache_key(
@@ -762,37 +766,30 @@ fn cache_key(
 }
 
 /// Fingerprint every external compile-policy input not already covered by the
-/// DGenLisp executable hash: staged `VERSION.json` on macOS, and the bundled
-/// ELF symbol allowlists on Linux. Missing policy material is a hard error.
+/// DGenLisp executable hash. Every host includes the mandatory staged
+/// `VERSION.json`; Linux also includes the distribution's ELF audit policy.
 fn fingerprint_toolchain(toolchain_root: &Path) -> Result<ToolchainFingerprint, String> {
+    let version_path = toolchain_root.join("VERSION.json");
+    let version = std::fs::read(&version_path).map_err(|e| {
+        format!(
+            "read staged toolchain VERSION.json for cache fingerprint at {}: {e}. \
+             Run ./rebuild_dgenlisp_tool.sh at the repo root to stage the toolchain \
+             (or fix ESEQ_DGEN_TOOLCHAIN_ROOT if the override is active).",
+            version_path.display()
+        )
+    })?;
     #[cfg(target_os = "macos")]
-    let policy_bytes = {
-        let path = toolchain_root.join("VERSION.json");
-        std::fs::read(&path).map_err(|e| {
-            format!(
-                "read staged toolchain VERSION.json for cache fingerprint at {}: {e}. \
-                 Run ./rebuild_dgenlisp_tool.sh at the repo root to stage the toolchain \
-                 (or fix ESEQ_DGEN_TOOLCHAIN_ROOT if the override is active).",
-                path.display()
-            )
-        })?
-    };
+    let policy_bytes = version;
     #[cfg(target_os = "linux")]
     let policy_bytes = {
         let abi_dir = crate::app_paths::app_paths().dgen_abi_dir();
-        let mut bytes = Vec::new();
+        let mut bytes = version;
         for name in ["exports-v1-elf.txt", "libsystem-symbols-v1-elf.txt"] {
             let path = abi_dir.join(name);
             bytes.extend(std::fs::read(&path).map_err(|e| {
                 format!("read Linux DGen ABI policy {}: {e}", path.display())
             })?);
             bytes.push(0);
-        }
-        // Test/custom policy roots may carry an explicit version marker. The
-        // published Linux distribution currently identifies its policy via
-        // the two allowlist contents above instead.
-        if let Ok(version) = std::fs::read(toolchain_root.join("VERSION.json")) {
-            bytes.extend(version);
         }
         bytes
     };

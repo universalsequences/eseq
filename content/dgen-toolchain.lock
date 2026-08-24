@@ -1,7 +1,14 @@
-# Vendored dgen toolchain (staged by rebuild_dgenlisp_tool.sh into
-# tools/dgen-toolchain/, which is gitignored). This lock file is committed
-# and is the reviewable record of which toolchain archive is vendored.
-archive dgen-toolchain-20.1.8-arm64.tar.gz
-archive_sha256 3f5a813d50294df2fd55bf6e63562f491b7e0c3d4cf52c762995dc03f036d5ca
-llvm_version 20.1.8
-dgen_abi_version 1
+# Hermetic dgen toolchains staged by rebuild_dgenlisp_tool.sh into
+# tools/dgen-toolchain/ (gitignored). Archive identities are target-qualified:
+# an archive for one platform or architecture must never satisfy another.
+format_version 2
+
+target.arm64-apple-macos.archive dgen-toolchain-20.1.8-arm64.tar.gz
+target.arm64-apple-macos.archive_sha256 3f5a813d50294df2fd55bf6e63562f491b7e0c3d4cf52c762995dc03f036d5ca
+target.arm64-apple-macos.llvm_version 20.1.8
+target.arm64-apple-macos.dgen_abi_version 1
+
+# x86_64-unknown-linux-gnu intentionally has no entry yet. The upstream
+# dgen-audio scripts/build-toolchain.sh currently produces only the
+# arm64-apple-macos stage. Linux compilation must fail rather than use the
+# system compiler until upstream publishes a relocatable Linux archive.

@@ -41,8 +41,16 @@ use std::sync::OnceLock;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-macos-arm64";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DGEN_TOOLCHAIN_TARGET: &str = "arm64-apple-macos";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DGEN_TOOLCHAIN_REQUIRED_FILES: &[&str] = &["bin/dgen-clang", "bin/ld64.lld"];
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const DGENLISP_TOOL_FILENAME: &str = "DGenLisp-linux-x86_64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const DGEN_TOOLCHAIN_TARGET: &str = "x86_64-unknown-linux-gnu";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const DGEN_TOOLCHAIN_REQUIRED_FILES: &[&str] = &["bin/dgen-clang"];
 #[cfg(not(any(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64")
@@ -206,10 +214,10 @@ impl AppPaths {
         }
     }
 
-    /// [`Self::dgen_toolchain_root`], preflight-checked for the two staged
-    /// executables the compile cannot run without. There is deliberately no
-    /// fallback to a system compiler (parent spec, Locked Principle 1): a
-    /// missing or incomplete stage is a hard, actionable error.
+    /// [`Self::dgen_toolchain_root`], preflight-checked for this host target.
+    /// There is deliberately no fallback to a system compiler (parent spec,
+    /// Locked Principle 1): a missing, incomplete, or wrong-target stage is a
+    /// hard, actionable error.
     pub fn dgen_toolchain_root_checked(&self) -> Result<PathBuf, String> {
         let root = self.dgen_toolchain_root();
         let overridden = matches!(
@@ -233,7 +241,26 @@ impl AppPaths {
                 root.display()
             ));
         }
-        for rel in ["bin/dgen-clang", "bin/ld64.lld"] {
+        let version_path = root.join("VERSION.json");
+        let version = std::fs::read_to_string(&version_path).map_err(|e| {
+            format!(
+                "DGen toolchain stage at {} is incomplete (cannot read VERSION.json: {e}). {hint}",
+                root.display()
+            )
+        })?;
+        let target = serde_json::from_str::<serde_json::Value>(&version)
+            .ok()
+            .and_then(|value| value.get("target")?.as_str().map(str::to_owned));
+        if target.as_deref() != Some(DGEN_TOOLCHAIN_TARGET) {
+            return Err(format!(
+                "DGen toolchain stage at {} targets {}, but this host requires {}. \
+                 Toolchain stages are target-specific and cannot be reused across architectures. {hint}",
+                root.display(),
+                target.as_deref().unwrap_or("an unknown target (invalid VERSION.json)"),
+                DGEN_TOOLCHAIN_TARGET,
+            ));
+        }
+        for rel in DGEN_TOOLCHAIN_REQUIRED_FILES {
             if !root.join(rel).is_file() {
                 return Err(format!(
                     "DGen toolchain stage at {} is incomplete (missing {rel}). {hint}",
@@ -961,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_default_stage_error_mentions_rebuild_script() {
+    fn missing_default_stage_is_a_hard_error_on_every_host() {
         let paths = AppPaths::dev(
             PathBuf::from("/nonexistent/crates/sequencer"),
             PathBuf::from("/nonexistent"),
@@ -972,6 +999,47 @@ mod tests {
             .expect_err("missing stage must be a hard error");
         assert!(err.contains("rebuild_dgenlisp_tool.sh"), "{err}");
         assert!(err.contains("tools/dgen-toolchain"), "{err}");
+    }
+
+    #[test]
+    fn wrong_target_toolchain_stage_is_a_hard_error() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-wrong-dgen-toolchain-target-{}",
+            std::process::id()
+        ));
+        let stage = root.join("dgen-toolchain");
+        std::fs::create_dir_all(&stage).expect("create test stage");
+        let wrong_target = if DGEN_TOOLCHAIN_TARGET == "arm64-apple-macos" {
+            "x86_64-unknown-linux-gnu"
+        } else {
+            "arm64-apple-macos"
+        };
+        std::fs::write(
+            stage.join("VERSION.json"),
+            format!(r#"{{"target":"{wrong_target}"}}"#),
+        )
+        .expect("write stage identity");
+
+        let mut paths = AppPaths::dev(
+            PathBuf::from("/ws/crates/sequencer"),
+            PathBuf::from("/ws"),
+            PathBuf::from("/home/test/.eseq.d"),
+        );
+        let AppPaths::Dev {
+            dgen_toolchain_override,
+            ..
+        } = &mut paths
+        else {
+            unreachable!()
+        };
+        *dgen_toolchain_override = Some(stage);
+        let err = paths
+            .dgen_toolchain_root_checked()
+            .expect_err("wrong-target stage must be rejected before compiler invocation");
+        assert!(err.contains(wrong_target), "{err}");
+        assert!(err.contains(DGEN_TOOLCHAIN_TARGET), "{err}");
+        assert!(err.contains("target-specific"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
