@@ -12,6 +12,15 @@ mix, metering, and CPU-load accounting.
 use super::*;
 
 pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
+    // cpal's ALSA backend spawns the callback thread with default scheduling
+    // and no spawn hook, so promote it here on first entry. The callback
+    // thread actively helps drain the graph; leaving it SCHED_OTHER while the
+    // workers run SCHED_FIFO inverts priorities in the audio path.
+    #[cfg(target_os = "linux")]
+    if !data.rt_promotion_attempted {
+        data.rt_promotion_attempted = true;
+        unsafe { promote_current_thread_rt() };
+    }
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;
     if let Some(observation) = data.output_block_size.observe(nframes) {

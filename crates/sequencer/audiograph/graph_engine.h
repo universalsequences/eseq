@@ -192,6 +192,15 @@ void engine_enable_graph_logging(int enable);
 // time constraints; Linux uses SCHED_FIFO.
 void engine_enable_rt_scheduling(int enable);
 void engine_set_rt_priority(int priority);
+
+// Promote the calling thread to realtime scheduling. Intended for the audio
+// callback thread, which drives each block and helps drain the graph: on
+// Linux it gets SCHED_FIFO at the configured rt priority + 1 so it outranks
+// the workers it feeds. No-op on Apple (CoreAudio already delivers the
+// callback on a realtime thread) and when rt scheduling is disabled; a
+// permission failure logs the same one-shot RLIMIT_RTPRIO warning as the
+// workers and the thread continues at normal priority.
+void engine_promote_current_thread_rt(void);
 bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 
 // ===================== Live Graph Operations =====================

@@ -123,6 +123,8 @@ pub fn build_output_stream(
         block_events_need_sort: false,
         current_callback_nframes: block_size,
         output_block_size: OutputBlockSizeVerifier::new(block_size),
+        #[cfg(target_os = "linux")]
+        rt_promotion_attempted: false,
         rendered_samples: Arc::clone(&rendered_samples),
         bus_effect_runtime,
         dropped_scheduled_events: 0,

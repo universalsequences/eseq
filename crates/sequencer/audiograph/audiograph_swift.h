@@ -39,6 +39,12 @@ void engine_enable_rt_logging(int enable);
 void engine_enable_rt_scheduling(int enable);
 void engine_set_rt_priority(int priority);
 
+// Promote the calling thread (the audio callback thread) to realtime
+// scheduling: Linux SCHED_FIFO at rt priority + 1 so it outranks the workers
+// it drives. No-op on Apple, where CoreAudio already supplies an RT callback
+// thread, and when rt scheduling is disabled.
+void engine_promote_current_thread_rt(void);
+
 // ===================== Live Graph Management =====================
 
 // Create and destroy live graphs

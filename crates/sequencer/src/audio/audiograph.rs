@@ -139,6 +139,7 @@ extern "C" {
     pub fn engine_enable_graph_logging(enable: c_int);
     pub fn engine_enable_rt_scheduling(enable: c_int);
     pub fn engine_set_rt_priority(priority: c_int);
+    pub fn engine_promote_current_thread_rt();
     pub fn debug_dump_graph(lg: *mut LiveGraph);
 
     // Graph lifecycle
@@ -287,4 +288,14 @@ pub unsafe fn enable_rt_scheduling(enable: bool) {
 
 pub unsafe fn set_rt_priority(priority: i32) {
     engine_set_rt_priority(priority);
+}
+
+/// Promote the calling thread to realtime scheduling: Linux SCHED_FIFO at the
+/// configured rt priority + 1 so the audio callback thread outranks the graph
+/// workers it drives. No-op on Apple (CoreAudio already provides an RT
+/// callback thread) and when rt scheduling is disabled; a permission failure
+/// logs the workers' one-shot RLIMIT_RTPRIO warning and leaves the thread at
+/// normal priority.
+pub unsafe fn promote_current_thread_rt() {
+    engine_promote_current_thread_rt();
 }

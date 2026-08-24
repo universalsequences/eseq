@@ -542,7 +542,13 @@ static void wait_for_block_start_or_shutdown(void) {
 }
 
 #ifdef __linux__
-static void promote_linux_worker_to_realtime(void) {
+// Shared SCHED_FIFO promotion for the graph workers and the audio callback
+// thread that drives them. `priority_boost` is added to the configured base
+// priority before clamping to the platform range: workers use 0, the callback
+// thread uses +1 so the thread that publishes each block (and helps drain the
+// graph in process_next_block) is never preempted by its own helpers.
+static void promote_current_linux_thread_to_fifo(int priority_boost,
+                                                 const char *role) {
   if (!atomic_load_explicit(&g_engine.rt_scheduling, memory_order_acquire)) {
     return;
   }
@@ -553,13 +559,14 @@ static void promote_linux_worker_to_realtime(void) {
     int err = errno;
     fprintf(stderr,
             "[audiograph] WARN: cannot query SCHED_FIFO priority range: %s "
-            "(workers remain normal priority)\n",
-            strerror(err));
+            "(%s remains normal priority)\n",
+            strerror(err), role);
     return;
   }
 
   int requested =
-      atomic_load_explicit(&g_engine.rt_priority, memory_order_acquire);
+      atomic_load_explicit(&g_engine.rt_priority, memory_order_acquire) +
+      priority_boost;
   int priority = requested;
   if (priority < min_priority)
     priority = min_priority;
@@ -577,26 +584,42 @@ static void promote_linux_worker_to_realtime(void) {
         fprintf(stderr,
                 "[audiograph] WARN: SCHED_FIFO priority %d denied: %s; grant "
                 "RLIMIT_RTPRIO with limits.conf/systemd LimitRTPRIO or grant "
-                "CAP_SYS_NICE (workers remain normal priority)\n",
-                priority, strerror(rc));
+                "CAP_SYS_NICE (%s remains normal priority)\n",
+                priority, strerror(rc), role);
       }
     } else {
       fprintf(stderr,
               "[audiograph] WARN: pthread_setschedparam(SCHED_FIFO, %d) "
-              "failed: %s (worker remains normal priority)\n",
-              priority, strerror(rc));
+              "failed: %s (%s remains normal priority)\n",
+              priority, strerror(rc), role);
     }
     return;
   }
 
   if (atomic_load_explicit(&g_engine.rt_log, memory_order_relaxed)) {
     fprintf(stderr,
-            "[audiograph] worker %p set SCHED_FIFO priority %d%s\n",
-            (void *)pthread_self(), priority,
+            "[audiograph] %s %p set SCHED_FIFO priority %d%s\n",
+            role, (void *)pthread_self(), priority,
             priority == requested ? "" : " (clamped to platform range)");
   }
 }
+
+static void promote_linux_worker_to_realtime(void) {
+  promote_current_linux_thread_to_fifo(0, "worker");
+}
 #endif
+
+void engine_promote_current_thread_rt(void) {
+#ifdef __linux__
+  // cpal's ALSA backend spawns the callback thread with default scheduling
+  // and no thread-spawn hook, so the callback promotes itself on first entry.
+  // Without this the workers run SCHED_FIFO while the thread that drives the
+  // block stays SCHED_OTHER — priority inversion in the audio path.
+  promote_current_linux_thread_to_fifo(1, "audio callback thread");
+#endif
+  // On Apple this is deliberately a no-op: CoreAudio already delivers the
+  // callback on a THREAD_TIME_CONSTRAINT_POLICY realtime thread.
+}
 
 static void *worker_main(void *arg) {
   intptr_t worker_slot = (intptr_t)arg;

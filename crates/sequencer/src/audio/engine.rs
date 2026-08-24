@@ -408,7 +408,10 @@ fn init_engine_parts(
         "audiograph: starting {workers} worker(s), realtime scheduling {}{}, graph trace {}",
         if rt_enabled { "enabled" } else { "disabled" },
         if cfg!(target_os = "linux") && rt_enabled {
-            format!(" (SCHED_FIFO priority {rt_priority})")
+            format!(
+                " (SCHED_FIFO workers at {rt_priority}, callback at {})",
+                rt_priority + 1
+            )
         } else {
             String::new()
         },

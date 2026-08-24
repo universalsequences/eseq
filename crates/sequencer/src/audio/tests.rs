@@ -47,6 +47,51 @@ fn linux_cpal_output_stream_starts_and_renders_callbacks() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn promote_current_thread_rt_promotes_above_workers_or_degrades_gracefully() {
+    fn current_policy_and_priority() -> (i32, i32) {
+        let mut param = libc::sched_param { sched_priority: 0 };
+        let mut policy: libc::c_int = 0;
+        let rc =
+            unsafe { libc::pthread_getschedparam(libc::pthread_self(), &mut policy, &mut param) };
+        assert_eq!(rc, 0, "pthread_getschedparam failed");
+        (policy, param.sched_priority)
+    }
+
+    // A dedicated thread stands in for the cpal callback thread so a
+    // successful promotion never leaves the test-runner thread at SCHED_FIFO.
+    std::thread::spawn(|| {
+        // With rt scheduling disabled the promotion must be a no-op.
+        unsafe {
+            crate::audiograph::set_rt_priority(20);
+            crate::audiograph::enable_rt_scheduling(false);
+            crate::audiograph::promote_current_thread_rt();
+        }
+        assert_eq!(current_policy_and_priority(), (libc::SCHED_OTHER, 0));
+
+        // Enabled, the callback thread requests base + 1. With an rtprio
+        // grant it lands on SCHED_FIFO above the workers; without one it logs
+        // the one-shot warning and continues at normal priority.
+        unsafe {
+            crate::audiograph::enable_rt_scheduling(true);
+            crate::audiograph::promote_current_thread_rt();
+            crate::audiograph::enable_rt_scheduling(false);
+        }
+        let (policy, priority) = current_policy_and_priority();
+        if policy == libc::SCHED_FIFO {
+            assert_eq!(
+                priority, 21,
+                "callback thread must sit one step above the workers' base priority"
+            );
+        } else {
+            assert_eq!((policy, priority), (libc::SCHED_OTHER, 0));
+        }
+    })
+    .join()
+    .expect("promotion thread panicked");
+}
+
 #[test]
 fn output_block_size_verifier_confirms_match_and_reports_first_later_mismatch() {
     let mut verifier = OutputBlockSizeVerifier::new(512);
