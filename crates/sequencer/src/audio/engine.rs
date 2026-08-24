@@ -404,22 +404,28 @@ fn init_engine_parts(
         audiograph::set_rt_priority(rt_priority);
         audiograph::enable_rt_scheduling(rt_enabled);
     }
-    eprintln!(
-        "audiograph: starting {workers} worker(s), realtime scheduling {}{}, graph trace {}",
-        if rt_enabled { "enabled" } else { "disabled" },
-        if cfg!(target_os = "linux") && rt_enabled {
-            format!(
-                " (SCHED_FIFO workers at {rt_priority}, callback at {})",
-                rt_priority + 1
-            )
-        } else {
-            String::new()
-        },
-        if graph_log { "enabled" } else { "disabled" }
-    );
     unsafe {
         audiograph::engine_start_workers(workers);
     }
+    #[cfg(target_os = "linux")]
+    let (started_workers, achieved_scheduling) = unsafe {
+        let status = audiograph::rt_status();
+        (status.worker_count, audiograph::format_rt_status(status))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (started_workers, achieved_scheduling) = (
+        workers,
+        if rt_enabled {
+            "platform realtime policy requested".to_string()
+        } else {
+            "realtime scheduling disabled".to_string()
+        },
+    );
+    eprintln!(
+        "audiograph: started {started_workers} worker(s), realtime request {}, achieved {achieved_scheduling}, graph trace {}",
+        if rt_enabled { "enabled" } else { "disabled" },
+        if graph_log { "enabled" } else { "disabled" }
+    );
 
     // Create shared sequencer state (start with 0 tracks)
     let state = Arc::new(SequencerState::new(0, vec![]));

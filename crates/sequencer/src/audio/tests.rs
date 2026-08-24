@@ -87,9 +87,70 @@ fn promote_current_thread_rt_promotes_above_workers_or_degrades_gracefully() {
         } else {
             assert_eq!((policy, priority), (libc::SCHED_OTHER, 0));
         }
+        let status = unsafe { crate::audiograph::rt_status() };
+        assert_eq!(status.callback_reported, 1);
+        assert_eq!(status.callback_policy, policy);
+        assert_eq!(status.callback_priority, priority);
     })
     .join()
     .expect("promotion thread panicked");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn worker_startup_reports_achieved_policy() {
+    crate::audiograph::initialize_engine_for_test(128, 48_000);
+    unsafe {
+        crate::audiograph::set_rt_priority(20);
+        crate::audiograph::enable_rt_scheduling(true);
+        crate::audiograph::engine_start_workers(2);
+    }
+
+    let status = unsafe { crate::audiograph::rt_status() };
+    assert_eq!(status.worker_count, 2);
+    assert_eq!(status.workers_reported, 2);
+    if status.worker_policy == libc::SCHED_FIFO {
+        assert_eq!(status.worker_priority, 20);
+    } else {
+        assert_eq!(status.worker_policy, libc::SCHED_OTHER);
+        assert_eq!(status.worker_priority, 0);
+    }
+    assert_eq!(status.callback_reported, 0);
+    assert_eq!(
+        status.callback_policy,
+        crate::audiograph::ENGINE_SCHED_POLICY_UNKNOWN
+    );
+
+    unsafe {
+        crate::audiograph::engine_stop_workers();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scheduling_status_format_supports_fifo_and_rtkit_rr() {
+    let mut status = crate::audiograph::EngineRtStatus {
+        worker_count: 3,
+        workers_reported: 3,
+        worker_policy: libc::SCHED_FIFO,
+        worker_priority: 20,
+        callback_reported: 1,
+        callback_policy: libc::SCHED_FIFO,
+        callback_priority: 21,
+    };
+    assert_eq!(
+        crate::audiograph::format_rt_status(status),
+        "workers SCHED_FIFO priority 20, callback SCHED_FIFO priority 21"
+    );
+
+    status.worker_policy = libc::SCHED_RR;
+    status.worker_priority = 15;
+    status.callback_policy = libc::SCHED_RR;
+    status.callback_priority = 16;
+    assert_eq!(
+        crate::audiograph::format_rt_status(status),
+        "workers SCHED_RR priority 15, callback SCHED_RR priority 16"
+    );
 }
 
 #[test]

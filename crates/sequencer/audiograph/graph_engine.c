@@ -207,6 +207,13 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.oswg_version, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.rt_scheduling, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.rt_priority, 20, memory_order_relaxed);
+  g_engine.workerPolicies = NULL;
+  g_engine.workerPriorities = NULL;
+  atomic_store_explicit(&g_engine.workerStartupCount, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPolicy, ENGINE_SCHED_POLICY_UNKNOWN,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.graph_log, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.activeWorkerLimit, 0, memory_order_relaxed);
   atomic_store_explicit(&g_active_job_count, 0, memory_order_relaxed);
@@ -604,6 +611,23 @@ static void promote_current_linux_thread_to_fifo(int priority_boost,
   }
 }
 
+static void read_current_linux_scheduling(int *policy, int *priority,
+                                          const char *role) {
+  struct sched_param param = {.sched_priority = 0};
+  int observed_policy = SCHED_OTHER;
+  int rc = pthread_getschedparam(pthread_self(), &observed_policy, &param);
+  if (rc != 0) {
+    fprintf(stderr,
+            "[audiograph] WARN: cannot read achieved scheduling for %s: %s\n",
+            role, strerror(rc));
+    *policy = ENGINE_SCHED_POLICY_UNKNOWN;
+    *priority = 0;
+    return;
+  }
+  *policy = observed_policy;
+  *priority = param.sched_priority;
+}
+
 static void promote_linux_worker_to_realtime(void) {
   promote_current_linux_thread_to_fifo(0, "worker");
 }
@@ -616,6 +640,13 @@ void engine_promote_current_thread_rt(void) {
   // Without this the workers run SCHED_FIFO while the thread that drives the
   // block stays SCHED_OTHER — priority inversion in the audio path.
   promote_current_linux_thread_to_fifo(1, "audio callback thread");
+  int policy = ENGINE_SCHED_POLICY_UNKNOWN;
+  int priority = 0;
+  read_current_linux_scheduling(&policy, &priority, "audio callback thread");
+  atomic_store_explicit(&g_engine.callbackPolicy, policy, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, priority,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 1, memory_order_release);
 #endif
   // On Apple this is deliberately a no-op: CoreAudio already delivers the
   // callback on a THREAD_TIME_CONSTRAINT_POLICY realtime thread.
@@ -630,7 +661,21 @@ static void *worker_main(void *arg) {
   // Elevate worker scheduling before it begins participating in graph work.
 #ifdef __linux__
   promote_linux_worker_to_realtime();
+  int policy = ENGINE_SCHED_POLICY_UNKNOWN;
+  int priority = 0;
+  read_current_linux_scheduling(&policy, &priority, "worker");
+  atomic_store_explicit(&g_engine.workerPolicies[worker_index], policy,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.workerPriorities[worker_index], priority,
+                        memory_order_relaxed);
 #endif
+  // Starting workers is synchronous with respect to this initialization point,
+  // so the host can truthfully report the achieved policy before continuing.
+  pthread_mutex_lock(&g_engine.workerStartupMtx);
+  atomic_fetch_add_explicit(&g_engine.workerStartupCount, 1,
+                            memory_order_release);
+  pthread_cond_broadcast(&g_engine.workerStartupCv);
+  pthread_mutex_unlock(&g_engine.workerStartupMtx);
 #ifdef __APPLE__
 #ifdef QOS_CLASS_USER_INTERACTIVE
   (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
@@ -819,12 +864,42 @@ static void *worker_main(void *arg) {
 // ===================== Worker Pool Management =====================
 
 void engine_start_workers(int workers) {
-  g_engine.workerCount = workers;
-  g_engine.threads = (pthread_t *)calloc(workers, sizeof(pthread_t));
+  if (workers < 0)
+    workers = 0;
+  g_engine.workerCount = 0;
+  g_engine.threads = (pthread_t *)calloc((size_t)workers, sizeof(pthread_t));
+  g_engine.workerPolicies =
+      (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
+  g_engine.workerPriorities =
+      (_Atomic int *)calloc((size_t)workers, sizeof(_Atomic int));
+  if (workers > 0 && (!g_engine.threads || !g_engine.workerPolicies ||
+                      !g_engine.workerPriorities)) {
+    fprintf(stderr,
+            "[audiograph] WARN: cannot allocate worker pool for %d workers\n",
+            workers);
+    free(g_engine.threads);
+    free(g_engine.workerPolicies);
+    free(g_engine.workerPriorities);
+    g_engine.threads = NULL;
+    g_engine.workerPolicies = NULL;
+    g_engine.workerPriorities = NULL;
+    workers = 0;
+  }
+  for (int i = 0; i < workers; i++) {
+    atomic_init(&g_engine.workerPolicies[i], ENGINE_SCHED_POLICY_UNKNOWN);
+    atomic_init(&g_engine.workerPriorities[i], 0);
+  }
+  atomic_store_explicit(&g_engine.workerStartupCount, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPolicy, ENGINE_SCHED_POLICY_UNKNOWN,
+                        memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackPriority, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_engine.callbackReported, 0, memory_order_relaxed);
 
-  // Initialize mutex and condition variable for block-start wake
+  // Initialize mutexes and condition variables before any worker can signal.
   pthread_mutex_init(&g_engine.sess_mtx, NULL);
   pthread_cond_init(&g_engine.sess_cv, NULL);
+  pthread_mutex_init(&g_engine.workerStartupMtx, NULL);
+  pthread_cond_init(&g_engine.workerStartupCv, NULL);
 
   atomic_store(&g_engine.runFlag, 1);
   for (int i = 0; i < workers; i++) {
@@ -836,10 +911,23 @@ void engine_start_workers(int workers) {
     (void)pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
 #endif
-    pthread_create(&g_engine.threads[i], &attr, worker_main,
-                   (void *)(intptr_t)(i + 1));
+    int rc = pthread_create(&g_engine.threads[i], &attr, worker_main,
+                            (void *)(intptr_t)(i + 1));
     pthread_attr_destroy(&attr);
+    if (rc != 0) {
+      fprintf(stderr, "[audiograph] WARN: cannot start worker %d: %s\n", i,
+              strerror(rc));
+      break;
+    }
+    g_engine.workerCount++;
   }
+
+  pthread_mutex_lock(&g_engine.workerStartupMtx);
+  while (atomic_load_explicit(&g_engine.workerStartupCount,
+                              memory_order_acquire) < g_engine.workerCount) {
+    pthread_cond_wait(&g_engine.workerStartupCv, &g_engine.workerStartupMtx);
+  }
+  pthread_mutex_unlock(&g_engine.workerStartupMtx);
 }
 
 void engine_set_os_workgroup(void *oswg_ptr) {
@@ -928,6 +1016,39 @@ void engine_set_rt_priority(int priority) {
   atomic_store_explicit(&g_engine.rt_priority, priority, memory_order_release);
 }
 
+void engine_get_rt_status(EngineRtStatus *status) {
+  if (!status)
+    return;
+
+  status->worker_count = g_engine.workerCount;
+  status->workers_reported = atomic_load_explicit(&g_engine.workerStartupCount,
+                                                  memory_order_acquire);
+  status->worker_policy = ENGINE_SCHED_POLICY_UNKNOWN;
+  status->worker_priority = 0;
+  for (int i = 0; i < status->workers_reported && i < g_engine.workerCount; i++) {
+    int policy = atomic_load_explicit(&g_engine.workerPolicies[i],
+                                      memory_order_relaxed);
+    int priority = atomic_load_explicit(&g_engine.workerPriorities[i],
+                                        memory_order_relaxed);
+    if (i == 0) {
+      status->worker_policy = policy;
+      status->worker_priority = priority;
+    } else {
+      if (status->worker_policy != policy)
+        status->worker_policy = ENGINE_SCHED_POLICY_MIXED;
+      if (status->worker_priority != priority)
+        status->worker_priority = ENGINE_SCHED_PRIORITY_MIXED;
+    }
+  }
+
+  status->callback_reported = atomic_load_explicit(&g_engine.callbackReported,
+                                                   memory_order_acquire);
+  status->callback_policy = atomic_load_explicit(&g_engine.callbackPolicy,
+                                                 memory_order_relaxed);
+  status->callback_priority = atomic_load_explicit(&g_engine.callbackPriority,
+                                                   memory_order_relaxed);
+}
+
 void engine_stop_workers(void) {
   atomic_store(&g_engine.runFlag, 0);
 
@@ -947,9 +1068,15 @@ void engine_stop_workers(void) {
   // Clean up synchronization primitives
   pthread_mutex_destroy(&g_engine.sess_mtx);
   pthread_cond_destroy(&g_engine.sess_cv);
+  pthread_mutex_destroy(&g_engine.workerStartupMtx);
+  pthread_cond_destroy(&g_engine.workerStartupCv);
 
   free(g_engine.threads);
+  free(g_engine.workerPolicies);
+  free(g_engine.workerPriorities);
   g_engine.threads = NULL;
+  g_engine.workerPolicies = NULL;
+  g_engine.workerPriorities = NULL;
   g_engine.workerCount = 0;
 }
 

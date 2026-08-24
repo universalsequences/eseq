@@ -172,7 +172,34 @@ typedef struct Engine {
   _Atomic int graph_log; // enable per-block audiograph scheduler/output trace
   _Atomic int rt_scheduling; // apply the platform realtime worker policy
   _Atomic int rt_priority; // SCHED_FIFO priority on Linux
+
+  // Actual scheduling observed after each Linux thread's promotion attempt.
+  // Per-worker slots let the public snapshot detect a partial/mixed outcome.
+  _Atomic int *workerPolicies;
+  _Atomic int *workerPriorities;
+  _Atomic int workerStartupCount;
+  pthread_mutex_t workerStartupMtx;
+  pthread_cond_t workerStartupCv;
+  _Atomic int callbackPolicy;
+  _Atomic int callbackPriority;
+  _Atomic int callbackReported;
 } Engine;
+
+// `worker_policy` and `callback_policy` are native pthread_getschedparam policy
+// values (SCHED_OTHER/SCHED_FIFO/SCHED_RR). Keeping the achieved native policy
+// makes this API able to report an rtkit SCHED_RR grant as well as direct FIFO.
+#define ENGINE_SCHED_POLICY_UNKNOWN (-1)
+#define ENGINE_SCHED_POLICY_MIXED (-2)
+#define ENGINE_SCHED_PRIORITY_MIXED (-1)
+typedef struct EngineRtStatus {
+  int worker_count;
+  int workers_reported;
+  int worker_policy;
+  int worker_priority;
+  int callback_reported;
+  int callback_policy;
+  int callback_priority;
+} EngineRtStatus;
 
 void engine_start_workers(int workers);
 void engine_stop_workers(void);
@@ -192,6 +219,7 @@ void engine_enable_graph_logging(int enable);
 // time constraints; Linux uses SCHED_FIFO.
 void engine_enable_rt_scheduling(int enable);
 void engine_set_rt_priority(int priority);
+void engine_get_rt_status(EngineRtStatus *status);
 
 // Promote the calling thread to realtime scheduling. Intended for the audio
 // callback thread, which drives each block and helps drain the graph: on

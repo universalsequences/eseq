@@ -20,6 +20,10 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     if !data.rt_promotion_attempted {
         data.rt_promotion_attempted = true;
         unsafe { promote_current_thread_rt() };
+        // Like the existing first-block size diagnostic below, this startup
+        // report runs once before the callback enters steady-state rendering.
+        let achieved = unsafe { audiograph::format_rt_status(audiograph::rt_status()) };
+        eprintln!("audiograph: realtime scheduling achieved: {achieved}");
     }
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;

@@ -58,10 +58,39 @@ void engine_set_rt_priority(int priority);     // Linux SCHED_FIFO priority
 void engine_set_os_workgroup(void *oswg);      // OS Workgroup (macOS 10.16+)
 ```
 
-On Linux, `SCHED_FIFO` requires either a nonzero `RLIMIT_RTPRIO` (configured
-through `limits.conf` or systemd `LimitRTPRIO`) or `CAP_SYS_NICE`. If promotion
-is denied, each worker remains at normal priority and the engine emits one clear
-warning per initialization rather than failing audio startup.
+On Linux, `SCHED_FIFO` requires a nonzero `RLIMIT_RTPRIO`. The repository ships
+[`packaging/eseq-realtime.conf`](packaging/eseq-realtime.conf), a PAM limits
+drop-in granting realtime-group members `rtprio 95` and unlimited locked memory.
+Provision a development or manually installed host with:
+
+```sh
+sudo groupadd --system --force realtime
+sudo install -Dm644 crates/sequencer/audiograph/packaging/eseq-realtime.conf \
+  /etc/security/limits.d/95-eseq-realtime.conf
+sudo usermod -aG realtime "$USER"
+```
+
+Log out completely and log back in after changing group membership; opening a
+new terminal inside the old login session is not sufficient. Verify the new
+session before launching eseq:
+
+```sh
+ulimit -r       # 95
+ulimit -l       # unlimited (some shells print "unlimited")
+```
+
+The drop-in is applied by `pam_limits` to login sessions. A service whose
+systemd unit overrides resource limits instead needs equivalent
+`LimitRTPRIO=95` and `LimitMEMLOCK=infinity` directives. Do not grant `CAP_SYS_NICE` to a development
+binary: file capabilities are lost whenever Cargo replaces the executable and
+grant broader scheduling authority than this group-scoped limit.
+
+At startup, eseq reports the policies and priorities actually observed on the
+worker and audio callback threads. With the drop-in, workers use `SCHED_FIFO`
+priority 20 and the callback uses priority 21. Without it, they remain
+`SCHED_OTHER` priority 0 and audio startup continues after a one-shot warning.
+Set `TINYSEQ_AUDIOGRAPH_RT_LOG=1` for per-thread promotion logs; `chrt -p <tid>`
+can independently inspect a thread from another shell.
 
 ### Graph Lifecycle
 
