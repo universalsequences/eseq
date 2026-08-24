@@ -13,3 +13,6 @@ pub mod effect_chain_graph;
 pub mod effect_compile;
 pub mod instrument_compile;
 pub mod instrument_storage;
+
+#[cfg(test)]
+mod dgen_host_services_tests;

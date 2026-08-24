@@ -5,8 +5,9 @@
  * ESeq's implementation of the DGen ABI v1 host-services table
  * (embedded-dgen-connector-impl-spec.md, decision 2 / slice E4): a
  * near-verbatim port of dgen's reference Sources/DGenHostSupport/
- * DGenHostSupport.c, backed by Accelerate/vDSP. The *app* links Accelerate;
- * generated dylibs never do.
+ * DGenHostSupport.c. Backed by Accelerate/vDSP on Apple platforms — where the
+ * *app* links Accelerate and generated dylibs never do — and by the portable
+ * dgen_fft.c everywhere else (eseq-linux.9).
  */
 
 #include "dgen_abi_v1.h"
