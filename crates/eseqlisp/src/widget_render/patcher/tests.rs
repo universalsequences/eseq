@@ -1847,6 +1847,13 @@ fn patcher_test_dgenlisp_tool(repo_root: &std::path::Path) -> Result<std::path::
     }
 }
 
+fn patcher_test_dgen_toolchain_root(repo_root: &std::path::Path) -> std::path::PathBuf {
+    std::env::var_os("ESEQ_DGEN_TOOLCHAIN_ROOT")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("crates/sequencer/tools/dgen-toolchain"))
+}
+
 fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
     let source_path = temp_patcher_source_path("patcher-dgen-compile");
     let out_dir = source_path.with_extension("out");
@@ -1858,12 +1865,19 @@ fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
         .and_then(|path| path.parent())
         .expect("eseqlisp crate should live below the repository root");
     let tool_path = patcher_test_dgenlisp_tool(repo_root)?;
+    let runtime_include = patcher_test_dgen_toolchain_root(repo_root).join("include");
     let output = std::process::Command::new(tool_path)
         .args(["compile", source_path.to_str().unwrap()])
         .args(["-o", out_dir.to_str().unwrap()])
         .args(["--name", "patcher_dgen_compile_test"])
         .args(["--sample-rate", "44100"])
         .args(["--voices", "12"])
+        // Published DGenLisp binaries must not fall back to a checkout path
+        // captured on their build machine. Patcher tests intentionally use
+        // the system compiler, so provide the runtime headers explicitly;
+        // production compiles instead pass the complete staged toolchain root.
+        .env("DGEN_RUNTIME_INCLUDE", runtime_include)
+        .arg("--skip-inline-audit")
         .output()
         .map_err(|error| error.to_string())?;
 
