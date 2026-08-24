@@ -58,7 +58,8 @@ mod inner {
     use crate::live_audio;
     use crate::theme;
     use crate::ui::gpu_geometry::{
-        Vertex, push_solid_quad_vertices, push_solid_rect_vertices,
+        ImageVertex, LiveSpectrogramInstance, PatchCableInstance, Vertex, WaveformInstance,
+        WavetableInstance, push_solid_quad_vertices, push_solid_rect_vertices,
     };
     use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
@@ -1783,105 +1784,6 @@ fragment float4 live_spectrogram_frag(
         widget_id: u64,
         widget_type: String,
         ancestor_widget_ids: Vec<u64>,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct ImageVertex {
-        position: [f32; 2],
-        uv: [f32; 2],
-        opacity: f32,
-        local_pos: [f32; 2],
-        half_size: [f32; 2],
-        radius: f32,
-        rotation: f32,
-        clip_circle: f32,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct WaveformInstance {
-        ndc_min: [f32; 2],
-        ndc_max: [f32; 2],
-        sample_start: f32,
-        sample_end: f32,
-        bucket_count: u32,
-        aspect_ratio: f32,
-        selection_start: f32,
-        selection_end: f32,
-        show_selection_start: i32,
-        show_selection_end: i32,
-        playhead_position: f32,
-        show_playhead: i32,
-        waveform_color: [f32; 4],
-        inactive_waveform_color: [f32; 4],
-        marker_color: [f32; 4],
-        active_marker_color: [f32; 4],
-        active_selection_start: i32,
-        active_selection_end: i32,
-        selection_color: [f32; 4],
-        bg_color: [f32; 4],
-        border_color: [f32; 4],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct WavetableInstance {
-        ndc_min: [f32; 2],
-        ndc_max: [f32; 2],
-        widget_px_w: f32,
-        widget_px_h: f32,
-        frame_len: u32,
-        set_base: u32,
-        waves_in_set: u32,
-        wave_pos: f32,
-        warp: f32,
-        fold: f32,
-        domain: u32,
-        selected_color: [f32; 4],
-        inactive_color: [f32; 4],
-        bg_color: [f32; 4],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct LiveSpectrogramInstance {
-        ndc_min: [f32; 2],
-        ndc_max: [f32; 2],
-        widget_px_w: f32,
-        widget_px_h: f32,
-        bins: u32,
-        time_slices: u32,
-        write_head: u32,
-        mode: u32,
-        freq_scale: u32,
-        sample_rate: f32,
-        display_hz: [f32; 2],
-        display_hz_padding: [f32; 2],
-        min_color: [f32; 4],
-        mid_color: [f32; 4],
-        max_color: [f32; 4],
-        eq_line_color: [f32; 4],
-        eq_fill_color: [f32; 4],
-        background_color: [f32; 4],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct PatchCableInstance {
-        ndc_min: [f32; 2],
-        ndc_max: [f32; 2],
-        bounds_min: [f32; 2],
-        bounds_max: [f32; 2],
-        start: [f32; 2],
-        control1: [f32; 2],
-        control2: [f32; 2],
-        end: [f32; 2],
-        color: [f32; 4],
-        radius_px: f32,
-        is_segmented: f32,
-        segment_y_px: f32,
-        corner_radius_px: f32,
     }
 
     #[derive(Clone, Copy)]

@@ -55,6 +55,9 @@ pub use lang::modules;
 pub use lang::parser;
 pub use lang::vm;
 
+#[cfg(feature = "wgpu")]
+pub mod shader_capture;
+
 pub use ui::backend;
 pub use ui::frame;
 pub use ui::glyph_atlas;

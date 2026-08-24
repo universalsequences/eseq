@@ -8,5 +8,8 @@ pub mod metal_backend;
 pub mod platform;
 pub mod theme;
 pub mod tui;
+pub mod wgsl_shaders;
 #[cfg(feature = "wgpu")]
 pub mod wgpu_backend;
+#[cfg(feature = "wgpu")]
+pub mod wgpu_pipelines;

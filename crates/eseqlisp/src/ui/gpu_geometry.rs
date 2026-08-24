@@ -13,6 +13,7 @@ use crate::widget_render::{self, GpuPrimitive, GpuPrimitiveRun};
 /// expanded from the same `SolidQuadInstance` representation consumed by wgpu.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub(crate) struct Vertex {
     pub position: [f32; 2],
     pub uv: [f32; 2],
@@ -27,6 +28,126 @@ pub(crate) struct SolidQuadInstance {
     /// Left, top, right, bottom in NDC. Y decreases towards the bottom.
     pub ndc_bounds: [f32; 4],
     pub color: [f32; 4],
+}
+
+/// Per-vertex data for the image quad pipeline (`image_vert`/`image_frag`).
+///
+/// This and the four instance structs below are the GPU-side layouts shared by
+/// the Metal and wgpu backends. They live here, next to the other vertex
+/// layouts, because both backends upload the bytes verbatim: MSL reads them as
+/// `device const T*`, WGSL as instance-step vertex attributes. Any field
+/// reorder is a wire-format change for both, so there is exactly one
+/// definition.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub(crate) struct ImageVertex {
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+    pub opacity: f32,
+    pub local_pos: [f32; 2],
+    pub half_size: [f32; 2],
+    pub radius: f32,
+    pub rotation: f32,
+    pub clip_circle: f32,
+}
+
+/// One patch cable, drawn as an instanced quad.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub(crate) struct PatchCableInstance {
+    pub ndc_min: [f32; 2],
+    pub ndc_max: [f32; 2],
+    pub bounds_min: [f32; 2],
+    pub bounds_max: [f32; 2],
+    pub start: [f32; 2],
+    pub control1: [f32; 2],
+    pub control2: [f32; 2],
+    pub end: [f32; 2],
+    pub color: [f32; 4],
+    pub radius_px: f32,
+    pub is_segmented: f32,
+    pub segment_y_px: f32,
+    pub corner_radius_px: f32,
+}
+
+/// One wavetable scope. Sample data comes from a separate bank buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub(crate) struct WavetableInstance {
+    pub ndc_min: [f32; 2],
+    pub ndc_max: [f32; 2],
+    pub widget_px_w: f32,
+    pub widget_px_h: f32,
+    pub frame_len: u32,
+    pub set_base: u32,
+    pub waves_in_set: u32,
+    pub wave_pos: f32,
+    pub warp: f32,
+    pub fold: f32,
+    pub domain: u32,
+    pub selected_color: [f32; 4],
+    pub inactive_color: [f32; 4],
+    pub bg_color: [f32; 4],
+}
+
+/// One sample-waveform view. Min/max buckets come from a separate buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub(crate) struct WaveformInstance {
+    pub ndc_min: [f32; 2],
+    pub ndc_max: [f32; 2],
+    pub sample_start: f32,
+    pub sample_end: f32,
+    pub bucket_count: u32,
+    pub aspect_ratio: f32,
+    pub selection_start: f32,
+    pub selection_end: f32,
+    pub show_selection_start: i32,
+    pub show_selection_end: i32,
+    pub playhead_position: f32,
+    pub show_playhead: i32,
+    pub waveform_color: [f32; 4],
+    pub inactive_waveform_color: [f32; 4],
+    pub marker_color: [f32; 4],
+    pub active_marker_color: [f32; 4],
+    pub active_selection_start: i32,
+    pub active_selection_end: i32,
+    pub selection_color: [f32; 4],
+    pub bg_color: [f32; 4],
+    pub border_color: [f32; 4],
+}
+
+/// One live spectrogram / EQ spectrum view.
+///
+/// `display_hz_padding` is not decoration: MSL aligns `float4` to 16 bytes, so
+/// without it the color block would sit at a different offset than this
+/// `#[repr(C)]` struct puts it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub(crate) struct LiveSpectrogramInstance {
+    pub ndc_min: [f32; 2],
+    pub ndc_max: [f32; 2],
+    pub widget_px_w: f32,
+    pub widget_px_h: f32,
+    pub bins: u32,
+    pub time_slices: u32,
+    pub write_head: u32,
+    pub mode: u32,
+    pub freq_scale: u32,
+    pub sample_rate: f32,
+    pub display_hz: [f32; 2],
+    pub display_hz_padding: [f32; 2],
+    pub min_color: [f32; 4],
+    pub mid_color: [f32; 4],
+    pub max_color: [f32; 4],
+    pub eq_line_color: [f32; 4],
+    pub eq_fill_color: [f32; 4],
+    pub background_color: [f32; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]

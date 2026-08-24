@@ -1,0 +1,29 @@
+{
+  "adapter": "Intel(R) UHD Graphics 620 (KBL GT2)",
+  "adapter_backend": "Vulkan",
+  "backend": "wgsl",
+  "capture_name": "wgsl-linux-x86_64",
+  "height": 256,
+  "png_sha256": {
+    "image": "567100c6cfa758401858b215cf913add21910f8674cac05f54f57fd53c94b17c",
+    "live-spectrogram": "47b6f60b8e558edc451c6214835905cfb0b6c4a4dc212180ddc3f459336b5144",
+    "patch-cable": "4e23e4a5421d881295950d9bd33ce7049ab95092131cf6f8fbfb71c5b48585a7",
+    "proportional-text": "114019c59a558db1108c256736a79746922ab3c5f8849e123ac0d1e7dff2e181",
+    "text": "7699a86cf5d363dcb80f6818c0f7bdaa7ca9c41eceb2497dc89d89321308b8c4",
+    "waveform": "f185c526c07af6fa4c64d1ff917fdba2b76862714e7f3bf865cfcf13da3a7931",
+    "wavetable": "250345d55acf9e62a14c8170fe41112a17bf73816ca0dd4ecc56c21ed6ad9f52",
+    "widget-surface": "fabd98864dd6cbe214fe5d10e93f9752ab05a4a11fa403dfdbab15c6cce2c4a7"
+  },
+  "scenes": [
+    "text",
+    "proportional-text",
+    "image",
+    "patch-cable",
+    "widget-surface",
+    "wavetable",
+    "waveform",
+    "live-spectrogram"
+  ],
+  "schema_version": 1,
+  "width": 512
+}

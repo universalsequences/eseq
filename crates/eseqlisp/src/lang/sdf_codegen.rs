@@ -1451,26 +1451,12 @@ fn compile_sdf_to_wgsl_with_state_and_theme(
     let result_expr = emitter.emit_expr(expr)?;
     let region_count = emitter.next_region_id;
 
+    // `WidgetVaryings` is declared once by
+    // `crate::ui::wgsl_shaders::WIDGET_SHADER_PREAMBLE_WGSL`, which every
+    // widget module is assembled onto — exactly as the MSL emitter relies on
+    // `WIDGET_SHADER_PREAMBLE`. Emitting a second copy here would make the
+    // assembled module fail to compile on a duplicate struct.
     let mut shader = String::with_capacity(3072);
-    shader.push_str(
-        r#"struct WidgetVaryings {
-    @location(0) uv: vec2<f32>,
-    @location(1) @interpolate(flat) value_t: f32,
-    @location(2) @interpolate(flat) itime: f32,
-    @location(3) @interpolate(flat) uniform_a: vec4<f32>,
-    @location(4) @interpolate(flat) uniform_b: vec4<f32>,
-    @location(5) @interpolate(flat) uniform_c: vec4<f32>,
-    @location(6) @interpolate(flat) uniform_d: vec4<f32>,
-    @location(7) @interpolate(flat) color_a: vec4<f32>,
-    @location(8) @interpolate(flat) color_b: vec4<f32>,
-    @location(9) @interpolate(flat) color_c: vec4<f32>,
-    @location(10) @interpolate(flat) color_d: vec4<f32>,
-    @location(11) @interpolate(flat) aspect: f32,
-    @location(12) @interpolate(flat) corner_radius: f32,
-};
-
-"#,
-    );
     writeln!(
         shader,
         "@fragment\nfn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32> {{"
@@ -1606,7 +1592,12 @@ mod tests {
         compile_sdf_expr(&parse_one_expr(src)).unwrap()
     }
 
-    fn assert_valid_wgsl(source: &str) {
+    /// Generated fragments are only half a module: they are written against
+    /// the shared widget preamble's `WidgetVaryings` and are compiled
+    /// concatenated onto it, so validate the same assembly the backend builds.
+    fn assert_valid_wgsl(fragment_source: &str) {
+        let assembled = crate::ui::wgsl_shaders::widget_shader_module(None, fragment_source);
+        let source = assembled.as_str();
         let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
             panic!(
                 "WGSL parse failed:\n{}\n\n{}",
@@ -1934,9 +1925,12 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        // Re-captured in eseq-linux.7 when the emitter stopped emitting its own
+        // `WidgetVaryings`: the struct now comes from the shared WGSL widget
+        // preamble the fragments are assembled onto. Bodies are unchanged.
         assert_eq!(
             wgsl_snapshot,
-            "762c24ab58a81c00a296c4cb55e4d45ae7ac70105d6764c854173d26877a6f6c"
+            "0367f4d1153ff7326bc8646dc9938b11254fe5ad30c746a4436c5b21300292af"
         );
     }
 

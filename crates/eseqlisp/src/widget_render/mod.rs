@@ -502,6 +502,7 @@ pub enum WidgetCursor {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct WidgetInstance {
     pub ndc_min: [f32; 2],
     pub ndc_max: [f32; 2],
