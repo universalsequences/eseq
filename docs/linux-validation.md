@@ -161,6 +161,53 @@ must hold `scroll cpu_p95` under one 60 Hz frame (16.6 ms). Treat a regression
 against that as a bug, and attribute it with the phase breakdown above before
 changing anything.
 
+### Measured, 2026-08-25, scrolling a multi-track sequencer buffer
+
+A representative steady-scroll second, with the three aggregates lined up:
+
+```
+[ui-profile][wgpu]      fps=8.1 cpu_avg=13.84ms cpu_p95=15.29ms plan_avg=10.97ms
+                        scene_avg=5.57ms acquire_avg=0.06ms encode_avg=2.87ms
+                        prims/frame=2907 draws/frame=889 buffers/frame=889
+                        buffer_kb/frame=622.0 | scroll frames=9 cpu_p95=15.29ms
+[ui-profile][sequencer] frames/s=8.0 frame_build_avg=50.08ms frame_build_max=110.77ms
+                        render_avg=14.55ms gestures=475.15ms
+[ui-profile][runtime]   relayout/s=16.9 relayout_avg=44.86ms reused=0 full=17
+                        subtree=0 fail=- reactive/s=0.0 reruns=full:0 sub:0
+```
+
+Scrolling runs at **6–8 fps**, and the render path is not why:
+
+| | per frame | per second |
+|---|---:|---:|
+| Full relayout (~2.1 per frame) | ~94 ms | **~758 ms** |
+| wgpu render total | 13.8 ms | 116 ms |
+| — of which widget scene rebuild | 5.6 ms | 47 ms |
+| — of which plan minus scene (889 buffers, 622 KB) | 5.4 ms | 45 ms |
+| — of which encode + submit | 2.9 ms | 24 ms |
+| — of which swapchain wait | 0.06 ms | 0.5 ms |
+
+Three things this settles:
+
+- **Layout is the cost, not rendering.** ~76% of wall-clock during a scroll is
+  spent in full relayouts. The entire wgpu render path is ~12%.
+- **Swapchain backpressure is not involved at all.** `acquire_avg` is 0.06 ms.
+  Frame pacing and input-to-present latency are ruled out; this is pure CPU.
+- **Nothing is being reused.** `reused=0 full=17 subtree=0`, with `reactive/s=0`
+  and zero buffer reruns — the widget *tree* is not being rebuilt, yet the
+  layout is recomputed from scratch about twice per frame. `fail=-` means no
+  reuse-failure reason was recorded either, which is itself the clue: several
+  callers of `relayout_current_tree` set `self.current_layout = None`
+  immediately beforehand (`runtime.rs` — `invalidate_layout`,
+  `flush_deferred_layout_invalidation`, `set_layout_cell_dimensions`,
+  `set_text_measurer`, `set_widget_id_offset`, `set_layout_aspect`). That
+  discards the very `previous_layout` the reuse path needs, so those call sites
+  take the full path *by construction* and report no reason for it.
+
+Attributing which of those callers fires during a scroll is the first task in
+`eseq-pzp`. Note that `set_layout_content_scroll` already documents this exact
+hazard and deliberately does not invalidate.
+
 Measured values are recorded in the bead `eseq-linux.12` notes as they are
 captured. Two cases must be in any capture, because both are reported as slow on
 this machine: scrolling a multi-track sequencer buffer vertically, and scrolling
