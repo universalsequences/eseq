@@ -437,6 +437,36 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     return vec4<f32>(col.rgb, col.a * mask);
 }"#;
 
+pub const DROPDOWN_CHECKMARK_SHADER: &str = r#"
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var aspect: f32 = input.aspect;
+    var p: vec2<f32> = vec2<f32>((input.uv.x - 0.5) * 2.0 * aspect, (input.uv.y - 0.5) * 2.0);
+
+    var start: vec2<f32> = vec2<f32>(-0.72 * aspect, -0.02);
+    var joint: vec2<f32> = vec2<f32>(-0.25 * aspect,  0.48);
+    var end: vec2<f32>   = vec2<f32>( 0.75 * aspect, -0.52);
+
+    var pa1: vec2<f32> = p - start;
+    var ba1: vec2<f32> = joint - start;
+    var h1: f32 = clamp(dot(pa1, ba1) / dot(ba1, ba1), 0.0, 1.0);
+    var seg1: f32 = length(pa1 - ba1 * h1);
+
+    var pa2: vec2<f32> = p - joint;
+    var ba2: vec2<f32> = end - joint;
+    var h2: f32 = clamp(dot(pa2, ba2) / dot(ba2, ba2), 0.0, 1.0);
+    var seg2: f32 = length(pa2 - ba2 * h2);
+
+    var d: f32 = min(seg1, seg2);
+    var stroke: f32 = 0.10;
+    var edge: f32 = fwidth(d) * 1.2;
+    var mask: f32 = smoothstep(stroke + edge, stroke - edge, d);
+
+    if (mask < 0.002) { discard; }
+    return vec4<f32>(input.color_a.rgb, input.color_a.a * mask);
+}"#;
+
 pub const HSLIDER_FRAGMENT_SHADER: &str = r#"
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>

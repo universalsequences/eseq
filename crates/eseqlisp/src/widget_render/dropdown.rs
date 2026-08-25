@@ -34,6 +34,8 @@ const APPROX_CHAR_WIDTH: f32 = super::menu_style::APPROX_CHAR_WIDTH;
 // Round action-menu glyphs sit optically below the midpoint when placed at
 // the font baseline's mathematical center.
 const ACTION_MENU_ICON_OPTICAL_OFFSET: f32 = -0.08;
+const CHECKMARK_HEIGHT_EM: f32 = 0.8;
+const CHECKMARK_WIDTH_TO_HEIGHT: f32 = 1.15;
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -517,7 +519,12 @@ pub static DROPDOWN_WIDGET: DropdownWidget = DropdownWidget;
 
 impl WidgetDefinition for DropdownWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["dropdown", "menu-button", "dropdown-chevron"]
+        &[
+            "dropdown",
+            "menu-button",
+            "dropdown-chevron",
+            "dropdown-checkmark",
+        ]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -819,6 +826,7 @@ impl WidgetDefinition for DropdownWidget {
         match widget_type {
             "dropdown" | "menu-button" => super::ROUNDED_RECT_SHADER.source(backend),
             "dropdown-chevron" => DROPDOWN_CHEVRON_SHADER.source(backend),
+            "dropdown-checkmark" => DROPDOWN_CHECKMARK_SHADER.source(backend),
             _ => None,
         }
     }
@@ -1022,7 +1030,7 @@ impl WidgetDefinition for DropdownWidget {
 
             // Menu width: at least trigger width, expanded to fit longest option
             let needs_scrollbar = geo.content_height > geo.visible_height;
-            let check_col_width = if action_menu { 0.0 } else { 1.5 }; // space for ✓ mark
+            let check_col_width = if action_menu { 0.0 } else { 1.5 }; // selected-item mark
             let text_left_pad = PADDING_H + check_col_width;
             let scrollbar_pad = if needs_scrollbar {
                 SCROLLBAR_WIDTH + SCROLLBAR_MARGIN * 2.0
@@ -1101,19 +1109,43 @@ impl WidgetDefinition for DropdownWidget {
 
                 // Check mark for selected item
                 if !action_menu && sel_idx == Some(i) {
-                    super::push_overlay_primitive(GpuPrimitive::ProportionalText(
-                        GpuProportionalTextPrimitive {
-                            row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
-                            col: label_col,
-                            align_width: 0.0,
-                            h_align: 0.0,
-                            text: "✓".to_string(),
-                            font_size: menu_font_size,
-                            scale: 1.0,
-                            fg: check_color,
-                            bg: transparent,
+                    let mark_height_px = (menu_font_size * CHECKMARK_HEIGHT_EM).max(1.0);
+                    let mark_width_px = mark_height_px * CHECKMARK_WIDTH_TO_HEIGHT;
+                    let mark_width = mark_width_px / viewport.cell_w.max(1.0);
+                    let mark_height = mark_height_px / viewport.cell_h.max(1.0);
+                    let mark_rect = Rect {
+                        row: item_y + (MENU_ROW_HEIGHT - mark_height) * 0.5,
+                        col: label_col + (check_col_width - mark_width) * 0.5,
+                        width: mark_width,
+                        height: mark_height,
+                    };
+                    let (ndc_min, ndc_max) = ndc_bounds(mark_rect, viewport);
+                    super::push_overlay_primitive(GpuPrimitive::WidgetInstance {
+                        widget_type: "dropdown-checkmark".to_string(),
+                        instance: WidgetInstance {
+                            ndc_min,
+                            ndc_max,
+                            value_t: 0.0,
+                            orientation: 0.0,
+                            itime: viewport.time_seconds,
+                            uniform_a: [0.0; 4],
+                            uniform_b: [0.0; 4],
+                            uniform_c: [0.0; 4],
+                            uniform_d: [0.0; 4],
+                            color_a: [
+                                check_color.r,
+                                check_color.g,
+                                check_color.b,
+                                check_color.a,
+                            ],
+                            color_b: [0.0; 4],
+                            color_c: [0.0; 4],
+                            color_d: [0.0; 4],
+                            corner_radius: 0.0,
+                            pixel_aspect: mark_width_px / mark_height_px,
                         },
-                    ));
+                        is_background: false,
+                    });
                 }
 
                 // Option label
@@ -1278,6 +1310,34 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 }
 "#, super::wgsl::DROPDOWN_CHEVRON_SHADER);
 
+const DROPDOWN_CHECKMARK_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = in.aspect;
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+
+    float2 start = float2(-0.72 * aspect, -0.02);
+    float2 joint = float2(-0.25 * aspect,  0.48);
+    float2 end   = float2( 0.75 * aspect, -0.52);
+
+    float2 pa1 = p - start; float2 ba1 = joint - start;
+    float h1 = clamp(dot(pa1, ba1) / dot(ba1, ba1), 0.0, 1.0);
+    float seg1 = length(pa1 - ba1 * h1);
+
+    float2 pa2 = p - joint; float2 ba2 = end - joint;
+    float h2 = clamp(dot(pa2, ba2) / dot(ba2, ba2), 0.0, 1.0);
+    float seg2 = length(pa2 - ba2 * h2);
+
+    float d = min(seg1, seg2);
+    float stroke = 0.10;
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(stroke + edge, stroke - edge, d);
+
+    if (mask < 0.002) { discard_fragment(); }
+    return float4(in.color_a.rgb, in.color_a.a * mask);
+}
+"#, super::wgsl::DROPDOWN_CHECKMARK_SHADER);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1434,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn open_menu_emits_a_finite_overlay_beyond_a_short_tile() {
+    fn open_menu_emits_a_finite_overlay_with_a_vector_selected_mark() {
         let widget_id = 91_337;
         let mut props = HashMap::new();
         props.insert(
@@ -1442,7 +1502,7 @@ mod tests {
             string_list(&["off", "1/16", "1/8", "1/4", "1/2", "1 bar"]),
         );
         props.insert("value".to_string(), Value::String("off".to_string()));
-        let node = LayoutNode {
+        let mut node = LayoutNode {
             widget_id,
             stable_widget_id: None,
             subtree_root_id: None,
@@ -1498,6 +1558,40 @@ mod tests {
         assert!(overlay_rect.width.is_finite() && overlay_rect.width > 0.0);
         assert!(overlay_rect.height.is_finite() && overlay_rect.height > 0.0);
         assert!(overlay_rect.row + overlay_rect.height > 2.0);
+        assert!(overlay_primitives.iter().any(|primitive| matches!(
+            primitive,
+            GpuPrimitive::WidgetInstance { widget_type, .. }
+                if widget_type == "dropdown-checkmark"
+        )));
+        assert!(!overlay_primitives.iter().any(|primitive| matches!(
+            primitive,
+            GpuPrimitive::ProportionalText(text) if text.text == "\u{2713}"
+        )));
+
+        set_state(widget_id, DropdownState::default());
+        super::super::clear_overlay();
+
+        node.props
+            .insert("action-menu".to_string(), Value::Bool(true));
+        let outcome = DROPDOWN_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            node.rect.col,
+            node.rect.row,
+            None,
+            None,
+            KeyModifiers::NONE,
+            viewport.cell_w,
+            viewport.cell_h,
+        );
+        assert!(matches!(outcome, MouseEventOutcome::Consume));
+        let (_tile_primitives, overlay_primitives) =
+            crate::widget_render::collect_gpu_primitives(&node, viewport, 0.0, 2);
+        assert!(!overlay_primitives.iter().any(|primitive| matches!(
+            primitive,
+            GpuPrimitive::WidgetInstance { widget_type, .. }
+                if widget_type == "dropdown-checkmark"
+        )));
 
         set_state(widget_id, DropdownState::default());
         super::super::clear_overlay();
