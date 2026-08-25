@@ -28,7 +28,7 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
         return 0.001;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
 pub(crate) fn emit_rounded_rect_overlay(
@@ -69,7 +69,8 @@ pub(crate) fn emit_panel_chrome(
     border: Color,
     viewport: WidgetViewport,
 ) {
-    let border_px = 1.0;
+    let border_design_px = 1.0;
+    let border_px = super::ui_design_px(border_design_px);
     let border_row = border_px / viewport.cell_h.max(1.0);
     let border_col = border_px / viewport.cell_w.max(1.0);
     let border_rect = Rect {
@@ -81,7 +82,7 @@ pub(crate) fn emit_panel_chrome(
     emit_rounded_rect_overlay(
         border_rect,
         border,
-        CORNER_RADIUS_PX + border_px,
+        CORNER_RADIUS_PX + border_design_px,
         viewport,
     );
     emit_rounded_rect_overlay(panel_rect, background, CORNER_RADIUS_PX, viewport);

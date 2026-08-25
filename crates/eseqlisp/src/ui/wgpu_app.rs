@@ -53,7 +53,8 @@ use crate::ui::wgpu_pipelines as pipelines;
 use crate::ui::wgsl_shaders;
 use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
-const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 15.0;
+use super::DEFAULT_MONOSPACE_FONT_SIZE_PT;
+
 const MONOSPACE_FONT_NAME: &str = "JetBrainsMono-Regular";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1488,7 +1489,7 @@ impl WgpuAppBackend {
             let tile_width_px = tile.body_rect.width * cell_w;
             let tile_height_px = tile.body_rect.height * cell_h;
             let border_inset_px = if tile.show_border {
-                tile.border_width_px
+                widget_render::ui_design_px(tile.border_width_px)
                     .max(0.0)
                     .min(tile_width_px * 0.5)
                     .min(tile_height_px * 0.5)
@@ -1853,7 +1854,7 @@ impl WgpuAppBackend {
                             frame_width_px,
                             frame_height_px,
                             tile.border_radius_px * ui_px_scale,
-                            tile.border_width_px,
+                            tile.border_width_px * ui_px_scale,
                             Color::rgba(0.0, 0.0, 0.0, 0.0),
                             border_color,
                             vp_w,
@@ -1877,7 +1878,7 @@ impl WgpuAppBackend {
                         frame_top_px,
                         frame_width_px,
                         frame_height_px,
-                        tile.border_width_px,
+                        tile.border_width_px * ui_px_scale,
                         tile.border_radius_px * ui_px_scale,
                         border_color,
                         vp_w,

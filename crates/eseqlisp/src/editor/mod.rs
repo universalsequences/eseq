@@ -97,7 +97,7 @@ fn metal_tile_content_viewport(
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
-        border_width_px
+        crate::widget_render::ui_design_px(border_width_px)
             .max(0.0)
             .min(tile_width_px * 0.5)
             .min(tile_height_px * 0.5)
@@ -121,7 +121,7 @@ fn metal_tile_content_viewport_height_exact(
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
-        border_width_px
+        crate::widget_render::ui_design_px(border_width_px)
             .max(0.0)
             .min(tile_width_px * 0.5)
             .min(tile_height_px * 0.5)
@@ -1121,7 +1121,8 @@ impl Editor {
     pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
         self.cached_tiled_frame_size = Some((total_width as f32, total_height as f32));
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-        let horizontal_margin = (self.tile_outer_gap.max(0.0) * TILE_GAP_PX_PER_UNIT
+        let horizontal_margin = (self.tile_outer_gap.max(0.0)
+            * crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT)
             / cell_w.max(1.0))
         .min(total_width as f32 * 0.5);
         let area = Rect {
@@ -1134,9 +1135,12 @@ impl Editor {
         // Enforce min-size constraints before computing rects
         Self::enforce_min_sizes_node(&mut self.tile_root, area, cell_w, cell_h);
         let old_rects = std::mem::take(&mut self.cached_tile_rects);
-        self.cached_tile_rects =
-            self.tile_root
-                .compute_rects(area, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
+        self.cached_tile_rects = self.tile_root.compute_rects(
+            area,
+            crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
+            cell_w,
+            cell_h,
+        );
         let viewport_sizes: Vec<(TileId, f32, f32)> = self
             .cached_tile_rects
             .iter()
@@ -1936,7 +1940,13 @@ impl Editor {
             }
         }
         let gap =
-            crate::tile::gap_to_cells(split.dir, split.gap, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
+            crate::tile::gap_to_cells(
+                split.dir,
+                split.gap,
+                crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
+                cell_w,
+                cell_h,
+            );
         let (a_rect, b_rect) = crate::tile::split_rect(area, split.dir, split.ratio, gap);
         Self::enforce_min_sizes_node(&mut split.a, a_rect, cell_w, cell_h);
         Self::enforce_min_sizes_node(&mut split.b, b_rect, cell_w, cell_h);
@@ -2807,8 +2817,10 @@ impl Editor {
             return (0.0, 0.0);
         }
         (
-            leaf.border_width_px.max(0.0) / cell_w.max(1.0),
-            leaf.border_width_px.max(0.0) / cell_h.max(1.0),
+            crate::widget_render::ui_design_px(leaf.border_width_px.max(0.0))
+                / cell_w.max(1.0),
+            crate::widget_render::ui_design_px(leaf.border_width_px.max(0.0))
+                / cell_h.max(1.0),
         )
     }
 
@@ -3076,7 +3088,7 @@ impl Editor {
             precise_col,
             precise_row,
             tolerance,
-            TILE_GAP_PX_PER_UNIT,
+            crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
             cell_w,
             cell_h,
         ) else {
@@ -3176,7 +3188,7 @@ impl Editor {
             precise_col,
             precise_row,
             tolerance,
-            TILE_GAP_PX_PER_UNIT,
+            crate::widget_render::ui_design_px(TILE_GAP_PX_PER_UNIT),
             cell_w,
             cell_h,
         )

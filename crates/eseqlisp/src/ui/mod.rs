@@ -1,3 +1,7 @@
+/// Shared application grid font size. Backends must agree because widget
+/// dimensions and tile constraints are authored in units of this cell grid.
+pub(crate) const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 16.0;
+
 pub mod backend;
 pub mod frame;
 pub(crate) mod gpu_geometry;

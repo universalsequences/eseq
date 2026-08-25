@@ -775,7 +775,7 @@ impl WidgetDefinition for Eq8EditorWidget {
                 let x_t = idx as f32 / 79.0;
                 primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center: plot_point(node.rect, x_t, y_t),
-                    radius_px: if db == 0.0 { 0.95 } else { 0.7 },
+                    radius_px: super::ui_design_px(if db == 0.0 { 0.95 } else { 0.7 }),
                     color: grid_color,
                     visible_half: GpuCircleVisibleHalf::Full,
                 }));
@@ -788,7 +788,7 @@ impl WidgetDefinition for Eq8EditorWidget {
                 let y_t = idx as f32 / 31.0;
                 primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center: plot_point(node.rect, x_t, y_t),
-                    radius_px: 0.7,
+                    radius_px: super::ui_design_px(0.7),
                     color: grid_color,
                     visible_half: GpuCircleVisibleHalf::Full,
                 }));
@@ -807,7 +807,7 @@ impl WidgetDefinition for Eq8EditorWidget {
             let y_t = response_y_t(db, min_db, max_db);
             primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                 center: plot_point(node.rect, x_t, y_t),
-                radius_px: 1.45,
+                radius_px: super::ui_design_px(1.45),
                 color: curve_color,
                 visible_half: GpuCircleVisibleHalf::Full,
             }));
@@ -827,14 +827,14 @@ impl WidgetDefinition for Eq8EditorWidget {
             };
             primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                 center,
-                radius_px: if band.selected { 12.0 } else { 10.0 },
+                radius_px: super::ui_design_px(if band.selected { 12.0 } else { 10.0 }),
                 color,
                 visible_half: GpuCircleVisibleHalf::Full,
             }));
             if band.enabled && !band.selected {
                 primitives.push(GpuPrimitive::Circle(GpuCirclePrimitive {
                     center,
-                    radius_px: 5.4,
+                    radius_px: super::ui_design_px(5.4),
                     color: color_with_alpha(background, 0.95),
                     visible_half: GpuCircleVisibleHalf::Full,
                 }));

@@ -230,8 +230,7 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
     if radius_px <= 0.0 {
         return 0.001;
     }
-    // radius_px is design pixels (2x reference); cell_h is framebuffer pixels.
-    let radius_px = radius_px * super::ui_px_scale();
+    let radius_px = super::ui_design_px(radius_px);
     let px_h = (rect.height * viewport.cell_h).max(1.0);
     ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
 }
@@ -656,10 +655,11 @@ impl WidgetDefinition for BoxWidget {
             Some(Value::Number(n)) => (*n as f32).max(0.0),
             _ => 0.0,
         };
-        let border_width_px = match node.props.get("border-width") {
+        let border_width_design_px = match node.props.get("border-width") {
             Some(Value::Number(n)) => (*n as f32).max(0.0),
             _ => 1.0,
         };
+        let border_width_px = super::ui_design_px(border_width_design_px);
         let has_rounded_corners = corner_radius_px > 0.0;
         let hover_drop = super::drop_target_hovered(node.widget_id);
         let background_color =
@@ -717,7 +717,7 @@ impl WidgetDefinition for BoxWidget {
                         inset_rect(node.rect, inset_x, inset_y),
                         color,
                         viewport,
-                        (corner_radius_px - border_width_px).max(0.0),
+                        (corner_radius_px - border_width_design_px).max(0.0),
                     );
                 }
             }
@@ -803,9 +803,9 @@ impl WidgetDefinition for BoxWidget {
         }
 
         if box_state_active(&node.props, "macro-owned") {
-            let outer_px = 12.0;
-            let inner_px = 8.0;
-            let margin_px = 2.5;
+            let outer_px = super::ui_design_px(12.0);
+            let inner_px = super::ui_design_px(8.0);
+            let margin_px = super::ui_design_px(2.5);
             let center = [
                 node.rect.col + (margin_px + outer_px * 0.5) / viewport.cell_w.max(1.0),
                 node.rect.row + (margin_px + outer_px * 0.5) / viewport.cell_h.max(1.0),

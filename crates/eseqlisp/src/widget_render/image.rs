@@ -149,7 +149,7 @@ impl WidgetDefinition for ImageWidget {
             rect: node.rect,
             src,
             fit: image_fit(&node.props),
-            radius_px: radius_px(&node.props),
+            radius_px: super::ui_design_px(radius_px(&node.props)),
             opacity: opacity(&node.props),
             rotation: rotation(&node.props),
             rotation_speed: rotation_speed(&node.props),

@@ -871,7 +871,8 @@ impl WidgetDefinition for MatrixWidget {
         // whose vertical extent is 2.0, so convert via the cell's pixel height.
         let cell_px_h = cell_h * viewport.cell_h;
         let stroke_width_p = if cell_px_h > 0.0 {
-            get_f32_prop(&node.props, "stroke-width", 1.5) * 2.0 / cell_px_h
+            super::ui_design_px(get_f32_prop(&node.props, "stroke-width", 1.5)) * 2.0
+                / cell_px_h
         } else {
             0.0
         };

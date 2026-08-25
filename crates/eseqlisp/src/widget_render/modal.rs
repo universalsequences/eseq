@@ -64,7 +64,7 @@ pub(crate) fn modal_rect_for_value(node: &Value, frame: Rect) -> Rect {
     let dimension = |cell_prop: &str, pixel_prop: &str, cell_px: f32| {
         get_prop_num(node, pixel_prop)
             .map(f64_to_f32)
-            .map(|pixels| pixels / cell_px.max(1.0))
+            .map(|pixels| super::ui_design_px(pixels) / cell_px.max(1.0))
             .or_else(|| get_prop_num(node, cell_prop).map(f64_to_f32))
     };
     compute_modal_rect(
@@ -116,7 +116,7 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
         return 0.001;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
 pub(crate) fn emit_rounded_rect_overlay(

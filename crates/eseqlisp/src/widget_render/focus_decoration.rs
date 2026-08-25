@@ -62,7 +62,7 @@ impl FocusCornerStyle {
 
         let width_px = rect.width * viewport.cell_w;
         let height_px = rect.height * viewport.cell_h;
-        let inset_px = self.inset_px.max(0.0);
+        let inset_px = super::ui_design_px(self.inset_px.max(0.0));
         let inset_x_px = inset_px.min(width_px * 0.5);
         let inset_y_px = inset_px.min(height_px * 0.5);
         let inner_width_px = (width_px - inset_x_px * 2.0).max(0.0);
@@ -71,10 +71,10 @@ impl FocusCornerStyle {
             return Vec::new();
         }
 
-        let requested_arm_px = self.arm_length_px.max(0.0);
+        let requested_arm_px = super::ui_design_px(self.arm_length_px.max(0.0));
         let arm_x_px = requested_arm_px.min(inner_width_px);
         let arm_y_px = requested_arm_px.min(inner_height_px);
-        let requested_stroke_px = self.stroke_width_px.max(0.0);
+        let requested_stroke_px = super::ui_design_px(self.stroke_width_px.max(0.0));
         let stroke_x_px = requested_stroke_px.min(arm_x_px);
         let stroke_y_px = requested_stroke_px.min(arm_y_px);
         if arm_x_px <= 0.0 || arm_y_px <= 0.0 || stroke_x_px <= 0.0 || stroke_y_px <= 0.0 {

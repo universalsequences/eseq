@@ -36225,8 +36225,39 @@
 
     #[test]
     fn metal_seq_fx_space_echo_layout_contains_mode_grid_and_knobs() {
+        struct LinuxScaleTextMeasurer(std::cell::RefCell<eseqlisp::glyph_atlas::SizedFontCache>);
+        impl eseqlisp::layout::TextMeasurer for LinuxScaleTextMeasurer {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                self.0
+                    .borrow_mut()
+                    .measure_text(text, (font_size * 10.0).round() as u16)
+            }
+
+            fn line_height_px(&self, font_size: f32) -> f32 {
+                self.0
+                    .borrow_mut()
+                    .line_height((font_size * 10.0).round() as u16)
+            }
+        }
+
+        const LINUX_SCALE_FACTOR: f64 = 1.6;
+        let mono_atlas = eseqlisp::glyph_atlas::GlyphAtlas::new(
+            "JetBrainsMono-Regular",
+            16.0 * LINUX_SCALE_FACTOR,
+        )
+        .expect("Linux-scale monospace atlas");
+        let text_measurer = LinuxScaleTextMeasurer(std::cell::RefCell::new(
+            eseqlisp::glyph_atlas::SizedFontCache::new(LINUX_SCALE_FACTOR)
+                .expect("Linux-scale proportional font cache"),
+        ));
+
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(
+            Box::new(text_measurer),
+            mono_atlas.cell_w as f32,
+            mono_atlas.cell_h as f32,
+        );
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -36301,12 +36332,43 @@
             .expect("fx lisp should create the *fx* buffer")
             .id;
         editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(128, 20);
+        // The authored panel is 40.6 cells wide and 10.8 cells tall. Use the
+        // smallest whole-cell viewport that fit the macOS reference panel;
+        // Linux's 1.6x font metrics must not inflate it past that boundary.
+        editor.set_layout_viewport(41, 11);
         let layout = editor.widget_layout().expect("space echo fx layout");
+        let panel = find_layout_node_by_debug_name(
+            &layout,
+            "audio-fx-panel-root-0-Space Echo",
+        )
+        .expect("layout should contain the built-in Space Echo panel");
+        assert_finite_nonzero_rect(panel, "Space Echo panel at Linux scale 1.6");
         assert!(
-            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Space Echo"),
-            "layout should contain the built-in Space Echo panel"
+            panel.rect.col + panel.rect.width <= 41.0 + 0.01,
+            "Space Echo panel must fit the 41-cell fx viewport at Linux scale 1.6: {:?}",
+            panel.rect
         );
+        assert!(
+            panel.rect.row + panel.rect.height <= 11.0 + 0.01,
+            "Space Echo panel must fit the 11-cell fx viewport at Linux scale 1.6: {:?}",
+            panel.rect
+        );
+        for label in ["intensity", "echo vol", "reverb vol", "tension"] {
+            let node = find_layout_node_by_text(panel, label)
+                .unwrap_or_else(|| panic!("Space Echo panel should contain {label:?}"));
+            assert_finite_nonzero_rect(node, &format!("Space Echo {label} control"));
+            assert!(
+                node.rect.col >= panel.rect.col - 0.01
+                    && node.rect.row >= panel.rect.row - 0.01
+                    && node.rect.col + node.rect.width
+                        <= panel.rect.col + panel.rect.width + 0.01
+                    && node.rect.row + node.rect.height
+                        <= panel.rect.row + panel.rect.height + 0.01,
+                "Space Echo {label} control must remain inside the fx panel at Linux scale 1.6: panel={:?}, control={:?}",
+                panel.rect,
+                node.rect
+            );
+        }
     }
 
     fn test_filterbank_params() -> Vec<Value> {

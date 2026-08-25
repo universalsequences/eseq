@@ -356,7 +356,7 @@ impl IsoCube {
             width: (rect.width - padding * 2.0).max(1.0),
             height: (rect.height - padding * 2.0).max(1.0),
         };
-        let stroke_safe_inset_px = 1.0_f32;
+        let stroke_safe_inset_px = super::ui_design_px(1.0);
         let drawing_col_px = drawing_rect.col * cell_w + stroke_safe_inset_px;
         let drawing_row_px = drawing_rect.row * cell_h + stroke_safe_inset_px;
         let drawing_width_px = (drawing_rect.width * cell_w - stroke_safe_inset_px * 2.0).max(1.0);
@@ -487,8 +487,10 @@ fn push_iso_cube(
 ) {
     let edge = resolve_named_color(props, "cube-color", Color::rgba(0.20, 0.43, 0.58, 0.55));
     let grid = resolve_named_color(props, "grid-color", Color::rgba(0.13, 0.27, 0.36, 0.32));
-    let edge_radius_px = get_f32_prop(props, "cube-line-radius-px", 0.72).max(0.1);
-    let grid_radius_px = get_f32_prop(props, "grid-line-radius-px", 0.38).max(0.1);
+    let edge_radius_px =
+        super::ui_design_px(get_f32_prop(props, "cube-line-radius-px", 0.72).max(0.1));
+    let grid_radius_px =
+        super::ui_design_px(get_f32_prop(props, "grid-line-radius-px", 0.38).max(0.1));
 
     let p = |x, y, z| cube.project(x, y, z);
     for t in [0.25_f32, 0.5, 0.75] {
@@ -729,7 +731,9 @@ impl WidgetDefinition for EventViewWidget {
                 }
             }
             EventViewRenderer::Isometric => {
-                let radius = get_f32_prop(&node.props, "point-radius-px", 3.2).max(0.5);
+                let radius = super::ui_design_px(
+                    get_f32_prop(&node.props, "point-radius-px", 3.2).max(0.5),
+                );
                 let cube_padding = get_f32_prop(&node.props, "cube-padding", 0.0).max(0.0);
                 let mut rotation = get_rotation(node);
                 if prop_bool(&node.props, "auto-rotate", false) {

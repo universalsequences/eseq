@@ -1125,7 +1125,7 @@ fn build_primitives(
                         },
                         black_color,
                         viewport,
-                        16.0,
+                        super::ui_design_px(16.0),
                     );
                 }
             } else {
@@ -1503,7 +1503,7 @@ fn build_primitives(
         let mut label_col = x + 0.34;
         if let Some(dot) = item.sound_dot {
             if width >= 1.2 && label_height >= 0.85 {
-                let side_px = (view.item_label_font_size * 1.26).max(5.0);
+                let side_px = super::ui_design_px((view.item_label_font_size * 1.26).max(5.0));
                 let mut side_rows = (side_px / viewport.cell_h).min(label_height * 0.66);
                 let mut side_cols = side_rows * viewport.cell_h / viewport.cell_w;
                 // The quad is not scissored (only the label run is), so it

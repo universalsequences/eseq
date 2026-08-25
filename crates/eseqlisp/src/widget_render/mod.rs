@@ -552,6 +552,13 @@ pub fn ui_px_scale() -> f32 {
         / UI_DESIGN_REFERENCE_SCALE
 }
 
+/// Convert a raw UI value authored in the macOS 2x design-pixel space into
+/// framebuffer pixels. Geometry derived from framebuffer dimensions or font
+/// metrics, and deliberate one-device-pixel hairlines, must not use this.
+pub fn ui_design_px(design_px: f32) -> f32 {
+    design_px * ui_px_scale()
+}
+
 #[derive(Clone, Copy)]
 pub struct WidgetViewport {
     pub cell_w: f32,

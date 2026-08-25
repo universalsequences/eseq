@@ -351,7 +351,7 @@ fn push_polyline(
             [1.0, 0.0]
         }
     };
-    let half_width_px = 0.9;
+    let half_width_px = super::ui_design_px(0.9);
     let mut left = Vec::with_capacity(points.len());
     let mut right = Vec::with_capacity(points.len());
     for index in 0..points_px.len() {

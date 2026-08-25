@@ -1931,7 +1931,7 @@ fragment float4 live_spectrogram_frag(
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str = "__agent-instrument-stub-bg";
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str = "__agent_instrument_stub_bg";
     const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
-    const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 16.0;
+    use crate::ui::DEFAULT_MONOSPACE_FONT_SIZE_PT;
 
     fn simple_widget_run_cacheable(widget_type: &str) -> bool {
         matches!(
@@ -4771,7 +4771,7 @@ fragment float4 live_spectrogram_frag(
                 let tile_width_px = tile.body_rect.width * cell_w;
                 let tile_height_px = tile.body_rect.height * cell_h;
                 let border_inset_px = if tile.show_border {
-                    tile.border_width_px
+                    widget_render::ui_design_px(tile.border_width_px)
                         .max(0.0)
                         .min(tile_width_px * 0.5)
                         .min(tile_height_px * 0.5)
@@ -4831,7 +4831,7 @@ fragment float4 live_spectrogram_frag(
                         frame_top_px,
                         frame_width_px,
                         frame_height_px,
-                        tile.border_radius_px,
+                        widget_render::ui_design_px(tile.border_radius_px),
                         0.0,
                         tile_bg,
                         Color::rgba(0.0, 0.0, 0.0, 0.0),
@@ -4855,7 +4855,7 @@ fragment float4 live_spectrogram_frag(
                         frame_top_px,
                         frame_width_px,
                         frame_height_px,
-                        tile.border_radius_px,
+                        widget_render::ui_design_px(tile.border_radius_px),
                         tile_bg,
                         vp_w,
                         vp_h,
@@ -5319,8 +5319,8 @@ fragment float4 live_spectrogram_frag(
                             frame_top_px,
                             frame_width_px,
                             frame_height_px,
-                            tile.border_radius_px,
-                            tile.border_width_px,
+                            widget_render::ui_design_px(tile.border_radius_px),
+                            widget_render::ui_design_px(tile.border_width_px),
                             Color::rgba(0.0, 0.0, 0.0, 0.0),
                             border_color,
                             vp_w,
@@ -5343,8 +5343,8 @@ fragment float4 live_spectrogram_frag(
                             frame_top_px,
                             frame_width_px,
                             frame_height_px,
-                            tile.border_width_px,
-                            tile.border_radius_px,
+                            widget_render::ui_design_px(tile.border_width_px),
+                            widget_render::ui_design_px(tile.border_radius_px),
                             border_color,
                             vp_w,
                             vp_h,

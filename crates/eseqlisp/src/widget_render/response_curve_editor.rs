@@ -186,7 +186,7 @@ fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32
         return 0.0;
     }
     let px_h = (rect.height * viewport.cell_h).max(1.0);
-    ((radius_px * 2.0) / px_h).clamp(0.0, 0.5)
+    ((super::ui_design_px(radius_px) * 2.0) / px_h).clamp(0.0, 0.5)
 }
 
 fn freq_to_t(freq: f32, min: f32, max: f32) -> f32 {
