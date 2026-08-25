@@ -64,9 +64,13 @@ RealtimeKit service for capped `SCHED_RR`; this is the zero-configuration path
 on stock PipeWire desktops. Before its first request, the helper deliberately
 sets the process's soft and hard `RLIMIT_RTTIME` to RealtimeKit's
 `RTTimeUSecMax` (or a pre-existing lower hard limit). Linux sends `SIGKILL` if
-an RT thread consumes that entire uninterrupted CPU budget. Audiograph threads
-block on ALSA or the block-start condition every period, which resets the
-accounting; the limit protects the host from a runaway realtime thread.
+an RT thread consumes that entire uninterrupted CPU budget. The audio callback
+and graph workers therefore make periodic, minimal blocking checkpoints while
+running under RealtimeKit's `SCHED_RR`; this resets the kernel accounting even
+when a callback is stalled waiting for graph work or heavy DSP keeps workers
+busy across consecutive blocks. Direct `SCHED_FIFO` threads do not take these
+checkpoints and retain their existing hot path. The limit still protects the
+host from a runaway realtime thread.
 
 For uncapped FIFO priorities, the repository ships
 [`packaging/eseq-realtime.conf`](packaging/eseq-realtime.conf), a PAM limits

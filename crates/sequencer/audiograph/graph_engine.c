@@ -72,6 +72,13 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 #define AUDIOGRAPH_WORKER_WAIT_TIMEOUT_US 50
 #endif
 
+// RealtimeKit requires RLIMIT_RTTIME and Linux kills the entire process when an
+// SCHED_RR thread consumes that much CPU without a blocking syscall. Keep the
+// checkpoint far below RealtimeKit's usual 200 ms ceiling.
+#ifndef AUDIOGRAPH_RTKIT_CHECKPOINT_INTERVAL_NS
+#define AUDIOGRAPH_RTKIT_CHECKPOINT_INTERVAL_NS 1000000ull
+#endif
+
 // Watchlist snapshots are useful for UI polling, but copying all watched node
 // state every audio callback can be expensive. Direct process_live_block()
 // callers still update every call; process_next_block() throttles snapshots.
@@ -88,6 +95,43 @@ static _Atomic int g_active_job_count = 0;
 static EngineRtKitWorkerHook g_rtkit_worker_hook = NULL;
 static EngineRtKitCallbackHook g_rtkit_callback_hook = NULL;
 static _Atomic int g_rt_permission_warning_logged = 0;
+static __thread uint64_t g_last_rtkit_checkpoint_ns = 0;
+
+static inline int base_linux_scheduling_policy(int policy) {
+#ifdef SCHED_RESET_ON_FORK
+  return policy & ~SCHED_RESET_ON_FORK;
+#else
+  return policy;
+#endif
+}
+
+static inline void checkpoint_rtkit_cpu_budget(int policy) {
+  if (base_linux_scheduling_policy(policy) != SCHED_RR)
+    return;
+
+  uint64_t now_ns = nsec_now();
+  if (g_last_rtkit_checkpoint_ns == 0) {
+    g_last_rtkit_checkpoint_ns = now_ns;
+    return;
+  }
+  if (now_ns - g_last_rtkit_checkpoint_ns <
+      AUDIOGRAPH_RTKIT_CHECKPOINT_INTERVAL_NS) {
+    return;
+  }
+
+  // A positive nanosleep is a blocking syscall even at this deliberately tiny
+  // duration. Besides yielding to the other graph threads, it resets Linux's
+  // RLIMIT_RTTIME accounting. This is only used for RealtimeKit's SCHED_RR;
+  // direct SCHED_FIFO scheduling retains its existing hot path.
+  struct timespec request = {.tv_sec = 0, .tv_nsec = 1};
+  struct timespec remaining;
+  int result;
+  while ((result = nanosleep(&request, &remaining)) != 0 && errno == EINTR) {
+    request = remaining;
+  }
+  if (result == 0)
+    g_last_rtkit_checkpoint_ns = nsec_now();
+}
 #endif
 static _Atomic uint64_t g_stall_recovery_count = 0;
 static _Atomic uint64_t g_graph_trace_block_counter = 0;
@@ -626,7 +670,7 @@ static void read_current_linux_scheduling(int *policy, int *priority,
     *priority = 0;
     return;
   }
-  *policy = observed_policy;
+  *policy = base_linux_scheduling_policy(observed_policy);
   *priority = param.sched_priority;
 }
 
@@ -655,6 +699,8 @@ void engine_record_rtkit_callback_result(pid_t tid) {
   if (policy < 0 || sched_getparam(tid, &param) != 0) {
     policy = ENGINE_SCHED_POLICY_UNKNOWN;
     param.sched_priority = 0;
+  } else {
+    policy = base_linux_scheduling_policy(policy);
   }
   atomic_store_explicit(&g_engine.callbackPolicy, policy, memory_order_relaxed);
   atomic_store_explicit(&g_engine.callbackPriority, param.sched_priority,
@@ -903,7 +949,13 @@ static void *worker_main(void *arg) {
       if (nf <= 0 || nf > lg->block_size) {
         nf = lg->block_size; // Clamp to graph's internal block size for safety
       }
-      (void)try_execute_ready_node(lg, nid, nf);
+      if (try_execute_ready_node(lg, nid, nf)) {
+#ifdef __linux__
+        // Check after every node: DSP costs vary enough that an operation-count
+        // interval cannot safely bound uninterrupted realtime CPU usage.
+        checkpoint_rtkit_cpu_budget(policy);
+#endif
+      }
     }
 
     // Loop back: will go to sleep on sess_cv until next block
@@ -2142,6 +2194,11 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
         }
         empty_spins = 0; // Reset on successful work
         stalled_empty_since_ns = 0;
+#ifdef __linux__
+        int callback_policy = atomic_load_explicit(
+            &g_engine.callbackPolicy, memory_order_relaxed);
+        checkpoint_rtkit_cpu_budget(callback_policy);
+#endif
       } else {
         // Queue empty but work in flight - workers processing
         // Check again if work completed (avoids unnecessary spins)
@@ -2152,6 +2209,11 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
         // lightly until workers publish more ready jobs or finish.
         if (++empty_spins > 4096) {
           empty_spins = 0;
+#ifdef __linux__
+          int callback_policy = atomic_load_explicit(
+              &g_engine.callbackPolicy, memory_order_relaxed);
+          checkpoint_rtkit_cpu_budget(callback_policy);
+#endif
           int active_jobs =
               atomic_load_explicit(&g_active_job_count, memory_order_acquire);
           if (active_jobs > 0) {
