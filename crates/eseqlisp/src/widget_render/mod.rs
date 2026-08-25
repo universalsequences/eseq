@@ -522,6 +522,36 @@ pub struct WidgetInstance {
     pub pixel_aspect: f32,
 }
 
+/// Raw-pixel UI constants (tile corner radii, the ADSR editor's handle boxes,
+/// autocomplete panel radii, …) were authored against macOS's 2x Retina
+/// backing store, so a window at scale factor 2.0 renders them 1:1. Any other
+/// scale factor multiplies those design pixels by `ui_px_scale()` to keep the
+/// same on-screen proportions relative to the cell grid.
+pub const UI_DESIGN_REFERENCE_SCALE: f32 = 2.0;
+
+// Bits of 2.0f32: the macOS reference, so backends that never report a scale
+// (tests, capture harnesses, the Metal path today) render unchanged.
+static UI_WINDOW_SCALE_FACTOR_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x4000_0000);
+
+/// Record the window's scale factor. Called by the active backend at window
+/// setup and again whenever the compositor reports a new factor.
+pub fn set_ui_scale_factor(scale_factor: f32) {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        UI_WINDOW_SCALE_FACTOR_BITS.store(
+            scale_factor.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// Multiplier converting design pixels (authored at the 2x reference scale)
+/// into framebuffer pixels for the current window.
+pub fn ui_px_scale() -> f32 {
+    f32::from_bits(UI_WINDOW_SCALE_FACTOR_BITS.load(std::sync::atomic::Ordering::Relaxed))
+        / UI_DESIGN_REFERENCE_SCALE
+}
+
 #[derive(Clone, Copy)]
 pub struct WidgetViewport {
     pub cell_w: f32,

@@ -1,5 +1,4 @@
 use crate::*;
-use eseqlisp::metal_backend::MetalBackend;
 
 type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
 
@@ -20,7 +19,7 @@ fn flush_pending_pointer_drag(
 pub(crate) fn run_event_loop(
     mut app: app::App,
     mut editor: Editor,
-    mut backend: MetalBackend,
+    mut backend: AppBackend,
     mut track_names: Vec<String>,
     shared: SharedHandles,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -155,6 +154,12 @@ pub(crate) fn run_event_loop(
     let mut pointer_is_down = false;
 
     loop {
+        // Window-manager close requests (super+w, the close button) quit
+        // immediately, matching macOS window-close behavior.
+        #[cfg(not(target_os = "macos"))]
+        if backend.take_close_requested() {
+            editor.request_quit();
+        }
         let mut pointer_released_this_loop = false;
         for result in app.drain_due_pattern_launches() {
             match result {
@@ -428,11 +433,11 @@ pub(crate) fn run_event_loop(
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
             match render_status {
-                eseqlisp::metal_backend::TiledRenderStatus::Presented => {
+                TiledRenderStatus::Presented => {
                     editor.clear_needs_redraw();
                     last_render_at = Instant::now();
                 }
-                eseqlisp::metal_backend::TiledRenderStatus::NotPresented => {
+                TiledRenderStatus::NotPresented => {
                     eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
                     last_render_at = Instant::now();
                 }

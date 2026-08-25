@@ -1,5 +1,5 @@
+use crate::AppBackend;
 use eseqlisp::backend::Backend;
-use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::{Editor, EditorConfig, Runtime};
 use sequencer::app;
 
@@ -13,14 +13,14 @@ const STARTUP_GRID_LAYOUT_EXPR: &str = "(eseq.seq-layout/apply-fx-layout)";
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &app::App,
-) -> Result<(Editor, MetalBackend), Box<dyn std::error::Error>> {
+) -> Result<(Editor, AppBackend), Box<dyn std::error::Error>> {
     let mut editor = create_editor(runtime, app)?;
     let mut backend =
-        MetalBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
-            .map_err(|_| "Metal backend creation failed")?;
+        AppBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
+            .map_err(|_| "render backend creation failed")?;
     backend
         .initialize()
-        .map_err(|_| "Metal backend init failed")?;
+        .map_err(|_| "render backend init failed")?;
     configure_editor_for_backend(&mut editor, &mut backend);
 
     Ok((editor, backend))
@@ -93,13 +93,16 @@ pub(crate) fn create_editor_with_user_init_path(
     Ok(editor)
 }
 
+/// Offscreen capture rendering rides the Metal backend's PNG path and is
+/// macOS-only for now; the wgpu backend has no offscreen frame renderer yet.
+#[cfg(target_os = "macos")]
 pub(crate) fn create_capture_backend(
     editor: &mut Editor,
     width: u32,
     height: u32,
-) -> Result<MetalBackend, Box<dyn std::error::Error>> {
+) -> Result<AppBackend, Box<dyn std::error::Error>> {
     let mut backend =
-        MetalBackend::new_capture_with_font_size(width, height, METAL_SEQ_TEXT_FONT_SIZE_PT)
+        AppBackend::new_capture_with_font_size(width, height, METAL_SEQ_TEXT_FONT_SIZE_PT)
             .map_err(|_| "Metal capture backend creation failed")?;
     backend
         .initialize()
@@ -108,7 +111,7 @@ pub(crate) fn create_capture_backend(
     Ok(backend)
 }
 
-fn configure_editor_for_backend(editor: &mut Editor, backend: &mut MetalBackend) {
+fn configure_editor_for_backend(editor: &mut Editor, backend: &mut AppBackend) {
     let (cell_w, cell_h) = backend.cell_dimensions();
     if let Some((text_cell_w, text_cell_h)) = backend.sync_text_zoom(editor.text_zoom()) {
         editor.set_text_cell_dimensions(cell_w, cell_h, text_cell_w, text_cell_h);

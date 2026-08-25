@@ -3331,6 +3331,14 @@ impl Editor {
         self.should_quit
     }
 
+    /// Quit immediately, matching the macOS behavior when the window closes.
+    /// Used by the app shell when the window system requests a close.
+    pub fn request_quit(&mut self) {
+        self.completion = None;
+        self.should_quit = true;
+        self.last_exit = EditorExit::Closed;
+    }
+
     pub fn clear_quit_request(&mut self) {
         self.should_quit = false;
         self.mark_needs_redraw();

@@ -51,6 +51,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::event::Event;
 
 use eseqlisp::backend::{Backend, BackendEvent};
+
+// The render backend behind the app shell: Metal on macOS, wgpu elsewhere.
+// Both expose the same inherent API, so everything downstream of this alias
+// is platform-neutral.
+#[cfg(target_os = "macos")]
+pub(crate) use eseqlisp::metal_backend::{MetalBackend as AppBackend, TiledRenderStatus};
+#[cfg(not(target_os = "macos"))]
+pub(crate) use eseqlisp::wgpu_app::{TiledRenderStatus, WgpuAppBackend as AppBackend};
 use eseqlisp::editor::ViewMode;
 use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::vm::Value;

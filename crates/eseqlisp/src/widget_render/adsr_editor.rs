@@ -475,7 +475,7 @@ impl WidgetDefinition for AdsrEditorWidget {
                 orientation: 0.0,
                 itime: viewport.time_seconds,
                 uniform_a: [attack, decay, sustain, release],
-                uniform_b: [hold, visual_handle, 0.0, 0.0],
+                uniform_b: [hold, visual_handle, super::ui_px_scale(), 0.0],
                 uniform_c: [attack_max, decay_max, release_max, 0.0],
                 uniform_d: [0.0; 4],
                 color_a: curve_color.to_rgba(),
@@ -579,6 +579,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col.rgb = mix(col.rgb, in.color_c.rgb, baseline * in.color_c.a * 0.25 * insidePlot);
 
     float2 uvPerPixel = max(float2(fwidth(uv.x), fwidth(uv.y)), float2(1e-6));
+    float pxScale = (in.uniform_b.z > 0.0) ? in.uniform_b.z : 1.0;
     float2 pPx = uv / uvPerPixel;
     float2 plotMinPx = float2(plotLeft, plotTop) / uvPerPixel;
     float2 plotMaxPx = float2(plotRight, plotBottom) / uvPerPixel;
@@ -590,9 +591,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float bottomBracketHeightPx = plotMaxPx.y - envelopeBottomPx;
     float bracketDist = 1000.0;
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMinPx, float2(1.0, 1.0), float2(leftBracketWidthPx, topBracketHeightPx)));
-    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMaxPx.x, plotMinPx.y), float2(-1.0, 1.0), float2(16.0, topBracketHeightPx)));
+    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMaxPx.x, plotMinPx.y), float2(-1.0, 1.0), float2(16.0 * pxScale, topBracketHeightPx)));
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, float2(plotMinPx.x, plotMaxPx.y), float2(1.0, -1.0), float2(leftBracketWidthPx, bottomBracketHeightPx)));
-    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, float2(-1.0, -1.0), float2(16.0, bottomBracketHeightPx)));
+    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, float2(-1.0, -1.0), float2(16.0 * pxScale, bottomBracketHeightPx)));
     float brackets = 1.0 - smoothstep(0.5, 1.25, bracketDist);
     col.rgb = mix(col.rgb, in.color_a.rgb, brackets * in.color_a.a);
 
@@ -631,8 +632,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     for (int i = 1; i < 5; ++i) {
         float2 h = adsr_point(i, x1, x2, x3, x4, sustain);
         bool highlighted = abs(float(i) - activeHandle) < 0.5;
-        float handleHalfPx = highlighted ? 7.2 : 6.0;
-        float handleStrokePx = 1.5;
+        float handleHalfPx = (highlighted ? 7.2 : 6.0) * pxScale;
+        float handleStrokePx = 1.5 * pxScale;
         float2 pxDelta = float2((uv.x - h.x) / uvPerPixel.x,
                                 (uv.y - h.y) / pixelY);
         float2 d = abs(pxDelta);

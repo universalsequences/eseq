@@ -93,6 +93,7 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     col = vec4<f32>((mix(col.rgb, input.color_c.rgb, baseline * input.color_c.a * 0.25 * insidePlot)), col.a);
 
     var uvPerPixel: vec2<f32> = max(vec2<f32>(fwidth(uv.x), fwidth(uv.y)), vec2<f32>(1e-6));
+    var pxScale: f32 = select(1.0, input.uniform_b.z, input.uniform_b.z > 0.0);
     var pPx: vec2<f32> = uv / uvPerPixel;
     var plotMinPx: vec2<f32> = vec2<f32>(plotLeft, plotTop) / uvPerPixel;
     var plotMaxPx: vec2<f32> = vec2<f32>(plotRight, plotBottom) / uvPerPixel;
@@ -104,9 +105,9 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     var bottomBracketHeightPx: f32 = plotMaxPx.y - envelopeBottomPx;
     var bracketDist: f32 = 1000.0;
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMinPx, vec2<f32>(1.0, 1.0), vec2<f32>(leftBracketWidthPx, topBracketHeightPx)));
-    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, vec2<f32>(plotMaxPx.x, plotMinPx.y), vec2<f32>(-1.0, 1.0), vec2<f32>(16.0, topBracketHeightPx)));
+    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, vec2<f32>(plotMaxPx.x, plotMinPx.y), vec2<f32>(-1.0, 1.0), vec2<f32>(16.0 * pxScale, topBracketHeightPx)));
     bracketDist = min(bracketDist, adsr_bracketDistance(pPx, vec2<f32>(plotMinPx.x, plotMaxPx.y), vec2<f32>(1.0, -1.0), vec2<f32>(leftBracketWidthPx, bottomBracketHeightPx)));
-    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, vec2<f32>(-1.0, -1.0), vec2<f32>(16.0, bottomBracketHeightPx)));
+    bracketDist = min(bracketDist, adsr_bracketDistance(pPx, plotMaxPx, vec2<f32>(-1.0, -1.0), vec2<f32>(16.0 * pxScale, bottomBracketHeightPx)));
     var brackets: f32 = 1.0 - smoothstep(0.5, 1.25, bracketDist);
     col = vec4<f32>((mix(col.rgb, input.color_a.rgb, brackets * input.color_a.a)), col.a);
 
@@ -146,8 +147,8 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     for (var i: i32 = 1; i < 5; i = i + 1) {
         var h: vec2<f32> = adsr_point(i, x1, x2, x3, x4, sustain);
         var highlighted: bool = abs(f32(i) - activeHandle) < 0.5;
-        var handleHalfPx: f32 = select(6.0, 7.2, highlighted);
-        var handleStrokePx: f32 = 1.5;
+        var handleHalfPx: f32 = select(6.0, 7.2, highlighted) * pxScale;
+        var handleStrokePx: f32 = 1.5 * pxScale;
         var pxDelta: vec2<f32> = vec2<f32>((uv.x - h.x) / uvPerPixel.x,
                                 (uv.y - h.y) / pixelY);
         var d: vec2<f32> = abs(pxDelta);

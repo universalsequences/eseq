@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod frame;
 pub(crate) mod gpu_geometry;
+pub(crate) mod gpu_scene;
 pub mod glyph_atlas;
 pub mod hit;
 pub mod layout;
@@ -9,6 +10,8 @@ pub mod platform;
 pub mod theme;
 pub mod tui;
 pub mod wgsl_shaders;
+#[cfg(feature = "wgpu")]
+pub mod wgpu_app;
 #[cfg(feature = "wgpu")]
 pub mod wgpu_backend;
 #[cfg(feature = "wgpu")]

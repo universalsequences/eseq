@@ -11213,6 +11213,8 @@ fn sdf_scale_circle() {
     assert!((d - (-2.0)).abs() < 1e-10, "got {}", d);
 }
 
+/// `sdf->metal` compiles for the platform's render backend: MSL where the
+/// Metal backend runs, WGSL where the wgpu backend runs.
 #[test]
 fn sdf_to_metal_native() {
     let mut rt = Runtime::new();
@@ -11221,9 +11223,18 @@ fn sdf_to_metal_native() {
         .unwrap()
         .unwrap();
     if let Value::String(shader) = result {
-        assert!(shader.contains("fragment float4 widget_frag"));
-        assert!(shader.contains("length(float2(x, y))"));
-        assert!(shader.contains("discard_fragment"));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(shader.contains("fragment float4 widget_frag"));
+            assert!(shader.contains("length(float2(x, y))"));
+            assert!(shader.contains("discard_fragment"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(shader.contains("fn widget_frag"), "shader: {shader}");
+            assert!(shader.contains("length(vec2<f32>(x, y))"), "shader: {shader}");
+            assert!(shader.contains("discard"), "shader: {shader}");
+        }
     } else {
         panic!("expected String, got {:?}", result);
     }

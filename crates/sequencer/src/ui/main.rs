@@ -9,10 +9,4 @@
     clippy::useless_format
 )]
 
-#[cfg(target_os = "macos")]
 include!("metal_main.rs");
-
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("metal_seq's Metal UI is macOS only.");
-}

@@ -1,10 +1,17 @@
+// The capture render entry point is macOS-only (Metal PNG path); these
+// imports only feed its body.
+#[cfg(target_os = "macos")]
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+#[cfg(target_os = "macos")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+#[cfg(target_os = "macos")]
 use eseqlisp::frame::build_render_frame;
 use eseqlisp::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
 
@@ -839,6 +846,14 @@ fn apply_capture_click_widgets(
     Ok(true)
 }
 
+/// Offscreen PNG capture renders through the Metal backend's
+/// `render_frame_to_png`; the wgpu backend has no offscreen frame path yet.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn run(_args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("metal_seq capture rendering is macOS-only for now (needs the Metal PNG path)".into())
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_capture_script(&args.script)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;

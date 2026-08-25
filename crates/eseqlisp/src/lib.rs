@@ -66,6 +66,8 @@ pub use ui::metal_backend;
 pub use ui::theme;
 pub use ui::tui;
 #[cfg(feature = "wgpu")]
+pub use ui::wgpu_app;
+#[cfg(feature = "wgpu")]
 pub use ui::wgpu_backend;
 
 // ── Root-level modules ───────────────────────────────────────────────────

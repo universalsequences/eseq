@@ -455,6 +455,33 @@ struct SdfCompileResult {
     state_symbols: Vec<String>,
 }
 
+/// Compile an SDF widget shader in the language of the platform's render
+/// backend: MSL for the macOS Metal backend, WGSL for the wgpu backend
+/// everywhere else. The registry stores exactly one source per widget, so the
+/// emitter choice must match the backend that will consume it.
+fn compile_sdf_for_platform_backend(
+    expr: &crate::parser::Expression,
+    state_symbols: &[String],
+    options: crate::lang::sdf_codegen::SdfShaderOptions,
+) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, crate::lang::sdf_codegen::CodegenError> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state_and_options(
+            expr,
+            state_symbols,
+            options,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::lang::sdf_codegen::compile_sdf_to_wgsl_with_state_and_options(
+            expr,
+            state_symbols,
+            options,
+        )
+    }
+}
+
 fn compile_sdf_value(
     value: &Value,
     vm: &mut VM,
@@ -466,12 +493,8 @@ fn compile_sdf_value(
         crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
     let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
-    let output = crate::lang::sdf_codegen::compile_sdf_to_metal_with_state_and_options(
-        &expanded,
-        &state_symbols,
-        options,
-    )
-    .map_err(|e| e.to_string())?;
+    let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
+        .map_err(|e| e.to_string())?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
@@ -642,12 +665,8 @@ fn compile_widget_material(
 
     let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let output = crate::lang::sdf_codegen::compile_sdf_to_metal_with_state_and_options(
-        &expanded,
-        &state_symbols,
-        options,
-    )
-    .map_err(|e| e.to_string())?;
+    let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
+        .map_err(|e| e.to_string())?;
 
     let paint_margin =
         crate::widget_render::sdf_widget::estimate_shadow_paint_margin(&expanded, 16.0, 8.0);

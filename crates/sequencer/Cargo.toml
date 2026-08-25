@@ -28,6 +28,11 @@ fs2 = "0.4"
 # libdbus development/runtime dependency in both source builds and packages.
 zbus = "5.12"
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# The metal_seq app shell renders through eseqlisp's wgpu backend everywhere
+# the Metal backend does not exist.
+eseqlisp = { path = "../eseqlisp", features = ["wgpu"] }
+
 [lib]
 name = "sequencer"
 path = "src/lib.rs"
