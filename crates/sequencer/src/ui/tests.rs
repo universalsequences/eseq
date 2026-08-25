@@ -2387,13 +2387,12 @@
             .expect("project 92 full-layout group/track selection probe should pass");
     }
 
-    /// NOT ignored: the functional half of the owner-switch probe runs in the
-    /// normal suite. Same fixture, same real clicks and tick replay, same
-    /// correctness assertions (selection state, *sel-sync* projection fields,
-    /// fx-owner panel markers, retained-run integrity) — but 1 warmup + 2
-    /// samples and no timing ceilings, so it is a behavior regression test,
-    /// not a benchmark. Timing stays in the ignored release probe above.
+    /// The functional half of the owner-switch probe uses the same real clicks,
+    /// tick replay, and correctness assertions as the release probe above, but
+    /// without timing ceilings. It remains ignored because project 92 references
+    /// a sample WAV from the author's local library that is not in the repository.
     #[test]
+    #[ignore = "project 92 references a sample WAV from the author's local library that is absent from fresh checkouts"]
     fn project_92_full_layout_group_track_selection_owner_switch_smoke() {
         std::thread::Builder::new()
             .name("project-92-full-layout-owner-switch-smoke".to_string())
