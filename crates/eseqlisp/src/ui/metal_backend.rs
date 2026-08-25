@@ -32,7 +32,7 @@ mod inner {
     use winit::{
         dpi::LogicalSize,
         event::{
-            ElementState, Event as WEvent, MouseButton as WMouseButton, MouseScrollDelta,
+            ElementState, Event as WEvent, MouseButton as WMouseButton,
             TouchPhase, WindowEvent,
         },
         event_loop::{ControlFlow, EventLoop},
@@ -6485,20 +6485,11 @@ fragment float4 live_spectrogram_frag(
                             }
                             *suppress_scroll_until = None;
                         }
-                        match delta {
-                            MouseScrollDelta::LineDelta(x, y) => {
-                                // Convert line deltas to pixel deltas and route through
-                                // the unified pending_scroll path. This allows lib.rs to
-                                // apply smooth sub-cell scrolling in UI mode, while still
-                                // quantizing to cell steps in text mode.
-                                let line_h = (cell_size.1 as f32).max(20.0);
-                                pending_scroll.push_back(((x * line_h, y * line_h), *cursor_pos));
-                            }
-                            MouseScrollDelta::PixelDelta(delta) => {
-                                pending_scroll
-                                    .push_back(((delta.x as f32, delta.y as f32), *cursor_pos));
-                            }
-                        };
+                        let delta = crate::ui::pointer_input::scroll_delta_pixels(
+                            delta,
+                            cell_size.1 as f32,
+                        );
+                        pending_scroll.push_back((delta, *cursor_pos));
                     }
                     WindowEvent::TouchpadMagnify { delta, phase, .. } => {
                         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {

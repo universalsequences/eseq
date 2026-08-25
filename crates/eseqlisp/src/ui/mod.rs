@@ -11,6 +11,7 @@ pub mod hit;
 pub mod layout;
 pub mod metal_backend;
 pub mod platform;
+pub(crate) mod pointer_input;
 pub mod theme;
 pub mod tui;
 pub mod wgsl_shaders;

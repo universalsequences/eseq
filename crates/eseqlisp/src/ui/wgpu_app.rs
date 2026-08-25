@@ -25,8 +25,9 @@ use crossterm::event::{
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::LogicalSize,
-    event::{ElementState, Event as WEvent, MouseButton as WMouseButton, MouseScrollDelta,
-        TouchPhase, WindowEvent},
+    event::{
+        ElementState, Event as WEvent, MouseButton as WMouseButton, TouchPhase, WindowEvent,
+    },
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, KeyCode as WinitKeyCode, NamedKey, PhysicalKey},
     platform::pump_events::EventLoopExtPumpEvents,
@@ -3002,16 +3003,11 @@ impl Backend for WgpuAppBackend {
                         }
                         *suppress_scroll_until = None;
                     }
-                    match delta {
-                        MouseScrollDelta::LineDelta(x, y) => {
-                            let line_h = (cell_size.1 as f32).max(20.0);
-                            pending_scroll.push_back(((x * line_h, y * line_h), *cursor_pos));
-                        }
-                        MouseScrollDelta::PixelDelta(delta) => {
-                            pending_scroll
-                                .push_back(((delta.x as f32, delta.y as f32), *cursor_pos));
-                        }
-                    };
+                    let delta = crate::ui::pointer_input::scroll_delta_pixels(
+                        delta,
+                        cell_size.1 as f32,
+                    );
+                    pending_scroll.push_back((delta, *cursor_pos));
                 }
                 WindowEvent::TouchpadMagnify { delta, phase, .. } => {
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
