@@ -17,7 +17,8 @@
    custom-ui-set-param-in-scope custom-ui-set-adsr-in-scope))
 (import eseq.effects.custom-ui-sections :refer
   (custom-ui-select-section-in-scope custom-ui-set-active-adsr
-   custom-ui-adsr-stage-active? ui-section-select-callback ui-panel-bg))
+   custom-ui-adsr-stage-active? custom-ui-adsr-stage-active-binding
+   ui-section-select-callback ui-panel-bg))
 (import eseq.effects.custom-ui-controls :refer (ui-param-bound-value))
 (import eseq.effects.param-controls :refer
   (custom-ui-option-index param-plock-color-r param-plock-color-g
@@ -487,7 +488,9 @@
               :unit unit
               :noui true :font-size 9.0
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
-              :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active? section stage)
+              :active (if stage
+                        (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
+                        false)
               :active-color (ui-accent-cyan)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -702,7 +705,7 @@
               :noui true :font-size 10.5
               :text-align :center
               :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
-              :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active? -1 stage)
+              :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding -1 stage)
               :active-color (ui-accent-cyan)
               :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
               :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
@@ -726,7 +729,7 @@
                 :noui true :font-size 10.5
                 :text-align :center
                 :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) :edit-color :yellow
-                :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active? section stage)
+                :active (eseq.effects.custom-ui-sections/custom-ui-adsr-stage-active-binding section stage)
                 :active-color (ui-accent-cyan)
                 :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
                 :plock-color-r (eseq.effects.param-controls/param-plock-color-r)

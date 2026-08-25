@@ -10,6 +10,7 @@
 (export custom-ui-selected-sections
         custom-ui-set-active-adsr
         custom-ui-adsr-stage-active?
+        custom-ui-adsr-stage-active-binding
         custom-ui-selected-section-for-current-scope
         custom-ui-select-section-in-scope
         ui-select-section
@@ -30,7 +31,31 @@
 ;; vocabulary (two Rust harnesses stub it), so it keeps its public alias.
 
 (defstate custom-ui-selected-sections '())
-(defstate active-adsr false)
+
+;; Gesture-only ADSR stage highlight. Deliberately NOT a defstate: every
+;; micro-num / adsr-number subtree in a custom UI shows the active stage, so
+;; a reactive write here re-rendered every one of those subtrees on the
+;; first drag event of each gesture (eseq-eeng: a multi-second first-drag
+;; stall on core/triton). The active stage is published as per-stage SEQV
+;; float fields instead (the *sel-sync* precedent in ui/seq-core-state.lisp:
+;; gesture-scoped state rides bound widget float channels, never
+;; effect-read state). Value-equal reactive-set writes short-circuit, so
+;; mid-gesture drag events publish nothing.
+(def active-adsr false)
+
+(def adsr-stage-active-field (scope-name section stage)
+  (str "custom-ui-adsr-active-" scope-name "-" section "-" stage))
+
+(def custom-ui-adsr-stage-active-binding (section stage)
+  (bind "SEQV" (adsr-stage-active-field (rt/custom-ui-scope-name) section stage)))
+
+(def adsr-active-same? (a b)
+  (if (and a b)
+    (and
+      (= (get a :scope) (get b :scope))
+      (= (get a :section) (get b :section))
+      (= (get a :stage) (get b :stage)))
+    (and (not a) (not b))))
 
 ;; Pinned to eseq.vanilla (spec §3 escape hatch, hazard i):
 ;; src/ui/custom_ui.rs:425,682 GENERATES lisp that writes this by bare name
@@ -42,10 +67,26 @@
 (def eseq.vanilla/custom-ui-selected-section 0)
 
 (def custom-ui-set-active-adsr (scope section active)
-  (set! active-adsr
-    (if active
-      (dict :scope (get scope :name) :section section :stage active)
-      false)))
+  (let ((next
+          (if active
+            (dict :scope (get scope :name) :section section :stage active)
+            false)))
+    (if (adsr-active-same? active-adsr next)
+      false
+      (do
+        (if active-adsr
+          (reactive-set "SEQV"
+            (adsr-stage-active-field
+              (get active-adsr :scope) (get active-adsr :section) (get active-adsr :stage))
+            0)
+          false)
+        (if next
+          (reactive-set "SEQV"
+            (adsr-stage-active-field
+              (get next :scope) (get next :section) (get next :stage))
+            1)
+          false)
+        (set! active-adsr next)))))
 
 (def custom-ui-adsr-stage-active? (section stage)
   (if active-adsr

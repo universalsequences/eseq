@@ -40,7 +40,9 @@ fn get_state(widget_id: u64) -> KnobNumberState {
 
 fn set_state(widget_id: u64, state: KnobNumberState) {
     STATES.with(|s| s.borrow_mut().insert(widget_id, state));
-    super::bump_widget_state_generation();
+    // Own-widget-only edit/drag state (eseq-eeng): see
+    // `bump_widget_state_revision`.
+    super::bump_widget_state_revision(widget_id);
 }
 
 fn format_value(value: f64, decimals: u32) -> String {

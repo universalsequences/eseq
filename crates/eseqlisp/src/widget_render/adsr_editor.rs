@@ -67,7 +67,11 @@ fn update_interaction_state(widget_id: u64, update: impl FnOnce(&mut AdsrInterac
         let before = *state;
         update(state);
         if *state != before {
-            super::bump_widget_state_generation();
+            // Own-widget-only state: the drag envelope and handle highlight
+            // never affect another widget's primitives, so a per-event
+            // global generation bump would only defeat every other widget's
+            // primitive cache for the whole gesture (eseq-eeng).
+            super::bump_widget_state_revision(widget_id);
         }
     });
 }
@@ -76,6 +80,35 @@ fn visual_envelope(node: &LayoutNode) -> AdsrEnvelope {
     interaction_state(node.widget_id)
         .last_drag_envelope
         .unwrap_or_else(|| AdsrEnvelope::from_node(node))
+}
+
+/// Test support: the local-cell center of a drag handle (1=attack, 2=decay,
+/// 3=sustain, 4=release), so harnesses can aim real pointer events at a
+/// handle. Mirrors the plot points `nearest_handle` hit-tests against.
+pub fn adsr_handle_center(node: &LayoutNode, handle_idx: i32) -> Option<(f32, f32)> {
+    let (x1, x2, x3, x4) = adsr_x_positions(&node.props);
+    let sustain = prop_unit(&node.props, "sustain", 0.5);
+    let (data_x, data_y) = match handle_idx {
+        1 => (x1, 1.0),
+        2 => (x2, sustain),
+        3 => (x3, sustain),
+        4 => (x4, 0.0),
+        _ => return None,
+    };
+    Some(plot_point(data_x, data_y, node.rect))
+}
+
+/// Test support: the envelope the renderer would draw for this node right
+/// now — live drag state first, layout props otherwise. Interaction state is
+/// thread-local, so this only observes drags dispatched on the same thread.
+pub fn adsr_visual_envelope(node: &LayoutNode) -> (f32, f32, f32, f32) {
+    let envelope = visual_envelope(node);
+    (
+        envelope.attack,
+        envelope.decay,
+        envelope.sustain,
+        envelope.release,
+    )
 }
 
 fn clamp_measured_axis(requested: f32, min: f32, max: f32) -> f32 {

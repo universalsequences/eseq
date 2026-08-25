@@ -260,7 +260,9 @@ pub fn number_picker_edit_state(widget_id: u64) -> NumberPickerEditState {
 
 fn set_state(widget_id: u64, state: NumberPickerEditState) {
     STATES.with(|s| s.borrow_mut().insert(widget_id, state));
-    super::bump_widget_state_generation();
+    // Own-widget-only edit/drag state (eseq-eeng): see
+    // `bump_widget_state_revision`.
+    super::bump_widget_state_revision(widget_id);
 }
 
 pub fn clear_number_picker_edit_state(widget_id: u64) {

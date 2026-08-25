@@ -36,13 +36,15 @@ fn set_live_band(widget_id: u64, state: LiveBandState) {
     LIVE_BANDS.with(|states| {
         states.borrow_mut().insert(widget_id, state);
     });
-    super::bump_widget_state_generation();
+    // Own-widget-only drag state (eseq-eeng): see
+    // `bump_widget_state_revision`.
+    super::bump_widget_state_revision(widget_id);
 }
 
 fn clear_live_band(widget_id: u64) {
     let removed = LIVE_BANDS.with(|states| states.borrow_mut().remove(&widget_id).is_some());
     if removed {
-        super::bump_widget_state_generation();
+        super::bump_widget_state_revision(widget_id);
     }
 }
 

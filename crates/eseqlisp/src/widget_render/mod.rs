@@ -80,6 +80,7 @@ static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static POINTER_HOVER_WIDGET_ID: RefCell<Option<u64>> = const { RefCell::new(None) };
+    static WIDGET_STATE_REVISIONS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     /// Text measurer available to render-pass code. Widget metrics that are
     /// normally cached as a side effect of measure() (e.g. text-input
     /// per-character widths) can be recomputed on a cache miss instead of
@@ -92,8 +93,46 @@ pub fn bump_widget_state_generation() {
     WIDGET_STATE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Global widget-state change stamp: advances on every shared-state bump AND
+/// on every per-widget revision bump. Redraw-scheduling diffs and tile-scene
+/// fingerprints observe this, so any widget-state mutation still schedules a
+/// repaint and invalidates whole-tile scene caches.
 pub fn widget_state_generation() -> u64 {
+    WIDGET_STATE_GENERATION
+        .load(Ordering::Relaxed)
+        .wrapping_add(WIDGET_STATE_TOTAL_REVISION.load(Ordering::Relaxed))
+}
+
+/// Shared-state-only generation, used by the per-widget primitive cache key
+/// together with the widget's own revision.
+fn widget_state_shared_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
+
+// Per-widget state revisions: for interaction state that only affects the
+// owning widget's own primitives (a drag envelope, an edit caret, a hovered
+// handle), bumping the shared generation invalidates every cacheable
+// widget's primitives on every pointer event of a gesture — the dominant
+// per-frame cost of continuous drags on the always-dynamic wgpu path
+// (eseq-eeng). Such state bumps its widget's own revision instead; the
+// per-widget primitive cache key hashes that revision plus the shared
+// generation, while `widget_state_generation()` above still moves so
+// whole-tile observers notice. State that other widgets can observe
+// (pointer hover with `inherited_hover`, overlays, drop targets, shared
+// data stores) must keep using `bump_widget_state_generation`.
+static WIDGET_STATE_TOTAL_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn bump_widget_state_revision(widget_id: u64) {
+    WIDGET_STATE_REVISIONS.with(|revisions| {
+        *revisions.borrow_mut().entry(widget_id).or_insert(0) += 1;
+    });
+    WIDGET_STATE_TOTAL_REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn widget_state_revision(widget_id: u64) -> u64 {
+    WIDGET_STATE_REVISIONS.with(|revisions| {
+        revisions.borrow().get(&widget_id).copied().unwrap_or(0)
+    })
 }
 
 pub fn set_render_text_measurer(measurer: Rc<dyn TextMeasurer>) {
@@ -1436,7 +1475,8 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     node.rect.col.to_bits().hash(&mut hasher);
     node.rect.width.to_bits().hash(&mut hasher);
     node.rect.height.to_bits().hash(&mut hasher);
-    widget_state_generation().hash(&mut hasher);
+    widget_state_shared_generation().hash(&mut hasher);
+    widget_state_revision(node.widget_id).hash(&mut hasher);
     theme::generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
@@ -1596,10 +1636,27 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 }
 "#, wgsl::TILE_TAB_SHADER);
 
+/// A widget's primitives can only depend on its OWN focus state (the focus
+/// decoration plus own-focus styling — every build-time consumer compares
+/// `focused_widget_id` to its own id) and on `focused_branch`, which the
+/// tree walk already narrows per node. Narrowing the global focused-widget
+/// id to the node before keying and building means a focus change
+/// invalidates only the widgets whose focus actually flipped instead of
+/// every cacheable widget in the tile (eseq-eeng: the cold-focus stall).
+fn narrow_viewport_focus_to(node: &LayoutNode, viewport: WidgetViewport) -> WidgetViewport {
+    WidgetViewport {
+        focused_widget_id: viewport
+            .focused_widget_id
+            .filter(|id| *id == node.widget_id),
+        ..viewport
+    }
+}
+
 pub fn widget_primitives_for_node(
     node: &LayoutNode,
     viewport: WidgetViewport,
 ) -> Vec<GpuPrimitive> {
+    let viewport = narrow_viewport_focus_to(node, viewport);
     let cache_key = widget_primitive_cache_key(node, viewport);
     if let Some(cache_key) = cache_key
         && let Some(cached) =
@@ -3398,6 +3455,95 @@ mod tests {
         let (runs, _) = collect_gpu_primitive_runs(layout, viewport, 0.0, 24);
         let flattened = flatten_gpu_primitive_runs(&runs);
         assert_eq!(primitive_tokens(&flattened), primitive_tokens(&flat));
+    }
+
+    /// eseq-eeng: focusing one widget must not perturb the primitive cache
+    /// key of every other widget in the tile — only the widget whose own
+    /// focus flipped may miss. The key is computed exactly the way
+    /// `widget_primitives_for_node` computes it (focus narrowed per node).
+    #[test]
+    fn unrelated_focus_change_keeps_a_cacheable_primitive_key_stable() {
+        let rect = Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 4.0,
+            height: 2.0,
+        };
+        let label = test_node(
+            7,
+            "label",
+            rect,
+            HashMap::from([("text".to_string(), Value::String("vol".to_string()))]),
+            Vec::new(),
+        );
+        let key = |focused_widget_id: Option<u64>| {
+            let viewport = WidgetViewport {
+                focused_widget_id,
+                ..test_viewport()
+            };
+            widget_primitive_cache_key(&label, narrow_viewport_focus_to(&label, viewport))
+                .expect("a plain label is cacheable")
+        };
+        assert_eq!(
+            key(None),
+            key(Some(999)),
+            "focusing an unrelated widget must not invalidate this widget's primitives"
+        );
+        assert_ne!(
+            key(None),
+            key(Some(7)),
+            "the widget's own focus state must stay part of its key"
+        );
+    }
+
+    /// eseq-eeng: widget-local interaction state (drag envelopes, edit
+    /// carets) bumps a per-widget revision, so a continuous drag rebuilds
+    /// only the dragged widget's primitives — while the global change stamp
+    /// still advances so redraw scheduling and tile-scene fingerprints see
+    /// the change.
+    #[test]
+    fn per_widget_state_revision_invalidates_only_the_owning_widget() {
+        let rect = Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 4.0,
+            height: 2.0,
+        };
+        let node = |widget_id: u64| {
+            test_node(
+                widget_id,
+                "label",
+                rect,
+                HashMap::from([("text".to_string(), Value::String("vol".to_string()))]),
+                Vec::new(),
+            )
+        };
+        let dragged = node(9101);
+        let bystander = node(9102);
+        let viewport = test_viewport();
+        let dragged_key_before =
+            widget_primitive_cache_key(&dragged, viewport).expect("cacheable");
+        let bystander_key_before =
+            widget_primitive_cache_key(&bystander, viewport).expect("cacheable");
+        let stamp_before = widget_state_generation();
+
+        bump_widget_state_revision(dragged.widget_id);
+
+        assert_ne!(
+            widget_primitive_cache_key(&dragged, viewport).expect("cacheable"),
+            dragged_key_before,
+            "the owning widget's key must change with its revision"
+        );
+        assert_eq!(
+            widget_primitive_cache_key(&bystander, viewport).expect("cacheable"),
+            bystander_key_before,
+            "another widget's key must survive an unrelated revision bump"
+        );
+        assert_ne!(
+            widget_state_generation(),
+            stamp_before,
+            "the global change stamp must advance so a repaint is scheduled"
+        );
     }
 
     #[test]
